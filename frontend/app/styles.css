@@ -15,7 +15,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -84,7 +86,24 @@ input {
   background: #ffffff;
 }
 
-input:focus {
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #c9d5d1;
+  border-radius: 6px;
+  padding: 12px 14px;
+  color: #172026;
+  background: #ffffff;
+}
+
+textarea {
+  min-height: 106px;
+  resize: vertical;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
   border-color: #2f6f62;
   outline: 3px solid rgb(47 111 98 / 18%);
 }
@@ -121,6 +140,33 @@ button:disabled {
   line-height: 1.5;
 }
 
+.success-message {
+  margin: 0;
+  max-width: none;
+  border-left: 4px solid #2f6f62;
+  padding: 10px 12px;
+  color: #24564c;
+  background: #eef8f5;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.app-page {
+  display: block;
+  place-items: unset;
+}
+
+.workspace {
+  display: grid;
+  gap: 24px;
+  width: min(100%, 1120px);
+  margin: 0 auto;
+}
+
+.workspace .panel {
+  width: 100%;
+}
+
 .panel-header {
   display: flex;
   align-items: flex-start;
@@ -153,6 +199,117 @@ dd {
   font-size: 18px;
 }
 
+.admin-panel {
+  display: grid;
+  gap: 28px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.2;
+}
+
+h3 {
+  margin: 0;
+  color: #172026;
+  font-size: 22px;
+  line-height: 1.25;
+}
+
+h4 {
+  margin: 0;
+  color: #172026;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.admin-section {
+  display: grid;
+  gap: 18px;
+  border-top: 1px solid #e4ebe8;
+  padding-top: 24px;
+}
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.small-muted {
+  margin: 0;
+  color: #5b6972;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.table-wrapper {
+  overflow-x: auto;
+  border: 1px solid #d9e2df;
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e4ebe8;
+  padding: 12px 14px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  color: #43515a;
+  background: #f4f7f6;
+  font-weight: 800;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+.admin-form {
+  display: grid;
+  gap: 16px;
+}
+
+.form-grid,
+.membership-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.form-grid label:first-child:last-child {
+  grid-column: 1 / -1;
+}
+
+.checkbox-row,
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+
+.checkbox-label input {
+  width: auto;
+}
+
 @media (max-width: 560px) {
   .page {
     padding: 18px;
@@ -168,5 +325,14 @@ dd {
 
   h1 {
     font-size: 32px;
+  }
+
+  h2 {
+    font-size: 26px;
+  }
+
+  .form-grid,
+  .membership-controls {
+    grid-template-columns: 1fr;
   }
 }
