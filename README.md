@@ -39,6 +39,20 @@ Servicios disponibles:
 - Backend: http://localhost:8000
 - Health check: http://localhost:8000/health
 
+## Migraciones
+
+Con los contenedores levantados, aplica las migraciones de Alembic:
+
+```bash
+docker compose exec backend alembic upgrade head
+```
+
+También puedes ejecutarlas en un contenedor temporal:
+
+```bash
+docker compose run --rm backend alembic upgrade head
+```
+
 ## Comprobación rápida
 
 ```bash
@@ -51,6 +65,41 @@ Respuesta esperada:
 {"status":"ok"}
 ```
 
+## Crear el primer administrador
+
+Configura `BOOTSTRAP_ADMIN_TOKEN` en `.env` antes de arrancar el backend. El endpoint solo permite crear un superusuario si todavía no existe ningún usuario.
+
+```bash
+curl -X POST http://localhost:8000/auth/bootstrap-admin \
+  -H "Content-Type: application/json" \
+  -H "X-Bootstrap-Admin-Token: dev-bootstrap-token" \
+  -d '{"email":"admin@example.com","password":"change-me-strong","full_name":"Admin"}'
+```
+
+Cuando ya exista cualquier usuario, este endpoint responderá con error y no creará más administradores iniciales.
+
+## Login
+
+```bash
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"change-me-strong"}'
+```
+
+Respuesta esperada:
+
+```json
+{"access_token":"...","token_type":"bearer"}
+```
+
+Para consultar el usuario autenticado:
+
+```bash
+TOKEN="pega-aqui-el-access-token"
+curl http://localhost:8000/auth/me \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ## Alcance actual
 
-Esta base no incluye autenticación, modelos de base de datos, agentes de IA, integraciones externas, scraping, QGIS, Hermes ni generación documental.
+Esta base incluye autenticación JWT, usuarios y una primera estructura RBAC simple. No incluye agentes de IA, integraciones externas, scraping, QGIS, Hermes ni generación documental.

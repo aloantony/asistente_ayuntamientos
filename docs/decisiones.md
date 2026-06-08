@@ -14,4 +14,10 @@ El backend lee la configuración desde variables de entorno para evitar valores 
 
 ## ADR-004: Alcance mínimo inicial
 
-La primera versión solo contiene la base técnica. No incluye autenticación, modelos, integraciones externas ni automatizaciones avanzadas.
+La primera versión mantiene el alcance acotado a la base técnica, autenticación y un modelo RBAC inicial. No incluye integraciones externas ni automatizaciones avanzadas.
+
+## ADR-005: RBAC simple como base inicial
+
+Se usa un modelo RBAC explícito y sencillo: usuarios, grupos, roles y permisos. La pertenencia se encadena como usuario-grupo, grupo-rol y rol-permiso, con un indicador `is_superuser` para el propietario inicial.
+
+Esta decisión evita introducir todavía un motor complejo de políticas. Para la fase inicial necesitamos una estructura fácil de entender, migrar y auditar. La comprobación fina de permisos se podrá añadir después sobre estas tablas cuando existan casos de uso reales.
