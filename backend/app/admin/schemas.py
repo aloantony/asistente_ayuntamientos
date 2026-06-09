@@ -81,3 +81,8 @@ class GroupMembershipResponse(BaseModel):
 class AdminUserDeleteResponse(BaseModel):
     user_id: int
     detail: str
+
+
+class AdminGroupDeleteResponse(BaseModel):
+    group_id: int
+    detail: str

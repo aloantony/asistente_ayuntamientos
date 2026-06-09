@@ -45,6 +45,11 @@ type UserDeleteResponse = {
   detail: string;
 };
 
+type GroupDeleteResponse = {
+  group_id: number;
+  detail: string;
+};
+
 type UserEditState = {
   full_name: string;
   is_active: boolean;
@@ -228,6 +233,7 @@ export default function Home() {
   const [groupEditError, setGroupEditError] = useState("");
   const [groupEditMessage, setGroupEditMessage] = useState("");
   const [updatingGroupId, setUpdatingGroupId] = useState<number | null>(null);
+  const [deletingGroupId, setDeletingGroupId] = useState<number | null>(null);
 
   const [membershipUserId, setMembershipUserId] = useState("");
   const [membershipGroupId, setMembershipGroupId] = useState("");
@@ -248,6 +254,7 @@ export default function Home() {
     setGroupFormError("");
     setGroupEditError("");
     setGroupEditMessage("");
+    setDeletingGroupId(null);
     setMembershipError("");
     setMembershipMessage("");
   }
@@ -295,6 +302,13 @@ export default function Home() {
       setGroups(groupsData);
       setUserEdits(buildUserEditState(usersData));
       setGroupEdits(buildGroupEditState(groupsData));
+
+      if (
+        membershipGroupId &&
+        !groupsData.some((group) => String(group.id) === membershipGroupId)
+      ) {
+        setMembershipGroupId("");
+      }
     } catch (adminLoadError) {
       if (isAuthError(adminLoadError)) {
         handleSessionExpired(
@@ -679,6 +693,49 @@ export default function Home() {
       );
     } finally {
       setUpdatingGroupId(null);
+    }
+  }
+
+  async function handleDeleteGroup(group: Group) {
+    setGroupEditError("");
+    setGroupEditMessage("");
+
+    const confirmed = window.confirm(
+      `¿Eliminar el grupo ${group.name}? Esta acción no se puede deshacer.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingGroupId(group.id);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<GroupDeleteResponse>(
+        `/admin/groups/${group.id}`,
+        token,
+        "No se pudo eliminar el grupo.",
+        {
+          method: "DELETE",
+        },
+      );
+
+      if (membershipGroupId === String(group.id)) {
+        setMembershipGroupId("");
+      }
+
+      setMembershipError("");
+      setMembershipMessage("");
+      setGroupEditMessage("Grupo eliminado.");
+      await loadAdminData();
+    } catch (deleteError) {
+      handleAdminError(
+        deleteError,
+        setGroupEditError,
+        "No se pudo eliminar el grupo.",
+      );
+    } finally {
+      setDeletingGroupId(null);
     }
   }
 
@@ -1091,18 +1148,35 @@ export default function Home() {
                                 )}
                               </td>
                               <td>
-                                <button
-                                  type="button"
-                                  onClick={() => handleUpdateGroup(group.id)}
-                                  disabled={
-                                    updatingGroupId === group.id ||
-                                    isLoadingAdmin
-                                  }
-                                >
-                                  {updatingGroupId === group.id
-                                    ? "Guardando..."
-                                    : "Guardar"}
-                                </button>
+                                <div className="table-actions">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUpdateGroup(group.id)}
+                                    disabled={
+                                      updatingGroupId === group.id ||
+                                      deletingGroupId === group.id ||
+                                      isLoadingAdmin
+                                    }
+                                  >
+                                    {updatingGroupId === group.id
+                                      ? "Guardando..."
+                                      : "Guardar"}
+                                  </button>
+                                  <button
+                                    className="danger-button"
+                                    type="button"
+                                    onClick={() => handleDeleteGroup(group)}
+                                    disabled={
+                                      deletingGroupId === group.id ||
+                                      updatingGroupId === group.id ||
+                                      isLoadingAdmin
+                                    }
+                                  >
+                                    {deletingGroupId === group.id
+                                      ? "Eliminando..."
+                                      : "Eliminar"}
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );

@@ -7,13 +7,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.admin.schemas import (
     AdminGroupCreate,
+    AdminGroupDeleteResponse,
     AdminGroupRead,
     AdminGroupUpdate,
     GroupMembershipResponse,
 )
 from app.auth.dependencies import require_superuser
 from app.db.session import get_db
-from app.rbac.models import Group, user_groups
+from app.rbac.models import Group, group_roles, user_groups
 from app.users.models import User
 
 router = APIRouter(
@@ -96,6 +97,26 @@ def update_group(
 
     db.refresh(group)
     return group
+
+
+@router.delete("/{group_id}", response_model=AdminGroupDeleteResponse)
+def delete_group(
+    group_id: int,
+    db: Annotated[Session, Depends(get_db)],
+) -> AdminGroupDeleteResponse:
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        )
+
+    db.execute(delete(user_groups).where(user_groups.c.group_id == group.id))
+    db.execute(delete(group_roles).where(group_roles.c.group_id == group.id))
+    db.delete(group)
+    db.commit()
+
+    return AdminGroupDeleteResponse(group_id=group_id, detail="Group deleted")
 
 
 @router.post(
