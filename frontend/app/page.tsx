@@ -18,6 +18,19 @@ type Group = {
   users?: GroupUserSummary[];
 };
 
+type ProjectStatus = "active" | "paused" | "completed" | "archived";
+
+type Project = {
+  id: number;
+  name: string;
+  description: string | null;
+  status: ProjectStatus;
+  users: GroupUserSummary[];
+  groups: UserGroupSummary[];
+  created_at: string;
+  updated_at: string;
+};
+
 type UserGroupSummary = {
   id: number;
   name: string;
@@ -61,6 +74,12 @@ type GroupEditState = {
   description: string;
 };
 
+type ProjectEditState = {
+  name: string;
+  description: string;
+  status: ProjectStatus;
+};
+
 class ApiRequestError extends Error {
   status: number;
 
@@ -73,6 +92,20 @@ class ApiRequestError extends Error {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+const PROJECT_STATUSES: ProjectStatus[] = [
+  "active",
+  "paused",
+  "completed",
+  "archived",
+];
+
+const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
+  active: "Activo",
+  paused: "Pausado",
+  completed: "Completado",
+  archived: "Archivado",
+};
 
 function translateApiDetail(detail: string, fallback: string) {
   switch (detail) {
@@ -92,6 +125,10 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró el usuario indicado.";
     case "Group not found":
       return "No se encontró el grupo indicado.";
+    case "Project not found":
+      return "No se encontró el proyecto indicado.";
+    case "Project access denied":
+      return "No tienes acceso a ese proyecto.";
     case "Cannot delete your own account":
       return "No puedes eliminar tu propia cuenta.";
     case "Cannot delete the last active superuser":
@@ -191,8 +228,23 @@ function buildGroupEditState(groups: Group[]) {
   }, {});
 }
 
+function buildProjectEditState(projects: Project[]) {
+  return projects.reduce<Record<number, ProjectEditState>>((edits, project) => {
+    edits[project.id] = {
+      name: project.name,
+      description: project.description ?? "",
+      status: project.status,
+    };
+    return edits;
+  }, {});
+}
+
 function formatUserOption(adminUser: User) {
   return `${adminUser.full_name} (${adminUser.email})`;
+}
+
+function formatProjectStatus(status: ProjectStatus) {
+  return PROJECT_STATUS_LABELS[status];
 }
 
 export default function Home() {
@@ -241,6 +293,50 @@ export default function Home() {
   const [membershipMessage, setMembershipMessage] = useState("");
   const [isUpdatingMembership, setIsUpdatingMembership] = useState(false);
 
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  const [projectError, setProjectError] = useState("");
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectDescription, setNewProjectDescription] = useState("");
+  const [newProjectStatus, setNewProjectStatus] =
+    useState<ProjectStatus>("active");
+  const [projectFormError, setProjectFormError] = useState("");
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [projectEdits, setProjectEdits] = useState<
+    Record<number, ProjectEditState>
+  >({});
+  const [projectEditError, setProjectEditError] = useState("");
+  const [projectEditMessage, setProjectEditMessage] = useState("");
+  const [updatingProjectId, setUpdatingProjectId] = useState<number | null>(
+    null,
+  );
+  const [projectMembershipProjectId, setProjectMembershipProjectId] =
+    useState("");
+  const [projectMembershipUserId, setProjectMembershipUserId] = useState("");
+  const [projectMembershipGroupId, setProjectMembershipGroupId] = useState("");
+  const [projectMembershipError, setProjectMembershipError] = useState("");
+  const [projectMembershipMessage, setProjectMembershipMessage] = useState("");
+  const [isUpdatingProjectMembership, setIsUpdatingProjectMembership] =
+    useState(false);
+
+  function clearProjectState() {
+    setProjects([]);
+    setProjectEdits({});
+    setProjectError("");
+    setNewProjectName("");
+    setNewProjectDescription("");
+    setNewProjectStatus("active");
+    setProjectFormError("");
+    setProjectEditError("");
+    setProjectEditMessage("");
+    setUpdatingProjectId(null);
+    setProjectMembershipProjectId("");
+    setProjectMembershipUserId("");
+    setProjectMembershipGroupId("");
+    setProjectMembershipError("");
+    setProjectMembershipMessage("");
+  }
+
   function clearAdminState() {
     setAdminUsers([]);
     setGroups([]);
@@ -264,6 +360,7 @@ export default function Home() {
     setUser(null);
     setPassword("");
     clearAdminState();
+    clearProjectState();
     setError(message);
   }
 
@@ -309,6 +406,20 @@ export default function Home() {
       ) {
         setMembershipGroupId("");
       }
+      if (
+        projectMembershipUserId &&
+        !usersData.some(
+          (adminUser) => String(adminUser.id) === projectMembershipUserId,
+        )
+      ) {
+        setProjectMembershipUserId("");
+      }
+      if (
+        projectMembershipGroupId &&
+        !groupsData.some((group) => String(group.id) === projectMembershipGroupId)
+      ) {
+        setProjectMembershipGroupId("");
+      }
     } catch (adminLoadError) {
       if (isAuthError(adminLoadError)) {
         handleSessionExpired(
@@ -328,6 +439,51 @@ export default function Home() {
       );
     } finally {
       setIsLoadingAdmin(false);
+    }
+  }
+
+  async function loadProjects() {
+    setIsLoadingProjects(true);
+    setProjectError("");
+
+    try {
+      const token = getStoredToken();
+      const projectsData = await adminRequest<Project[]>(
+        "/projects",
+        token,
+        "No se pudieron cargar los proyectos.",
+      );
+
+      setProjects(projectsData);
+      setProjectEdits(buildProjectEditState(projectsData));
+
+      if (
+        projectMembershipProjectId &&
+        !projectsData.some(
+          (project) => String(project.id) === projectMembershipProjectId,
+        )
+      ) {
+        setProjectMembershipProjectId("");
+      }
+    } catch (projectsLoadError) {
+      if (isAuthError(projectsLoadError)) {
+        handleSessionExpired(
+          getErrorMessage(
+            projectsLoadError,
+            "La sesión ha caducado o no es válida. Inicia sesión de nuevo.",
+          ),
+        );
+        return;
+      }
+
+      setProjectError(
+        getErrorMessage(
+          projectsLoadError,
+          "No se pudieron cargar los proyectos.",
+        ),
+      );
+    } finally {
+      setIsLoadingProjects(false);
     }
   }
 
@@ -373,6 +529,14 @@ export default function Home() {
     loadAdminData();
   }, [user?.is_superuser]);
 
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    loadProjects();
+  }, [user?.id]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -408,6 +572,7 @@ export default function Home() {
       window.localStorage.removeItem("access_token");
       setUser(null);
       clearAdminState();
+      clearProjectState();
       setError(
         getErrorMessage(loginError, "No se pudo iniciar sesión."),
       );
@@ -422,6 +587,7 @@ export default function Home() {
     setPassword("");
     setError("");
     clearAdminState();
+    clearProjectState();
   }
 
   function handleAdminError(
@@ -466,6 +632,26 @@ export default function Home() {
       return {
         ...currentEdits,
         [groupId]: {
+          ...currentEdit,
+          ...updates,
+        },
+      };
+    });
+  }
+
+  function updateProjectEdit(
+    projectId: number,
+    updates: Partial<ProjectEditState>,
+  ) {
+    setProjectEdits((currentEdits) => {
+      const currentEdit = currentEdits[projectId];
+      if (!currentEdit) {
+        return currentEdits;
+      }
+
+      return {
+        ...currentEdits,
+        [projectId]: {
           ...currentEdit,
           ...updates,
         },
@@ -605,6 +791,7 @@ export default function Home() {
 
       setUserEditMessage("Usuario eliminado.");
       await loadAdminData();
+      await loadProjects();
     } catch (deleteError) {
       handleAdminError(
         deleteError,
@@ -728,6 +915,7 @@ export default function Home() {
       setMembershipMessage("");
       setGroupEditMessage("Grupo eliminado.");
       await loadAdminData();
+      await loadProjects();
     } catch (deleteError) {
       handleAdminError(
         deleteError,
@@ -781,6 +969,173 @@ export default function Home() {
     }
   }
 
+  async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setProjectFormError("");
+    setIsCreatingProject(true);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Project>(
+        "/projects",
+        token,
+        "No se pudo crear el proyecto.",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: newProjectName,
+            description: newProjectDescription.trim() || null,
+            status: newProjectStatus,
+          }),
+        },
+      );
+
+      setNewProjectName("");
+      setNewProjectDescription("");
+      setNewProjectStatus("active");
+      await loadProjects();
+    } catch (createError) {
+      handleAdminError(
+        createError,
+        setProjectFormError,
+        "No se pudo crear el proyecto.",
+      );
+    } finally {
+      setIsCreatingProject(false);
+    }
+  }
+
+  async function handleUpdateProject(projectId: number) {
+    const edit = projectEdits[projectId];
+    if (!edit) {
+      setProjectEditError("No se pudo encontrar el proyecto para editar.");
+      return;
+    }
+
+    const name = edit.name.trim();
+    if (!name) {
+      setProjectEditError("El nombre del proyecto no puede estar vacío.");
+      setProjectEditMessage("");
+      return;
+    }
+
+    setProjectEditError("");
+    setProjectEditMessage("");
+    setUpdatingProjectId(projectId);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Project>(
+        `/projects/${projectId}`,
+        token,
+        "No se pudo actualizar el proyecto.",
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            name,
+            description: edit.description.trim() || null,
+            status: edit.status,
+          }),
+        },
+      );
+
+      setProjectEditMessage("Proyecto actualizado.");
+      await loadProjects();
+    } catch (updateError) {
+      handleAdminError(
+        updateError,
+        setProjectEditError,
+        "No se pudo actualizar el proyecto.",
+      );
+    } finally {
+      setUpdatingProjectId(null);
+    }
+  }
+
+  async function updateProjectUserMembership(action: "add" | "remove") {
+    setProjectMembershipError("");
+    setProjectMembershipMessage("");
+
+    const projectId = Number.parseInt(projectMembershipProjectId, 10);
+    const userId = Number.parseInt(projectMembershipUserId, 10);
+
+    if (!Number.isInteger(projectId) || !Number.isInteger(userId)) {
+      setProjectMembershipError("Selecciona un proyecto y un usuario.");
+      return;
+    }
+
+    setIsUpdatingProjectMembership(true);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Project>(
+        `/projects/${projectId}/users/${userId}`,
+        token,
+        "No se pudo actualizar el usuario del proyecto.",
+        {
+          method: action === "add" ? "POST" : "DELETE",
+        },
+      );
+
+      setProjectMembershipMessage(
+        action === "add"
+          ? "Usuario añadido al proyecto."
+          : "Usuario eliminado del proyecto.",
+      );
+      await loadProjects();
+    } catch (membershipUpdateError) {
+      handleAdminError(
+        membershipUpdateError,
+        setProjectMembershipError,
+        "No se pudo actualizar el usuario del proyecto.",
+      );
+    } finally {
+      setIsUpdatingProjectMembership(false);
+    }
+  }
+
+  async function updateProjectGroupMembership(action: "add" | "remove") {
+    setProjectMembershipError("");
+    setProjectMembershipMessage("");
+
+    const projectId = Number.parseInt(projectMembershipProjectId, 10);
+    const groupId = Number.parseInt(projectMembershipGroupId, 10);
+
+    if (!Number.isInteger(projectId) || !Number.isInteger(groupId)) {
+      setProjectMembershipError("Selecciona un proyecto y un grupo.");
+      return;
+    }
+
+    setIsUpdatingProjectMembership(true);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Project>(
+        `/projects/${projectId}/groups/${groupId}`,
+        token,
+        "No se pudo actualizar el grupo del proyecto.",
+        {
+          method: action === "add" ? "POST" : "DELETE",
+        },
+      );
+
+      setProjectMembershipMessage(
+        action === "add"
+          ? "Grupo añadido al proyecto."
+          : "Grupo eliminado del proyecto.",
+      );
+      await loadProjects();
+    } catch (membershipUpdateError) {
+      handleAdminError(
+        membershipUpdateError,
+        setProjectMembershipError,
+        "No se pudo actualizar el grupo del proyecto.",
+      );
+    } finally {
+      setIsUpdatingProjectMembership(false);
+    }
+  }
+
   if (isLoadingSession) {
     return (
       <main className="page">
@@ -826,6 +1181,363 @@ export default function Home() {
                 <dd>{user.is_superuser ? "Sí" : "No"}</dd>
               </div>
             </dl>
+          </section>
+
+          <section className="panel admin-panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Trabajo</p>
+                <h2>Proyectos</h2>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={loadProjects}
+                disabled={isLoadingProjects}
+              >
+                {isLoadingProjects ? "Cargando..." : "Actualizar"}
+              </button>
+            </div>
+
+            {projectError ? (
+              <p className="error-message">{projectError}</p>
+            ) : null}
+
+            {!user.is_superuser && !isLoadingProjects && projects.length === 0 ? (
+              <p className="small-muted">
+                No tienes proyectos accesibles. Un administrador puede asignarte
+                directamente o mediante un grupo.
+              </p>
+            ) : null}
+
+            <div className="admin-section">
+              <div className="section-header">
+                <h3>Listado</h3>
+                {isLoadingProjects ? (
+                  <p className="small-muted">Cargando proyectos.</p>
+                ) : null}
+              </div>
+
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Nombre</th>
+                      <th>Descripción</th>
+                      <th>Estado</th>
+                      <th>Usuarios</th>
+                      <th>Grupos</th>
+                      {user.is_superuser ? <th>Acción</th> : null}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {projects.length > 0 ? (
+                      projects.map((project) => {
+                        const edit = projectEdits[project.id] ?? {
+                          name: project.name,
+                          description: project.description ?? "",
+                          status: project.status,
+                        };
+                        const assignedUsers = project.users ?? [];
+                        const assignedGroups = project.groups ?? [];
+
+                        return (
+                          <tr key={project.id}>
+                            <td>{project.id}</td>
+                            <td>
+                              {user.is_superuser ? (
+                                <input
+                                  aria-label={`Nombre del proyecto ${project.name}`}
+                                  className="table-input"
+                                  onChange={(event) =>
+                                    updateProjectEdit(project.id, {
+                                      name: event.target.value,
+                                    })
+                                  }
+                                  type="text"
+                                  value={edit.name}
+                                />
+                              ) : (
+                                <strong>{project.name}</strong>
+                              )}
+                            </td>
+                            <td>
+                              {user.is_superuser ? (
+                                <textarea
+                                  aria-label={`Descripción del proyecto ${project.name}`}
+                                  className="table-textarea"
+                                  onChange={(event) =>
+                                    updateProjectEdit(project.id, {
+                                      description: event.target.value,
+                                    })
+                                  }
+                                  rows={2}
+                                  value={edit.description}
+                                />
+                              ) : project.description ? (
+                                project.description
+                              ) : (
+                                <span className="small-muted">
+                                  Sin descripción
+                                </span>
+                              )}
+                            </td>
+                            <td>
+                              {user.is_superuser ? (
+                                <select
+                                  aria-label={`Estado del proyecto ${project.name}`}
+                                  className="table-input"
+                                  onChange={(event) =>
+                                    updateProjectEdit(project.id, {
+                                      status: event.target
+                                        .value as ProjectStatus,
+                                    })
+                                  }
+                                  value={edit.status}
+                                >
+                                  {PROJECT_STATUSES.map((status) => (
+                                    <option key={status} value={status}>
+                                      {formatProjectStatus(status)}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span className="tag">
+                                  {formatProjectStatus(project.status)}
+                                </span>
+                              )}
+                            </td>
+                            <td>
+                              {assignedUsers.length > 0 ? (
+                                <ul className="compact-list">
+                                  {assignedUsers.map((projectUser) => (
+                                    <li key={projectUser.id}>
+                                      <strong>{projectUser.full_name}</strong>
+                                      <span>{projectUser.email}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <span className="small-muted">
+                                  Sin usuarios
+                                </span>
+                              )}
+                            </td>
+                            <td>
+                              {assignedGroups.length > 0 ? (
+                                <div className="tag-list">
+                                  {assignedGroups.map((group) => (
+                                    <span className="tag" key={group.id}>
+                                      {group.name}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span className="small-muted">Sin grupos</span>
+                              )}
+                            </td>
+                            {user.is_superuser ? (
+                              <td>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateProject(project.id)}
+                                  disabled={
+                                    updatingProjectId === project.id ||
+                                    isLoadingProjects
+                                  }
+                                >
+                                  {updatingProjectId === project.id
+                                    ? "Guardando..."
+                                    : "Guardar"}
+                                </button>
+                              </td>
+                            ) : null}
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={user.is_superuser ? 7 : 6}>
+                          {user.is_superuser
+                            ? "No hay proyectos para mostrar."
+                            : "No tienes proyectos accesibles."}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {projectEditError ? (
+                <p className="error-message">{projectEditError}</p>
+              ) : null}
+              {projectEditMessage ? (
+                <p className="success-message">{projectEditMessage}</p>
+              ) : null}
+            </div>
+
+            {user.is_superuser ? (
+              <>
+                <div className="admin-section">
+                  <form className="admin-form" onSubmit={handleCreateProject}>
+                    <h3>Crear proyecto</h3>
+                    <div className="form-grid">
+                      <label>
+                        Nombre
+                        <input
+                          name="new-project-name"
+                          onChange={(event) =>
+                            setNewProjectName(event.target.value)
+                          }
+                          required
+                          type="text"
+                          value={newProjectName}
+                        />
+                      </label>
+
+                      <label>
+                        Estado
+                        <select
+                          name="new-project-status"
+                          onChange={(event) =>
+                            setNewProjectStatus(
+                              event.target.value as ProjectStatus,
+                            )
+                          }
+                          value={newProjectStatus}
+                        >
+                          {PROJECT_STATUSES.map((status) => (
+                            <option key={status} value={status}>
+                              {formatProjectStatus(status)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label>
+                        Descripción
+                        <textarea
+                          name="new-project-description"
+                          onChange={(event) =>
+                            setNewProjectDescription(event.target.value)
+                          }
+                          rows={3}
+                          value={newProjectDescription}
+                        />
+                      </label>
+                    </div>
+
+                    {projectFormError ? (
+                      <p className="error-message">{projectFormError}</p>
+                    ) : null}
+
+                    <button type="submit" disabled={isCreatingProject}>
+                      {isCreatingProject ? "Creando..." : "Crear proyecto"}
+                    </button>
+                  </form>
+                </div>
+
+                <div className="admin-section">
+                  <h3>Pertenencia a proyectos</h3>
+
+                  <div className="membership-controls">
+                    <label>
+                      Proyecto
+                      <select
+                        onChange={(event) =>
+                          setProjectMembershipProjectId(event.target.value)
+                        }
+                        value={projectMembershipProjectId}
+                      >
+                        <option value="">Selecciona un proyecto</option>
+                        {projects.map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      Usuario
+                      <select
+                        onChange={(event) =>
+                          setProjectMembershipUserId(event.target.value)
+                        }
+                        value={projectMembershipUserId}
+                      >
+                        <option value="">Selecciona un usuario</option>
+                        {adminUsers.map((adminUser) => (
+                          <option key={adminUser.id} value={adminUser.id}>
+                            {formatUserOption(adminUser)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      Grupo
+                      <select
+                        onChange={(event) =>
+                          setProjectMembershipGroupId(event.target.value)
+                        }
+                        value={projectMembershipGroupId}
+                      >
+                        <option value="">Selecciona un grupo</option>
+                        {groups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {group.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  {projectMembershipError ? (
+                    <p className="error-message">{projectMembershipError}</p>
+                  ) : null}
+                  {projectMembershipMessage ? (
+                    <p className="success-message">
+                      {projectMembershipMessage}
+                    </p>
+                  ) : null}
+
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      onClick={() => updateProjectUserMembership("add")}
+                      disabled={isUpdatingProjectMembership}
+                    >
+                      Añadir usuario
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => updateProjectUserMembership("remove")}
+                      disabled={isUpdatingProjectMembership}
+                    >
+                      Quitar usuario
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateProjectGroupMembership("add")}
+                      disabled={isUpdatingProjectMembership}
+                    >
+                      Añadir grupo
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => updateProjectGroupMembership("remove")}
+                      disabled={isUpdatingProjectMembership}
+                    >
+                      Quitar grupo
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : null}
           </section>
 
           {user.is_superuser ? (
