@@ -129,6 +129,10 @@ button:disabled {
   background: #e6efec;
 }
 
+.danger-button {
+  background: #a9352b;
+}
+
 .error-message {
   margin: 0;
   max-width: none;
@@ -281,6 +285,12 @@ tr:last-child td {
   min-width: 180px;
   padding: 9px 10px;
   font-size: 14px;
+}
+
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .table-textarea {

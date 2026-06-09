@@ -1,13 +1,19 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.admin.schemas import AdminUserCreate, AdminUserRead, AdminUserUpdate
+from app.admin.schemas import (
+    AdminUserCreate,
+    AdminUserDeleteResponse,
+    AdminUserRead,
+    AdminUserUpdate,
+)
 from app.auth.dependencies import require_superuser
 from app.db.session import get_db
+from app.rbac.models import user_groups
 from app.users.crud import create_user
 from app.users.models import User
 
@@ -84,3 +90,47 @@ def update_admin_user(
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.delete("/{user_id}", response_model=AdminUserDeleteResponse)
+def delete_admin_user(
+    user_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_superuser)],
+) -> AdminUserDeleteResponse:
+    active_superuser_ids = list(
+        db.scalars(
+            select(User.id)
+            .where(
+                User.is_active.is_(True),
+                User.is_superuser.is_(True),
+            )
+            .order_by(User.id)
+            .with_for_update()
+        )
+    )
+
+    user = db.scalar(select(User).where(User.id == user_id).with_for_update())
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    if user.is_active and user.is_superuser and len(active_superuser_ids) <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete the last active superuser",
+        )
+
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own account",
+        )
+
+    db.execute(delete(user_groups).where(user_groups.c.user_id == user.id))
+    db.delete(user)
+    db.commit()
+
+    return AdminUserDeleteResponse(user_id=user_id, detail="User deleted")

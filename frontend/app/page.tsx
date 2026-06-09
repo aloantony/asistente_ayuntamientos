@@ -40,6 +40,11 @@ type MembershipResponse = {
   detail: string;
 };
 
+type UserDeleteResponse = {
+  user_id: number;
+  detail: string;
+};
+
 type UserEditState = {
   full_name: string;
   is_active: boolean;
@@ -82,6 +87,10 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró el usuario indicado.";
     case "Group not found":
       return "No se encontró el grupo indicado.";
+    case "Cannot delete your own account":
+      return "No puedes eliminar tu propia cuenta.";
+    case "Cannot delete the last active superuser":
+      return "No puedes eliminar el último superusuario activo.";
     default:
       return detail || fallback;
   }
@@ -207,6 +216,7 @@ export default function Home() {
   const [userEditError, setUserEditError] = useState("");
   const [userEditMessage, setUserEditMessage] = useState("");
   const [updatingUserId, setUpdatingUserId] = useState<number | null>(null);
+  const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
 
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupDescription, setNewGroupDescription] = useState("");
@@ -234,6 +244,7 @@ export default function Home() {
     setUserFormError("");
     setUserEditError("");
     setUserEditMessage("");
+    setDeletingUserId(null);
     setGroupFormError("");
     setGroupEditError("");
     setGroupEditMessage("");
@@ -545,6 +556,52 @@ export default function Home() {
     }
   }
 
+  async function handleDeleteUser(adminUser: User) {
+    setUserEditError("");
+    setUserEditMessage("");
+
+    if (user?.id === adminUser.id) {
+      setUserEditError("No puedes eliminar tu propia cuenta.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `¿Eliminar el usuario ${adminUser.email}? Esta acción no se puede deshacer.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingUserId(adminUser.id);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<UserDeleteResponse>(
+        `/admin/users/${adminUser.id}`,
+        token,
+        "No se pudo eliminar el usuario.",
+        {
+          method: "DELETE",
+        },
+      );
+
+      if (membershipUserId === String(adminUser.id)) {
+        setMembershipUserId("");
+      }
+
+      setUserEditMessage("Usuario eliminado.");
+      await loadAdminData();
+    } catch (deleteError) {
+      handleAdminError(
+        deleteError,
+        setUserEditError,
+        "No se pudo eliminar el usuario.",
+      );
+    } finally {
+      setDeletingUserId(null);
+    }
+  }
+
   async function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setGroupFormError("");
@@ -765,6 +822,7 @@ export default function Home() {
                             is_superuser: adminUser.is_superuser,
                           };
                           const assignedGroups = adminUser.groups ?? [];
+                          const isCurrentUser = user?.id === adminUser.id;
 
                           return (
                             <tr key={adminUser.id}>
@@ -825,18 +883,41 @@ export default function Home() {
                                 </label>
                               </td>
                               <td>
-                                <button
-                                  type="button"
-                                  onClick={() => handleUpdateUser(adminUser.id)}
-                                  disabled={
-                                    updatingUserId === adminUser.id ||
-                                    isLoadingAdmin
-                                  }
-                                >
-                                  {updatingUserId === adminUser.id
-                                    ? "Guardando..."
-                                    : "Guardar"}
-                                </button>
+                                <div className="table-actions">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUpdateUser(adminUser.id)}
+                                    disabled={
+                                      updatingUserId === adminUser.id ||
+                                      deletingUserId === adminUser.id ||
+                                      isLoadingAdmin
+                                    }
+                                  >
+                                    {updatingUserId === adminUser.id
+                                      ? "Guardando..."
+                                      : "Guardar"}
+                                  </button>
+                                  <button
+                                    className="danger-button"
+                                    type="button"
+                                    onClick={() => handleDeleteUser(adminUser)}
+                                    disabled={
+                                      isCurrentUser ||
+                                      deletingUserId === adminUser.id ||
+                                      updatingUserId === adminUser.id ||
+                                      isLoadingAdmin
+                                    }
+                                    title={
+                                      isCurrentUser
+                                        ? "No puedes eliminar la cuenta de la sesión actual"
+                                        : undefined
+                                    }
+                                  >
+                                    {deletingUserId === adminUser.id
+                                      ? "Eliminando..."
+                                      : "Eliminar"}
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );
