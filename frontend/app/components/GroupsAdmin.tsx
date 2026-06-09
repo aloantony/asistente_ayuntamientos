@@ -60,6 +60,7 @@ export function GroupsAdmin({
               <th>Nombre</th>
               <th>Descripción</th>
               <th>Usuarios</th>
+              <th>Roles</th>
               <th>Acción</th>
             </tr>
           </thead>
@@ -71,6 +72,7 @@ export function GroupsAdmin({
                   description: group.description ?? "",
                 };
                 const assignedUsers = group.users ?? [];
+                const assignedRoles = group.roles ?? [];
 
                 return (
                   <tr key={group.id}>
@@ -116,6 +118,19 @@ export function GroupsAdmin({
                       )}
                     </td>
                     <td>
+                      {assignedRoles.length > 0 ? (
+                        <div className="tag-list">
+                          {assignedRoles.map((role) => (
+                            <span className="tag" key={role.id}>
+                              {role.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="small-muted">Sin roles</span>
+                      )}
+                    </td>
+                    <td>
                       <div className="table-actions">
                         <button
                           type="button"
@@ -151,7 +166,7 @@ export function GroupsAdmin({
               })
             ) : (
               <tr>
-                <td colSpan={5}>No hay grupos para mostrar.</td>
+                <td colSpan={6}>No hay grupos para mostrar.</td>
               </tr>
             )}
           </tbody>

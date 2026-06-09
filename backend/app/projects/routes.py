@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.orm import Session
 
-from app.auth.dependencies import get_current_user, require_superuser
+from app.auth.dependencies import get_current_user
 from app.db.session import get_db
 from app.projects.access import (
     get_project_with_memberships,
@@ -14,6 +14,7 @@ from app.projects.access import (
 from app.projects.models import Project, project_groups, project_users
 from app.projects.schemas import ProjectCreate, ProjectRead, ProjectUpdate
 from app.rbac.models import Group
+from app.rbac.permissions import has_permission, require_permission
 from app.users.models import User
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -24,7 +25,10 @@ def list_projects(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> list[Project]:
-    return list(db.scalars(select_visible_projects(current_user)))
+    can_view_all = has_permission(current_user, "projects.view_all", db)
+    return list(
+        db.scalars(select_visible_projects(current_user, can_view_all=can_view_all))
+    )
 
 
 @router.post(
@@ -35,7 +39,7 @@ def list_projects(
 def create_project(
     payload: ProjectCreate,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
+    current_user: Annotated[User, Depends(require_permission("projects.create"))],
 ) -> Project:
     project = Project(
         name=payload.name,
@@ -67,7 +71,13 @@ def get_project(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
         )
-    if not user_can_access_project(db, current_user, project_id):
+    can_view_all = has_permission(current_user, "projects.view_all", db)
+    if not user_can_access_project(
+        db,
+        current_user,
+        project_id,
+        can_view_all=can_view_all,
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Project access denied",
@@ -80,7 +90,7 @@ def update_project(
     project_id: int,
     payload: ProjectUpdate,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
+    current_user: Annotated[User, Depends(require_permission("projects.edit"))],
 ) -> Project:
     project = get_project_with_memberships(db, project_id)
     if project is None:
@@ -90,6 +100,16 @@ def update_project(
         )
 
     updates = payload.model_dump(exclude_unset=True)
+    if updates.get("status") == "archived" and not has_permission(
+        current_user,
+        "projects.archive",
+        db,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission required: projects.archive",
+        )
+
     for field, value in updates.items():
         setattr(project, field, value)
 
@@ -114,7 +134,10 @@ def assign_user_to_project(
     project_id: int,
     user_id: int,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
+    current_user: Annotated[
+        User,
+        Depends(require_permission("projects.manage_members")),
+    ],
 ) -> Project:
     ensure_project_and_user_exist(db, project_id=project_id, user_id=user_id)
 
@@ -140,7 +163,10 @@ def remove_user_from_project(
     project_id: int,
     user_id: int,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
+    current_user: Annotated[
+        User,
+        Depends(require_permission("projects.manage_members")),
+    ],
 ) -> Project:
     ensure_project_and_user_exist(db, project_id=project_id, user_id=user_id)
 
@@ -166,7 +192,10 @@ def assign_group_to_project(
     project_id: int,
     group_id: int,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
+    current_user: Annotated[
+        User,
+        Depends(require_permission("projects.manage_members")),
+    ],
 ) -> Project:
     ensure_project_and_group_exist(db, project_id=project_id, group_id=group_id)
 
@@ -192,7 +221,10 @@ def remove_group_from_project(
     project_id: int,
     group_id: int,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
+    current_user: Annotated[
+        User,
+        Depends(require_permission("projects.manage_members")),
+    ],
 ) -> Project:
     ensure_project_and_group_exist(db, project_id=project_id, group_id=group_id)
 

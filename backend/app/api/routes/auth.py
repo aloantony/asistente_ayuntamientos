@@ -9,6 +9,7 @@ from app.auth.schemas import BootstrapAdminRequest, LoginRequest, Token
 from app.core.config import settings
 from app.core.security import create_access_token, verify_password
 from app.db.session import get_db
+from app.rbac.permissions import get_user_permission_codes
 from app.users.crud import count_users, create_user, get_user_by_email
 from app.users.models import User
 from app.users.schemas import UserRead
@@ -36,8 +37,15 @@ def login(payload: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> Tok
 
 
 @router.get("/me", response_model=UserRead)
-def read_me(current_user: Annotated[User, Depends(get_current_user)]) -> User:
-    return current_user
+def read_me(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserRead:
+    return UserRead.model_validate(current_user).model_copy(
+        update={
+            "permissions": sorted(get_user_permission_codes(current_user, db)),
+        }
+    )
 
 
 @router.post(

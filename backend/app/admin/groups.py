@@ -12,21 +12,25 @@ from app.admin.schemas import (
     AdminGroupUpdate,
     GroupMembershipResponse,
 )
-from app.auth.dependencies import require_superuser
 from app.db.session import get_db
 from app.rbac.models import Group, group_roles, user_groups
+from app.rbac.permissions import require_permission
 from app.users.models import User
 
 router = APIRouter(
     prefix="/admin/groups",
     tags=["admin-groups"],
-    dependencies=[Depends(require_superuser)],
+    dependencies=[Depends(require_permission("groups.manage"))],
 )
 
 
 @router.get("", response_model=list[AdminGroupRead])
 def list_groups(db: Annotated[Session, Depends(get_db)]) -> list[Group]:
-    query = select(Group).options(selectinload(Group.users)).order_by(Group.id)
+    query = (
+        select(Group)
+        .options(selectinload(Group.users), selectinload(Group.roles))
+        .order_by(Group.id)
+    )
     return list(db.scalars(query))
 
 
@@ -57,7 +61,9 @@ def get_group(
     db: Annotated[Session, Depends(get_db)],
 ) -> Group:
     group = db.scalar(
-        select(Group).options(selectinload(Group.users)).where(Group.id == group_id)
+        select(Group)
+        .options(selectinload(Group.users), selectinload(Group.roles))
+        .where(Group.id == group_id)
     )
     if group is None:
         raise HTTPException(
@@ -74,7 +80,9 @@ def update_group(
     db: Annotated[Session, Depends(get_db)],
 ) -> Group:
     group = db.scalar(
-        select(Group).options(selectinload(Group.users)).where(Group.id == group_id)
+        select(Group)
+        .options(selectinload(Group.users), selectinload(Group.roles))
+        .where(Group.id == group_id)
     )
     if group is None:
         raise HTTPException(

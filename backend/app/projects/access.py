@@ -6,14 +6,14 @@ from app.rbac.models import user_groups
 from app.users.models import User
 
 
-def select_visible_projects(current_user: User):
+def select_visible_projects(current_user: User, *, can_view_all: bool = False):
     query = (
         select(Project)
         .options(selectinload(Project.users), selectinload(Project.groups))
         .order_by(Project.id)
     )
 
-    if current_user.is_superuser:
+    if current_user.is_superuser or can_view_all:
         return query
 
     direct_assignment = exists().where(
@@ -37,8 +37,14 @@ def get_project_with_memberships(db: Session, project_id: int) -> Project | None
     )
 
 
-def user_can_access_project(db: Session, current_user: User, project_id: int) -> bool:
-    if current_user.is_superuser:
+def user_can_access_project(
+    db: Session,
+    current_user: User,
+    project_id: int,
+    *,
+    can_view_all: bool = False,
+) -> bool:
+    if current_user.is_superuser or can_view_all:
         return True
 
     direct_project_id = db.scalar(

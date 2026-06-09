@@ -348,6 +348,10 @@ tr:last-child td {
   font-size: 13px;
 }
 
+.permission-list {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
 .admin-form {
   display: grid;
   gap: 16px;

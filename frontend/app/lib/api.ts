@@ -14,6 +14,10 @@ export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 function translateApiDetail(detail: string, fallback: string) {
+  if (detail.startsWith("Permission required:")) {
+    return "No tienes el permiso necesario para esta acción.";
+  }
+
   switch (detail) {
     case "Incorrect email or password":
       return "No se pudo iniciar sesión. Revisa el email y la contraseña.";
@@ -27,10 +31,16 @@ function translateApiDetail(detail: string, fallback: string) {
       return "Ya existe un usuario con ese email.";
     case "Group already exists":
       return "Ya existe un grupo con ese nombre.";
+    case "Role already exists":
+      return "Ya existe un rol con ese nombre.";
     case "User not found":
       return "No se encontró el usuario indicado.";
     case "Group not found":
       return "No se encontró el grupo indicado.";
+    case "Role not found":
+      return "No se encontró el rol indicado.";
+    case "Permission not found":
+      return "No se encontró el permiso indicado.";
     case "Project not found":
       return "No se encontró el proyecto indicado.";
     case "Project access denied":

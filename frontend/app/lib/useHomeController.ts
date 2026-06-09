@@ -250,6 +250,8 @@ export function useHomeController() {
           currentUser: user,
           adminUsers: adminController.adminUsers,
           groups: adminController.groups,
+          permissions: adminController.permissions,
+          roles: adminController.roles,
           isLoadingAdmin: adminController.isLoadingAdmin,
           adminError: adminController.adminError,
           newUserEmail: adminController.newUserEmail,
@@ -278,6 +280,33 @@ export function useHomeController() {
           membershipError: adminController.membershipError,
           membershipMessage: adminController.membershipMessage,
           isUpdatingMembership: adminController.isUpdatingMembership,
+          newRoleName: adminController.newRoleName,
+          newRoleDescription: adminController.newRoleDescription,
+          roleFormError: adminController.roleFormError,
+          isCreatingRole: adminController.isCreatingRole,
+          roleEdits: adminController.roleEdits,
+          roleEditError: adminController.roleEditError,
+          roleEditMessage: adminController.roleEditMessage,
+          updatingRoleId: adminController.updatingRoleId,
+          deletingRoleId: adminController.deletingRoleId,
+          rolePermissionRoleId: adminController.rolePermissionRoleId,
+          rolePermissionPermissionId:
+            adminController.rolePermissionPermissionId,
+          rolePermissionError: adminController.rolePermissionError,
+          rolePermissionMessage: adminController.rolePermissionMessage,
+          isUpdatingRolePermission:
+            adminController.isUpdatingRolePermission,
+          groupRoleGroupId: adminController.groupRoleGroupId,
+          groupRoleRoleId: adminController.groupRoleRoleId,
+          groupRoleError: adminController.groupRoleError,
+          groupRoleMessage: adminController.groupRoleMessage,
+          isUpdatingGroupRole: adminController.isUpdatingGroupRole,
+          bootstrapPermissionsError:
+            adminController.bootstrapPermissionsError,
+          bootstrapPermissionsMessage:
+            adminController.bootstrapPermissionsMessage,
+          isBootstrappingPermissions:
+            adminController.isBootstrappingPermissions,
           onRefresh: adminController.loadAdminData,
           onNewUserEmailChange: adminController.setNewUserEmail,
           onNewUserPasswordChange: adminController.setNewUserPassword,
@@ -299,6 +328,23 @@ export function useHomeController() {
           onMembershipUserIdChange: adminController.setMembershipUserId,
           onMembershipGroupIdChange: adminController.setMembershipGroupId,
           onUpdateMembership: adminController.updateMembership,
+          onBootstrapPermissions:
+            adminController.handleBootstrapPermissions,
+          onNewRoleNameChange: adminController.setNewRoleName,
+          onNewRoleDescriptionChange:
+            adminController.setNewRoleDescription,
+          onCreateRole: adminController.handleCreateRole,
+          onUpdateRoleEdit: adminController.updateRoleEdit,
+          onUpdateRole: adminController.handleUpdateRole,
+          onDeleteRole: adminController.handleDeleteRole,
+          onRolePermissionRoleIdChange:
+            adminController.setRolePermissionRoleId,
+          onRolePermissionPermissionIdChange:
+            adminController.setRolePermissionPermissionId,
+          onUpdateRolePermission: adminController.updateRolePermission,
+          onGroupRoleGroupIdChange: adminController.setGroupRoleGroupId,
+          onGroupRoleRoleIdChange: adminController.setGroupRoleRoleId,
+          onUpdateGroupRole: adminController.updateGroupRole,
         }
       : null;
 

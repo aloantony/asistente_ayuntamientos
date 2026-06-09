@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class UserRead(BaseModel):
@@ -9,6 +9,7 @@ class UserRead(BaseModel):
     full_name: str
     is_active: bool
     is_superuser: bool
+    permissions: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

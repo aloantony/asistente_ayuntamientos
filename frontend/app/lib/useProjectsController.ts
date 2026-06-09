@@ -183,6 +183,19 @@ export function useProjectsController({
       return;
     }
 
+    const project = projects.find((currentProject) => currentProject.id === projectId);
+    const payload: {
+      name: string;
+      description: string | null;
+      status?: ProjectStatus;
+    } = {
+      name,
+      description: edit.description.trim() || null,
+    };
+    if (!project || edit.status !== project.status) {
+      payload.status = edit.status;
+    }
+
     setProjectEditError("");
     setProjectEditMessage("");
     setUpdatingProjectId(projectId);
@@ -195,11 +208,7 @@ export function useProjectsController({
         "No se pudo actualizar el proyecto.",
         {
           method: "PATCH",
-          body: JSON.stringify({
-            name,
-            description: edit.description.trim() || null,
-            status: edit.status,
-          }),
+          body: JSON.stringify(payload),
         },
       );
 

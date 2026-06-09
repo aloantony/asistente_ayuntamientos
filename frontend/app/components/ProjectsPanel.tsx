@@ -3,6 +3,7 @@ import {
   formatProjectStatus,
   formatUserOption,
   PROJECT_STATUSES,
+  userHasPermission,
   type Group,
   type MembershipAction,
   type Project,
@@ -85,6 +86,12 @@ export function ProjectsPanel({
   onUpdateProjectUserMembership,
   onUpdateProjectGroupMembership,
 }: ProjectsPanelProps) {
+  const canCreateProjects = userHasPermission(user, "projects.create");
+  const canEditProjects = userHasPermission(user, "projects.edit");
+  const canArchiveProjects = userHasPermission(user, "projects.archive");
+  const showProjectMembershipControls =
+    user.is_superuser && userHasPermission(user, "projects.manage_members");
+
   return (
     <section className="panel admin-panel">
       <div className="panel-header">
@@ -104,7 +111,10 @@ export function ProjectsPanel({
 
       {projectError ? <p className="error-message">{projectError}</p> : null}
 
-      {!user.is_superuser && !isLoadingProjects && projects.length === 0 ? (
+      {!user.is_superuser &&
+      !canCreateProjects &&
+      !isLoadingProjects &&
+      projects.length === 0 ? (
         <p className="small-muted">
           No tienes proyectos accesibles. Un administrador puede asignarte
           directamente o mediante un grupo.
@@ -129,7 +139,7 @@ export function ProjectsPanel({
                 <th>Estado</th>
                 <th>Usuarios</th>
                 <th>Grupos</th>
-                {user.is_superuser ? <th>Acción</th> : null}
+                {canEditProjects ? <th>Acción</th> : null}
               </tr>
             </thead>
             <tbody>
@@ -147,7 +157,7 @@ export function ProjectsPanel({
                     <tr key={project.id}>
                       <td>{project.id}</td>
                       <td>
-                        {user.is_superuser ? (
+                        {canEditProjects ? (
                           <input
                             aria-label={`Nombre del proyecto ${project.name}`}
                             className="table-input"
@@ -164,7 +174,7 @@ export function ProjectsPanel({
                         )}
                       </td>
                       <td>
-                        {user.is_superuser ? (
+                        {canEditProjects ? (
                           <textarea
                             aria-label={`Descripción del proyecto ${project.name}`}
                             className="table-textarea"
@@ -183,7 +193,7 @@ export function ProjectsPanel({
                         )}
                       </td>
                       <td>
-                        {user.is_superuser ? (
+                        {canEditProjects ? (
                           <select
                             aria-label={`Estado del proyecto ${project.name}`}
                             className="table-input"
@@ -195,7 +205,15 @@ export function ProjectsPanel({
                             value={edit.status}
                           >
                             {PROJECT_STATUSES.map((status) => (
-                              <option key={status} value={status}>
+                              <option
+                                disabled={
+                                  status === "archived" &&
+                                  !canArchiveProjects &&
+                                  edit.status !== "archived"
+                                }
+                                key={status}
+                                value={status}
+                              >
                                 {formatProjectStatus(status)}
                               </option>
                             ))}
@@ -233,7 +251,7 @@ export function ProjectsPanel({
                           <span className="small-muted">Sin grupos</span>
                         )}
                       </td>
-                      {user.is_superuser ? (
+                      {canEditProjects ? (
                         <td>
                           <button
                             type="button"
@@ -254,8 +272,8 @@ export function ProjectsPanel({
                 })
               ) : (
                 <tr>
-                  <td colSpan={user.is_superuser ? 7 : 6}>
-                    {user.is_superuser
+                  <td colSpan={canEditProjects ? 7 : 6}>
+                    {canCreateProjects || canEditProjects
                       ? "No hay proyectos para mostrar."
                       : "No tienes proyectos accesibles."}
                   </td>
@@ -273,163 +291,167 @@ export function ProjectsPanel({
         ) : null}
       </div>
 
-      {user.is_superuser ? (
+      {canCreateProjects || showProjectMembershipControls ? (
         <>
-          <div className="admin-section">
-            <form className="admin-form" onSubmit={onCreateProject}>
-              <h3>Crear proyecto</h3>
-              <div className="form-grid">
-                <label>
-                  Nombre
-                  <input
-                    name="new-project-name"
-                    onChange={(event) =>
-                      onNewProjectNameChange(event.target.value)
-                    }
-                    required
-                    type="text"
-                    value={newProjectName}
-                  />
-                </label>
+          {canCreateProjects ? (
+            <div className="admin-section">
+              <form className="admin-form" onSubmit={onCreateProject}>
+                <h3>Crear proyecto</h3>
+                <div className="form-grid">
+                  <label>
+                    Nombre
+                    <input
+                      name="new-project-name"
+                      onChange={(event) =>
+                        onNewProjectNameChange(event.target.value)
+                      }
+                      required
+                      type="text"
+                      value={newProjectName}
+                    />
+                  </label>
 
+                  <label>
+                    Estado
+                    <select
+                      name="new-project-status"
+                      onChange={(event) =>
+                        onNewProjectStatusChange(
+                          event.target.value as ProjectStatus,
+                        )
+                      }
+                      value={newProjectStatus}
+                    >
+                      {PROJECT_STATUSES.map((status) => (
+                        <option key={status} value={status}>
+                          {formatProjectStatus(status)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Descripción
+                    <textarea
+                      name="new-project-description"
+                      onChange={(event) =>
+                        onNewProjectDescriptionChange(event.target.value)
+                      }
+                      rows={3}
+                      value={newProjectDescription}
+                    />
+                  </label>
+                </div>
+
+                {projectFormError ? (
+                  <p className="error-message">{projectFormError}</p>
+                ) : null}
+
+                <button type="submit" disabled={isCreatingProject}>
+                  {isCreatingProject ? "Creando..." : "Crear proyecto"}
+                </button>
+              </form>
+            </div>
+          ) : null}
+
+          {showProjectMembershipControls ? (
+            <div className="admin-section">
+              <h3>Pertenencia a proyectos</h3>
+
+              <div className="membership-controls">
                 <label>
-                  Estado
+                  Proyecto
                   <select
-                    name="new-project-status"
                     onChange={(event) =>
-                      onNewProjectStatusChange(
-                        event.target.value as ProjectStatus,
-                      )
+                      onProjectMembershipProjectIdChange(event.target.value)
                     }
-                    value={newProjectStatus}
+                    value={projectMembershipProjectId}
                   >
-                    {PROJECT_STATUSES.map((status) => (
-                      <option key={status} value={status}>
-                        {formatProjectStatus(status)}
+                    <option value="">Selecciona un proyecto</option>
+                    {projects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
                       </option>
                     ))}
                   </select>
                 </label>
 
                 <label>
-                  Descripción
-                  <textarea
-                    name="new-project-description"
+                  Usuario
+                  <select
                     onChange={(event) =>
-                      onNewProjectDescriptionChange(event.target.value)
+                      onProjectMembershipUserIdChange(event.target.value)
                     }
-                    rows={3}
-                    value={newProjectDescription}
-                  />
+                    value={projectMembershipUserId}
+                  >
+                    <option value="">Selecciona un usuario</option>
+                    {adminUsers.map((adminUser) => (
+                      <option key={adminUser.id} value={adminUser.id}>
+                        {formatUserOption(adminUser)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Grupo
+                  <select
+                    onChange={(event) =>
+                      onProjectMembershipGroupIdChange(event.target.value)
+                    }
+                    value={projectMembershipGroupId}
+                  >
+                    <option value="">Selecciona un grupo</option>
+                    {groups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               </div>
 
-              {projectFormError ? (
-                <p className="error-message">{projectFormError}</p>
+              {projectMembershipError ? (
+                <p className="error-message">{projectMembershipError}</p>
+              ) : null}
+              {projectMembershipMessage ? (
+                <p className="success-message">{projectMembershipMessage}</p>
               ) : null}
 
-              <button type="submit" disabled={isCreatingProject}>
-                {isCreatingProject ? "Creando..." : "Crear proyecto"}
-              </button>
-            </form>
-          </div>
-
-          <div className="admin-section">
-            <h3>Pertenencia a proyectos</h3>
-
-            <div className="membership-controls">
-              <label>
-                Proyecto
-                <select
-                  onChange={(event) =>
-                    onProjectMembershipProjectIdChange(event.target.value)
-                  }
-                  value={projectMembershipProjectId}
+              <div className="button-row">
+                <button
+                  type="button"
+                  onClick={() => onUpdateProjectUserMembership("add")}
+                  disabled={isUpdatingProjectMembership}
                 >
-                  <option value="">Selecciona un proyecto</option>
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                Usuario
-                <select
-                  onChange={(event) =>
-                    onProjectMembershipUserIdChange(event.target.value)
-                  }
-                  value={projectMembershipUserId}
+                  Añadir usuario
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => onUpdateProjectUserMembership("remove")}
+                  disabled={isUpdatingProjectMembership}
                 >
-                  <option value="">Selecciona un usuario</option>
-                  {adminUsers.map((adminUser) => (
-                    <option key={adminUser.id} value={adminUser.id}>
-                      {formatUserOption(adminUser)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                Grupo
-                <select
-                  onChange={(event) =>
-                    onProjectMembershipGroupIdChange(event.target.value)
-                  }
-                  value={projectMembershipGroupId}
+                  Quitar usuario
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onUpdateProjectGroupMembership("add")}
+                  disabled={isUpdatingProjectMembership}
                 >
-                  <option value="">Selecciona un grupo</option>
-                  {groups.map((group) => (
-                    <option key={group.id} value={group.id}>
-                      {group.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  Añadir grupo
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => onUpdateProjectGroupMembership("remove")}
+                  disabled={isUpdatingProjectMembership}
+                >
+                  Quitar grupo
+                </button>
+              </div>
             </div>
-
-            {projectMembershipError ? (
-              <p className="error-message">{projectMembershipError}</p>
-            ) : null}
-            {projectMembershipMessage ? (
-              <p className="success-message">{projectMembershipMessage}</p>
-            ) : null}
-
-            <div className="button-row">
-              <button
-                type="button"
-                onClick={() => onUpdateProjectUserMembership("add")}
-                disabled={isUpdatingProjectMembership}
-              >
-                Añadir usuario
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => onUpdateProjectUserMembership("remove")}
-                disabled={isUpdatingProjectMembership}
-              >
-                Quitar usuario
-              </button>
-              <button
-                type="button"
-                onClick={() => onUpdateProjectGroupMembership("add")}
-                disabled={isUpdatingProjectMembership}
-              >
-                Añadir grupo
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => onUpdateProjectGroupMembership("remove")}
-                disabled={isUpdatingProjectMembership}
-              >
-                Quitar grupo
-              </button>
-            </div>
-          </div>
+          ) : null}
         </>
       ) : null}
     </section>

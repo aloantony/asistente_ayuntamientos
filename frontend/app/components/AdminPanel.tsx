@@ -1,8 +1,10 @@
 import { GroupsAdmin, type GroupsAdminProps } from "./GroupsAdmin";
+import { RbacAdmin, type RbacAdminProps } from "./RbacAdmin";
 import { UsersAdmin, type UsersAdminProps } from "./UsersAdmin";
 import { formatUserOption, type Group, type MembershipAction } from "./types";
 
 type AdminPanelProps = UsersAdminProps &
+  RbacAdminProps &
   GroupsAdminProps & {
     adminError: string;
     membershipUserId: string;
@@ -54,6 +56,7 @@ export function AdminPanel(props: AdminPanelProps) {
 
       <UsersAdmin {...props} />
       <GroupsAdmin {...props} />
+      <RbacAdmin {...props} />
 
       <div className="admin-section">
         <h3>Pertenencia a grupos</h3>

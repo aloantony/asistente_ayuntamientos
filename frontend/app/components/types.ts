@@ -3,6 +3,11 @@ export type UserGroupSummary = {
   name: string;
 };
 
+export type RoleSummary = {
+  id: number;
+  name: string;
+};
+
 export type GroupUserSummary = {
   id: number;
   email: string;
@@ -15,6 +20,7 @@ export type User = {
   full_name: string;
   is_active: boolean;
   is_superuser: boolean;
+  permissions?: string[];
   groups?: UserGroupSummary[];
 };
 
@@ -23,6 +29,24 @@ export type Group = {
   name: string;
   description: string | null;
   users?: GroupUserSummary[];
+  roles?: RoleSummary[];
+};
+
+export type Permission = {
+  id: number;
+  code: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Role = {
+  id: number;
+  name: string;
+  description: string | null;
+  permissions: Permission[];
+  created_at: string;
+  updated_at: string;
 };
 
 export type ProjectStatus = "active" | "paused" | "completed" | "archived";
@@ -70,6 +94,11 @@ export type GroupEditState = {
   description: string;
 };
 
+export type RoleEditState = {
+  name: string;
+  description: string;
+};
+
 export type ProjectEditState = {
   name: string;
   description: string;
@@ -77,6 +106,29 @@ export type ProjectEditState = {
 };
 
 export type MembershipAction = "add" | "remove";
+
+export type RoleDeleteResponse = {
+  role_id: number;
+  detail: string;
+};
+
+export type RolePermissionResponse = {
+  role_id: number;
+  permission_id: number;
+  detail: string;
+};
+
+export type GroupRoleResponse = {
+  group_id: number;
+  role_id: number;
+  detail: string;
+};
+
+export type PermissionBootstrapResponse = {
+  created_codes: string[];
+  permissions: Permission[];
+  detail: string;
+};
 
 export const PROJECT_STATUSES: ProjectStatus[] = [
   "active",
@@ -98,4 +150,10 @@ export function formatUserOption(adminUser: User) {
 
 export function formatProjectStatus(status: ProjectStatus) {
   return PROJECT_STATUS_LABELS[status];
+}
+
+export function userHasPermission(user: User, permissionCode: string) {
+  return (
+    user.is_superuser || (user.permissions ?? []).includes(permissionCode)
+  );
 }

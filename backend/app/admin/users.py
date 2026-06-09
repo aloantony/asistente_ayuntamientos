@@ -11,8 +11,9 @@ from app.admin.schemas import (
     AdminUserRead,
     AdminUserUpdate,
 )
-from app.auth.dependencies import require_superuser
+from app.auth.dependencies import get_current_user
 from app.db.session import get_db
+from app.rbac.permissions import require_permission
 from app.rbac.models import user_groups
 from app.users.crud import create_user
 from app.users.models import User
@@ -20,7 +21,7 @@ from app.users.models import User
 router = APIRouter(
     prefix="/admin/users",
     tags=["admin-users"],
-    dependencies=[Depends(require_superuser)],
+    dependencies=[Depends(require_permission("users.manage"))],
 )
 
 
@@ -96,7 +97,7 @@ def update_admin_user(
 def delete_admin_user(
     user_id: int,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> AdminUserDeleteResponse:
     active_superuser_ids = list(
         db.scalars(
