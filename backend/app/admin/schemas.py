@@ -3,12 +3,28 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
+class AdminGroupSummary(BaseModel):
+    id: int
+    name: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AdminUserSummary(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AdminUserRead(BaseModel):
     id: int
     email: EmailStr
     full_name: str
     is_active: bool
     is_superuser: bool
+    groups: list[AdminGroupSummary]
     created_at: datetime
     updated_at: datetime
 
@@ -35,6 +51,7 @@ class AdminGroupRead(BaseModel):
     id: int
     name: str
     description: str | None
+    users: list[AdminUserSummary]
     created_at: datetime
     updated_at: datetime
 

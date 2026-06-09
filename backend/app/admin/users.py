@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.admin.schemas import AdminUserCreate, AdminUserRead, AdminUserUpdate
 from app.auth.dependencies import require_superuser
@@ -20,7 +20,8 @@ router = APIRouter(
 
 @router.get("", response_model=list[AdminUserRead])
 def list_users(db: Annotated[Session, Depends(get_db)]) -> list[User]:
-    return list(db.scalars(select(User).order_by(User.id)))
+    query = select(User).options(selectinload(User.groups)).order_by(User.id)
+    return list(db.scalars(query))
 
 
 @router.post("", response_model=AdminUserRead, status_code=status.HTTP_201_CREATED)
@@ -50,7 +51,9 @@ def get_admin_user(
     user_id: int,
     db: Annotated[Session, Depends(get_db)],
 ) -> User:
-    user = db.get(User, user_id)
+    user = db.scalar(
+        select(User).options(selectinload(User.groups)).where(User.id == user_id)
+    )
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -65,7 +68,9 @@ def update_admin_user(
     payload: AdminUserUpdate,
     db: Annotated[Session, Depends(get_db)],
 ) -> User:
-    user = db.get(User, user_id)
+    user = db.scalar(
+        select(User).options(selectinload(User.groups)).where(User.id == user_id)
+    )
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

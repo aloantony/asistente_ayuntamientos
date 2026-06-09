@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, insert, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.admin.schemas import (
     AdminGroupCreate,
@@ -25,7 +25,8 @@ router = APIRouter(
 
 @router.get("", response_model=list[AdminGroupRead])
 def list_groups(db: Annotated[Session, Depends(get_db)]) -> list[Group]:
-    return list(db.scalars(select(Group).order_by(Group.id)))
+    query = select(Group).options(selectinload(Group.users)).order_by(Group.id)
+    return list(db.scalars(query))
 
 
 @router.post("", response_model=AdminGroupRead, status_code=status.HTTP_201_CREATED)
@@ -54,7 +55,9 @@ def get_group(
     group_id: int,
     db: Annotated[Session, Depends(get_db)],
 ) -> Group:
-    group = db.get(Group, group_id)
+    group = db.scalar(
+        select(Group).options(selectinload(Group.users)).where(Group.id == group_id)
+    )
     if group is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -69,7 +72,9 @@ def update_group(
     payload: AdminGroupUpdate,
     db: Annotated[Session, Depends(get_db)],
 ) -> Group:
-    group = db.get(Group, group_id)
+    group = db.scalar(
+        select(Group).options(selectinload(Group.users)).where(Group.id == group_id)
+    )
     if group is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

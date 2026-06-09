@@ -8,12 +8,25 @@ type User = {
   full_name: string;
   is_active: boolean;
   is_superuser: boolean;
+  groups?: UserGroupSummary[];
 };
 
 type Group = {
   id: number;
   name: string;
   description: string | null;
+  users?: GroupUserSummary[];
+};
+
+type UserGroupSummary = {
+  id: number;
+  name: string;
+};
+
+type GroupUserSummary = {
+  id: number;
+  email: string;
+  full_name: string;
 };
 
 type LoginResponse = {
@@ -25,6 +38,17 @@ type MembershipResponse = {
   group_id: number;
   user_id: number;
   detail: string;
+};
+
+type UserEditState = {
+  full_name: string;
+  is_active: boolean;
+  is_superuser: boolean;
+};
+
+type GroupEditState = {
+  name: string;
+  description: string;
 };
 
 class ApiRequestError extends Error {
@@ -132,6 +156,31 @@ function isAuthError(error: unknown) {
   return error instanceof ApiRequestError && error.status === 401;
 }
 
+function buildUserEditState(users: User[]) {
+  return users.reduce<Record<number, UserEditState>>((edits, adminUser) => {
+    edits[adminUser.id] = {
+      full_name: adminUser.full_name,
+      is_active: adminUser.is_active,
+      is_superuser: adminUser.is_superuser,
+    };
+    return edits;
+  }, {});
+}
+
+function buildGroupEditState(groups: Group[]) {
+  return groups.reduce<Record<number, GroupEditState>>((edits, group) => {
+    edits[group.id] = {
+      name: group.name,
+      description: group.description ?? "",
+    };
+    return edits;
+  }, {});
+}
+
+function formatUserOption(adminUser: User) {
+  return `${adminUser.full_name} (${adminUser.email})`;
+}
+
 export default function Home() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -152,11 +201,23 @@ export default function Home() {
   const [newUserIsSuperuser, setNewUserIsSuperuser] = useState(false);
   const [userFormError, setUserFormError] = useState("");
   const [isCreatingUser, setIsCreatingUser] = useState(false);
+  const [userEdits, setUserEdits] = useState<Record<number, UserEditState>>(
+    {},
+  );
+  const [userEditError, setUserEditError] = useState("");
+  const [userEditMessage, setUserEditMessage] = useState("");
+  const [updatingUserId, setUpdatingUserId] = useState<number | null>(null);
 
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupDescription, setNewGroupDescription] = useState("");
   const [groupFormError, setGroupFormError] = useState("");
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
+  const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditState>>(
+    {},
+  );
+  const [groupEditError, setGroupEditError] = useState("");
+  const [groupEditMessage, setGroupEditMessage] = useState("");
+  const [updatingGroupId, setUpdatingGroupId] = useState<number | null>(null);
 
   const [membershipUserId, setMembershipUserId] = useState("");
   const [membershipGroupId, setMembershipGroupId] = useState("");
@@ -167,9 +228,15 @@ export default function Home() {
   function clearAdminState() {
     setAdminUsers([]);
     setGroups([]);
+    setUserEdits({});
+    setGroupEdits({});
     setAdminError("");
     setUserFormError("");
+    setUserEditError("");
+    setUserEditMessage("");
     setGroupFormError("");
+    setGroupEditError("");
+    setGroupEditMessage("");
     setMembershipError("");
     setMembershipMessage("");
   }
@@ -215,6 +282,8 @@ export default function Home() {
 
       setAdminUsers(usersData);
       setGroups(groupsData);
+      setUserEdits(buildUserEditState(usersData));
+      setGroupEdits(buildGroupEditState(groupsData));
     } catch (adminLoadError) {
       if (isAuthError(adminLoadError)) {
         handleSessionExpired(
@@ -345,6 +414,40 @@ export default function Home() {
     setMessage(message);
   }
 
+  function updateUserEdit(userId: number, updates: Partial<UserEditState>) {
+    setUserEdits((currentEdits) => {
+      const currentEdit = currentEdits[userId];
+      if (!currentEdit) {
+        return currentEdits;
+      }
+
+      return {
+        ...currentEdits,
+        [userId]: {
+          ...currentEdit,
+          ...updates,
+        },
+      };
+    });
+  }
+
+  function updateGroupEdit(groupId: number, updates: Partial<GroupEditState>) {
+    setGroupEdits((currentEdits) => {
+      const currentEdit = currentEdits[groupId];
+      if (!currentEdit) {
+        return currentEdits;
+      }
+
+      return {
+        ...currentEdits,
+        [groupId]: {
+          ...currentEdit,
+          ...updates,
+        },
+      };
+    });
+  }
+
   async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setUserFormError("");
@@ -385,6 +488,63 @@ export default function Home() {
     }
   }
 
+  async function handleUpdateUser(userId: number) {
+    const edit = userEdits[userId];
+    if (!edit) {
+      setUserEditError("No se pudo encontrar el usuario para editar.");
+      return;
+    }
+
+    const fullName = edit.full_name.trim();
+    if (!fullName) {
+      setUserEditError("El nombre completo no puede estar vacío.");
+      setUserEditMessage("");
+      return;
+    }
+
+    setUserEditError("");
+    setUserEditMessage("");
+    setUpdatingUserId(userId);
+
+    try {
+      const token = getStoredToken();
+      const updatedUser = await adminRequest<User>(
+        `/admin/users/${userId}`,
+        token,
+        "No se pudo actualizar el usuario.",
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            full_name: fullName,
+            is_active: edit.is_active,
+            is_superuser: edit.is_superuser,
+          }),
+        },
+      );
+
+      setUserEditMessage("Usuario actualizado.");
+
+      if (user?.id === updatedUser.id) {
+        setUser(updatedUser);
+      }
+
+      if (user?.id === updatedUser.id && !updatedUser.is_superuser) {
+        clearAdminState();
+        return;
+      }
+
+      await loadAdminData();
+    } catch (updateError) {
+      handleAdminError(
+        updateError,
+        setUserEditError,
+        "No se pudo actualizar el usuario.",
+      );
+    } finally {
+      setUpdatingUserId(null);
+    }
+  }
+
   async function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setGroupFormError("");
@@ -419,6 +579,52 @@ export default function Home() {
     }
   }
 
+  async function handleUpdateGroup(groupId: number) {
+    const edit = groupEdits[groupId];
+    if (!edit) {
+      setGroupEditError("No se pudo encontrar el grupo para editar.");
+      return;
+    }
+
+    const name = edit.name.trim();
+    if (!name) {
+      setGroupEditError("El nombre del grupo no puede estar vacío.");
+      setGroupEditMessage("");
+      return;
+    }
+
+    setGroupEditError("");
+    setGroupEditMessage("");
+    setUpdatingGroupId(groupId);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Group>(
+        `/admin/groups/${groupId}`,
+        token,
+        "No se pudo actualizar el grupo.",
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            name,
+            description: edit.description.trim() || null,
+          }),
+        },
+      );
+
+      setGroupEditMessage("Grupo actualizado.");
+      await loadAdminData();
+    } catch (updateError) {
+      handleAdminError(
+        updateError,
+        setGroupEditError,
+        "No se pudo actualizar el grupo.",
+      );
+    } finally {
+      setUpdatingGroupId(null);
+    }
+  }
+
   async function updateMembership(action: "add" | "remove") {
     setMembershipError("");
     setMembershipMessage("");
@@ -449,6 +655,7 @@ export default function Home() {
           ? "Usuario añadido al grupo."
           : "Usuario eliminado del grupo.",
       );
+      await loadAdminData();
     } catch (membershipUpdateError) {
       handleAdminError(
         membershipUpdateError,
@@ -543,29 +750,112 @@ export default function Home() {
                         <th>ID</th>
                         <th>Email</th>
                         <th>Nombre completo</th>
+                        <th>Grupos</th>
                         <th>Activo</th>
                         <th>Superusuario</th>
+                        <th>Acción</th>
                       </tr>
                     </thead>
                     <tbody>
                       {adminUsers.length > 0 ? (
-                        adminUsers.map((adminUser) => (
-                          <tr key={adminUser.id}>
-                            <td>{adminUser.id}</td>
-                            <td>{adminUser.email}</td>
-                            <td>{adminUser.full_name}</td>
-                            <td>{adminUser.is_active ? "Sí" : "No"}</td>
-                            <td>{adminUser.is_superuser ? "Sí" : "No"}</td>
-                          </tr>
-                        ))
+                        adminUsers.map((adminUser) => {
+                          const edit = userEdits[adminUser.id] ?? {
+                            full_name: adminUser.full_name,
+                            is_active: adminUser.is_active,
+                            is_superuser: adminUser.is_superuser,
+                          };
+                          const assignedGroups = adminUser.groups ?? [];
+
+                          return (
+                            <tr key={adminUser.id}>
+                              <td>{adminUser.id}</td>
+                              <td>{adminUser.email}</td>
+                              <td>
+                                <input
+                                  aria-label={`Nombre completo de ${adminUser.email}`}
+                                  className="table-input"
+                                  onChange={(event) =>
+                                    updateUserEdit(adminUser.id, {
+                                      full_name: event.target.value,
+                                    })
+                                  }
+                                  type="text"
+                                  value={edit.full_name}
+                                />
+                              </td>
+                              <td>
+                                {assignedGroups.length > 0 ? (
+                                  <div className="tag-list">
+                                    {assignedGroups.map((group) => (
+                                      <span className="tag" key={group.id}>
+                                        {group.name}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="small-muted">Sin grupos</span>
+                                )}
+                              </td>
+                              <td>
+                                <label className="table-checkbox">
+                                  <input
+                                    checked={edit.is_active}
+                                    onChange={(event) =>
+                                      updateUserEdit(adminUser.id, {
+                                        is_active: event.target.checked,
+                                      })
+                                    }
+                                    type="checkbox"
+                                  />
+                                  Activo
+                                </label>
+                              </td>
+                              <td>
+                                <label className="table-checkbox">
+                                  <input
+                                    checked={edit.is_superuser}
+                                    onChange={(event) =>
+                                      updateUserEdit(adminUser.id, {
+                                        is_superuser: event.target.checked,
+                                      })
+                                    }
+                                    type="checkbox"
+                                  />
+                                  Superusuario
+                                </label>
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateUser(adminUser.id)}
+                                  disabled={
+                                    updatingUserId === adminUser.id ||
+                                    isLoadingAdmin
+                                  }
+                                >
+                                  {updatingUserId === adminUser.id
+                                    ? "Guardando..."
+                                    : "Guardar"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
                       ) : (
                         <tr>
-                          <td colSpan={5}>No hay usuarios para mostrar.</td>
+                          <td colSpan={7}>No hay usuarios para mostrar.</td>
                         </tr>
                       )}
                     </tbody>
                   </table>
                 </div>
+
+                {userEditError ? (
+                  <p className="error-message">{userEditError}</p>
+                ) : null}
+                {userEditMessage ? (
+                  <p className="success-message">{userEditMessage}</p>
+                ) : null}
 
                 <form className="admin-form" onSubmit={handleCreateUser}>
                   <h4>Crear usuario</h4>
@@ -661,25 +951,96 @@ export default function Home() {
                         <th>ID</th>
                         <th>Nombre</th>
                         <th>Descripción</th>
+                        <th>Usuarios</th>
+                        <th>Acción</th>
                       </tr>
                     </thead>
                     <tbody>
                       {groups.length > 0 ? (
-                        groups.map((group) => (
-                          <tr key={group.id}>
-                            <td>{group.id}</td>
-                            <td>{group.name}</td>
-                            <td>{group.description || "Sin descripción"}</td>
-                          </tr>
-                        ))
+                        groups.map((group) => {
+                          const edit = groupEdits[group.id] ?? {
+                            name: group.name,
+                            description: group.description ?? "",
+                          };
+                          const assignedUsers = group.users ?? [];
+
+                          return (
+                            <tr key={group.id}>
+                              <td>{group.id}</td>
+                              <td>
+                                <input
+                                  aria-label={`Nombre del grupo ${group.name}`}
+                                  className="table-input"
+                                  onChange={(event) =>
+                                    updateGroupEdit(group.id, {
+                                      name: event.target.value,
+                                    })
+                                  }
+                                  type="text"
+                                  value={edit.name}
+                                />
+                              </td>
+                              <td>
+                                <textarea
+                                  aria-label={`Descripción del grupo ${group.name}`}
+                                  className="table-textarea"
+                                  onChange={(event) =>
+                                    updateGroupEdit(group.id, {
+                                      description: event.target.value,
+                                    })
+                                  }
+                                  rows={2}
+                                  value={edit.description}
+                                />
+                              </td>
+                              <td>
+                                {assignedUsers.length > 0 ? (
+                                  <ul className="compact-list">
+                                    {assignedUsers.map((groupUser) => (
+                                      <li key={groupUser.id}>
+                                        <strong>{groupUser.full_name}</strong>
+                                        <span>{groupUser.email}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <span className="small-muted">
+                                    Sin usuarios
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateGroup(group.id)}
+                                  disabled={
+                                    updatingGroupId === group.id ||
+                                    isLoadingAdmin
+                                  }
+                                >
+                                  {updatingGroupId === group.id
+                                    ? "Guardando..."
+                                    : "Guardar"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
                       ) : (
                         <tr>
-                          <td colSpan={3}>No hay grupos para mostrar.</td>
+                          <td colSpan={5}>No hay grupos para mostrar.</td>
                         </tr>
                       )}
                     </tbody>
                   </table>
                 </div>
+
+                {groupEditError ? (
+                  <p className="error-message">{groupEditError}</p>
+                ) : null}
+                {groupEditMessage ? (
+                  <p className="success-message">{groupEditMessage}</p>
+                ) : null}
 
                 <form className="admin-form" onSubmit={handleCreateGroup}>
                   <h4>Crear grupo</h4>
@@ -735,7 +1096,7 @@ export default function Home() {
                       <option value="">Selecciona un usuario</option>
                       {adminUsers.map((adminUser) => (
                         <option key={adminUser.id} value={adminUser.id}>
-                          {adminUser.id} - {adminUser.email}
+                          {formatUserOption(adminUser)}
                         </option>
                       ))}
                     </select>
@@ -752,7 +1113,7 @@ export default function Home() {
                       <option value="">Selecciona un grupo</option>
                       {groups.map((group) => (
                         <option key={group.id} value={group.id}>
-                          {group.id} - {group.name}
+                          {group.name}
                         </option>
                       ))}
                     </select>
