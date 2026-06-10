@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.documents.routes import router as documents_router
 from app.organizations.routes import router as organizations_router
 from app.projects.routes import router as projects_router
+from app.requirements.routes import router as requirements_router
 
 app = FastAPI(
     title=settings.app_name,
@@ -28,3 +29,4 @@ app.include_router(organizations_router)
 app.include_router(admin_router)
 app.include_router(projects_router)
 app.include_router(documents_router)
+app.include_router(requirements_router)

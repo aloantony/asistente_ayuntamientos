@@ -4,6 +4,7 @@ import { AdminPanel } from "./components/AdminPanel";
 import { Dashboard } from "./components/Dashboard";
 import { LoginForm } from "./components/LoginForm";
 import { ProjectsPanel } from "./components/ProjectsPanel";
+import { RequirementsPanel } from "./components/RequirementsPanel";
 import { useHomeController } from "./lib/useHomeController";
 
 export default function Home() {
@@ -13,6 +14,7 @@ export default function Home() {
     loginFormProps,
     dashboardProps,
     projectsPanelProps,
+    requirementsPanelProps,
     adminPanelProps,
   } = useHomeController();
 
@@ -33,6 +35,9 @@ export default function Home() {
       <main className="page app-page">
         <div className="workspace">
           <Dashboard {...dashboardProps} />
+          {requirementsPanelProps ? (
+            <RequirementsPanel {...requirementsPanelProps} />
+          ) : null}
           <ProjectsPanel {...projectsPanelProps} />
 
           {adminPanelProps ? (

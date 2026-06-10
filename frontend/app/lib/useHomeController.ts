@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { useAdminController } from "./useAdminController";
 import { useProjectsController } from "./useProjectsController";
+import { useRequirementsController } from "./useRequirementsController";
 
 const ADMIN_DATA_PERMISSIONS = [
   "users.manage",
@@ -29,6 +30,15 @@ const ADMIN_PANEL_PERMISSIONS = [
   "roles.manage",
 ];
 
+const REQUIREMENT_PERMISSIONS = [
+  "requirements.view",
+  "requirements.create",
+  "requirements.edit",
+  "requirements.review",
+  "requirements.archive",
+  "requirements.manage",
+];
+
 function hasAnyPermission(user: User, permissionCodes: string[]) {
   return permissionCodes.some((permissionCode) =>
     userHasPermission(user, permissionCode),
@@ -43,6 +53,10 @@ function shouldShowAdminPanel(user: User) {
   return hasAnyPermission(user, ADMIN_PANEL_PERMISSIONS);
 }
 
+function shouldShowRequirementsPanel(user: User) {
+  return hasAnyPermission(user, REQUIREMENT_PERMISSIONS);
+}
+
 export function useHomeController() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -52,6 +66,7 @@ export function useHomeController() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const clearAdminStateRef = useRef<() => void>(() => undefined);
   const clearProjectStateRef = useRef<() => void>(() => undefined);
+  const clearRequirementsStateRef = useRef<() => void>(() => undefined);
 
   function handleSessionExpired(message: string) {
     window.localStorage.removeItem("access_token");
@@ -59,6 +74,7 @@ export function useHomeController() {
     setPassword("");
     clearAdminStateRef.current();
     clearProjectStateRef.current();
+    clearRequirementsStateRef.current();
     setError(message);
   }
 
@@ -94,6 +110,10 @@ export function useHomeController() {
     handleRequestError,
     user,
   });
+  const requirementsController = useRequirementsController({
+    getStoredToken,
+    handleRequestError,
+  });
   const adminController = useAdminController({
     getStoredToken,
     handleRequestError,
@@ -110,6 +130,8 @@ export function useHomeController() {
 
   clearAdminStateRef.current = adminController.clearAdminState;
   clearProjectStateRef.current = projectsController.clearProjectState;
+  clearRequirementsStateRef.current =
+    requirementsController.clearRequirementsState;
 
   useEffect(() => {
     let isActive = true;
@@ -161,6 +183,14 @@ export function useHomeController() {
     projectsController.loadProjects();
   }, [user?.id]);
 
+  useEffect(() => {
+    if (!user || !shouldShowRequirementsPanel(user)) {
+      return;
+    }
+
+    requirementsController.loadRequirements();
+  }, [user?.id, user?.permissions]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -197,6 +227,7 @@ export function useHomeController() {
       setUser(null);
       adminController.clearAdminState();
       projectsController.clearProjectState();
+      requirementsController.clearRequirementsState();
       setError(getErrorMessage(loginError, "No se pudo iniciar sesión."));
     } finally {
       setIsSubmitting(false);
@@ -210,6 +241,7 @@ export function useHomeController() {
     setError("");
     adminController.clearAdminState();
     projectsController.clearProjectState();
+    requirementsController.clearRequirementsState();
   }
 
   const loginFormProps = {
@@ -297,6 +329,74 @@ export function useHomeController() {
           projectsController.handleIncludeArchivedDocumentsChange,
       }
     : null;
+
+  const requirementsPanelProps =
+    user && shouldShowRequirementsPanel(user)
+      ? {
+          user,
+          organizations:
+            adminController.organizations.length > 0
+              ? adminController.organizations
+              : user.organizations ?? [],
+          projects: projectsController.projects,
+          requirements: requirementsController.requirements,
+          selectedRequirement: requirementsController.selectedRequirement,
+          requirementMessages: requirementsController.requirementMessages,
+          isLoadingRequirements:
+            requirementsController.isLoadingRequirements,
+          requirementError: requirementsController.requirementError,
+          requirementMessage: requirementsController.requirementMessage,
+          filterOrganizationId:
+            requirementsController.filterOrganizationId,
+          filterProjectId: requirementsController.filterProjectId,
+          filterStatus: requirementsController.filterStatus,
+          includeArchivedRequirements:
+            requirementsController.includeArchivedRequirements,
+          newRequirement: requirementsController.newRequirement,
+          requirementFormError:
+            requirementsController.requirementFormError,
+          isCreatingRequirement:
+            requirementsController.isCreatingRequirement,
+          requirementEdit: requirementsController.requirementEdit,
+          requirementEditError:
+            requirementsController.requirementEditError,
+          isUpdatingRequirement:
+            requirementsController.isUpdatingRequirement,
+          newRequirementMessageBody:
+            requirementsController.newRequirementMessageBody,
+          newRequirementMessageType:
+            requirementsController.newRequirementMessageType,
+          requirementMessagesError:
+            requirementsController.requirementMessagesError,
+          isCreatingRequirementMessage:
+            requirementsController.isCreatingRequirementMessage,
+          onRefresh: requirementsController.loadRequirements,
+          onSelectRequirement: requirementsController.selectRequirement,
+          onUpdateNewRequirement:
+            requirementsController.updateNewRequirement,
+          onUpdateRequirementEdit:
+            requirementsController.updateRequirementEdit,
+          onFilterOrganizationIdChange:
+            requirementsController.setFilterOrganizationId,
+          onFilterProjectIdChange:
+            requirementsController.setFilterProjectId,
+          onFilterStatusChange: requirementsController.setFilterStatus,
+          onIncludeArchivedRequirementsChange:
+            requirementsController.setIncludeArchivedRequirements,
+          onNewRequirementMessageBodyChange:
+            requirementsController.setNewRequirementMessageBody,
+          onNewRequirementMessageTypeChange:
+            requirementsController.setNewRequirementMessageType,
+          onCreateRequirement:
+            requirementsController.handleCreateRequirement,
+          onUpdateRequirement:
+            requirementsController.handleUpdateRequirement,
+          onChangeRequirementStatus:
+            requirementsController.handleChangeRequirementStatus,
+          onCreateRequirementMessage:
+            requirementsController.handleCreateRequirementMessage,
+        }
+      : null;
 
   const adminPanelProps =
     user && shouldShowAdminPanel(user)
@@ -447,6 +547,7 @@ export function useHomeController() {
     loginFormProps,
     dashboardProps,
     projectsPanelProps,
+    requirementsPanelProps,
     adminPanelProps,
   };
 }

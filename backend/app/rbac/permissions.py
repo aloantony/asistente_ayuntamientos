@@ -25,6 +25,12 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "documents.upload": "Subir documentos",
     "documents.archive": "Archivar documentos",
     "documents.manage": "Gestionar documentos",
+    "requirements.view": "Ver requisitos",
+    "requirements.create": "Crear requisitos",
+    "requirements.edit": "Editar requisitos",
+    "requirements.review": "Revisar requisitos",
+    "requirements.archive": "Archivar requisitos",
+    "requirements.manage": "Gestionar requisitos",
 }
 
 INITIAL_PERMISSION_CODES = tuple(INITIAL_PERMISSION_DEFINITIONS.keys())

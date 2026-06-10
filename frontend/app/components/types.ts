@@ -80,6 +80,32 @@ export type ProjectStatus = "active" | "paused" | "completed" | "archived";
 
 export type DocumentStatus = "active" | "archived";
 
+export type RequirementPriority = "low" | "medium" | "high" | "urgent";
+
+export type RequirementStatus =
+  | "draft"
+  | "submitted"
+  | "in_review"
+  | "needs_clarification"
+  | "accepted"
+  | "rejected"
+  | "converted"
+  | "archived";
+
+export type RequirementSourceType =
+  | "manual"
+  | "conversation"
+  | "phone_call"
+  | "meeting"
+  | "other";
+
+export type RequirementMessageType =
+  | "note"
+  | "question"
+  | "answer"
+  | "clarification"
+  | "decision";
+
 export type Project = {
   id: number;
   name: string;
@@ -108,6 +134,60 @@ export type Document = {
   uploaded_by_id: number | null;
   created_at: string;
   updated_at: string;
+};
+
+export type RequirementOrganizationSummary = {
+  id: number;
+  name: string;
+};
+
+export type RequirementProjectSummary = {
+  id: number;
+  name: string;
+};
+
+export type RequirementUserSummary = {
+  id: number;
+  email: string;
+  full_name: string;
+};
+
+export type Requirement = {
+  id: number;
+  organization_id: number;
+  project_id: number | null;
+  title: string;
+  summary: string | null;
+  problem: string | null;
+  current_process: string | null;
+  desired_process: string | null;
+  affected_users: string | null;
+  involved_documents: string | null;
+  data_sensitivity_notes: string | null;
+  legal_notes: string | null;
+  acceptance_criteria: string | null;
+  open_questions: string | null;
+  priority: RequirementPriority;
+  status: RequirementStatus;
+  source_type: RequirementSourceType;
+  created_by_id: number | null;
+  reviewed_by_id: number | null;
+  organization: RequirementOrganizationSummary;
+  project: RequirementProjectSummary | null;
+  created_by: RequirementUserSummary | null;
+  reviewed_by: RequirementUserSummary | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RequirementMessage = {
+  id: number;
+  requirement_id: number;
+  author_id: number | null;
+  body: string;
+  message_type: RequirementMessageType;
+  author: RequirementUserSummary | null;
+  created_at: string;
 };
 
 export type LoginResponse = {
@@ -160,6 +240,31 @@ export type ProjectEditState = {
   status: ProjectStatus;
 };
 
+export type RequirementFormState = {
+  organization_id: string;
+  project_id: string;
+  title: string;
+  summary: string;
+  problem: string;
+  current_process: string;
+  desired_process: string;
+  affected_users: string;
+  involved_documents: string;
+  data_sensitivity_notes: string;
+  legal_notes: string;
+  acceptance_criteria: string;
+  open_questions: string;
+  priority: RequirementPriority;
+  source_type: RequirementSourceType;
+};
+
+export type RequirementEditState = Omit<
+  RequirementFormState,
+  "organization_id"
+> & {
+  status: RequirementStatus;
+};
+
 export type MembershipAction = "add" | "remove";
 
 export type RoleDeleteResponse = {
@@ -200,6 +305,40 @@ export const PROJECT_STATUSES: ProjectStatus[] = [
 
 export const DOCUMENT_STATUSES: DocumentStatus[] = ["active", "archived"];
 
+export const REQUIREMENT_PRIORITIES: RequirementPriority[] = [
+  "low",
+  "medium",
+  "high",
+  "urgent",
+];
+
+export const REQUIREMENT_STATUSES: RequirementStatus[] = [
+  "draft",
+  "submitted",
+  "in_review",
+  "needs_clarification",
+  "accepted",
+  "rejected",
+  "converted",
+  "archived",
+];
+
+export const REQUIREMENT_SOURCE_TYPES: RequirementSourceType[] = [
+  "manual",
+  "conversation",
+  "phone_call",
+  "meeting",
+  "other",
+];
+
+export const REQUIREMENT_MESSAGE_TYPES: RequirementMessageType[] = [
+  "note",
+  "question",
+  "answer",
+  "clarification",
+  "decision",
+];
+
 export const ORGANIZATION_STATUSES: OrganizationStatus[] = [
   "active",
   "paused",
@@ -216,6 +355,40 @@ const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
 const DOCUMENT_STATUS_LABELS: Record<DocumentStatus, string> = {
   active: "Activo",
   archived: "Archivado",
+};
+
+const REQUIREMENT_PRIORITY_LABELS: Record<RequirementPriority, string> = {
+  low: "Baja",
+  medium: "Media",
+  high: "Alta",
+  urgent: "Urgente",
+};
+
+const REQUIREMENT_STATUS_LABELS: Record<RequirementStatus, string> = {
+  draft: "Borrador",
+  submitted: "Pendiente",
+  in_review: "En revisión",
+  needs_clarification: "Necesita aclaración",
+  accepted: "Aceptado",
+  rejected: "Rechazado",
+  converted: "Convertido",
+  archived: "Archivado",
+};
+
+const REQUIREMENT_SOURCE_TYPE_LABELS: Record<RequirementSourceType, string> = {
+  manual: "Manual",
+  conversation: "Conversación",
+  phone_call: "Llamada",
+  meeting: "Reunión",
+  other: "Otro",
+};
+
+const REQUIREMENT_MESSAGE_TYPE_LABELS: Record<RequirementMessageType, string> = {
+  note: "Nota",
+  question: "Pregunta",
+  answer: "Respuesta",
+  clarification: "Aclaración",
+  decision: "Decisión",
 };
 
 const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {
@@ -238,6 +411,24 @@ export function formatProjectStatus(status: ProjectStatus) {
 
 export function formatDocumentStatus(status: DocumentStatus) {
   return DOCUMENT_STATUS_LABELS[status];
+}
+
+export function formatRequirementPriority(priority: RequirementPriority) {
+  return REQUIREMENT_PRIORITY_LABELS[priority];
+}
+
+export function formatRequirementStatus(status: RequirementStatus) {
+  return REQUIREMENT_STATUS_LABELS[status];
+}
+
+export function formatRequirementSourceType(sourceType: RequirementSourceType) {
+  return REQUIREMENT_SOURCE_TYPE_LABELS[sourceType];
+}
+
+export function formatRequirementMessageType(
+  messageType: RequirementMessageType,
+) {
+  return REQUIREMENT_MESSAGE_TYPE_LABELS[messageType];
 }
 
 export function formatFileSize(sizeBytes: number) {
