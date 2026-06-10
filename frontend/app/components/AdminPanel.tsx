@@ -1,9 +1,19 @@
 import { GroupsAdmin, type GroupsAdminProps } from "./GroupsAdmin";
+import {
+  OrganizationsAdmin,
+  type OrganizationsAdminProps,
+} from "./OrganizationsAdmin";
 import { RbacAdmin, type RbacAdminProps } from "./RbacAdmin";
 import { UsersAdmin, type UsersAdminProps } from "./UsersAdmin";
-import { formatUserOption, type Group, type MembershipAction } from "./types";
+import {
+  formatUserOption,
+  userHasPermission,
+  type Group,
+  type MembershipAction,
+} from "./types";
 
 type AdminPanelProps = UsersAdminProps &
+  OrganizationsAdminProps &
   RbacAdminProps &
   GroupsAdminProps & {
     adminError: string;
@@ -21,6 +31,7 @@ type AdminPanelProps = UsersAdminProps &
 export function AdminPanel(props: AdminPanelProps) {
   const {
     adminUsers,
+    currentUser,
     groups,
     isLoadingAdmin,
     adminError,
@@ -34,13 +45,20 @@ export function AdminPanel(props: AdminPanelProps) {
     onMembershipGroupIdChange,
     onUpdateMembership,
   } = props;
+  const canManageOrganizations = userHasPermission(
+    currentUser,
+    "organizations.manage",
+  );
+  const canManageUsers = userHasPermission(currentUser, "users.manage");
+  const canManageGroups = userHasPermission(currentUser, "groups.manage");
+  const canManageRoles = userHasPermission(currentUser, "roles.manage");
 
   return (
     <section className="panel admin-panel">
       <div className="panel-header">
         <div>
           <p className="eyebrow">Administración</p>
-          <h2>Usuarios y grupos</h2>
+          <h2>Administración</h2>
         </div>
         <button
           className="secondary-button"
@@ -54,10 +72,12 @@ export function AdminPanel(props: AdminPanelProps) {
 
       {adminError ? <p className="error-message">{adminError}</p> : null}
 
-      <UsersAdmin {...props} />
-      <GroupsAdmin {...props} />
-      <RbacAdmin {...props} />
+      {canManageOrganizations ? <OrganizationsAdmin {...props} /> : null}
+      {canManageUsers ? <UsersAdmin {...props} /> : null}
+      {canManageGroups ? <GroupsAdmin {...props} /> : null}
+      {canManageRoles ? <RbacAdmin {...props} /> : null}
 
+      {canManageGroups ? (
       <div className="admin-section">
         <h3>Pertenencia a grupos</h3>
 
@@ -90,7 +110,7 @@ export function AdminPanel(props: AdminPanelProps) {
               <option value="">Selecciona un grupo</option>
               {groups.map((group: Group) => (
                 <option key={group.id} value={group.id}>
-                  {group.name}
+                  {group.name} - {group.organization.name}
                 </option>
               ))}
             </select>
@@ -122,6 +142,7 @@ export function AdminPanel(props: AdminPanelProps) {
           </button>
         </div>
       </div>
+      ) : null}
     </section>
   );
 }

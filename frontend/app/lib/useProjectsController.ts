@@ -42,6 +42,7 @@ export function useProjectsController({
   const [newProjectDescription, setNewProjectDescription] = useState("");
   const [newProjectStatus, setNewProjectStatus] =
     useState<ProjectStatus>("active");
+  const [newProjectOrganizationId, setNewProjectOrganizationId] = useState("");
   const [projectFormError, setProjectFormError] = useState("");
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [projectEdits, setProjectEdits] = useState<
@@ -68,6 +69,7 @@ export function useProjectsController({
     setNewProjectName("");
     setNewProjectDescription("");
     setNewProjectStatus("active");
+    setNewProjectOrganizationId("");
     setProjectFormError("");
     setProjectEditError("");
     setProjectEditMessage("");
@@ -136,6 +138,13 @@ export function useProjectsController({
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setProjectFormError("");
+
+    const organizationId = Number.parseInt(newProjectOrganizationId, 10);
+    if (!Number.isInteger(organizationId)) {
+      setProjectFormError("Selecciona una organización para el proyecto.");
+      return;
+    }
+
     setIsCreatingProject(true);
 
     try {
@@ -150,6 +159,7 @@ export function useProjectsController({
             name: newProjectName,
             description: newProjectDescription.trim() || null,
             status: newProjectStatus,
+            organization_id: organizationId,
           }),
         },
       );
@@ -157,6 +167,7 @@ export function useProjectsController({
       setNewProjectName("");
       setNewProjectDescription("");
       setNewProjectStatus("active");
+      setNewProjectOrganizationId("");
       await loadProjects();
     } catch (createError) {
       handleRequestError(
@@ -316,6 +327,7 @@ export function useProjectsController({
     newProjectName,
     newProjectDescription,
     newProjectStatus,
+    newProjectOrganizationId,
     projectFormError,
     isCreatingProject,
     projectEdits,
@@ -331,6 +343,7 @@ export function useProjectsController({
     setNewProjectName,
     setNewProjectDescription,
     setNewProjectStatus,
+    setNewProjectOrganizationId,
     setProjectMembershipProjectId,
     setProjectMembershipUserId,
     setProjectMembershipGroupId,

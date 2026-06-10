@@ -3,59 +3,56 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-ProjectStatus = Literal["active", "paused", "completed", "archived"]
+OrganizationStatus = Literal["active", "paused", "archived"]
 
 
-class ProjectUserSummary(BaseModel):
+class OrganizationSummary(BaseModel):
+    id: int
+    name: str
+    status: OrganizationStatus
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrganizationUserSummary(BaseModel):
     id: int
     email: EmailStr
     full_name: str
+    is_active: bool
+    is_superuser: bool
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class ProjectGroupSummary(BaseModel):
-    id: int
-    name: str
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class ProjectOrganizationSummary(BaseModel):
-    id: int
-    name: str
-    status: str
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class ProjectRead(BaseModel):
+class OrganizationRead(BaseModel):
     id: int
     name: str
     description: str | None
-    status: ProjectStatus
-    organization_id: int
-    organization: ProjectOrganizationSummary
-    users: list[ProjectUserSummary]
-    groups: list[ProjectGroupSummary]
+    status: OrganizationStatus
+    users: list[OrganizationUserSummary]
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class ProjectCreate(BaseModel):
+class OrganizationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=1000)
-    status: ProjectStatus = "active"
-    organization_id: int
+    status: OrganizationStatus = "active"
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
 
-class ProjectUpdate(BaseModel):
+class OrganizationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=1000)
-    status: ProjectStatus | None = None
+    status: OrganizationStatus | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class OrganizationMembershipResponse(BaseModel):
+    organization_id: int
+    user_id: int
+    detail: str

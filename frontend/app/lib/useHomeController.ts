@@ -2,6 +2,7 @@
 
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import type { LoginResponse, User } from "../components/types";
+import { userHasPermission } from "../components/types";
 import {
   API_BASE_URL,
   ApiRequestError,
@@ -12,6 +13,35 @@ import {
 } from "./api";
 import { useAdminController } from "./useAdminController";
 import { useProjectsController } from "./useProjectsController";
+
+const ADMIN_DATA_PERMISSIONS = [
+  "users.manage",
+  "groups.manage",
+  "organizations.manage",
+  "roles.manage",
+  "projects.manage_members",
+];
+
+const ADMIN_PANEL_PERMISSIONS = [
+  "users.manage",
+  "groups.manage",
+  "organizations.manage",
+  "roles.manage",
+];
+
+function hasAnyPermission(user: User, permissionCodes: string[]) {
+  return permissionCodes.some((permissionCode) =>
+    userHasPermission(user, permissionCode),
+  );
+}
+
+function shouldLoadAdminData(user: User) {
+  return hasAnyPermission(user, ADMIN_DATA_PERMISSIONS);
+}
+
+function shouldShowAdminPanel(user: User) {
+  return hasAnyPermission(user, ADMIN_PANEL_PERMISSIONS);
+}
 
 export function useHomeController() {
   const [email, setEmail] = useState("");
@@ -115,12 +145,12 @@ export function useHomeController() {
   }, []);
 
   useEffect(() => {
-    if (!user?.is_superuser) {
+    if (!user || !shouldLoadAdminData(user)) {
       return;
     }
 
     adminController.loadAdminData();
-  }, [user?.is_superuser]);
+  }, [user?.id, user?.permissions]);
 
   useEffect(() => {
     if (!user) {
@@ -204,11 +234,17 @@ export function useHomeController() {
         projects: projectsController.projects,
         adminUsers: adminController.adminUsers,
         groups: adminController.groups,
+        organizations:
+          adminController.organizations.length > 0
+            ? adminController.organizations
+            : user.organizations ?? [],
         isLoadingProjects: projectsController.isLoadingProjects,
         projectError: projectsController.projectError,
         newProjectName: projectsController.newProjectName,
         newProjectDescription: projectsController.newProjectDescription,
         newProjectStatus: projectsController.newProjectStatus,
+        newProjectOrganizationId:
+          projectsController.newProjectOrganizationId,
         projectFormError: projectsController.projectFormError,
         isCreatingProject: projectsController.isCreatingProject,
         projectEdits: projectsController.projectEdits,
@@ -228,6 +264,8 @@ export function useHomeController() {
         onNewProjectDescriptionChange:
           projectsController.setNewProjectDescription,
         onNewProjectStatusChange: projectsController.setNewProjectStatus,
+        onNewProjectOrganizationIdChange:
+          projectsController.setNewProjectOrganizationId,
         onCreateProject: projectsController.handleCreateProject,
         onUpdateProjectEdit: projectsController.updateProjectEdit,
         onUpdateProject: projectsController.handleUpdateProject,
@@ -245,10 +283,11 @@ export function useHomeController() {
     : null;
 
   const adminPanelProps =
-    user?.is_superuser
+    user && shouldShowAdminPanel(user)
       ? {
           currentUser: user,
           adminUsers: adminController.adminUsers,
+          organizations: adminController.organizations,
           groups: adminController.groups,
           permissions: adminController.permissions,
           roles: adminController.roles,
@@ -259,6 +298,26 @@ export function useHomeController() {
           newUserFullName: adminController.newUserFullName,
           newUserIsActive: adminController.newUserIsActive,
           newUserIsSuperuser: adminController.newUserIsSuperuser,
+          newOrganizationName: adminController.newOrganizationName,
+          newOrganizationDescription:
+            adminController.newOrganizationDescription,
+          newOrganizationStatus: adminController.newOrganizationStatus,
+          organizationFormError: adminController.organizationFormError,
+          isCreatingOrganization: adminController.isCreatingOrganization,
+          organizationEdits: adminController.organizationEdits,
+          organizationEditError: adminController.organizationEditError,
+          organizationEditMessage: adminController.organizationEditMessage,
+          updatingOrganizationId: adminController.updatingOrganizationId,
+          organizationMembershipOrganizationId:
+            adminController.organizationMembershipOrganizationId,
+          organizationMembershipUserId:
+            adminController.organizationMembershipUserId,
+          organizationMembershipError:
+            adminController.organizationMembershipError,
+          organizationMembershipMessage:
+            adminController.organizationMembershipMessage,
+          isUpdatingOrganizationMembership:
+            adminController.isUpdatingOrganizationMembership,
           userFormError: adminController.userFormError,
           isCreatingUser: adminController.isCreatingUser,
           userEdits: adminController.userEdits,
@@ -268,6 +327,7 @@ export function useHomeController() {
           deletingUserId: adminController.deletingUserId,
           newGroupName: adminController.newGroupName,
           newGroupDescription: adminController.newGroupDescription,
+          newGroupOrganizationId: adminController.newGroupOrganizationId,
           groupFormError: adminController.groupFormError,
           isCreatingGroup: adminController.isCreatingGroup,
           groupEdits: adminController.groupEdits,
@@ -314,6 +374,21 @@ export function useHomeController() {
           onNewUserIsActiveChange: adminController.setNewUserIsActive,
           onNewUserIsSuperuserChange:
             adminController.setNewUserIsSuperuser,
+          onNewOrganizationNameChange:
+            adminController.setNewOrganizationName,
+          onNewOrganizationDescriptionChange:
+            adminController.setNewOrganizationDescription,
+          onNewOrganizationStatusChange:
+            adminController.setNewOrganizationStatus,
+          onCreateOrganization: adminController.handleCreateOrganization,
+          onUpdateOrganizationEdit: adminController.updateOrganizationEdit,
+          onUpdateOrganization: adminController.handleUpdateOrganization,
+          onOrganizationMembershipOrganizationIdChange:
+            adminController.setOrganizationMembershipOrganizationId,
+          onOrganizationMembershipUserIdChange:
+            adminController.setOrganizationMembershipUserId,
+          onUpdateOrganizationMembership:
+            adminController.updateOrganizationMembership,
           onCreateUser: adminController.handleCreateUser,
           onUpdateUserEdit: adminController.updateUserEdit,
           onUpdateUser: adminController.handleUpdateUser,
@@ -321,6 +396,8 @@ export function useHomeController() {
           onNewGroupNameChange: adminController.setNewGroupName,
           onNewGroupDescriptionChange:
             adminController.setNewGroupDescription,
+          onNewGroupOrganizationIdChange:
+            adminController.setNewGroupOrganizationId,
           onCreateGroup: adminController.handleCreateGroup,
           onUpdateGroupEdit: adminController.updateGroupEdit,
           onUpdateGroup: adminController.handleUpdateGroup,

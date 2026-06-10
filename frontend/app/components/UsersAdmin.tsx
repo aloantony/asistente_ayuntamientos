@@ -73,6 +73,7 @@ export function UsersAdmin({
               <th>ID</th>
               <th>Email</th>
               <th>Nombre completo</th>
+              <th>Organizaciones</th>
               <th>Grupos</th>
               <th>Activo</th>
               <th>Superusuario</th>
@@ -88,6 +89,7 @@ export function UsersAdmin({
                   is_superuser: adminUser.is_superuser,
                 };
                 const assignedGroups = adminUser.groups ?? [];
+                const assignedOrganizations = adminUser.organizations ?? [];
                 const isCurrentUser = currentUser.id === adminUser.id;
 
                 return (
@@ -106,6 +108,19 @@ export function UsersAdmin({
                         type="text"
                         value={edit.full_name}
                       />
+                    </td>
+                    <td>
+                      {assignedOrganizations.length > 0 ? (
+                        <div className="tag-list">
+                          {assignedOrganizations.map((organization) => (
+                            <span className="tag" key={organization.id}>
+                              {organization.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="small-muted">Sin organizaciones</span>
+                      )}
                     </td>
                     <td>
                       {assignedGroups.length > 0 ? (
@@ -190,7 +205,7 @@ export function UsersAdmin({
               })
             ) : (
               <tr>
-                <td colSpan={7}>No hay usuarios para mostrar.</td>
+                <td colSpan={8}>No hay usuarios para mostrar.</td>
               </tr>
             )}
           </tbody>

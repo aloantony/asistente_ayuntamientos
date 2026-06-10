@@ -1,6 +1,7 @@
 export type UserGroupSummary = {
   id: number;
   name: string;
+  organization?: OrganizationSummary;
 };
 
 export type RoleSummary = {
@@ -14,6 +15,29 @@ export type GroupUserSummary = {
   full_name: string;
 };
 
+export type OrganizationStatus = "active" | "paused" | "archived";
+
+export type OrganizationSummary = {
+  id: number;
+  name: string;
+  status: OrganizationStatus;
+};
+
+export type OrganizationUserSummary = {
+  id: number;
+  email: string;
+  full_name: string;
+  is_active: boolean;
+  is_superuser: boolean;
+};
+
+export type Organization = OrganizationSummary & {
+  description: string | null;
+  users: OrganizationUserSummary[];
+  created_at: string;
+  updated_at: string;
+};
+
 export type User = {
   id: number;
   email: string;
@@ -21,6 +45,7 @@ export type User = {
   is_active: boolean;
   is_superuser: boolean;
   permissions?: string[];
+  organizations?: OrganizationSummary[];
   groups?: UserGroupSummary[];
 };
 
@@ -28,6 +53,8 @@ export type Group = {
   id: number;
   name: string;
   description: string | null;
+  organization_id: number;
+  organization: OrganizationSummary;
   users?: GroupUserSummary[];
   roles?: RoleSummary[];
 };
@@ -56,6 +83,8 @@ export type Project = {
   name: string;
   description: string | null;
   status: ProjectStatus;
+  organization_id: number;
+  organization: OrganizationSummary;
   users: GroupUserSummary[];
   groups: UserGroupSummary[];
   created_at: string;
@@ -92,6 +121,13 @@ export type UserEditState = {
 export type GroupEditState = {
   name: string;
   description: string;
+  organization_id: number;
+};
+
+export type OrganizationEditState = {
+  name: string;
+  description: string;
+  status: OrganizationStatus;
 };
 
 export type RoleEditState = {
@@ -130,10 +166,22 @@ export type PermissionBootstrapResponse = {
   detail: string;
 };
 
+export type OrganizationMembershipResponse = {
+  organization_id: number;
+  user_id: number;
+  detail: string;
+};
+
 export const PROJECT_STATUSES: ProjectStatus[] = [
   "active",
   "paused",
   "completed",
+  "archived",
+];
+
+export const ORGANIZATION_STATUSES: OrganizationStatus[] = [
+  "active",
+  "paused",
   "archived",
 ];
 
@@ -144,12 +192,26 @@ const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   archived: "Archivado",
 };
 
+const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {
+  active: "Activo",
+  paused: "Pausado",
+  archived: "Archivado",
+};
+
 export function formatUserOption(adminUser: User) {
   return `${adminUser.full_name} (${adminUser.email})`;
 }
 
+export function formatOrganizationOption(organization: OrganizationSummary) {
+  return `${organization.name} (${formatOrganizationStatus(organization.status)})`;
+}
+
 export function formatProjectStatus(status: ProjectStatus) {
   return PROJECT_STATUS_LABELS[status];
+}
+
+export function formatOrganizationStatus(status: OrganizationStatus) {
+  return ORGANIZATION_STATUS_LABELS[status];
 }
 
 export function userHasPermission(user: User, permissionCode: string) {

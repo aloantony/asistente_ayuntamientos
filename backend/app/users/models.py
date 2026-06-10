@@ -2,6 +2,7 @@ from sqlalchemy import Boolean, String, false, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
+from app.organizations.models import organization_users
 from app.rbac.models import user_groups
 
 
@@ -28,5 +29,10 @@ class User(TimestampMixin, Base):
     groups: Mapped[list["Group"]] = relationship(
         "Group",
         secondary=user_groups,
+        back_populates="users",
+    )
+    organizations: Mapped[list["Organization"]] = relationship(
+        "Organization",
+        secondary=organization_users,
         back_populates="users",
     )

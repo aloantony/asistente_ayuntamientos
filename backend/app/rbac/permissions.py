@@ -7,12 +7,14 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
-from app.rbac.models import Permission, group_roles, role_permissions, user_groups
+from app.organizations.models import organization_users
+from app.rbac.models import Group, Permission, group_roles, role_permissions, user_groups
 from app.users.models import User
 
 INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "users.manage": "Gestionar usuarios",
     "groups.manage": "Gestionar grupos",
+    "organizations.manage": "Gestionar organizaciones",
     "roles.manage": "Gestionar roles y permisos",
     "projects.create": "Crear proyectos",
     "projects.edit": "Editar proyectos",
@@ -24,33 +26,50 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
 INITIAL_PERMISSION_CODES = tuple(INITIAL_PERMISSION_DEFINITIONS.keys())
 
 
-def get_user_permission_codes(user: User, db: Session) -> set[str]:
-    return set(
-        db.scalars(
-            select(Permission.code)
-            .join(
-                role_permissions,
-                Permission.id == role_permissions.c.permission_id,
-            )
-            .join(
-                group_roles,
-                role_permissions.c.role_id == group_roles.c.role_id,
-            )
-            .join(
-                user_groups,
-                group_roles.c.group_id == user_groups.c.group_id,
-            )
-            .where(user_groups.c.user_id == user.id)
-            .distinct()
+def get_user_permission_codes(
+    user: User,
+    db: Session,
+    organization_id: int | None = None,
+) -> set[str]:
+    query = (
+        select(Permission.code)
+        .join(
+            role_permissions,
+            Permission.id == role_permissions.c.permission_id,
         )
+        .join(
+            group_roles,
+            role_permissions.c.role_id == group_roles.c.role_id,
+        )
+        .join(Group, group_roles.c.group_id == Group.id)
+        .join(
+            user_groups,
+            user_groups.c.group_id == Group.id,
+        )
+        .join(
+            organization_users,
+            (organization_users.c.organization_id == Group.organization_id)
+            & (organization_users.c.user_id == user.id),
+        )
+        .where(user_groups.c.user_id == user.id)
     )
 
+    if organization_id is not None:
+        query = query.where(Group.organization_id == organization_id)
 
-def has_permission(user: User, code: str, db: Session) -> bool:
+    return set(db.scalars(query.distinct()))
+
+
+def has_permission(
+    user: User,
+    code: str,
+    db: Session,
+    organization_id: int | None = None,
+) -> bool:
     if user.is_superuser:
         return True
 
-    return code in get_user_permission_codes(user, db)
+    return code in get_user_permission_codes(user, db, organization_id)
 
 
 def require_permission(code: str) -> Callable[..., User]:

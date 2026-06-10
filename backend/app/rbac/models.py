@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.organizations.models import Organization
     from app.users.models import User
 
 user_groups = Table(
@@ -36,7 +37,16 @@ class Group(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
 
+    organization: Mapped["Organization"] = relationship(
+        "Organization",
+        back_populates="groups",
+    )
     users: Mapped[list["User"]] = relationship(
         "User",
         secondary=user_groups,

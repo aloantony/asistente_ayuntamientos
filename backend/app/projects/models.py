@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.organizations.models import Organization
     from app.rbac.models import Group
     from app.users.models import User
 
@@ -44,7 +45,16 @@ class Project(TimestampMixin, Base):
         server_default="active",
         nullable=False,
     )
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
 
+    organization: Mapped["Organization"] = relationship(
+        "Organization",
+        back_populates="projects",
+    )
     users: Mapped[list["User"]] = relationship(
         "User",
         secondary=project_users,

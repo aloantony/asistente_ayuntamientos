@@ -13,6 +13,10 @@ import type {
   GroupRoleResponse,
   MembershipAction,
   MembershipResponse,
+  Organization,
+  OrganizationEditState,
+  OrganizationMembershipResponse,
+  OrganizationStatus,
   Permission,
   PermissionBootstrapResponse,
   Role,
@@ -23,6 +27,7 @@ import type {
   UserDeleteResponse,
   UserEditState,
 } from "../components/types";
+import { userHasPermission } from "../components/types";
 import { adminRequest } from "./api";
 
 type RequestErrorHandler = (
@@ -59,9 +64,24 @@ function buildGroupEditState(groups: Group[]) {
     edits[group.id] = {
       name: group.name,
       description: group.description ?? "",
+      organization_id: group.organization_id,
     };
     return edits;
   }, {});
+}
+
+function buildOrganizationEditState(organizations: Organization[]) {
+  return organizations.reduce<Record<number, OrganizationEditState>>(
+    (edits, organization) => {
+      edits[organization.id] = {
+        name: organization.name,
+        description: organization.description ?? "",
+        status: organization.status,
+      };
+      return edits;
+    },
+    {},
+  );
 }
 
 function buildRoleEditState(roles: Role[]) {
@@ -86,9 +106,36 @@ export function useAdminController({
   setProjectMembershipGroupId,
 }: UseAdminControllerArgs) {
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [isLoadingAdmin, setIsLoadingAdmin] = useState(false);
   const [adminError, setAdminError] = useState("");
+
+  const [newOrganizationName, setNewOrganizationName] = useState("");
+  const [newOrganizationDescription, setNewOrganizationDescription] =
+    useState("");
+  const [newOrganizationStatus, setNewOrganizationStatus] =
+    useState<OrganizationStatus>("active");
+  const [organizationFormError, setOrganizationFormError] = useState("");
+  const [isCreatingOrganization, setIsCreatingOrganization] = useState(false);
+  const [organizationEdits, setOrganizationEdits] = useState<
+    Record<number, OrganizationEditState>
+  >({});
+  const [organizationEditError, setOrganizationEditError] = useState("");
+  const [organizationEditMessage, setOrganizationEditMessage] = useState("");
+  const [updatingOrganizationId, setUpdatingOrganizationId] = useState<
+    number | null
+  >(null);
+  const [organizationMembershipOrganizationId, setOrganizationMembershipOrganizationId] =
+    useState("");
+  const [organizationMembershipUserId, setOrganizationMembershipUserId] =
+    useState("");
+  const [organizationMembershipError, setOrganizationMembershipError] =
+    useState("");
+  const [organizationMembershipMessage, setOrganizationMembershipMessage] =
+    useState("");
+  const [isUpdatingOrganizationMembership, setIsUpdatingOrganizationMembership] =
+    useState(false);
 
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserPassword, setNewUserPassword] = useState("");
@@ -107,6 +154,7 @@ export function useAdminController({
 
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupDescription, setNewGroupDescription] = useState("");
+  const [newGroupOrganizationId, setNewGroupOrganizationId] = useState("");
   const [groupFormError, setGroupFormError] = useState("");
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditState>>(
@@ -157,17 +205,32 @@ export function useAdminController({
 
   function clearAdminState() {
     setAdminUsers([]);
+    setOrganizations([]);
     setGroups([]);
     setPermissions([]);
     setRoles([]);
     setUserEdits({});
+    setOrganizationEdits({});
     setGroupEdits({});
     setRoleEdits({});
     setAdminError("");
+    setNewOrganizationName("");
+    setNewOrganizationDescription("");
+    setNewOrganizationStatus("active");
+    setOrganizationFormError("");
+    setOrganizationEditError("");
+    setOrganizationEditMessage("");
+    setUpdatingOrganizationId(null);
+    setOrganizationMembershipOrganizationId("");
+    setOrganizationMembershipUserId("");
+    setOrganizationMembershipError("");
+    setOrganizationMembershipMessage("");
+    setIsUpdatingOrganizationMembership(false);
     setUserFormError("");
     setUserEditError("");
     setUserEditMessage("");
     setDeletingUserId(null);
+    setNewGroupOrganizationId("");
     setGroupFormError("");
     setGroupEditError("");
     setGroupEditMessage("");
@@ -196,43 +259,107 @@ export function useAdminController({
     setIsBootstrappingPermissions(false);
   }
 
+  function canUsePermission(permissionCode: string) {
+    return Boolean(user && userHasPermission(user, permissionCode));
+  }
+
   async function loadAdminData() {
     setIsLoadingAdmin(true);
     setAdminError("");
 
     try {
       const token = getStoredToken();
-      const [usersData, groupsData, permissionsData, rolesData] =
-        await Promise.all([
-          adminRequest<User[]>(
-            "/admin/users",
-            token,
-            "No se pudo cargar la lista de usuarios.",
-          ),
-          adminRequest<Group[]>(
-            "/admin/groups",
-            token,
-            "No se pudo cargar la lista de grupos.",
-          ),
-          adminRequest<Permission[]>(
-            "/admin/permissions",
-            token,
-            "No se pudo cargar la lista de permisos.",
-          ),
-          adminRequest<Role[]>(
-            "/admin/roles",
-            token,
-            "No se pudo cargar la lista de roles.",
-          ),
-        ]);
+      const canLoadOrganizations = Boolean(user);
+      const canLoadUsers =
+        canUsePermission("users.manage") ||
+        canUsePermission("groups.manage") ||
+        canUsePermission("organizations.manage") ||
+        canUsePermission("projects.manage_members");
+      const canLoadGroups =
+        canUsePermission("groups.manage") ||
+        canUsePermission("roles.manage") ||
+        canUsePermission("projects.manage_members");
+      const canLoadRbac = canUsePermission("roles.manage");
 
+      const [
+        organizationsData,
+        usersData,
+        groupsData,
+        permissionsData,
+        rolesData,
+      ] = await Promise.all([
+        canLoadOrganizations
+          ? adminRequest<Organization[]>(
+              "/organizations",
+              token,
+              "No se pudo cargar la lista de organizaciones.",
+            )
+          : Promise.resolve([]),
+        canLoadUsers
+          ? adminRequest<User[]>(
+              "/admin/users",
+              token,
+              "No se pudo cargar la lista de usuarios.",
+            )
+          : Promise.resolve([]),
+        canLoadGroups
+          ? adminRequest<Group[]>(
+              "/admin/groups",
+              token,
+              "No se pudo cargar la lista de grupos.",
+            )
+          : Promise.resolve([]),
+        canLoadRbac
+          ? adminRequest<Permission[]>(
+              "/admin/permissions",
+              token,
+              "No se pudo cargar la lista de permisos.",
+            )
+          : Promise.resolve([]),
+        canLoadRbac
+          ? adminRequest<Role[]>(
+              "/admin/roles",
+              token,
+              "No se pudo cargar la lista de roles.",
+            )
+          : Promise.resolve([]),
+      ]);
+
+      setOrganizations(organizationsData);
       setAdminUsers(usersData);
       setGroups(groupsData);
       setPermissions(permissionsData);
       setRoles(rolesData);
+      setOrganizationEdits(buildOrganizationEditState(organizationsData));
       setUserEdits(buildUserEditState(usersData));
       setGroupEdits(buildGroupEditState(groupsData));
       setRoleEdits(buildRoleEditState(rolesData));
+
+      if (
+        newGroupOrganizationId &&
+        !organizationsData.some(
+          (organization) => String(organization.id) === newGroupOrganizationId,
+        )
+      ) {
+        setNewGroupOrganizationId("");
+      }
+      if (
+        organizationMembershipOrganizationId &&
+        !organizationsData.some(
+          (organization) =>
+            String(organization.id) === organizationMembershipOrganizationId,
+        )
+      ) {
+        setOrganizationMembershipOrganizationId("");
+      }
+      if (
+        organizationMembershipUserId &&
+        !usersData.some(
+          (adminUser) => String(adminUser.id) === organizationMembershipUserId,
+        )
+      ) {
+        setOrganizationMembershipUserId("");
+      }
 
       if (
         membershipGroupId &&
@@ -308,6 +435,26 @@ export function useAdminController({
     });
   }
 
+  function updateOrganizationEdit(
+    organizationId: number,
+    updates: Partial<OrganizationEditState>,
+  ) {
+    setOrganizationEdits((currentEdits) => {
+      const currentEdit = currentEdits[organizationId];
+      if (!currentEdit) {
+        return currentEdits;
+      }
+
+      return {
+        ...currentEdits,
+        [organizationId]: {
+          ...currentEdit,
+          ...updates,
+        },
+      };
+    });
+  }
+
   function updateGroupEdit(groupId: number, updates: Partial<GroupEditState>) {
     setGroupEdits((currentEdits) => {
       const currentEdit = currentEdits[groupId];
@@ -340,6 +487,138 @@ export function useAdminController({
         },
       };
     });
+  }
+
+  async function handleCreateOrganization(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setOrganizationFormError("");
+    setIsCreatingOrganization(true);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Organization>(
+        "/organizations",
+        token,
+        "No se pudo crear la organización.",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: newOrganizationName,
+            description: newOrganizationDescription.trim() || null,
+            status: newOrganizationStatus,
+          }),
+        },
+      );
+
+      setNewOrganizationName("");
+      setNewOrganizationDescription("");
+      setNewOrganizationStatus("active");
+      await loadAdminData();
+    } catch (createError) {
+      handleRequestError(
+        createError,
+        setOrganizationFormError,
+        "No se pudo crear la organización.",
+      );
+    } finally {
+      setIsCreatingOrganization(false);
+    }
+  }
+
+  async function handleUpdateOrganization(organizationId: number) {
+    const edit = organizationEdits[organizationId];
+    if (!edit) {
+      setOrganizationEditError(
+        "No se pudo encontrar la organización para editar.",
+      );
+      return;
+    }
+
+    const name = edit.name.trim();
+    if (!name) {
+      setOrganizationEditError("El nombre de la organización no puede estar vacío.");
+      setOrganizationEditMessage("");
+      return;
+    }
+
+    setOrganizationEditError("");
+    setOrganizationEditMessage("");
+    setUpdatingOrganizationId(organizationId);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Organization>(
+        `/organizations/${organizationId}`,
+        token,
+        "No se pudo actualizar la organización.",
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            name,
+            description: edit.description.trim() || null,
+            status: edit.status,
+          }),
+        },
+      );
+
+      setOrganizationEditMessage("Organización actualizada.");
+      await loadAdminData();
+      await loadProjects();
+    } catch (updateError) {
+      handleRequestError(
+        updateError,
+        setOrganizationEditError,
+        "No se pudo actualizar la organización.",
+      );
+    } finally {
+      setUpdatingOrganizationId(null);
+    }
+  }
+
+  async function updateOrganizationMembership(action: MembershipAction) {
+    setOrganizationMembershipError("");
+    setOrganizationMembershipMessage("");
+
+    const organizationId = Number.parseInt(
+      organizationMembershipOrganizationId,
+      10,
+    );
+    const userId = Number.parseInt(organizationMembershipUserId, 10);
+
+    if (!Number.isInteger(organizationId) || !Number.isInteger(userId)) {
+      setOrganizationMembershipError("Selecciona una organización y un usuario.");
+      return;
+    }
+
+    setIsUpdatingOrganizationMembership(true);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<OrganizationMembershipResponse>(
+        `/organizations/${organizationId}/users/${userId}`,
+        token,
+        "No se pudo actualizar el usuario de la organización.",
+        {
+          method: action === "add" ? "POST" : "DELETE",
+        },
+      );
+
+      setOrganizationMembershipMessage(
+        action === "add"
+          ? "Usuario añadido a la organización."
+          : "Usuario quitado de la organización.",
+      );
+      await loadAdminData();
+      await loadProjects();
+    } catch (membershipUpdateError) {
+      handleRequestError(
+        membershipUpdateError,
+        setOrganizationMembershipError,
+        "No se pudo actualizar el usuario de la organización.",
+      );
+    } finally {
+      setIsUpdatingOrganizationMembership(false);
+    }
   }
 
   async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
@@ -489,6 +768,13 @@ export function useAdminController({
   async function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setGroupFormError("");
+
+    const organizationId = Number.parseInt(newGroupOrganizationId, 10);
+    if (!Number.isInteger(organizationId)) {
+      setGroupFormError("Selecciona una organización para el grupo.");
+      return;
+    }
+
     setIsCreatingGroup(true);
 
     try {
@@ -502,12 +788,14 @@ export function useAdminController({
           body: JSON.stringify({
             name: newGroupName,
             description: newGroupDescription.trim() || null,
+            organization_id: organizationId,
           }),
         },
       );
 
       setNewGroupName("");
       setNewGroupDescription("");
+      setNewGroupOrganizationId("");
       await loadAdminData();
     } catch (createError) {
       handleRequestError(
@@ -549,6 +837,7 @@ export function useAdminController({
           body: JSON.stringify({
             name,
             description: edit.description.trim() || null,
+            organization_id: edit.organization_id,
           }),
         },
       );
@@ -899,6 +1188,7 @@ export function useAdminController({
 
   return {
     adminUsers,
+    organizations,
     groups,
     permissions,
     roles,
@@ -909,6 +1199,20 @@ export function useAdminController({
     newUserFullName,
     newUserIsActive,
     newUserIsSuperuser,
+    newOrganizationName,
+    newOrganizationDescription,
+    newOrganizationStatus,
+    organizationFormError,
+    isCreatingOrganization,
+    organizationEdits,
+    organizationEditError,
+    organizationEditMessage,
+    updatingOrganizationId,
+    organizationMembershipOrganizationId,
+    organizationMembershipUserId,
+    organizationMembershipError,
+    organizationMembershipMessage,
+    isUpdatingOrganizationMembership,
     userFormError,
     isCreatingUser,
     userEdits,
@@ -918,6 +1222,7 @@ export function useAdminController({
     deletingUserId,
     newGroupName,
     newGroupDescription,
+    newGroupOrganizationId,
     groupFormError,
     isCreatingGroup,
     groupEdits,
@@ -957,8 +1262,14 @@ export function useAdminController({
     setNewUserFullName,
     setNewUserIsActive,
     setNewUserIsSuperuser,
+    setNewOrganizationName,
+    setNewOrganizationDescription,
+    setNewOrganizationStatus,
+    setOrganizationMembershipOrganizationId,
+    setOrganizationMembershipUserId,
     setNewGroupName,
     setNewGroupDescription,
+    setNewGroupOrganizationId,
     setMembershipUserId,
     setMembershipGroupId,
     setNewRoleName,
@@ -970,11 +1281,15 @@ export function useAdminController({
     clearAdminState,
     loadAdminData,
     updateUserEdit,
+    updateOrganizationEdit,
     updateGroupEdit,
     updateRoleEdit,
     handleCreateUser,
     handleUpdateUser,
     handleDeleteUser,
+    handleCreateOrganization,
+    handleUpdateOrganization,
+    updateOrganizationMembership,
     handleCreateGroup,
     handleUpdateGroup,
     handleDeleteGroup,

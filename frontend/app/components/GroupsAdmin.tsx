@@ -1,11 +1,18 @@
 import type { FormEvent } from "react";
-import type { Group, GroupEditState } from "./types";
+import {
+  formatOrganizationOption,
+  type Group,
+  type GroupEditState,
+  type Organization,
+} from "./types";
 
 export type GroupsAdminProps = {
   groups: Group[];
+  organizations: Organization[];
   isLoadingAdmin: boolean;
   newGroupName: string;
   newGroupDescription: string;
+  newGroupOrganizationId: string;
   groupFormError: string;
   isCreatingGroup: boolean;
   groupEdits: Record<number, GroupEditState>;
@@ -15,6 +22,7 @@ export type GroupsAdminProps = {
   deletingGroupId: number | null;
   onNewGroupNameChange: (name: string) => void;
   onNewGroupDescriptionChange: (description: string) => void;
+  onNewGroupOrganizationIdChange: (organizationId: string) => void;
   onCreateGroup: (event: FormEvent<HTMLFormElement>) => void;
   onUpdateGroupEdit: (
     groupId: number,
@@ -26,9 +34,11 @@ export type GroupsAdminProps = {
 
 export function GroupsAdmin({
   groups,
+  organizations,
   isLoadingAdmin,
   newGroupName,
   newGroupDescription,
+  newGroupOrganizationId,
   groupFormError,
   isCreatingGroup,
   groupEdits,
@@ -38,6 +48,7 @@ export function GroupsAdmin({
   deletingGroupId,
   onNewGroupNameChange,
   onNewGroupDescriptionChange,
+  onNewGroupOrganizationIdChange,
   onCreateGroup,
   onUpdateGroupEdit,
   onUpdateGroup,
@@ -57,6 +68,7 @@ export function GroupsAdmin({
           <thead>
             <tr>
               <th>ID</th>
+              <th>Organización</th>
               <th>Nombre</th>
               <th>Descripción</th>
               <th>Usuarios</th>
@@ -70,6 +82,7 @@ export function GroupsAdmin({
                 const edit = groupEdits[group.id] ?? {
                   name: group.name,
                   description: group.description ?? "",
+                  organization_id: group.organization_id,
                 };
                 const assignedUsers = group.users ?? [];
                 const assignedRoles = group.roles ?? [];
@@ -77,6 +90,27 @@ export function GroupsAdmin({
                 return (
                   <tr key={group.id}>
                     <td>{group.id}</td>
+                    <td>
+                      <select
+                        aria-label={`Organización del grupo ${group.name}`}
+                        className="table-input"
+                        onChange={(event) =>
+                          onUpdateGroupEdit(group.id, {
+                            organization_id: Number.parseInt(
+                              event.target.value,
+                              10,
+                            ),
+                          })
+                        }
+                        value={edit.organization_id}
+                      >
+                        {organizations.map((organization) => (
+                          <option key={organization.id} value={organization.id}>
+                            {formatOrganizationOption(organization)}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                     <td>
                       <input
                         aria-label={`Nombre del grupo ${group.name}`}
@@ -166,7 +200,7 @@ export function GroupsAdmin({
               })
             ) : (
               <tr>
-                <td colSpan={6}>No hay grupos para mostrar.</td>
+                <td colSpan={7}>No hay grupos para mostrar.</td>
               </tr>
             )}
           </tbody>
@@ -183,6 +217,25 @@ export function GroupsAdmin({
       <form className="admin-form" onSubmit={onCreateGroup}>
         <h4>Crear grupo</h4>
         <div className="form-grid">
+          <label>
+            Organización
+            <select
+              name="new-group-organization"
+              onChange={(event) =>
+                onNewGroupOrganizationIdChange(event.target.value)
+              }
+              required
+              value={newGroupOrganizationId}
+            >
+              <option value="">Selecciona una organización</option>
+              {organizations.map((organization) => (
+                <option key={organization.id} value={organization.id}>
+                  {formatOrganizationOption(organization)}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <label>
             Nombre
             <input

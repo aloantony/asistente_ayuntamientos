@@ -3,9 +3,18 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
+class AdminOrganizationSummary(BaseModel):
+    id: int
+    name: str
+    status: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AdminGroupSummary(BaseModel):
     id: int
     name: str
+    organization: AdminOrganizationSummary
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -41,6 +50,7 @@ class AdminUserRead(BaseModel):
     full_name: str
     is_active: bool
     is_superuser: bool
+    organizations: list[AdminOrganizationSummary]
     groups: list[AdminGroupSummary]
     created_at: datetime
     updated_at: datetime
@@ -68,6 +78,8 @@ class AdminGroupRead(BaseModel):
     id: int
     name: str
     description: str | None
+    organization_id: int
+    organization: AdminOrganizationSummary
     users: list[AdminUserSummary]
     roles: list[AdminRoleSummary]
     created_at: datetime
@@ -79,6 +91,7 @@ class AdminGroupRead(BaseModel):
 class AdminGroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
+    organization_id: int
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -86,6 +99,7 @@ class AdminGroupCreate(BaseModel):
 class AdminGroupUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
+    organization_id: int | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
 

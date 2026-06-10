@@ -15,10 +15,15 @@ from app.admin.schemas import (
     RoleRead,
     RoleUpdate,
 )
-from app.auth.dependencies import require_superuser
+from app.auth.dependencies import get_current_user, require_superuser
 from app.db.session import get_db
 from app.rbac.models import Group, Permission, Role, group_roles, role_permissions
-from app.rbac.permissions import ensure_initial_permissions, require_permission
+from app.rbac.permissions import (
+    ensure_initial_permissions,
+    has_permission,
+    require_permission,
+)
+from app.users.models import User
 
 permissions_router = APIRouter(
     prefix="/admin/permissions",
@@ -218,8 +223,10 @@ def assign_role_to_group(
     group_id: int,
     role_id: int,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> GroupRoleResponse:
-    ensure_group_and_role_exist(db, group_id=group_id, role_id=role_id)
+    group = ensure_group_and_role_exist(db, group_id=group_id, role_id=role_id)
+    require_roles_manage_for_group(db, current_user, group)
 
     exists = db.execute(
         select(group_roles).where(
@@ -246,8 +253,10 @@ def remove_role_from_group(
     group_id: int,
     role_id: int,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> GroupRoleResponse:
-    ensure_group_and_role_exist(db, group_id=group_id, role_id=role_id)
+    group = ensure_group_and_role_exist(db, group_id=group_id, role_id=role_id)
+    require_roles_manage_for_group(db, current_user, group)
 
     db.execute(
         delete(group_roles).where(
@@ -302,8 +311,9 @@ def ensure_group_and_role_exist(
     *,
     group_id: int,
     role_id: int,
-) -> None:
-    if db.get(Group, group_id) is None:
+) -> Group:
+    group = db.get(Group, group_id)
+    if group is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Group not found",
@@ -313,3 +323,24 @@ def ensure_group_and_role_exist(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Role not found",
         )
+
+    return group
+
+
+def require_roles_manage_for_group(
+    db: Session,
+    current_user: User,
+    group: Group,
+) -> None:
+    if has_permission(
+        current_user,
+        "roles.manage",
+        db,
+        organization_id=group.organization_id,
+    ):
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Permission required: roles.manage",
+    )

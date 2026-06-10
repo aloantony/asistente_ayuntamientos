@@ -31,6 +31,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           <dt>Superusuario</dt>
           <dd>{user.is_superuser ? "Sí" : "No"}</dd>
         </div>
+        <div>
+          <dt>Organizaciones</dt>
+          <dd>
+            {(user.organizations ?? []).length > 0
+              ? (user.organizations ?? [])
+                  .map((organization) => organization.name)
+                  .join(", ")
+              : "Sin organizaciones"}
+          </dd>
+        </div>
       </dl>
     </section>
   );

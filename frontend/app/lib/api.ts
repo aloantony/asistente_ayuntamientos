@@ -45,6 +45,24 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró el proyecto indicado.";
     case "Project access denied":
       return "No tienes acceso a ese proyecto.";
+    case "Organization not found":
+      return "No se encontró la organización indicada.";
+    case "Organization access denied":
+      return "No tienes acceso a esa organización.";
+    case "User does not belong to the group organization":
+      return "El usuario no pertenece a la organización del grupo.";
+    case "User does not belong to the project organization":
+      return "El usuario no pertenece a la organización del proyecto.";
+    case "Group does not belong to the project organization":
+      return "El grupo no pertenece a la organización del proyecto.";
+    case "Cannot remove yourself from an organization":
+      return "No puedes quitarte a ti mismo de una organización.";
+    case "Cannot remove the last active superuser from all organizations":
+      return "No puedes quitar al último superusuario activo de todas las organizaciones.";
+    case "Cannot move group because a group user is outside the target organization":
+      return "No se puede mover el grupo porque tiene usuarios fuera de la organización destino.";
+    case "Cannot move group because it is assigned to a project outside the target organization":
+      return "No se puede mover el grupo porque está asignado a proyectos de otra organización.";
     case "Cannot delete your own account":
       return "No puedes eliminar tu propia cuenta.";
     case "Cannot delete the last active superuser":

@@ -2,10 +2,12 @@ import type { FormEvent } from "react";
 import {
   formatProjectStatus,
   formatUserOption,
+  formatOrganizationOption,
   PROJECT_STATUSES,
   userHasPermission,
   type Group,
   type MembershipAction,
+  type OrganizationSummary,
   type Project,
   type ProjectEditState,
   type ProjectStatus,
@@ -17,11 +19,13 @@ type ProjectsPanelProps = {
   projects: Project[];
   adminUsers: User[];
   groups: Group[];
+  organizations: OrganizationSummary[];
   isLoadingProjects: boolean;
   projectError: string;
   newProjectName: string;
   newProjectDescription: string;
   newProjectStatus: ProjectStatus;
+  newProjectOrganizationId: string;
   projectFormError: string;
   isCreatingProject: boolean;
   projectEdits: Record<number, ProjectEditState>;
@@ -38,6 +42,7 @@ type ProjectsPanelProps = {
   onNewProjectNameChange: (name: string) => void;
   onNewProjectDescriptionChange: (description: string) => void;
   onNewProjectStatusChange: (status: ProjectStatus) => void;
+  onNewProjectOrganizationIdChange: (organizationId: string) => void;
   onCreateProject: (event: FormEvent<HTMLFormElement>) => void;
   onUpdateProjectEdit: (
     projectId: number,
@@ -56,11 +61,13 @@ export function ProjectsPanel({
   projects,
   adminUsers,
   groups,
+  organizations,
   isLoadingProjects,
   projectError,
   newProjectName,
   newProjectDescription,
   newProjectStatus,
+  newProjectOrganizationId,
   projectFormError,
   isCreatingProject,
   projectEdits,
@@ -77,6 +84,7 @@ export function ProjectsPanel({
   onNewProjectNameChange,
   onNewProjectDescriptionChange,
   onNewProjectStatusChange,
+  onNewProjectOrganizationIdChange,
   onCreateProject,
   onUpdateProjectEdit,
   onUpdateProject,
@@ -89,8 +97,27 @@ export function ProjectsPanel({
   const canCreateProjects = userHasPermission(user, "projects.create");
   const canEditProjects = userHasPermission(user, "projects.edit");
   const canArchiveProjects = userHasPermission(user, "projects.archive");
-  const showProjectMembershipControls =
-    user.is_superuser && userHasPermission(user, "projects.manage_members");
+  const showProjectMembershipControls = userHasPermission(
+    user,
+    "projects.manage_members",
+  );
+  const selectedMembershipProject = projects.find(
+    (project) => String(project.id) === projectMembershipProjectId,
+  );
+  const projectMembershipUsers = selectedMembershipProject
+    ? adminUsers.filter((adminUser) =>
+        (adminUser.organizations ?? []).some(
+          (organization) =>
+            organization.id === selectedMembershipProject.organization_id,
+        ),
+      )
+    : adminUsers;
+  const projectMembershipGroups = selectedMembershipProject
+    ? groups.filter(
+        (group) =>
+          group.organization_id === selectedMembershipProject.organization_id,
+      )
+    : groups;
 
   return (
     <section className="panel admin-panel">
@@ -134,6 +161,7 @@ export function ProjectsPanel({
             <thead>
               <tr>
                 <th>ID</th>
+                <th>Organización</th>
                 <th>Nombre</th>
                 <th>Descripción</th>
                 <th>Estado</th>
@@ -156,6 +184,9 @@ export function ProjectsPanel({
                   return (
                     <tr key={project.id}>
                       <td>{project.id}</td>
+                      <td>
+                        <span className="tag">{project.organization.name}</span>
+                      </td>
                       <td>
                         {canEditProjects ? (
                           <input
@@ -272,7 +303,7 @@ export function ProjectsPanel({
                 })
               ) : (
                 <tr>
-                  <td colSpan={canEditProjects ? 7 : 6}>
+                  <td colSpan={canEditProjects ? 8 : 7}>
                     {canCreateProjects || canEditProjects
                       ? "No hay proyectos para mostrar."
                       : "No tienes proyectos accesibles."}
@@ -298,6 +329,25 @@ export function ProjectsPanel({
               <form className="admin-form" onSubmit={onCreateProject}>
                 <h3>Crear proyecto</h3>
                 <div className="form-grid">
+                  <label>
+                    Organización
+                    <select
+                      name="new-project-organization"
+                      onChange={(event) =>
+                        onNewProjectOrganizationIdChange(event.target.value)
+                      }
+                      required
+                      value={newProjectOrganizationId}
+                    >
+                      <option value="">Selecciona una organización</option>
+                      {organizations.map((organization) => (
+                        <option key={organization.id} value={organization.id}>
+                          {formatOrganizationOption(organization)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
                   <label>
                     Nombre
                     <input
@@ -385,7 +435,7 @@ export function ProjectsPanel({
                     value={projectMembershipUserId}
                   >
                     <option value="">Selecciona un usuario</option>
-                    {adminUsers.map((adminUser) => (
+                    {projectMembershipUsers.map((adminUser) => (
                       <option key={adminUser.id} value={adminUser.id}>
                         {formatUserOption(adminUser)}
                       </option>
@@ -402,9 +452,9 @@ export function ProjectsPanel({
                     value={projectMembershipGroupId}
                   >
                     <option value="">Selecciona un grupo</option>
-                    {groups.map((group) => (
+                    {projectMembershipGroups.map((group) => (
                       <option key={group.id} value={group.id}>
-                        {group.name}
+                        {group.name} - {group.organization.name}
                       </option>
                     ))}
                   </select>
