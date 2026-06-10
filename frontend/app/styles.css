@@ -386,6 +386,87 @@ tr:last-child td {
   width: auto;
 }
 
+.documents-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.project-documents-list {
+  display: grid;
+  border: 1px solid #d9e2df;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.project-documents-row {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-top: 1px solid #e4ebe8;
+}
+
+.project-documents-row:first-child {
+  border-top: 0;
+}
+
+.project-documents-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.document-upload-form {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: min(100%, 380px);
+}
+
+.document-upload-form input {
+  max-width: 260px;
+  padding: 9px 10px;
+  font-size: 14px;
+}
+
+.document-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.document-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid #eef2f0;
+  padding-top: 10px;
+}
+
+.document-list li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.document-list strong,
+.document-list span {
+  display: block;
+}
+
+.document-list span {
+  margin-top: 3px;
+  color: #5b6972;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 @media (max-width: 560px) {
   .page {
     padding: 18px;
@@ -410,5 +491,23 @@ tr:last-child td {
   .form-grid,
   .membership-controls {
     grid-template-columns: 1fr;
+  }
+
+  .documents-toolbar,
+  .project-documents-heading,
+  .document-list li {
+    display: grid;
+    justify-content: stretch;
+  }
+
+  .document-upload-form {
+    justify-content: stretch;
+    min-width: 0;
+  }
+
+  .document-upload-form input,
+  .document-upload-form button {
+    width: 100%;
+    max-width: none;
   }
 }

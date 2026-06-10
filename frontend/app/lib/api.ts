@@ -45,6 +45,20 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró el proyecto indicado.";
     case "Project access denied":
       return "No tienes acceso a ese proyecto.";
+    case "Document not found":
+      return "No se encontró el documento indicado.";
+    case "Document file not found":
+      return "No se encontró el archivo del documento.";
+    case "Unsupported document content type":
+      return "El tipo de archivo no está permitido.";
+    case "Document exceeds maximum upload size":
+      return "El archivo supera el tamaño máximo permitido.";
+    case "Empty document upload":
+      return "El archivo está vacío.";
+    case "Invalid document storage key":
+      return "No se pudo guardar el documento.";
+    case "Document project organization mismatch":
+      return "El documento no coincide con la organización del proyecto.";
     case "Organization not found":
       return "No se encontró la organización indicada.";
     case "Organization access denied":
@@ -114,7 +128,9 @@ export async function adminRequest<T>(
   const headers = new Headers(options.headers);
   headers.set("Authorization", `Bearer ${accessToken}`);
 
-  if (options.body && !headers.has("Content-Type")) {
+  const isFormData =
+    typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (options.body && !headers.has("Content-Type") && !isFormData) {
     headers.set("Content-Type", "application/json");
   }
 

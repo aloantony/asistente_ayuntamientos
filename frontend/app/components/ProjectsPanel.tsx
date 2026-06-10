@@ -1,10 +1,13 @@
 import type { FormEvent } from "react";
 import {
+  formatDocumentStatus,
+  formatFileSize,
   formatProjectStatus,
   formatUserOption,
   formatOrganizationOption,
   PROJECT_STATUSES,
   userHasPermission,
+  type Document,
   type Group,
   type MembershipAction,
   type OrganizationSummary,
@@ -38,6 +41,14 @@ type ProjectsPanelProps = {
   projectMembershipError: string;
   projectMembershipMessage: string;
   isUpdatingProjectMembership: boolean;
+  projectDocuments: Record<number, Document[]>;
+  projectDocumentErrors: Record<number, string>;
+  isLoadingDocuments: boolean;
+  includeArchivedDocuments: boolean;
+  uploadingDocumentProjectId: number | null;
+  archivingDocumentId: number | null;
+  documentError: string;
+  documentMessage: string;
   onRefresh: () => void;
   onNewProjectNameChange: (name: string) => void;
   onNewProjectDescriptionChange: (description: string) => void;
@@ -54,6 +65,13 @@ type ProjectsPanelProps = {
   onProjectMembershipGroupIdChange: (groupId: string) => void;
   onUpdateProjectUserMembership: (action: MembershipAction) => void;
   onUpdateProjectGroupMembership: (action: MembershipAction) => void;
+  onUploadDocument: (
+    projectId: number,
+    event: FormEvent<HTMLFormElement>,
+  ) => void;
+  onDownloadDocument: (document: Document) => void;
+  onArchiveDocument: (document: Document) => void;
+  onIncludeArchivedDocumentsChange: (includeArchived: boolean) => void;
 };
 
 export function ProjectsPanel({
@@ -80,6 +98,14 @@ export function ProjectsPanel({
   projectMembershipError,
   projectMembershipMessage,
   isUpdatingProjectMembership,
+  projectDocuments,
+  projectDocumentErrors,
+  isLoadingDocuments,
+  includeArchivedDocuments,
+  uploadingDocumentProjectId,
+  archivingDocumentId,
+  documentError,
+  documentMessage,
   onRefresh,
   onNewProjectNameChange,
   onNewProjectDescriptionChange,
@@ -93,10 +119,23 @@ export function ProjectsPanel({
   onProjectMembershipGroupIdChange,
   onUpdateProjectUserMembership,
   onUpdateProjectGroupMembership,
+  onUploadDocument,
+  onDownloadDocument,
+  onArchiveDocument,
+  onIncludeArchivedDocumentsChange,
 }: ProjectsPanelProps) {
   const canCreateProjects = userHasPermission(user, "projects.create");
   const canEditProjects = userHasPermission(user, "projects.edit");
   const canArchiveProjects = userHasPermission(user, "projects.archive");
+  const canViewDocuments =
+    userHasPermission(user, "documents.view") ||
+    userHasPermission(user, "documents.manage");
+  const canUploadDocuments =
+    userHasPermission(user, "documents.upload") ||
+    userHasPermission(user, "documents.manage");
+  const canArchiveDocuments =
+    userHasPermission(user, "documents.archive") ||
+    userHasPermission(user, "documents.manage");
   const showProjectMembershipControls = userHasPermission(
     user,
     "projects.manage_members",
@@ -321,6 +360,150 @@ export function ProjectsPanel({
           <p className="success-message">{projectEditMessage}</p>
         ) : null}
       </div>
+
+      {canViewDocuments || canUploadDocuments ? (
+        <div className="admin-section documents-section">
+          <div className="section-header">
+            <h3>Documentos</h3>
+            <div className="documents-toolbar">
+              {isLoadingDocuments ? (
+                <p className="small-muted">Cargando documentos.</p>
+              ) : null}
+              {canViewDocuments ? (
+                <label className="checkbox-label">
+                  <input
+                    checked={includeArchivedDocuments}
+                    onChange={(event) =>
+                      onIncludeArchivedDocumentsChange(event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  Mostrar archivados
+                </label>
+              ) : null}
+            </div>
+          </div>
+
+          {documentError ? (
+            <p className="error-message">{documentError}</p>
+          ) : null}
+          {documentMessage ? (
+            <p className="success-message">{documentMessage}</p>
+          ) : null}
+
+          {projects.length > 0 ? (
+            <div className="project-documents-list">
+              {projects.map((project) => {
+                const documents = projectDocuments[project.id] ?? [];
+                const projectDocumentError =
+                  projectDocumentErrors[project.id];
+
+                return (
+                  <div className="project-documents-row" key={project.id}>
+                    <div className="project-documents-heading">
+                      <div>
+                        <h4>{project.name}</h4>
+                        <p className="small-muted">
+                          {project.organization.name}
+                        </p>
+                      </div>
+
+                      {canUploadDocuments ? (
+                        <form
+                          className="document-upload-form"
+                          onSubmit={(event) =>
+                            onUploadDocument(project.id, event)
+                          }
+                        >
+                          <input
+                            aria-label={`Subir documento a ${project.name}`}
+                            name="file"
+                            type="file"
+                            accept=".pdf,.png,.jpg,.jpeg,.txt,.doc,.docx,.xls,.xlsx,application/pdf,image/png,image/jpeg,text/plain,application/msword,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                          />
+                          <button
+                            type="submit"
+                            disabled={
+                              uploadingDocumentProjectId === project.id
+                            }
+                          >
+                            {uploadingDocumentProjectId === project.id
+                              ? "Subiendo..."
+                              : "Subir"}
+                          </button>
+                        </form>
+                      ) : null}
+                    </div>
+
+                    {canViewDocuments ? (
+                      <>
+                        {projectDocumentError ? (
+                          <p className="error-message">
+                            {projectDocumentError}
+                          </p>
+                        ) : null}
+
+                        {documents.length > 0 ? (
+                          <ul className="document-list">
+                            {documents.map((document) => (
+                              <li key={document.id}>
+                                <div>
+                                  <strong>{document.original_filename}</strong>
+                                  <span>
+                                    {formatFileSize(document.size_bytes)} -{" "}
+                                    {document.content_type} -{" "}
+                                    {formatDocumentStatus(document.status)}
+                                  </span>
+                                </div>
+                                <div className="table-actions">
+                                  <button
+                                    className="secondary-button"
+                                    type="button"
+                                    onClick={() =>
+                                      onDownloadDocument(document)
+                                    }
+                                  >
+                                    Descargar
+                                  </button>
+                                  {canArchiveDocuments &&
+                                  document.status === "active" ? (
+                                    <button
+                                      className="danger-button"
+                                      type="button"
+                                      onClick={() =>
+                                        onArchiveDocument(document)
+                                      }
+                                      disabled={
+                                        archivingDocumentId === document.id
+                                      }
+                                    >
+                                      {archivingDocumentId === document.id
+                                        ? "Archivando..."
+                                        : "Archivar"}
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="small-muted">
+                            No hay documentos para mostrar.
+                          </p>
+                        )}
+                      </>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="small-muted">
+              No hay proyectos disponibles para documentos.
+            </p>
+          )}
+        </div>
+      ) : null}
 
       {canCreateProjects || showProjectMembershipControls ? (
         <>

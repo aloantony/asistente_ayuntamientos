@@ -92,6 +92,7 @@ export function useHomeController() {
   const projectsController = useProjectsController({
     getStoredToken,
     handleRequestError,
+    user,
   });
   const adminController = useAdminController({
     getStoredToken,
@@ -259,6 +260,16 @@ export function useHomeController() {
         projectMembershipMessage: projectsController.projectMembershipMessage,
         isUpdatingProjectMembership:
           projectsController.isUpdatingProjectMembership,
+        projectDocuments: projectsController.projectDocuments,
+        projectDocumentErrors: projectsController.projectDocumentErrors,
+        isLoadingDocuments: projectsController.isLoadingDocuments,
+        includeArchivedDocuments:
+          projectsController.includeArchivedDocuments,
+        uploadingDocumentProjectId:
+          projectsController.uploadingDocumentProjectId,
+        archivingDocumentId: projectsController.archivingDocumentId,
+        documentError: projectsController.documentError,
+        documentMessage: projectsController.documentMessage,
         onRefresh: projectsController.loadProjects,
         onNewProjectNameChange: projectsController.setNewProjectName,
         onNewProjectDescriptionChange:
@@ -279,6 +290,11 @@ export function useHomeController() {
           projectsController.updateProjectUserMembership,
         onUpdateProjectGroupMembership:
           projectsController.updateProjectGroupMembership,
+        onUploadDocument: projectsController.handleUploadDocument,
+        onDownloadDocument: projectsController.handleDownloadDocument,
+        onArchiveDocument: projectsController.handleArchiveDocument,
+        onIncludeArchivedDocumentsChange:
+          projectsController.handleIncludeArchivedDocumentsChange,
       }
     : null;
 

@@ -21,6 +21,10 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "projects.archive": "Archivar proyectos",
     "projects.manage_members": "Gestionar miembros de proyectos",
     "projects.view_all": "Ver todos los proyectos",
+    "documents.view": "Ver documentos",
+    "documents.upload": "Subir documentos",
+    "documents.archive": "Archivar documentos",
+    "documents.manage": "Gestionar documentos",
 }
 
 INITIAL_PERMISSION_CODES = tuple(INITIAL_PERMISSION_DEFINITIONS.keys())

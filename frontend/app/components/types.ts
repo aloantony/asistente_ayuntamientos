@@ -78,6 +78,8 @@ export type Role = {
 
 export type ProjectStatus = "active" | "paused" | "completed" | "archived";
 
+export type DocumentStatus = "active" | "archived";
+
 export type Project = {
   id: number;
   name: string;
@@ -87,6 +89,23 @@ export type Project = {
   organization: OrganizationSummary;
   users: GroupUserSummary[];
   groups: UserGroupSummary[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type Document = {
+  id: number;
+  organization_id: number;
+  project_id: number;
+  original_filename: string;
+  stored_filename: string;
+  storage_backend: string;
+  storage_key: string;
+  content_type: string;
+  size_bytes: number;
+  checksum_sha256: string;
+  status: DocumentStatus;
+  uploaded_by_id: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -179,6 +198,8 @@ export const PROJECT_STATUSES: ProjectStatus[] = [
   "archived",
 ];
 
+export const DOCUMENT_STATUSES: DocumentStatus[] = ["active", "archived"];
+
 export const ORGANIZATION_STATUSES: OrganizationStatus[] = [
   "active",
   "paused",
@@ -189,6 +210,11 @@ const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   active: "Activo",
   paused: "Pausado",
   completed: "Completado",
+  archived: "Archivado",
+};
+
+const DOCUMENT_STATUS_LABELS: Record<DocumentStatus, string> = {
+  active: "Activo",
   archived: "Archivado",
 };
 
@@ -208,6 +234,22 @@ export function formatOrganizationOption(organization: OrganizationSummary) {
 
 export function formatProjectStatus(status: ProjectStatus) {
   return PROJECT_STATUS_LABELS[status];
+}
+
+export function formatDocumentStatus(status: DocumentStatus) {
+  return DOCUMENT_STATUS_LABELS[status];
+}
+
+export function formatFileSize(sizeBytes: number) {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function formatOrganizationStatus(status: OrganizationStatus) {

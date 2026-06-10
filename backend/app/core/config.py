@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     bootstrap_admin_token: str | None = None
     jwt_algorithm: str = "HS256"
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    document_storage_root: str = "/var/lib/asistente_ayuntamientos/documents"
+    document_max_upload_bytes: int = 25 * 1024 * 1024
 
     model_config = SettingsConfigDict(
         env_file=".env",
