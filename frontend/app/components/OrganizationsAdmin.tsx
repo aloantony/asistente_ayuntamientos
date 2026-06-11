@@ -1,9 +1,11 @@
 import type { FormEvent } from "react";
 import {
+  formatMunicipalityOption,
   formatOrganizationStatus,
   formatUserOption,
   ORGANIZATION_STATUSES,
   type MembershipAction,
+  type Municipality,
   type Organization,
   type OrganizationEditState,
   type OrganizationStatus,
@@ -12,10 +14,12 @@ import {
 
 export type OrganizationsAdminProps = {
   organizations: Organization[];
+  municipalities: Municipality[];
   adminUsers: User[];
   isLoadingAdmin: boolean;
   newOrganizationName: string;
   newOrganizationDescription: string;
+  newOrganizationMunicipalityId: string;
   newOrganizationStatus: OrganizationStatus;
   organizationFormError: string;
   isCreatingOrganization: boolean;
@@ -30,6 +34,7 @@ export type OrganizationsAdminProps = {
   isUpdatingOrganizationMembership: boolean;
   onNewOrganizationNameChange: (name: string) => void;
   onNewOrganizationDescriptionChange: (description: string) => void;
+  onNewOrganizationMunicipalityIdChange: (municipalityId: string) => void;
   onNewOrganizationStatusChange: (status: OrganizationStatus) => void;
   onCreateOrganization: (event: FormEvent<HTMLFormElement>) => void;
   onUpdateOrganizationEdit: (
@@ -44,10 +49,12 @@ export type OrganizationsAdminProps = {
 
 export function OrganizationsAdmin({
   organizations,
+  municipalities,
   adminUsers,
   isLoadingAdmin,
   newOrganizationName,
   newOrganizationDescription,
+  newOrganizationMunicipalityId,
   newOrganizationStatus,
   organizationFormError,
   isCreatingOrganization,
@@ -62,6 +69,7 @@ export function OrganizationsAdmin({
   isUpdatingOrganizationMembership,
   onNewOrganizationNameChange,
   onNewOrganizationDescriptionChange,
+  onNewOrganizationMunicipalityIdChange,
   onNewOrganizationStatusChange,
   onCreateOrganization,
   onUpdateOrganizationEdit,
@@ -70,6 +78,10 @@ export function OrganizationsAdmin({
   onOrganizationMembershipUserIdChange,
   onUpdateOrganizationMembership,
 }: OrganizationsAdminProps) {
+  const activeMunicipalities = municipalities.filter(
+    (municipality) => municipality.status === "active",
+  );
+
   return (
     <div className="admin-section">
       <div className="section-header">
@@ -86,6 +98,7 @@ export function OrganizationsAdmin({
               <th>ID</th>
               <th>Nombre</th>
               <th>Descripción</th>
+              <th>Municipio vinculado</th>
               <th>Estado</th>
               <th>Usuarios</th>
               <th>Acción</th>
@@ -97,8 +110,21 @@ export function OrganizationsAdmin({
                 const edit = organizationEdits[organization.id] ?? {
                   name: organization.name,
                   description: organization.description ?? "",
+                  municipality_id:
+                    organization.municipality_id === null
+                      ? ""
+                      : String(organization.municipality_id),
                   status: organization.status,
                 };
+                const selectableMunicipalities = organization.municipality
+                  ? [
+                      organization.municipality,
+                      ...activeMunicipalities.filter(
+                        (municipality) =>
+                          municipality.id !== organization.municipality?.id,
+                      ),
+                    ]
+                  : activeMunicipalities;
 
                 return (
                   <tr key={organization.id}>
@@ -115,6 +141,36 @@ export function OrganizationsAdmin({
                         type="text"
                         value={edit.name}
                       />
+                    </td>
+                    <td>
+                      {selectableMunicipalities.length > 0 ? (
+                        <select
+                          aria-label={`Municipio vinculado a ${organization.name}`}
+                          className="table-input"
+                          onChange={(event) =>
+                            onUpdateOrganizationEdit(organization.id, {
+                              municipality_id: event.target.value,
+                            })
+                          }
+                          value={edit.municipality_id}
+                        >
+                          <option value="">Sin municipio vinculado</option>
+                          {selectableMunicipalities.map((municipality) => (
+                            <option key={municipality.id} value={municipality.id}>
+                              {formatMunicipalityOption(municipality)}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="small-muted">
+                          Sin municipios disponibles
+                        </span>
+                      )}
+                      {organization.municipality ? (
+                        <span className="small-muted">
+                          {organization.municipality.autonomous_community}
+                        </span>
+                      ) : null}
                     </td>
                     <td>
                       <textarea
@@ -180,7 +236,7 @@ export function OrganizationsAdmin({
               })
             ) : (
               <tr>
-                <td colSpan={6}>No hay organizaciones para mostrar.</td>
+                <td colSpan={7}>No hay organizaciones para mostrar.</td>
               </tr>
             )}
           </tbody>
@@ -224,6 +280,24 @@ export function OrganizationsAdmin({
               {ORGANIZATION_STATUSES.map((status) => (
                 <option key={status} value={status}>
                   {formatOrganizationStatus(status)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Municipio vinculado
+            <select
+              name="new-organization-municipality"
+              onChange={(event) =>
+                onNewOrganizationMunicipalityIdChange(event.target.value)
+              }
+              value={newOrganizationMunicipalityId}
+            >
+              <option value="">Sin municipio vinculado</option>
+              {activeMunicipalities.map((municipality) => (
+                <option key={municipality.id} value={municipality.id}>
+                  {formatMunicipalityOption(municipality)}
                 </option>
               ))}
             </select>

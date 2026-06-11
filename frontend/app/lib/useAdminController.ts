@@ -13,6 +13,8 @@ import type {
   GroupRoleResponse,
   MembershipAction,
   MembershipResponse,
+  Municipality,
+  MunicipalityEditState,
   Organization,
   OrganizationEditState,
   OrganizationMembershipResponse,
@@ -76,12 +78,128 @@ function buildOrganizationEditState(organizations: Organization[]) {
       edits[organization.id] = {
         name: organization.name,
         description: organization.description ?? "",
+        municipality_id:
+          organization.municipality_id === null
+            ? ""
+            : String(organization.municipality_id),
         status: organization.status,
       };
       return edits;
     },
     {},
   );
+}
+
+const EMPTY_MUNICIPALITY_FORM: MunicipalityEditState = {
+  name: "",
+  province: "",
+  autonomous_community: "",
+  country: "España",
+  ine_code: "",
+  population: "",
+  surface_km2: "",
+  density: "",
+  postal_codes: "",
+  municipality_type: "municipality",
+  rural_urban_profile: "unknown",
+  economic_profile: "",
+  tourism_profile: "",
+  geographic_notes: "",
+  administrative_notes: "",
+  status: "active",
+};
+
+function createEmptyMunicipalityForm(): MunicipalityEditState {
+  return { ...EMPTY_MUNICIPALITY_FORM };
+}
+
+function buildMunicipalityEditState(municipalities: Municipality[]) {
+  return municipalities.reduce<Record<number, MunicipalityEditState>>(
+    (edits, municipality) => {
+      edits[municipality.id] = {
+        name: municipality.name,
+        province: municipality.province,
+        autonomous_community: municipality.autonomous_community,
+        country: municipality.country,
+        ine_code: municipality.ine_code ?? "",
+        population:
+          municipality.population === null ? "" : String(municipality.population),
+        surface_km2:
+          municipality.surface_km2 === null
+            ? ""
+            : String(municipality.surface_km2),
+        density: municipality.density === null ? "" : String(municipality.density),
+        postal_codes: municipality.postal_codes ?? "",
+        municipality_type: municipality.municipality_type,
+        rural_urban_profile: municipality.rural_urban_profile,
+        economic_profile: municipality.economic_profile ?? "",
+        tourism_profile: municipality.tourism_profile ?? "",
+        geographic_notes: municipality.geographic_notes ?? "",
+        administrative_notes: municipality.administrative_notes ?? "",
+        status: municipality.status,
+      };
+      return edits;
+    },
+    {},
+  );
+}
+
+function parseOptionalId(value: string) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function parseOptionalNumber(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function buildMunicipalityPayload(edit: MunicipalityEditState) {
+  const population = parseOptionalNumber(edit.population);
+  if (
+    population !== null &&
+    (!Number.isInteger(population) || population < 0)
+  ) {
+    throw new Error("La población debe ser un número entero no negativo.");
+  }
+
+  const surfaceKm2 = parseOptionalNumber(edit.surface_km2);
+  if (surfaceKm2 !== null && surfaceKm2 < 0) {
+    throw new Error("La superficie debe ser un número no negativo.");
+  }
+
+  const density = parseOptionalNumber(edit.density);
+  if (density !== null && density < 0) {
+    throw new Error("La densidad debe ser un número no negativo.");
+  }
+
+  return {
+    name: edit.name,
+    province: edit.province,
+    autonomous_community: edit.autonomous_community,
+    country: edit.country,
+    ine_code: edit.ine_code.trim() || null,
+    population,
+    surface_km2: surfaceKm2,
+    density,
+    postal_codes: edit.postal_codes.trim() || null,
+    municipality_type: edit.municipality_type,
+    rural_urban_profile: edit.rural_urban_profile,
+    economic_profile: edit.economic_profile.trim() || null,
+    tourism_profile: edit.tourism_profile.trim() || null,
+    geographic_notes: edit.geographic_notes.trim() || null,
+    administrative_notes: edit.administrative_notes.trim() || null,
+    status: edit.status,
+  };
 }
 
 function buildRoleEditState(roles: Role[]) {
@@ -107,12 +225,15 @@ export function useAdminController({
 }: UseAdminControllerArgs) {
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [municipalities, setMunicipalities] = useState<Municipality[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [isLoadingAdmin, setIsLoadingAdmin] = useState(false);
   const [adminError, setAdminError] = useState("");
 
   const [newOrganizationName, setNewOrganizationName] = useState("");
   const [newOrganizationDescription, setNewOrganizationDescription] =
+    useState("");
+  const [newOrganizationMunicipalityId, setNewOrganizationMunicipalityId] =
     useState("");
   const [newOrganizationStatus, setNewOrganizationStatus] =
     useState<OrganizationStatus>("active");
@@ -136,6 +257,29 @@ export function useAdminController({
     useState("");
   const [isUpdatingOrganizationMembership, setIsUpdatingOrganizationMembership] =
     useState(false);
+
+  const [municipalitySearchText, setMunicipalitySearchText] = useState("");
+  const [municipalityProvinceFilter, setMunicipalityProvinceFilter] =
+    useState("");
+  const [
+    municipalityAutonomousCommunityFilter,
+    setMunicipalityAutonomousCommunityFilter,
+  ] = useState("");
+  const [municipalityStatusFilter, setMunicipalityStatusFilter] = useState("");
+  const [municipalityIncludeArchived, setMunicipalityIncludeArchived] =
+    useState(false);
+  const [newMunicipality, setNewMunicipality] =
+    useState<MunicipalityEditState>(createEmptyMunicipalityForm);
+  const [municipalityFormError, setMunicipalityFormError] = useState("");
+  const [isCreatingMunicipality, setIsCreatingMunicipality] = useState(false);
+  const [municipalityEdits, setMunicipalityEdits] = useState<
+    Record<number, MunicipalityEditState>
+  >({});
+  const [municipalityEditError, setMunicipalityEditError] = useState("");
+  const [municipalityEditMessage, setMunicipalityEditMessage] = useState("");
+  const [updatingMunicipalityId, setUpdatingMunicipalityId] = useState<
+    number | null
+  >(null);
 
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserPassword, setNewUserPassword] = useState("");
@@ -206,16 +350,19 @@ export function useAdminController({
   function clearAdminState() {
     setAdminUsers([]);
     setOrganizations([]);
+    setMunicipalities([]);
     setGroups([]);
     setPermissions([]);
     setRoles([]);
     setUserEdits({});
     setOrganizationEdits({});
+    setMunicipalityEdits({});
     setGroupEdits({});
     setRoleEdits({});
     setAdminError("");
     setNewOrganizationName("");
     setNewOrganizationDescription("");
+    setNewOrganizationMunicipalityId("");
     setNewOrganizationStatus("active");
     setOrganizationFormError("");
     setOrganizationEditError("");
@@ -226,6 +373,17 @@ export function useAdminController({
     setOrganizationMembershipError("");
     setOrganizationMembershipMessage("");
     setIsUpdatingOrganizationMembership(false);
+    setMunicipalitySearchText("");
+    setMunicipalityProvinceFilter("");
+    setMunicipalityAutonomousCommunityFilter("");
+    setMunicipalityStatusFilter("");
+    setMunicipalityIncludeArchived(false);
+    setNewMunicipality(createEmptyMunicipalityForm());
+    setMunicipalityFormError("");
+    setIsCreatingMunicipality(false);
+    setMunicipalityEditError("");
+    setMunicipalityEditMessage("");
+    setUpdatingMunicipalityId(null);
     setUserFormError("");
     setUserEditError("");
     setUserEditMessage("");
@@ -280,9 +438,13 @@ export function useAdminController({
         canUsePermission("roles.manage") ||
         canUsePermission("projects.manage_members");
       const canLoadRbac = canUsePermission("roles.manage");
+      const canLoadMunicipalities =
+        canUsePermission("municipalities.view") ||
+        canUsePermission("municipalities.manage");
 
       const [
         organizationsData,
+        municipalitiesData,
         usersData,
         groupsData,
         permissionsData,
@@ -293,6 +455,13 @@ export function useAdminController({
               "/organizations",
               token,
               "No se pudo cargar la lista de organizaciones.",
+            )
+          : Promise.resolve([]),
+        canLoadMunicipalities
+          ? adminRequest<Municipality[]>(
+              "/municipalities?include_archived=true",
+              token,
+              "No se pudo cargar la lista de municipios.",
             )
           : Promise.resolve([]),
         canLoadUsers
@@ -326,15 +495,27 @@ export function useAdminController({
       ]);
 
       setOrganizations(organizationsData);
+      setMunicipalities(municipalitiesData);
       setAdminUsers(usersData);
       setGroups(groupsData);
       setPermissions(permissionsData);
       setRoles(rolesData);
       setOrganizationEdits(buildOrganizationEditState(organizationsData));
+      setMunicipalityEdits(buildMunicipalityEditState(municipalitiesData));
       setUserEdits(buildUserEditState(usersData));
       setGroupEdits(buildGroupEditState(groupsData));
       setRoleEdits(buildRoleEditState(rolesData));
 
+      if (
+        newOrganizationMunicipalityId &&
+        !municipalitiesData.some(
+          (municipality) =>
+            municipality.status === "active" &&
+            String(municipality.id) === newOrganizationMunicipalityId,
+        )
+      ) {
+        setNewOrganizationMunicipalityId("");
+      }
       if (
         newGroupOrganizationId &&
         !organizationsData.some(
@@ -455,6 +636,33 @@ export function useAdminController({
     });
   }
 
+  function updateNewMunicipality(updates: Partial<MunicipalityEditState>) {
+    setNewMunicipality((currentMunicipality) => ({
+      ...currentMunicipality,
+      ...updates,
+    }));
+  }
+
+  function updateMunicipalityEdit(
+    municipalityId: number,
+    updates: Partial<MunicipalityEditState>,
+  ) {
+    setMunicipalityEdits((currentEdits) => {
+      const currentEdit = currentEdits[municipalityId];
+      if (!currentEdit) {
+        return currentEdits;
+      }
+
+      return {
+        ...currentEdits,
+        [municipalityId]: {
+          ...currentEdit,
+          ...updates,
+        },
+      };
+    });
+  }
+
   function updateGroupEdit(groupId: number, updates: Partial<GroupEditState>) {
     setGroupEdits((currentEdits) => {
       const currentEdit = currentEdits[groupId];
@@ -493,6 +701,7 @@ export function useAdminController({
     event.preventDefault();
     setOrganizationFormError("");
     setIsCreatingOrganization(true);
+    const municipalityId = parseOptionalId(newOrganizationMunicipalityId);
 
     try {
       const token = getStoredToken();
@@ -505,6 +714,7 @@ export function useAdminController({
           body: JSON.stringify({
             name: newOrganizationName,
             description: newOrganizationDescription.trim() || null,
+            municipality_id: municipalityId,
             status: newOrganizationStatus,
           }),
         },
@@ -512,6 +722,7 @@ export function useAdminController({
 
       setNewOrganizationName("");
       setNewOrganizationDescription("");
+      setNewOrganizationMunicipalityId("");
       setNewOrganizationStatus("active");
       await loadAdminData();
     } catch (createError) {
@@ -556,6 +767,7 @@ export function useAdminController({
           body: JSON.stringify({
             name,
             description: edit.description.trim() || null,
+            municipality_id: parseOptionalId(edit.municipality_id),
             status: edit.status,
           }),
         },
@@ -572,6 +784,115 @@ export function useAdminController({
       );
     } finally {
       setUpdatingOrganizationId(null);
+    }
+  }
+
+  async function handleCreateMunicipality(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMunicipalityFormError("");
+    setIsCreatingMunicipality(true);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Municipality>(
+        "/municipalities",
+        token,
+        "No se pudo crear el municipio.",
+        {
+          method: "POST",
+          body: JSON.stringify(buildMunicipalityPayload(newMunicipality)),
+        },
+      );
+
+      setNewMunicipality(createEmptyMunicipalityForm());
+      await loadAdminData();
+    } catch (createError) {
+      handleRequestError(
+        createError,
+        setMunicipalityFormError,
+        "No se pudo crear el municipio.",
+      );
+    } finally {
+      setIsCreatingMunicipality(false);
+    }
+  }
+
+  async function handleUpdateMunicipality(municipalityId: number) {
+    const edit = municipalityEdits[municipalityId];
+    if (!edit) {
+      setMunicipalityEditError("No se pudo encontrar el municipio para editar.");
+      return;
+    }
+
+    setMunicipalityEditError("");
+    setMunicipalityEditMessage("");
+    setUpdatingMunicipalityId(municipalityId);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Municipality>(
+        `/municipalities/${municipalityId}`,
+        token,
+        "No se pudo actualizar el municipio.",
+        {
+          method: "PATCH",
+          body: JSON.stringify(buildMunicipalityPayload(edit)),
+        },
+      );
+
+      setMunicipalityEditMessage("Municipio actualizado.");
+      await loadAdminData();
+    } catch (updateError) {
+      handleRequestError(
+        updateError,
+        setMunicipalityEditError,
+        "No se pudo actualizar el municipio.",
+      );
+    } finally {
+      setUpdatingMunicipalityId(null);
+    }
+  }
+
+  async function handleArchiveMunicipality(municipality: Municipality) {
+    setMunicipalityEditError("");
+    setMunicipalityEditMessage("");
+
+    if (municipality.status === "archived") {
+      setMunicipalityEditError("El municipio ya está archivado.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `¿Archivar el municipio ${municipality.name}? No se eliminará definitivamente.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setUpdatingMunicipalityId(municipality.id);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Municipality>(
+        `/municipalities/${municipality.id}`,
+        token,
+        "No se pudo archivar el municipio.",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: "archived" }),
+        },
+      );
+
+      setMunicipalityEditMessage("Municipio archivado.");
+      await loadAdminData();
+    } catch (archiveError) {
+      handleRequestError(
+        archiveError,
+        setMunicipalityEditError,
+        "No se pudo archivar el municipio.",
+      );
+    } finally {
+      setUpdatingMunicipalityId(null);
     }
   }
 
@@ -1189,6 +1510,7 @@ export function useAdminController({
   return {
     adminUsers,
     organizations,
+    municipalities,
     groups,
     permissions,
     roles,
@@ -1201,6 +1523,7 @@ export function useAdminController({
     newUserIsSuperuser,
     newOrganizationName,
     newOrganizationDescription,
+    newOrganizationMunicipalityId,
     newOrganizationStatus,
     organizationFormError,
     isCreatingOrganization,
@@ -1213,6 +1536,18 @@ export function useAdminController({
     organizationMembershipError,
     organizationMembershipMessage,
     isUpdatingOrganizationMembership,
+    municipalitySearchText,
+    municipalityProvinceFilter,
+    municipalityAutonomousCommunityFilter,
+    municipalityStatusFilter,
+    municipalityIncludeArchived,
+    newMunicipality,
+    municipalityFormError,
+    isCreatingMunicipality,
+    municipalityEdits,
+    municipalityEditError,
+    municipalityEditMessage,
+    updatingMunicipalityId,
     userFormError,
     isCreatingUser,
     userEdits,
@@ -1264,9 +1599,15 @@ export function useAdminController({
     setNewUserIsSuperuser,
     setNewOrganizationName,
     setNewOrganizationDescription,
+    setNewOrganizationMunicipalityId,
     setNewOrganizationStatus,
     setOrganizationMembershipOrganizationId,
     setOrganizationMembershipUserId,
+    setMunicipalitySearchText,
+    setMunicipalityProvinceFilter,
+    setMunicipalityAutonomousCommunityFilter,
+    setMunicipalityStatusFilter,
+    setMunicipalityIncludeArchived,
     setNewGroupName,
     setNewGroupDescription,
     setNewGroupOrganizationId,
@@ -1282,6 +1623,8 @@ export function useAdminController({
     loadAdminData,
     updateUserEdit,
     updateOrganizationEdit,
+    updateNewMunicipality,
+    updateMunicipalityEdit,
     updateGroupEdit,
     updateRoleEdit,
     handleCreateUser,
@@ -1289,6 +1632,9 @@ export function useAdminController({
     handleDeleteUser,
     handleCreateOrganization,
     handleUpdateOrganization,
+    handleCreateMunicipality,
+    handleUpdateMunicipality,
+    handleArchiveMunicipality,
     updateOrganizationMembership,
     handleCreateGroup,
     handleUpdateGroup,

@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.municipalities.schemas import MunicipalitySummary
+
 OrganizationStatus = Literal["active", "paused", "archived"]
 
 
@@ -28,6 +30,8 @@ class OrganizationRead(BaseModel):
     id: int
     name: str
     description: str | None
+    municipality_id: int | None
+    municipality: MunicipalitySummary | None
     status: OrganizationStatus
     users: list[OrganizationUserSummary]
     created_at: datetime
@@ -39,6 +43,7 @@ class OrganizationRead(BaseModel):
 class OrganizationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=1000)
+    municipality_id: int | None = None
     status: OrganizationStatus = "active"
 
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -47,6 +52,7 @@ class OrganizationCreate(BaseModel):
 class OrganizationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=1000)
+    municipality_id: int | None = None
     status: OrganizationStatus | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)

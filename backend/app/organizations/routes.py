@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
+from app.municipalities.models import Municipality
 from app.organizations.access import get_accessible_organizations_query
 from app.organizations.models import Organization, organization_users
 from app.organizations.schemas import (
@@ -28,7 +29,8 @@ def list_organizations(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> list[Organization]:
     query = get_accessible_organizations_query(current_user).options(
-        selectinload(Organization.users)
+        selectinload(Organization.users),
+        selectinload(Organization.municipality),
     )
     return list(db.scalars(query))
 
@@ -44,10 +46,12 @@ def create_organization(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Organization:
     require_organizations_manage(db, current_user)
+    ensure_municipality_can_be_linked(db, payload.municipality_id)
 
     organization = Organization(
         name=payload.name,
         description=payload.description,
+        municipality_id=payload.municipality_id,
         status=payload.status,
     )
     db.add(organization)
@@ -93,6 +97,11 @@ def update_organization(
     require_organizations_manage(db, current_user, organization_id=organization.id)
 
     updates = payload.model_dump(exclude_unset=True)
+    if (
+        "municipality_id" in updates
+        and updates["municipality_id"] != organization.municipality_id
+    ):
+        ensure_municipality_can_be_linked(db, updates["municipality_id"])
     for field, value in updates.items():
         setattr(organization, field, value)
 
@@ -271,7 +280,10 @@ def prevent_organization_lockout(
 def get_existing_organization(db: Session, organization_id: int) -> Organization:
     organization = db.scalar(
         select(Organization)
-        .options(selectinload(Organization.users))
+        .options(
+            selectinload(Organization.users),
+            selectinload(Organization.municipality),
+        )
         .where(Organization.id == organization_id)
     )
     if organization is None:
@@ -281,3 +293,23 @@ def get_existing_organization(db: Session, organization_id: int) -> Organization
         )
 
     return organization
+
+
+def ensure_municipality_can_be_linked(
+    db: Session,
+    municipality_id: int | None,
+) -> None:
+    if municipality_id is None:
+        return
+
+    municipality = db.get(Municipality, municipality_id)
+    if municipality is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Municipality not found",
+        )
+    if municipality.status == "archived":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Municipality is archived",
+        )

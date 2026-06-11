@@ -17,10 +17,52 @@ export type GroupUserSummary = {
 
 export type OrganizationStatus = "active" | "paused" | "archived";
 
+export type MunicipalityStatus = "active" | "archived";
+
+export type MunicipalityType =
+  | "municipality"
+  | "minor_local_entity"
+  | "district"
+  | "other";
+
+export type RuralUrbanProfile =
+  | "rural"
+  | "semi_rural"
+  | "urban"
+  | "mixed"
+  | "unknown";
+
+export type MunicipalitySummary = {
+  id: number;
+  name: string;
+  province: string;
+  autonomous_community: string;
+};
+
+export type Municipality = MunicipalitySummary & {
+  country: string;
+  ine_code: string | null;
+  population: number | null;
+  surface_km2: number | null;
+  density: number | null;
+  postal_codes: string | null;
+  municipality_type: MunicipalityType;
+  rural_urban_profile: RuralUrbanProfile;
+  economic_profile: string | null;
+  tourism_profile: string | null;
+  geographic_notes: string | null;
+  administrative_notes: string | null;
+  status: MunicipalityStatus;
+  created_at: string;
+  updated_at: string;
+};
+
 export type OrganizationSummary = {
   id: number;
   name: string;
   status: OrganizationStatus;
+  municipality_id?: number | null;
+  municipality?: MunicipalitySummary | null;
 };
 
 export type OrganizationUserSummary = {
@@ -33,6 +75,8 @@ export type OrganizationUserSummary = {
 
 export type Organization = OrganizationSummary & {
   description: string | null;
+  municipality_id: number | null;
+  municipality: MunicipalitySummary | null;
   users: OrganizationUserSummary[];
   created_at: string;
   updated_at: string;
@@ -226,7 +270,27 @@ export type GroupEditState = {
 export type OrganizationEditState = {
   name: string;
   description: string;
+  municipality_id: string;
   status: OrganizationStatus;
+};
+
+export type MunicipalityEditState = {
+  name: string;
+  province: string;
+  autonomous_community: string;
+  country: string;
+  ine_code: string;
+  population: string;
+  surface_km2: string;
+  density: string;
+  postal_codes: string;
+  municipality_type: MunicipalityType;
+  rural_urban_profile: RuralUrbanProfile;
+  economic_profile: string;
+  tourism_profile: string;
+  geographic_notes: string;
+  administrative_notes: string;
+  status: MunicipalityStatus;
 };
 
 export type RoleEditState = {
@@ -345,6 +409,26 @@ export const ORGANIZATION_STATUSES: OrganizationStatus[] = [
   "archived",
 ];
 
+export const MUNICIPALITY_STATUSES: MunicipalityStatus[] = [
+  "active",
+  "archived",
+];
+
+export const MUNICIPALITY_TYPES: MunicipalityType[] = [
+  "municipality",
+  "minor_local_entity",
+  "district",
+  "other",
+];
+
+export const RURAL_URBAN_PROFILES: RuralUrbanProfile[] = [
+  "rural",
+  "semi_rural",
+  "urban",
+  "mixed",
+  "unknown",
+];
+
 const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   active: "Activo",
   paused: "Pausado",
@@ -397,12 +481,36 @@ const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {
   archived: "Archivado",
 };
 
+const MUNICIPALITY_STATUS_LABELS: Record<MunicipalityStatus, string> = {
+  active: "Activo",
+  archived: "Archivado",
+};
+
+const MUNICIPALITY_TYPE_LABELS: Record<MunicipalityType, string> = {
+  municipality: "Municipio",
+  minor_local_entity: "Entidad local menor",
+  district: "Distrito",
+  other: "Otro",
+};
+
+const RURAL_URBAN_PROFILE_LABELS: Record<RuralUrbanProfile, string> = {
+  rural: "Rural",
+  semi_rural: "Semirrural",
+  urban: "Urbano",
+  mixed: "Mixto",
+  unknown: "Desconocido",
+};
+
 export function formatUserOption(adminUser: User) {
   return `${adminUser.full_name} (${adminUser.email})`;
 }
 
 export function formatOrganizationOption(organization: OrganizationSummary) {
   return `${organization.name} (${formatOrganizationStatus(organization.status)})`;
+}
+
+export function formatMunicipalityOption(municipality: MunicipalitySummary) {
+  return `${municipality.name} - ${municipality.province}`;
 }
 
 export function formatProjectStatus(status: ProjectStatus) {
@@ -445,6 +553,18 @@ export function formatFileSize(sizeBytes: number) {
 
 export function formatOrganizationStatus(status: OrganizationStatus) {
   return ORGANIZATION_STATUS_LABELS[status];
+}
+
+export function formatMunicipalityStatus(status: MunicipalityStatus) {
+  return MUNICIPALITY_STATUS_LABELS[status];
+}
+
+export function formatMunicipalityType(municipalityType: MunicipalityType) {
+  return MUNICIPALITY_TYPE_LABELS[municipalityType];
+}
+
+export function formatRuralUrbanProfile(profile: RuralUrbanProfile) {
+  return RURAL_URBAN_PROFILE_LABELS[profile];
 }
 
 export function userHasPermission(user: User, permissionCode: string) {

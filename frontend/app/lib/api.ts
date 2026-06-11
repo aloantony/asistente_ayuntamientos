@@ -73,6 +73,12 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró la organización indicada.";
     case "Organization access denied":
       return "No tienes acceso a esa organización.";
+    case "Municipality not found":
+      return "No se encontró el municipio indicado.";
+    case "Municipality already exists":
+      return "Ya existe un municipio con ese código INE.";
+    case "Municipality is archived":
+      return "No se puede vincular una organización a un municipio archivado.";
     case "User does not belong to the group organization":
       return "El usuario no pertenece a la organización del grupo.";
     case "User does not belong to the project organization":

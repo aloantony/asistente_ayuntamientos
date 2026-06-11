@@ -21,6 +21,11 @@ const ADMIN_DATA_PERMISSIONS = [
   "organizations.manage",
   "roles.manage",
   "projects.manage_members",
+  "municipalities.view",
+  "municipalities.create",
+  "municipalities.edit",
+  "municipalities.archive",
+  "municipalities.manage",
 ];
 
 const ADMIN_PANEL_PERMISSIONS = [
@@ -28,6 +33,11 @@ const ADMIN_PANEL_PERMISSIONS = [
   "groups.manage",
   "organizations.manage",
   "roles.manage",
+  "municipalities.view",
+  "municipalities.create",
+  "municipalities.edit",
+  "municipalities.archive",
+  "municipalities.manage",
 ];
 
 const REQUIREMENT_PERMISSIONS = [
@@ -404,6 +414,7 @@ export function useHomeController() {
           currentUser: user,
           adminUsers: adminController.adminUsers,
           organizations: adminController.organizations,
+          municipalities: adminController.municipalities,
           groups: adminController.groups,
           permissions: adminController.permissions,
           roles: adminController.roles,
@@ -417,6 +428,8 @@ export function useHomeController() {
           newOrganizationName: adminController.newOrganizationName,
           newOrganizationDescription:
             adminController.newOrganizationDescription,
+          newOrganizationMunicipalityId:
+            adminController.newOrganizationMunicipalityId,
           newOrganizationStatus: adminController.newOrganizationStatus,
           organizationFormError: adminController.organizationFormError,
           isCreatingOrganization: adminController.isCreatingOrganization,
@@ -434,6 +447,22 @@ export function useHomeController() {
             adminController.organizationMembershipMessage,
           isUpdatingOrganizationMembership:
             adminController.isUpdatingOrganizationMembership,
+          municipalitySearchText: adminController.municipalitySearchText,
+          municipalityProvinceFilter:
+            adminController.municipalityProvinceFilter,
+          municipalityAutonomousCommunityFilter:
+            adminController.municipalityAutonomousCommunityFilter,
+          municipalityStatusFilter:
+            adminController.municipalityStatusFilter,
+          municipalityIncludeArchived:
+            adminController.municipalityIncludeArchived,
+          newMunicipality: adminController.newMunicipality,
+          municipalityFormError: adminController.municipalityFormError,
+          isCreatingMunicipality: adminController.isCreatingMunicipality,
+          municipalityEdits: adminController.municipalityEdits,
+          municipalityEditError: adminController.municipalityEditError,
+          municipalityEditMessage: adminController.municipalityEditMessage,
+          updatingMunicipalityId: adminController.updatingMunicipalityId,
           userFormError: adminController.userFormError,
           isCreatingUser: adminController.isCreatingUser,
           userEdits: adminController.userEdits,
@@ -494,6 +523,8 @@ export function useHomeController() {
             adminController.setNewOrganizationName,
           onNewOrganizationDescriptionChange:
             adminController.setNewOrganizationDescription,
+          onNewOrganizationMunicipalityIdChange:
+            adminController.setNewOrganizationMunicipalityId,
           onNewOrganizationStatusChange:
             adminController.setNewOrganizationStatus,
           onCreateOrganization: adminController.handleCreateOrganization,
@@ -505,6 +536,23 @@ export function useHomeController() {
             adminController.setOrganizationMembershipUserId,
           onUpdateOrganizationMembership:
             adminController.updateOrganizationMembership,
+          onMunicipalitySearchTextChange:
+            adminController.setMunicipalitySearchText,
+          onMunicipalityProvinceFilterChange:
+            adminController.setMunicipalityProvinceFilter,
+          onMunicipalityAutonomousCommunityFilterChange:
+            adminController.setMunicipalityAutonomousCommunityFilter,
+          onMunicipalityStatusFilterChange:
+            adminController.setMunicipalityStatusFilter,
+          onMunicipalityIncludeArchivedChange:
+            adminController.setMunicipalityIncludeArchived,
+          onUpdateNewMunicipality: adminController.updateNewMunicipality,
+          onCreateMunicipality: adminController.handleCreateMunicipality,
+          onUpdateMunicipalityEdit:
+            adminController.updateMunicipalityEdit,
+          onUpdateMunicipality: adminController.handleUpdateMunicipality,
+          onArchiveMunicipality:
+            adminController.handleArchiveMunicipality,
           onCreateUser: adminController.handleCreateUser,
           onUpdateUserEdit: adminController.updateUserEdit,
           onUpdateUser: adminController.handleUpdateUser,

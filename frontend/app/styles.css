@@ -364,6 +364,17 @@ tr:last-child td {
   gap: 16px;
 }
 
+.municipality-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(160px, 1fr));
+  gap: 16px;
+  align-items: end;
+}
+
+.municipalities-archive-toggle {
+  min-height: 48px;
+}
+
 .form-grid label:first-child:last-child {
   grid-column: 1 / -1;
 }
@@ -651,6 +662,7 @@ tr:last-child td {
     max-width: none;
   }
 
+  .municipality-filters,
   .requirement-filters,
   .requirements-layout {
     grid-template-columns: 1fr;
