@@ -36,6 +36,11 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "municipalities.edit": "Editar municipios",
     "municipalities.archive": "Archivar municipios",
     "municipalities.manage": "Gestionar municipios",
+    "ordinances.view": "Ver ordenanzas",
+    "ordinances.create": "Crear ordenanzas",
+    "ordinances.edit": "Editar ordenanzas",
+    "ordinances.archive": "Archivar ordenanzas",
+    "ordinances.manage": "Gestionar ordenanzas",
 }
 
 INITIAL_PERMISSION_CODES = tuple(INITIAL_PERMISSION_DEFINITIONS.keys())

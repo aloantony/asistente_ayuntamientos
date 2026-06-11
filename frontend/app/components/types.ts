@@ -19,6 +19,22 @@ export type OrganizationStatus = "active" | "paused" | "archived";
 
 export type MunicipalityStatus = "active" | "archived";
 
+export type OrdinanceType =
+  | "ordinance"
+  | "regulation"
+  | "bylaw"
+  | "tax_ordinance"
+  | "urban_planning"
+  | "other";
+
+export type OrdinanceStatus =
+  | "active"
+  | "repealed"
+  | "partially_repealed"
+  | "superseded"
+  | "unknown"
+  | "archived";
+
 export type MunicipalityType =
   | "municipality"
   | "minor_local_entity"
@@ -53,6 +69,41 @@ export type Municipality = MunicipalitySummary & {
   geographic_notes: string | null;
   administrative_notes: string | null;
   status: MunicipalityStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OrdinanceDocumentSummary = {
+  id: number;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+  status: DocumentStatus;
+};
+
+export type Ordinance = {
+  id: number;
+  municipality_id: number;
+  document_id: number | null;
+  title: string;
+  topic: string;
+  subtopic: string | null;
+  ordinance_type: OrdinanceType;
+  summary: string | null;
+  source_url: string | null;
+  official_bulletin: string | null;
+  bulletin_number: string | null;
+  approval_date: string | null;
+  publication_date: string | null;
+  effective_date: string | null;
+  status: OrdinanceStatus;
+  text_content: string | null;
+  notes: string | null;
+  legal_review_notes: string | null;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  municipality: MunicipalitySummary;
+  document?: OrdinanceDocumentSummary | null;
   created_at: string;
   updated_at: string;
 };
@@ -293,6 +344,26 @@ export type MunicipalityEditState = {
   status: MunicipalityStatus;
 };
 
+export type OrdinanceEditState = {
+  municipality_id: string;
+  document_id: string;
+  title: string;
+  topic: string;
+  subtopic: string;
+  ordinance_type: OrdinanceType;
+  summary: string;
+  source_url: string;
+  official_bulletin: string;
+  bulletin_number: string;
+  approval_date: string;
+  publication_date: string;
+  effective_date: string;
+  status: OrdinanceStatus;
+  text_content: string;
+  notes: string;
+  legal_review_notes: string;
+};
+
 export type RoleEditState = {
   name: string;
   description: string;
@@ -414,6 +485,24 @@ export const MUNICIPALITY_STATUSES: MunicipalityStatus[] = [
   "archived",
 ];
 
+export const ORDINANCE_TYPES: OrdinanceType[] = [
+  "ordinance",
+  "regulation",
+  "bylaw",
+  "tax_ordinance",
+  "urban_planning",
+  "other",
+];
+
+export const ORDINANCE_STATUSES: OrdinanceStatus[] = [
+  "active",
+  "repealed",
+  "partially_repealed",
+  "superseded",
+  "unknown",
+  "archived",
+];
+
 export const MUNICIPALITY_TYPES: MunicipalityType[] = [
   "municipality",
   "minor_local_entity",
@@ -484,6 +573,24 @@ const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {
 const MUNICIPALITY_STATUS_LABELS: Record<MunicipalityStatus, string> = {
   active: "Activo",
   archived: "Archivado",
+};
+
+const ORDINANCE_TYPE_LABELS: Record<OrdinanceType, string> = {
+  ordinance: "Ordenanza",
+  regulation: "Reglamento",
+  bylaw: "Bando",
+  tax_ordinance: "Ordenanza fiscal",
+  urban_planning: "Urbanismo",
+  other: "Otra",
+};
+
+const ORDINANCE_STATUS_LABELS: Record<OrdinanceStatus, string> = {
+  active: "Activa",
+  repealed: "Derogada",
+  partially_repealed: "Parcialmente derogada",
+  superseded: "Sustituida",
+  unknown: "Desconocida",
+  archived: "Archivada",
 };
 
 const MUNICIPALITY_TYPE_LABELS: Record<MunicipalityType, string> = {
@@ -557,6 +664,14 @@ export function formatOrganizationStatus(status: OrganizationStatus) {
 
 export function formatMunicipalityStatus(status: MunicipalityStatus) {
   return MUNICIPALITY_STATUS_LABELS[status];
+}
+
+export function formatOrdinanceType(ordinanceType: OrdinanceType) {
+  return ORDINANCE_TYPE_LABELS[ordinanceType];
+}
+
+export function formatOrdinanceStatus(status: OrdinanceStatus) {
+  return ORDINANCE_STATUS_LABELS[status];
 }
 
 export function formatMunicipalityType(municipalityType: MunicipalityType) {

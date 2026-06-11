@@ -7,6 +7,10 @@ import {
   OrganizationsAdmin,
   type OrganizationsAdminProps,
 } from "./OrganizationsAdmin";
+import {
+  OrdinancesAdmin,
+  type OrdinancesAdminProps,
+} from "./OrdinancesAdmin";
 import { RbacAdmin, type RbacAdminProps } from "./RbacAdmin";
 import { UsersAdmin, type UsersAdminProps } from "./UsersAdmin";
 import {
@@ -19,6 +23,7 @@ import {
 type AdminPanelProps = UsersAdminProps &
   OrganizationsAdminProps &
   MunicipalitiesAdminProps &
+  OrdinancesAdminProps &
   RbacAdminProps &
   GroupsAdminProps & {
     adminError: string;
@@ -64,6 +69,13 @@ export function AdminPanel(props: AdminPanelProps) {
     "municipalities.archive",
     "municipalities.manage",
   ].some((permissionCode) => userHasPermission(currentUser, permissionCode));
+  const canUseOrdinances = [
+    "ordinances.view",
+    "ordinances.create",
+    "ordinances.edit",
+    "ordinances.archive",
+    "ordinances.manage",
+  ].some((permissionCode) => userHasPermission(currentUser, permissionCode));
 
   return (
     <section className="panel admin-panel">
@@ -85,6 +97,7 @@ export function AdminPanel(props: AdminPanelProps) {
       {adminError ? <p className="error-message">{adminError}</p> : null}
 
       {canUseMunicipalities ? <MunicipalitiesAdmin {...props} /> : null}
+      {canUseOrdinances ? <OrdinancesAdmin {...props} /> : null}
       {canManageOrganizations ? <OrganizationsAdmin {...props} /> : null}
       {canManageUsers ? <UsersAdmin {...props} /> : null}
       {canManageGroups ? <GroupsAdmin {...props} /> : null}

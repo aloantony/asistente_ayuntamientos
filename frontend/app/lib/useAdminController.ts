@@ -15,6 +15,8 @@ import type {
   MembershipResponse,
   Municipality,
   MunicipalityEditState,
+  Ordinance,
+  OrdinanceEditState,
   Organization,
   OrganizationEditState,
   OrganizationMembershipResponse,
@@ -144,6 +146,59 @@ function buildMunicipalityEditState(municipalities: Municipality[]) {
   );
 }
 
+const EMPTY_ORDINANCE_FORM: OrdinanceEditState = {
+  municipality_id: "",
+  document_id: "",
+  title: "",
+  topic: "",
+  subtopic: "",
+  ordinance_type: "ordinance",
+  summary: "",
+  source_url: "",
+  official_bulletin: "",
+  bulletin_number: "",
+  approval_date: "",
+  publication_date: "",
+  effective_date: "",
+  status: "unknown",
+  text_content: "",
+  notes: "",
+  legal_review_notes: "",
+};
+
+function createEmptyOrdinanceForm(): OrdinanceEditState {
+  return { ...EMPTY_ORDINANCE_FORM };
+}
+
+function buildOrdinanceEditState(ordinances: Ordinance[]) {
+  return ordinances.reduce<Record<number, OrdinanceEditState>>(
+    (edits, ordinance) => {
+      edits[ordinance.id] = {
+        municipality_id: String(ordinance.municipality_id),
+        document_id:
+          ordinance.document_id === null ? "" : String(ordinance.document_id),
+        title: ordinance.title,
+        topic: ordinance.topic,
+        subtopic: ordinance.subtopic ?? "",
+        ordinance_type: ordinance.ordinance_type,
+        summary: ordinance.summary ?? "",
+        source_url: ordinance.source_url ?? "",
+        official_bulletin: ordinance.official_bulletin ?? "",
+        bulletin_number: ordinance.bulletin_number ?? "",
+        approval_date: ordinance.approval_date ?? "",
+        publication_date: ordinance.publication_date ?? "",
+        effective_date: ordinance.effective_date ?? "",
+        status: ordinance.status,
+        text_content: ordinance.text_content ?? "",
+        notes: ordinance.notes ?? "",
+        legal_review_notes: ordinance.legal_review_notes ?? "",
+      };
+      return edits;
+    },
+    {},
+  );
+}
+
 function parseOptionalId(value: string) {
   if (!value) {
     return null;
@@ -199,6 +254,37 @@ function buildMunicipalityPayload(edit: MunicipalityEditState) {
     geographic_notes: edit.geographic_notes.trim() || null,
     administrative_notes: edit.administrative_notes.trim() || null,
     status: edit.status,
+  };
+}
+
+function parseRequiredId(value: string, fieldLabel: string) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`Selecciona ${fieldLabel}.`);
+  }
+
+  return parsed;
+}
+
+function buildOrdinancePayload(edit: OrdinanceEditState) {
+  return {
+    municipality_id: parseRequiredId(edit.municipality_id, "un municipio"),
+    document_id: parseOptionalId(edit.document_id),
+    title: edit.title,
+    topic: edit.topic,
+    subtopic: edit.subtopic.trim() || null,
+    ordinance_type: edit.ordinance_type,
+    summary: edit.summary.trim() || null,
+    source_url: edit.source_url.trim() || null,
+    official_bulletin: edit.official_bulletin.trim() || null,
+    bulletin_number: edit.bulletin_number.trim() || null,
+    approval_date: edit.approval_date || null,
+    publication_date: edit.publication_date || null,
+    effective_date: edit.effective_date || null,
+    status: edit.status,
+    text_content: edit.text_content.trim() || null,
+    notes: edit.notes.trim() || null,
+    legal_review_notes: edit.legal_review_notes.trim() || null,
   };
 }
 
@@ -281,6 +367,27 @@ export function useAdminController({
     number | null
   >(null);
 
+  const [ordinances, setOrdinances] = useState<Ordinance[]>([]);
+  const [ordinanceSearchText, setOrdinanceSearchText] = useState("");
+  const [ordinanceMunicipalityFilter, setOrdinanceMunicipalityFilter] =
+    useState("");
+  const [ordinanceTopicFilter, setOrdinanceTopicFilter] = useState("");
+  const [ordinanceStatusFilter, setOrdinanceStatusFilter] = useState("");
+  const [ordinanceIncludeArchived, setOrdinanceIncludeArchived] =
+    useState(false);
+  const [newOrdinance, setNewOrdinance] =
+    useState<OrdinanceEditState>(createEmptyOrdinanceForm);
+  const [ordinanceFormError, setOrdinanceFormError] = useState("");
+  const [isCreatingOrdinance, setIsCreatingOrdinance] = useState(false);
+  const [ordinanceEdits, setOrdinanceEdits] = useState<
+    Record<number, OrdinanceEditState>
+  >({});
+  const [ordinanceEditError, setOrdinanceEditError] = useState("");
+  const [ordinanceEditMessage, setOrdinanceEditMessage] = useState("");
+  const [updatingOrdinanceId, setUpdatingOrdinanceId] = useState<number | null>(
+    null,
+  );
+
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserPassword, setNewUserPassword] = useState("");
   const [newUserFullName, setNewUserFullName] = useState("");
@@ -351,12 +458,14 @@ export function useAdminController({
     setAdminUsers([]);
     setOrganizations([]);
     setMunicipalities([]);
+    setOrdinances([]);
     setGroups([]);
     setPermissions([]);
     setRoles([]);
     setUserEdits({});
     setOrganizationEdits({});
     setMunicipalityEdits({});
+    setOrdinanceEdits({});
     setGroupEdits({});
     setRoleEdits({});
     setAdminError("");
@@ -384,6 +493,17 @@ export function useAdminController({
     setMunicipalityEditError("");
     setMunicipalityEditMessage("");
     setUpdatingMunicipalityId(null);
+    setOrdinanceSearchText("");
+    setOrdinanceMunicipalityFilter("");
+    setOrdinanceTopicFilter("");
+    setOrdinanceStatusFilter("");
+    setOrdinanceIncludeArchived(false);
+    setNewOrdinance(createEmptyOrdinanceForm());
+    setOrdinanceFormError("");
+    setIsCreatingOrdinance(false);
+    setOrdinanceEditError("");
+    setOrdinanceEditMessage("");
+    setUpdatingOrdinanceId(null);
     setUserFormError("");
     setUserEditError("");
     setUserEditMessage("");
@@ -441,10 +561,14 @@ export function useAdminController({
       const canLoadMunicipalities =
         canUsePermission("municipalities.view") ||
         canUsePermission("municipalities.manage");
+      const canLoadOrdinances =
+        canUsePermission("ordinances.view") ||
+        canUsePermission("ordinances.manage");
 
       const [
         organizationsData,
         municipalitiesData,
+        ordinancesData,
         usersData,
         groupsData,
         permissionsData,
@@ -462,6 +586,13 @@ export function useAdminController({
               "/municipalities?include_archived=true",
               token,
               "No se pudo cargar la lista de municipios.",
+            )
+          : Promise.resolve([]),
+        canLoadOrdinances
+          ? adminRequest<Ordinance[]>(
+              "/ordinances?include_archived=true",
+              token,
+              "No se pudo cargar la lista de ordenanzas.",
             )
           : Promise.resolve([]),
         canLoadUsers
@@ -496,12 +627,14 @@ export function useAdminController({
 
       setOrganizations(organizationsData);
       setMunicipalities(municipalitiesData);
+      setOrdinances(ordinancesData);
       setAdminUsers(usersData);
       setGroups(groupsData);
       setPermissions(permissionsData);
       setRoles(rolesData);
       setOrganizationEdits(buildOrganizationEditState(organizationsData));
       setMunicipalityEdits(buildMunicipalityEditState(municipalitiesData));
+      setOrdinanceEdits(buildOrdinanceEditState(ordinancesData));
       setUserEdits(buildUserEditState(usersData));
       setGroupEdits(buildGroupEditState(groupsData));
       setRoleEdits(buildRoleEditState(rolesData));
@@ -515,6 +648,29 @@ export function useAdminController({
         )
       ) {
         setNewOrganizationMunicipalityId("");
+      }
+      if (
+        newOrdinance.municipality_id &&
+        municipalitiesData.length > 0 &&
+        !municipalitiesData.some(
+          (municipality) =>
+            municipality.status === "active" &&
+            String(municipality.id) === newOrdinance.municipality_id,
+        )
+      ) {
+        setNewOrdinance((currentOrdinance) => ({
+          ...currentOrdinance,
+          municipality_id: "",
+        }));
+      }
+      if (
+        ordinanceMunicipalityFilter &&
+        !ordinancesData.some(
+          (ordinance) =>
+            String(ordinance.municipality_id) === ordinanceMunicipalityFilter,
+        )
+      ) {
+        setOrdinanceMunicipalityFilter("");
       }
       if (
         newGroupOrganizationId &&
@@ -656,6 +812,33 @@ export function useAdminController({
       return {
         ...currentEdits,
         [municipalityId]: {
+          ...currentEdit,
+          ...updates,
+        },
+      };
+    });
+  }
+
+  function updateNewOrdinance(updates: Partial<OrdinanceEditState>) {
+    setNewOrdinance((currentOrdinance) => ({
+      ...currentOrdinance,
+      ...updates,
+    }));
+  }
+
+  function updateOrdinanceEdit(
+    ordinanceId: number,
+    updates: Partial<OrdinanceEditState>,
+  ) {
+    setOrdinanceEdits((currentEdits) => {
+      const currentEdit = currentEdits[ordinanceId];
+      if (!currentEdit) {
+        return currentEdits;
+      }
+
+      return {
+        ...currentEdits,
+        [ordinanceId]: {
           ...currentEdit,
           ...updates,
         },
@@ -893,6 +1076,115 @@ export function useAdminController({
       );
     } finally {
       setUpdatingMunicipalityId(null);
+    }
+  }
+
+  async function handleCreateOrdinance(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setOrdinanceFormError("");
+    setIsCreatingOrdinance(true);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Ordinance>(
+        "/ordinances",
+        token,
+        "No se pudo crear la ordenanza.",
+        {
+          method: "POST",
+          body: JSON.stringify(buildOrdinancePayload(newOrdinance)),
+        },
+      );
+
+      setNewOrdinance(createEmptyOrdinanceForm());
+      await loadAdminData();
+    } catch (createError) {
+      handleRequestError(
+        createError,
+        setOrdinanceFormError,
+        "No se pudo crear la ordenanza.",
+      );
+    } finally {
+      setIsCreatingOrdinance(false);
+    }
+  }
+
+  async function handleUpdateOrdinance(ordinanceId: number) {
+    const edit = ordinanceEdits[ordinanceId];
+    if (!edit) {
+      setOrdinanceEditError("No se pudo encontrar la ordenanza para editar.");
+      return;
+    }
+
+    setOrdinanceEditError("");
+    setOrdinanceEditMessage("");
+    setUpdatingOrdinanceId(ordinanceId);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Ordinance>(
+        `/ordinances/${ordinanceId}`,
+        token,
+        "No se pudo actualizar la ordenanza.",
+        {
+          method: "PATCH",
+          body: JSON.stringify(buildOrdinancePayload(edit)),
+        },
+      );
+
+      setOrdinanceEditMessage("Ordenanza actualizada.");
+      await loadAdminData();
+    } catch (updateError) {
+      handleRequestError(
+        updateError,
+        setOrdinanceEditError,
+        "No se pudo actualizar la ordenanza.",
+      );
+    } finally {
+      setUpdatingOrdinanceId(null);
+    }
+  }
+
+  async function handleArchiveOrdinance(ordinance: Ordinance) {
+    setOrdinanceEditError("");
+    setOrdinanceEditMessage("");
+
+    if (ordinance.status === "archived") {
+      setOrdinanceEditError("La ordenanza ya está archivada.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `¿Archivar la ordenanza ${ordinance.title}? No se eliminará definitivamente.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setUpdatingOrdinanceId(ordinance.id);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<Ordinance>(
+        `/ordinances/${ordinance.id}`,
+        token,
+        "No se pudo archivar la ordenanza.",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: "archived" }),
+        },
+      );
+
+      setOrdinanceEditMessage("Ordenanza archivada.");
+      await loadAdminData();
+    } catch (archiveError) {
+      handleRequestError(
+        archiveError,
+        setOrdinanceEditError,
+        "No se pudo archivar la ordenanza.",
+      );
+    } finally {
+      setUpdatingOrdinanceId(null);
     }
   }
 
@@ -1548,6 +1840,19 @@ export function useAdminController({
     municipalityEditError,
     municipalityEditMessage,
     updatingMunicipalityId,
+    ordinances,
+    ordinanceSearchText,
+    ordinanceMunicipalityFilter,
+    ordinanceTopicFilter,
+    ordinanceStatusFilter,
+    ordinanceIncludeArchived,
+    newOrdinance,
+    ordinanceFormError,
+    isCreatingOrdinance,
+    ordinanceEdits,
+    ordinanceEditError,
+    ordinanceEditMessage,
+    updatingOrdinanceId,
     userFormError,
     isCreatingUser,
     userEdits,
@@ -1608,6 +1913,11 @@ export function useAdminController({
     setMunicipalityAutonomousCommunityFilter,
     setMunicipalityStatusFilter,
     setMunicipalityIncludeArchived,
+    setOrdinanceSearchText,
+    setOrdinanceMunicipalityFilter,
+    setOrdinanceTopicFilter,
+    setOrdinanceStatusFilter,
+    setOrdinanceIncludeArchived,
     setNewGroupName,
     setNewGroupDescription,
     setNewGroupOrganizationId,
@@ -1625,6 +1935,8 @@ export function useAdminController({
     updateOrganizationEdit,
     updateNewMunicipality,
     updateMunicipalityEdit,
+    updateNewOrdinance,
+    updateOrdinanceEdit,
     updateGroupEdit,
     updateRoleEdit,
     handleCreateUser,
@@ -1635,6 +1947,9 @@ export function useAdminController({
     handleCreateMunicipality,
     handleUpdateMunicipality,
     handleArchiveMunicipality,
+    handleCreateOrdinance,
+    handleUpdateOrdinance,
+    handleArchiveOrdinance,
     updateOrganizationMembership,
     handleCreateGroup,
     handleUpdateGroup,

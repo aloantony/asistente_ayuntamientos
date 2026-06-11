@@ -371,7 +371,18 @@ tr:last-child td {
   align-items: end;
 }
 
+.ordinance-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(160px, 1fr));
+  gap: 16px;
+  align-items: end;
+}
+
 .municipalities-archive-toggle {
+  min-height: 48px;
+}
+
+.ordinances-archive-toggle {
   min-height: 48px;
 }
 
@@ -663,6 +674,7 @@ tr:last-child td {
   }
 
   .municipality-filters,
+  .ordinance-filters,
   .requirement-filters,
   .requirements-layout {
     grid-template-columns: 1fr;

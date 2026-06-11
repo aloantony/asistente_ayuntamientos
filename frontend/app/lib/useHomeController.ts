@@ -26,6 +26,11 @@ const ADMIN_DATA_PERMISSIONS = [
   "municipalities.edit",
   "municipalities.archive",
   "municipalities.manage",
+  "ordinances.view",
+  "ordinances.create",
+  "ordinances.edit",
+  "ordinances.archive",
+  "ordinances.manage",
 ];
 
 const ADMIN_PANEL_PERMISSIONS = [
@@ -38,6 +43,11 @@ const ADMIN_PANEL_PERMISSIONS = [
   "municipalities.edit",
   "municipalities.archive",
   "municipalities.manage",
+  "ordinances.view",
+  "ordinances.create",
+  "ordinances.edit",
+  "ordinances.archive",
+  "ordinances.manage",
 ];
 
 const REQUIREMENT_PERMISSIONS = [
@@ -463,6 +473,21 @@ export function useHomeController() {
           municipalityEditError: adminController.municipalityEditError,
           municipalityEditMessage: adminController.municipalityEditMessage,
           updatingMunicipalityId: adminController.updatingMunicipalityId,
+          ordinances: adminController.ordinances,
+          ordinanceSearchText: adminController.ordinanceSearchText,
+          ordinanceMunicipalityFilter:
+            adminController.ordinanceMunicipalityFilter,
+          ordinanceTopicFilter: adminController.ordinanceTopicFilter,
+          ordinanceStatusFilter: adminController.ordinanceStatusFilter,
+          ordinanceIncludeArchived:
+            adminController.ordinanceIncludeArchived,
+          newOrdinance: adminController.newOrdinance,
+          ordinanceFormError: adminController.ordinanceFormError,
+          isCreatingOrdinance: adminController.isCreatingOrdinance,
+          ordinanceEdits: adminController.ordinanceEdits,
+          ordinanceEditError: adminController.ordinanceEditError,
+          ordinanceEditMessage: adminController.ordinanceEditMessage,
+          updatingOrdinanceId: adminController.updatingOrdinanceId,
           userFormError: adminController.userFormError,
           isCreatingUser: adminController.isCreatingUser,
           userEdits: adminController.userEdits,
@@ -553,6 +578,22 @@ export function useHomeController() {
           onUpdateMunicipality: adminController.handleUpdateMunicipality,
           onArchiveMunicipality:
             adminController.handleArchiveMunicipality,
+          onOrdinanceSearchTextChange:
+            adminController.setOrdinanceSearchText,
+          onOrdinanceMunicipalityFilterChange:
+            adminController.setOrdinanceMunicipalityFilter,
+          onOrdinanceTopicFilterChange:
+            adminController.setOrdinanceTopicFilter,
+          onOrdinanceStatusFilterChange:
+            adminController.setOrdinanceStatusFilter,
+          onOrdinanceIncludeArchivedChange:
+            adminController.setOrdinanceIncludeArchived,
+          onUpdateNewOrdinance: adminController.updateNewOrdinance,
+          onCreateOrdinance: adminController.handleCreateOrdinance,
+          onUpdateOrdinanceEdit:
+            adminController.updateOrdinanceEdit,
+          onUpdateOrdinance: adminController.handleUpdateOrdinance,
+          onArchiveOrdinance: adminController.handleArchiveOrdinance,
           onCreateUser: adminController.handleCreateUser,
           onUpdateUserEdit: adminController.updateUserEdit,
           onUpdateUser: adminController.handleUpdateUser,
