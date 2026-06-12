@@ -51,7 +51,7 @@ Future priorities will be refined through Requirements Intake and through work w
 
 ## 5. Implemented modules
 
-- Authentication: JWT login, `/auth/me` session restoration and first-admin bootstrap.
+- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, per-IP login rate limiting, `/auth/me` session restoration and first-admin bootstrap.
 - Users and groups: administrative management. Deletion is physical (hard delete) but guarded: the last active superuser and your own account cannot be deleted, and association rows are cleaned up explicitly.
 - Roles and permissions: RBAC model for administrative and functional capabilities. The permission catalog is seeded automatically and idempotently on backend startup.
 - Organizations: tenant foundation for client entities using the application.
@@ -67,6 +67,8 @@ Future priorities will be refined through Requirements Intake and through work w
 - Access control is tenant-aware through `Organization`.
 - Privileged platform operations are superuser-only: granting or revoking superuser status, creating organizations (tenants), and mutating the global roles/permissions catalog. `users.manage` only reaches users who share an organization where the admin holds the permission.
 - Municipalities are global reference data, separate from tenant organizations. Linking a document to an ordinance requires access to that document.
+- List endpoints for municipalities, ordinances, requirements and admin users are paginated (`limit` 1-200 default 100, `offset`) and expose the total via the `X-Total-Count` header. Ordinance listings omit `text_content`; the full legal text only travels on the detail endpoint.
+- Assistant voice input uses the browser's on-device speech recognition only (`processLocally`); it is disabled rather than falling back to the browser's cloud service (see ADR-012).
 - Uploaded documents are stored outside PostgreSQL.
 - PostgreSQL stores document metadata, ownership, status and relationships, not raw file bytes.
 - Uploaded files are stored in a persistent Docker volume.

@@ -22,7 +22,7 @@ La distinción central del dominio:
 
 ## Control de acceso
 
-- Autenticación: JWT HS256 de acceso (60 min), sin refresh; contraseñas con Argon2id.
+- Autenticación: JWT HS256 de acceso (60 min) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id; cambio self-service (`POST /auth/change-password`) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios). Rate limiting en memoria en el login.
 - Autorización: cadena RBAC usuario → grupo → rol → permiso. Los permisos de un grupo solo cuentan si el usuario es además miembro de la organización del grupo, lo que hace el modelo consciente del tenant.
 - `is_superuser` puentea todos los chequeos. Conceder o retirar superusuario es operación de superusuarios.
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
@@ -50,8 +50,8 @@ La distinción central del dominio:
 
 ## Carencias conocidas (deuda aceptada conscientemente)
 
-- Sin refresh tokens, revocación, cambio/reset de contraseña ni rate limiting en login.
-- Sin paginación en los listados (bloqueante para importar el dataset INE completo).
-- Token JWT en localStorage en el frontend.
+- Sin refresh tokens ni revocación server-side del JWT (la cookie expira a los 60 min).
+- El rate limiter del login es por proceso; al pasar a varios workers debe moverse a Redis.
+- Los filtros de búsqueda de municipios/ordenanzas en el frontend operan sobre la página cargada; falta llevarlos al servidor cuando se importe el dataset INE.
 - Sin pipeline de CI; validación local según README §9.
 - Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.
