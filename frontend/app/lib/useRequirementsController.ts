@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 import type {
   Requirement,
   RequirementEditState,
@@ -10,6 +10,20 @@ import type {
   RequirementStatus,
 } from "../components/types";
 import { adminRequest } from "./api";
+
+export type RequirementListFilters = {
+  organizationId: string;
+  projectId: string;
+  status: string;
+  includeArchived: boolean;
+};
+
+const DEFAULT_REQUIREMENT_FILTERS: RequirementListFilters = {
+  organizationId: "",
+  projectId: "",
+  status: "",
+  includeArchived: false,
+};
 
 type RequestErrorHandler = (
   requestError: unknown,
@@ -121,12 +135,19 @@ export function useRequirementsController({
   const [isCreatingRequirementMessage, setIsCreatingRequirementMessage] =
     useState(false);
 
+  // Últimos filtros aplicados (vienen de la URL); los reload internos tras
+  // crear/editar reutilizan exactamente la misma consulta del servidor.
+  const lastFiltersRef = useRef<RequirementListFilters>(
+    DEFAULT_REQUIREMENT_FILTERS,
+  );
+
   function clearRequirementsState() {
     setRequirements([]);
     setSelectedRequirement(null);
     setRequirementMessages([]);
     setRequirementError("");
     setRequirementMessage("");
+    lastFiltersRef.current = DEFAULT_REQUIREMENT_FILTERS;
     setFilterOrganizationId("");
     setFilterProjectId("");
     setFilterStatus("");
@@ -153,18 +174,18 @@ export function useRequirementsController({
     );
   }
 
-  function buildRequirementsQuery() {
+  function buildRequirementsQuery(filters: RequirementListFilters) {
     const params = new URLSearchParams();
-    if (filterOrganizationId) {
-      params.set("organization_id", filterOrganizationId);
+    if (filters.organizationId) {
+      params.set("organization_id", filters.organizationId);
     }
-    if (filterProjectId) {
-      params.set("project_id", filterProjectId);
+    if (filters.projectId) {
+      params.set("project_id", filters.projectId);
     }
-    if (filterStatus) {
-      params.set("status", filterStatus);
+    if (filters.status) {
+      params.set("status", filters.status);
     }
-    if (includeArchivedRequirements) {
+    if (filters.includeArchived) {
       params.set("include_archived", "true");
     }
 
@@ -172,14 +193,19 @@ export function useRequirementsController({
     return query ? `/requirements?${query}` : "/requirements";
   }
 
-  async function loadRequirements() {
+  // El filtrado es del servidor: la lista muestra exactamente lo que devuelve
+  // GET /requirements con los parámetros aplicados (que viven en la URL).
+  async function loadRequirements(
+    filters: RequirementListFilters = lastFiltersRef.current,
+  ) {
+    lastFiltersRef.current = filters;
     setIsLoadingRequirements(true);
     setRequirementError("");
 
     try {
       const token = getStoredToken();
       const requirementsData = await adminRequest<Requirement[]>(
-        buildRequirementsQuery(),
+        buildRequirementsQuery(filters),
         token,
         "No se pudieron cargar los requisitos.",
       );
@@ -208,6 +234,12 @@ export function useRequirementsController({
     } finally {
       setIsLoadingRequirements(false);
     }
+  }
+
+  function deselectRequirement() {
+    setSelectedRequirement(null);
+    setRequirementEdit(null);
+    setRequirementMessages([]);
   }
 
   async function selectRequirement(requirementId: number) {
@@ -440,6 +472,7 @@ export function useRequirementsController({
     clearRequirementsState,
     loadRequirements,
     selectRequirement,
+    deselectRequirement,
     updateNewRequirement,
     updateRequirementEdit,
     setFilterOrganizationId,

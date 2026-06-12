@@ -1,4 +1,6 @@
-import type { FormEvent } from "react";
+"use client";
+
+import { useEffect, useState, type FormEvent } from "react";
 import {
   formatMunicipalityStatus,
   formatMunicipalityType,
@@ -14,6 +16,22 @@ import {
   type RuralUrbanProfile,
   type User,
 } from "./types";
+
+export type MunicipalityFilterValues = {
+  q: string;
+  province: string;
+  autonomousCommunity: string;
+  status: string;
+  includeArchived: boolean;
+};
+
+const EMPTY_MUNICIPALITY_FILTERS: MunicipalityFilterValues = {
+  q: "",
+  province: "",
+  autonomousCommunity: "",
+  status: "",
+  includeArchived: false,
+};
 
 export type MunicipalitiesAdminProps = {
   currentUser: User;
@@ -34,13 +52,7 @@ export type MunicipalitiesAdminProps = {
   municipalityEditError: string;
   municipalityEditMessage: string;
   updatingMunicipalityId: number | null;
-  onMunicipalitySearchTextChange: (searchText: string) => void;
-  onMunicipalityProvinceFilterChange: (province: string) => void;
-  onMunicipalityAutonomousCommunityFilterChange: (
-    autonomousCommunity: string,
-  ) => void;
-  onMunicipalityStatusFilterChange: (status: string) => void;
-  onMunicipalityIncludeArchivedChange: (includeArchived: boolean) => void;
+  onApplyMunicipalityFilters: (filters: MunicipalityFilterValues) => void;
   onMunicipalityPrevPage: () => void;
   onMunicipalityNextPage: () => void;
   onUpdateNewMunicipality: (updates: Partial<MunicipalityEditState>) => void;
@@ -72,11 +84,7 @@ export function MunicipalitiesAdmin({
   municipalityEditError,
   municipalityEditMessage,
   updatingMunicipalityId,
-  onMunicipalitySearchTextChange,
-  onMunicipalityProvinceFilterChange,
-  onMunicipalityAutonomousCommunityFilterChange,
-  onMunicipalityStatusFilterChange,
-  onMunicipalityIncludeArchivedChange,
+  onApplyMunicipalityFilters,
   onMunicipalityPrevPage,
   onMunicipalityNextPage,
   onUpdateNewMunicipality,
@@ -85,6 +93,48 @@ export function MunicipalitiesAdmin({
   onUpdateMunicipality,
   onArchiveMunicipality,
 }: MunicipalitiesAdminProps) {
+  // Borrador local de filtros: se inicializa desde la URL (props aplicadas)
+  // y solo viaja a la URL al enviar el formulario "Aplicar filtros".
+  const [filterDraft, setFilterDraft] = useState<MunicipalityFilterValues>({
+    q: municipalitySearchText,
+    province: municipalityProvinceFilter,
+    autonomousCommunity: municipalityAutonomousCommunityFilter,
+    status: municipalityStatusFilter,
+    includeArchived: municipalityIncludeArchived,
+  });
+
+  useEffect(() => {
+    // Re-sincroniza los inputs cuando cambian los filtros aplicados en la URL
+    // (atrás/adelante del navegador, enlaces profundos…).
+    setFilterDraft({
+      q: municipalitySearchText,
+      province: municipalityProvinceFilter,
+      autonomousCommunity: municipalityAutonomousCommunityFilter,
+      status: municipalityStatusFilter,
+      includeArchived: municipalityIncludeArchived,
+    });
+  }, [
+    municipalitySearchText,
+    municipalityProvinceFilter,
+    municipalityAutonomousCommunityFilter,
+    municipalityStatusFilter,
+    municipalityIncludeArchived,
+  ]);
+
+  function updateFilterDraft(updates: Partial<MunicipalityFilterValues>) {
+    setFilterDraft((current) => ({ ...current, ...updates }));
+  }
+
+  function handleSubmitFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onApplyMunicipalityFilters(filterDraft);
+  }
+
+  function handleClearFilters() {
+    setFilterDraft(EMPTY_MUNICIPALITY_FILTERS);
+    onApplyMunicipalityFilters(EMPTY_MUNICIPALITY_FILTERS);
+  }
+
   const canView =
     userHasPermission(currentUser, "municipalities.view") ||
     userHasPermission(currentUser, "municipalities.manage");
@@ -98,47 +148,15 @@ export function MunicipalitiesAdmin({
     userHasPermission(currentUser, "municipalities.archive") ||
     userHasPermission(currentUser, "municipalities.manage");
 
-  const visibleMunicipalities = municipalities.filter((municipality) => {
-    const search = municipalitySearchText.trim().toLowerCase();
-    if (
-      search &&
-      ![
-        municipality.name,
-        municipality.province,
-        municipality.autonomous_community,
-        municipality.ine_code ?? "",
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(search)
-    ) {
-      return false;
-    }
-    if (
-      municipalityProvinceFilter &&
-      municipality.province !== municipalityProvinceFilter
-    ) {
-      return false;
-    }
-    if (
-      municipalityAutonomousCommunityFilter &&
-      municipality.autonomous_community !==
-        municipalityAutonomousCommunityFilter
-    ) {
-      return false;
-    }
-    if (
-      municipalityStatusFilter &&
-      municipality.status !== municipalityStatusFilter
-    ) {
-      return false;
-    }
-    return municipalityIncludeArchived || municipality.status !== "archived";
-  });
+  // La lista renderiza exactamente lo que devolvió el servidor; el filtrado
+  // se hace con los parámetros de consulta del backend.
   const municipalityPageCount = Math.max(
     1,
     Math.ceil(municipalityTotal / municipalityPageSize),
   );
+  // Sugerencias (datalist) con los valores distintos de la página cargada;
+  // al ser texto libre se puede escribir cualquier provincia/comunidad y el
+  // backend filtra sin distinguir mayúsculas.
   const provinceOptions = Array.from(
     new Set(municipalities.map((municipality) => municipality.province)),
   ).sort();
@@ -159,61 +177,67 @@ export function MunicipalitiesAdmin({
 
       {canView ? (
         <>
-          <div className="municipality-filters">
+          <form
+            className="municipality-filters"
+            onSubmit={handleSubmitFilters}
+          >
             <label>
               Buscar
               <input
                 onChange={(event) =>
-                  onMunicipalitySearchTextChange(event.target.value)
+                  updateFilterDraft({ q: event.target.value })
                 }
                 type="search"
-                value={municipalitySearchText}
+                value={filterDraft.q}
               />
             </label>
 
             <label>
               Provincia
-              <select
+              <input
+                list="municipality-province-options"
                 onChange={(event) =>
-                  onMunicipalityProvinceFilterChange(event.target.value)
+                  updateFilterDraft({ province: event.target.value })
                 }
-                value={municipalityProvinceFilter}
-              >
-                <option value="">Todas</option>
+                type="text"
+                value={filterDraft.province}
+              />
+              <datalist id="municipality-province-options">
                 {provinceOptions.map((province) => (
-                  <option key={province} value={province}>
-                    {province}
-                  </option>
+                  <option key={province} value={province} />
                 ))}
-              </select>
+              </datalist>
             </label>
 
             <label>
               Comunidad autónoma
-              <select
+              <input
+                list="municipality-community-options"
                 onChange={(event) =>
-                  onMunicipalityAutonomousCommunityFilterChange(
-                    event.target.value,
-                  )
+                  updateFilterDraft({
+                    autonomousCommunity: event.target.value,
+                  })
                 }
-                value={municipalityAutonomousCommunityFilter}
-              >
-                <option value="">Todas</option>
+                type="text"
+                value={filterDraft.autonomousCommunity}
+              />
+              <datalist id="municipality-community-options">
                 {autonomousCommunityOptions.map((autonomousCommunity) => (
-                  <option key={autonomousCommunity} value={autonomousCommunity}>
-                    {autonomousCommunity}
-                  </option>
+                  <option
+                    key={autonomousCommunity}
+                    value={autonomousCommunity}
+                  />
                 ))}
-              </select>
+              </datalist>
             </label>
 
             <label>
               Estado
               <select
                 onChange={(event) =>
-                  onMunicipalityStatusFilterChange(event.target.value)
+                  updateFilterDraft({ status: event.target.value })
                 }
-                value={municipalityStatusFilter}
+                value={filterDraft.status}
               >
                 <option value="">Todos</option>
                 {MUNICIPALITY_STATUSES.map((status) => (
@@ -226,15 +250,29 @@ export function MunicipalitiesAdmin({
 
             <label className="checkbox-label municipalities-archive-toggle">
               <input
-                checked={municipalityIncludeArchived}
+                checked={filterDraft.includeArchived}
                 onChange={(event) =>
-                  onMunicipalityIncludeArchivedChange(event.target.checked)
+                  updateFilterDraft({ includeArchived: event.target.checked })
                 }
                 type="checkbox"
               />
               Incluir archivados
             </label>
-          </div>
+
+            <div className="button-row">
+              <button type="submit" disabled={isLoadingAdmin}>
+                Aplicar filtros
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={handleClearFilters}
+                disabled={isLoadingAdmin}
+              >
+                Limpiar
+              </button>
+            </div>
+          </form>
 
           <div className="table-wrapper">
             <table>
@@ -261,8 +299,8 @@ export function MunicipalitiesAdmin({
                 </tr>
               </thead>
               <tbody>
-                {visibleMunicipalities.length > 0 ? (
-                  visibleMunicipalities.map((municipality) => {
+                {municipalities.length > 0 ? (
+                  municipalities.map((municipality) => {
                     const edit = municipalityEdits[municipality.id] ?? {
                       name: municipality.name,
                       province: municipality.province,

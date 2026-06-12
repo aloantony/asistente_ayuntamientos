@@ -1,4 +1,6 @@
-import type { FormEvent } from "react";
+"use client";
+
+import { useEffect, useState, type FormEvent } from "react";
 import {
   formatMunicipalityOption,
   formatOrdinanceStatus,
@@ -14,6 +16,24 @@ import {
   type User,
 } from "./types";
 
+export type OrdinanceFilterValues = {
+  q: string;
+  province: string;
+  autonomousCommunity: string;
+  topic: string;
+  status: string;
+  includeArchived: boolean;
+};
+
+const EMPTY_ORDINANCE_FILTERS: OrdinanceFilterValues = {
+  q: "",
+  province: "",
+  autonomousCommunity: "",
+  topic: "",
+  status: "",
+  includeArchived: false,
+};
+
 export type OrdinancesAdminProps = {
   currentUser: User;
   municipalities: Municipality[];
@@ -23,7 +43,8 @@ export type OrdinancesAdminProps = {
   ordinanceTotal: number;
   ordinancePageSize: number;
   ordinanceSearchText: string;
-  ordinanceMunicipalityFilter: string;
+  ordinanceProvinceFilter: string;
+  ordinanceAutonomousCommunityFilter: string;
   ordinanceTopicFilter: string;
   ordinanceStatusFilter: string;
   ordinanceIncludeArchived: boolean;
@@ -36,11 +57,7 @@ export type OrdinancesAdminProps = {
   updatingOrdinanceId: number | null;
   ordinanceDetailLoaded: Record<number, boolean>;
   loadingOrdinanceDetailId: number | null;
-  onOrdinanceSearchTextChange: (searchText: string) => void;
-  onOrdinanceMunicipalityFilterChange: (municipalityId: string) => void;
-  onOrdinanceTopicFilterChange: (topic: string) => void;
-  onOrdinanceStatusFilterChange: (status: string) => void;
-  onOrdinanceIncludeArchivedChange: (includeArchived: boolean) => void;
+  onApplyOrdinanceFilters: (filters: OrdinanceFilterValues) => void;
   onOrdinancePrevPage: () => void;
   onOrdinanceNextPage: () => void;
   onUpdateNewOrdinance: (updates: Partial<OrdinanceEditState>) => void;
@@ -63,7 +80,8 @@ export function OrdinancesAdmin({
   ordinanceTotal,
   ordinancePageSize,
   ordinanceSearchText,
-  ordinanceMunicipalityFilter,
+  ordinanceProvinceFilter,
+  ordinanceAutonomousCommunityFilter,
   ordinanceTopicFilter,
   ordinanceStatusFilter,
   ordinanceIncludeArchived,
@@ -76,11 +94,7 @@ export function OrdinancesAdmin({
   updatingOrdinanceId,
   ordinanceDetailLoaded,
   loadingOrdinanceDetailId,
-  onOrdinanceSearchTextChange,
-  onOrdinanceMunicipalityFilterChange,
-  onOrdinanceTopicFilterChange,
-  onOrdinanceStatusFilterChange,
-  onOrdinanceIncludeArchivedChange,
+  onApplyOrdinanceFilters,
   onOrdinancePrevPage,
   onOrdinanceNextPage,
   onUpdateNewOrdinance,
@@ -90,6 +104,51 @@ export function OrdinancesAdmin({
   onUpdateOrdinance,
   onArchiveOrdinance,
 }: OrdinancesAdminProps) {
+  // Borrador local de filtros: se inicializa desde la URL (props aplicadas)
+  // y solo viaja a la URL al enviar el formulario "Aplicar filtros".
+  const [filterDraft, setFilterDraft] = useState<OrdinanceFilterValues>({
+    q: ordinanceSearchText,
+    province: ordinanceProvinceFilter,
+    autonomousCommunity: ordinanceAutonomousCommunityFilter,
+    topic: ordinanceTopicFilter,
+    status: ordinanceStatusFilter,
+    includeArchived: ordinanceIncludeArchived,
+  });
+
+  useEffect(() => {
+    // Re-sincroniza los inputs cuando cambian los filtros aplicados en la URL
+    // (atrás/adelante del navegador, enlaces profundos…).
+    setFilterDraft({
+      q: ordinanceSearchText,
+      province: ordinanceProvinceFilter,
+      autonomousCommunity: ordinanceAutonomousCommunityFilter,
+      topic: ordinanceTopicFilter,
+      status: ordinanceStatusFilter,
+      includeArchived: ordinanceIncludeArchived,
+    });
+  }, [
+    ordinanceSearchText,
+    ordinanceProvinceFilter,
+    ordinanceAutonomousCommunityFilter,
+    ordinanceTopicFilter,
+    ordinanceStatusFilter,
+    ordinanceIncludeArchived,
+  ]);
+
+  function updateFilterDraft(updates: Partial<OrdinanceFilterValues>) {
+    setFilterDraft((current) => ({ ...current, ...updates }));
+  }
+
+  function handleSubmitFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onApplyOrdinanceFilters(filterDraft);
+  }
+
+  function handleClearFilters() {
+    setFilterDraft(EMPTY_ORDINANCE_FILTERS);
+    onApplyOrdinanceFilters(EMPTY_ORDINANCE_FILTERS);
+  }
+
   const canView =
     userHasPermission(currentUser, "ordinances.view") ||
     userHasPermission(currentUser, "ordinances.manage");
@@ -103,6 +162,8 @@ export function OrdinancesAdmin({
     userHasPermission(currentUser, "ordinances.archive") ||
     userHasPermission(currentUser, "ordinances.manage");
 
+  // La lista renderiza exactamente lo que devolvió el servidor; el filtrado
+  // se hace con los parámetros de consulta del backend.
   const ordinancePageCount = Math.max(
     1,
     Math.ceil(ordinanceTotal / ordinancePageSize),
@@ -112,51 +173,22 @@ export function OrdinancesAdmin({
     municipalities.length > 0
       ? municipalities.filter((municipality) => municipality.status === "active")
       : municipalityOptions;
+  // Sugerencias (datalist) con los valores distintos de los datos cargados;
+  // al ser texto libre se puede escribir cualquier provincia/comunidad/tema y
+  // el backend filtra sin distinguir mayúsculas.
+  const provinceOptions = Array.from(
+    new Set(municipalityOptions.map((municipality) => municipality.province)),
+  ).sort();
+  const autonomousCommunityOptions = Array.from(
+    new Set(
+      municipalityOptions.map(
+        (municipality) => municipality.autonomous_community,
+      ),
+    ),
+  ).sort();
   const topicOptions = Array.from(
     new Set(ordinances.map((ordinance) => ordinance.topic).filter(Boolean)),
   ).sort();
-  const visibleOrdinances = ordinances.filter((ordinance) => {
-    const search = ordinanceSearchText.trim().toLowerCase();
-    if (
-      search &&
-      ![
-        ordinance.title,
-        ordinance.topic,
-        ordinance.subtopic ?? "",
-        ordinance.summary ?? "",
-        ordinance.official_bulletin ?? "",
-        ordinance.bulletin_number ?? "",
-        ordinance.municipality.name,
-        ordinance.municipality.province,
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(search)
-    ) {
-      return false;
-    }
-    if (
-      ordinanceMunicipalityFilter &&
-      String(ordinance.municipality_id) !== ordinanceMunicipalityFilter
-    ) {
-      return false;
-    }
-    if (ordinanceTopicFilter && ordinance.topic !== ordinanceTopicFilter) {
-      return false;
-    }
-    if (
-      ordinanceStatusFilter &&
-      ordinance.status !== ordinanceStatusFilter
-    ) {
-      return false;
-    }
-
-    return (
-      ordinanceIncludeArchived ||
-      ordinanceStatusFilter === "archived" ||
-      ordinance.status !== "archived"
-    );
-  });
 
   return (
     <div className="admin-section">
@@ -169,59 +201,81 @@ export function OrdinancesAdmin({
 
       {canView ? (
         <>
-          <div className="ordinance-filters">
+          <form className="ordinance-filters" onSubmit={handleSubmitFilters}>
             <label>
               Buscar
               <input
                 onChange={(event) =>
-                  onOrdinanceSearchTextChange(event.target.value)
+                  updateFilterDraft({ q: event.target.value })
                 }
                 type="search"
-                value={ordinanceSearchText}
+                value={filterDraft.q}
               />
             </label>
 
             <label>
-              Municipio
-              <select
+              Provincia
+              <input
+                list="ordinance-province-options"
                 onChange={(event) =>
-                  onOrdinanceMunicipalityFilterChange(event.target.value)
+                  updateFilterDraft({ province: event.target.value })
                 }
-                value={ordinanceMunicipalityFilter}
-              >
-                <option value="">Todos</option>
-                {municipalityOptions.map((municipality) => (
-                  <option key={municipality.id} value={municipality.id}>
-                    {formatMunicipalityOption(municipality)}
-                  </option>
+                type="text"
+                value={filterDraft.province}
+              />
+              <datalist id="ordinance-province-options">
+                {provinceOptions.map((province) => (
+                  <option key={province} value={province} />
                 ))}
-              </select>
+              </datalist>
+            </label>
+
+            <label>
+              Comunidad autónoma
+              <input
+                list="ordinance-community-options"
+                onChange={(event) =>
+                  updateFilterDraft({
+                    autonomousCommunity: event.target.value,
+                  })
+                }
+                type="text"
+                value={filterDraft.autonomousCommunity}
+              />
+              <datalist id="ordinance-community-options">
+                {autonomousCommunityOptions.map((autonomousCommunity) => (
+                  <option
+                    key={autonomousCommunity}
+                    value={autonomousCommunity}
+                  />
+                ))}
+              </datalist>
             </label>
 
             <label>
               Tema
-              <select
+              <input
+                list="ordinance-topic-options"
                 onChange={(event) =>
-                  onOrdinanceTopicFilterChange(event.target.value)
+                  updateFilterDraft({ topic: event.target.value })
                 }
-                value={ordinanceTopicFilter}
-              >
-                <option value="">Todos</option>
+                type="text"
+                value={filterDraft.topic}
+              />
+              <datalist id="ordinance-topic-options">
                 {topicOptions.map((topic) => (
-                  <option key={topic} value={topic}>
-                    {topic}
-                  </option>
+                  <option key={topic} value={topic} />
                 ))}
-              </select>
+              </datalist>
             </label>
 
             <label>
               Estado
               <select
                 onChange={(event) =>
-                  onOrdinanceStatusFilterChange(event.target.value)
+                  updateFilterDraft({ status: event.target.value })
                 }
-                value={ordinanceStatusFilter}
+                value={filterDraft.status}
               >
                 <option value="">Todos</option>
                 {ORDINANCE_STATUSES.map((status) => (
@@ -234,15 +288,29 @@ export function OrdinancesAdmin({
 
             <label className="checkbox-label ordinances-archive-toggle">
               <input
-                checked={ordinanceIncludeArchived}
+                checked={filterDraft.includeArchived}
                 onChange={(event) =>
-                  onOrdinanceIncludeArchivedChange(event.target.checked)
+                  updateFilterDraft({ includeArchived: event.target.checked })
                 }
                 type="checkbox"
               />
               Incluir archivadas
             </label>
-          </div>
+
+            <div className="button-row">
+              <button type="submit" disabled={isLoadingAdmin}>
+                Aplicar filtros
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={handleClearFilters}
+                disabled={isLoadingAdmin}
+              >
+                Limpiar
+              </button>
+            </div>
+          </form>
 
           <div className="table-wrapper">
             <table>
@@ -270,8 +338,8 @@ export function OrdinancesAdmin({
                 </tr>
               </thead>
               <tbody>
-                {visibleOrdinances.length > 0 ? (
-                  visibleOrdinances.map((ordinance) => {
+                {ordinances.length > 0 ? (
+                  ordinances.map((ordinance) => {
                     const edit = ordinanceEdits[ordinance.id] ?? {
                       municipality_id: String(ordinance.municipality_id),
                       document_id:

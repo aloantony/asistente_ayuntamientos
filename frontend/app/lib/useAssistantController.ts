@@ -117,6 +117,15 @@ export function useAssistantController({
     void loadAssistant(includeArchived);
   }
 
+  function deselectConversation() {
+    if (selectedIdRef.current === null) {
+      return;
+    }
+
+    applySelectedConversation(null);
+    setDraftMessage("");
+  }
+
   async function selectConversation(conversationId: number) {
     setAssistantError("");
 
@@ -313,6 +322,7 @@ export function useAssistantController({
     loadAssistant,
     toggleIncludeArchivedConversations,
     selectConversation,
+    deselectConversation,
     startConversation,
     sendMessage,
     archiveConversation,
