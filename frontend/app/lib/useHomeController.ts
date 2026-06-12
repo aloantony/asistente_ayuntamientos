@@ -12,6 +12,7 @@ import {
   readApiError,
 } from "./api";
 import { useAdminController } from "./useAdminController";
+import { useAssistantController } from "./useAssistantController";
 import { useProjectsController } from "./useProjectsController";
 import { useRequirementsController } from "./useRequirementsController";
 
@@ -87,6 +88,7 @@ export function useHomeController() {
   const clearAdminStateRef = useRef<() => void>(() => undefined);
   const clearProjectStateRef = useRef<() => void>(() => undefined);
   const clearRequirementsStateRef = useRef<() => void>(() => undefined);
+  const clearAssistantStateRef = useRef<() => void>(() => undefined);
 
   function handleSessionExpired(message: string) {
     window.localStorage.removeItem("access_token");
@@ -95,6 +97,7 @@ export function useHomeController() {
     clearAdminStateRef.current();
     clearProjectStateRef.current();
     clearRequirementsStateRef.current();
+    clearAssistantStateRef.current();
     setError(message);
   }
 
@@ -134,6 +137,11 @@ export function useHomeController() {
     getStoredToken,
     handleRequestError,
   });
+  const assistantController = useAssistantController({
+    getStoredToken,
+    handleRequestError,
+    onRequirementsChanged: requirementsController.loadRequirements,
+  });
   const adminController = useAdminController({
     getStoredToken,
     handleRequestError,
@@ -152,6 +160,7 @@ export function useHomeController() {
   clearProjectStateRef.current = projectsController.clearProjectState;
   clearRequirementsStateRef.current =
     requirementsController.clearRequirementsState;
+  clearAssistantStateRef.current = assistantController.clearAssistantState;
 
   useEffect(() => {
     let isActive = true;
@@ -211,6 +220,14 @@ export function useHomeController() {
     requirementsController.loadRequirements();
   }, [user?.id, user?.permissions]);
 
+  useEffect(() => {
+    if (!user || !userHasPermission(user, "assistant.use")) {
+      return;
+    }
+
+    assistantController.loadAssistant();
+  }, [user?.id, user?.permissions]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -248,6 +265,7 @@ export function useHomeController() {
       adminController.clearAdminState();
       projectsController.clearProjectState();
       requirementsController.clearRequirementsState();
+      assistantController.clearAssistantState();
       setError(getErrorMessage(loginError, "No se pudo iniciar sesión."));
     } finally {
       setIsSubmitting(false);
@@ -262,6 +280,7 @@ export function useHomeController() {
     adminController.clearAdminState();
     projectsController.clearProjectState();
     requirementsController.clearRequirementsState();
+    assistantController.clearAssistantState();
   }
 
   const loginFormProps = {
@@ -630,6 +649,24 @@ export function useHomeController() {
         }
       : null;
 
+  const assistantPanelProps =
+    user && userHasPermission(user, "assistant.use")
+      ? {
+          assistantStatus: assistantController.assistantStatus,
+          conversations: assistantController.conversations,
+          selectedConversation: assistantController.selectedConversation,
+          draftMessage: assistantController.draftMessage,
+          isLoadingAssistant: assistantController.isLoadingAssistant,
+          isSendingMessage: assistantController.isSendingMessage,
+          assistantError: assistantController.assistantError,
+          onDraftMessageChange: assistantController.setDraftMessage,
+          onSelectConversation: assistantController.selectConversation,
+          onStartConversation: assistantController.startConversation,
+          onSendMessage: assistantController.sendMessage,
+          onArchiveConversation: assistantController.archiveConversation,
+        }
+      : null;
+
   return {
     isLoadingSession,
     user,
@@ -638,5 +675,6 @@ export function useHomeController() {
     projectsPanelProps,
     requirementsPanelProps,
     adminPanelProps,
+    assistantPanelProps,
   };
 }

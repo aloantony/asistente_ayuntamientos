@@ -101,6 +101,18 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No puedes eliminar tu propia cuenta.";
     case "Cannot delete the last active superuser":
       return "No puedes eliminar el último superusuario activo.";
+    case "Cannot demote the last active superuser":
+      return "No puedes desactivar ni degradar al último superusuario activo.";
+    case "Only superusers can change superuser status":
+      return "Solo un superusuario puede conceder o retirar el estado de superusuario.";
+    case "Assistant is not configured":
+      return "El asistente no está configurado en este servidor.";
+    case "Assistant request failed":
+      return "El asistente no ha podido procesar la petición. Inténtalo de nuevo.";
+    case "Conversation is archived":
+      return "La conversación está archivada.";
+    case "Conversation not found":
+      return "No se encontró la conversación.";
     default:
       return detail || fallback;
   }

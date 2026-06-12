@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     document_storage_root: str = "/var/lib/asistente_ayuntamientos/documents"
     document_max_upload_bytes: int = 25 * 1024 * 1024
+    anthropic_api_key: str | None = None
+    assistant_model: str = "claude-opus-4-8"
+    assistant_max_tokens: int = 16000
+    assistant_max_tool_iterations: int = 8
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -682,6 +682,52 @@ export function formatRuralUrbanProfile(profile: RuralUrbanProfile) {
   return RURAL_URBAN_PROFILE_LABELS[profile];
 }
 
+export type AssistantStatus = {
+  enabled: boolean;
+  model: string;
+};
+
+export type AssistantAction = {
+  tool: string;
+  ok: boolean;
+  input: Record<string, unknown>;
+  result: string;
+};
+
+export type AssistantMessage = {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  actions: AssistantAction[];
+  created_at: string;
+};
+
+export type AssistantConversation = {
+  id: number;
+  title: string;
+  status: "active" | "archived";
+  created_at: string;
+  updated_at: string;
+};
+
+export type AssistantConversationDetail = AssistantConversation & {
+  messages: AssistantMessage[];
+};
+
+export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
+  list_organizations: "Consultar organizaciones",
+  list_projects: "Consultar proyectos",
+  list_requirements: "Consultar requisitos",
+  get_requirement: "Leer requisito",
+  create_requirement: "Crear requisito",
+  update_requirement: "Actualizar requisito",
+  add_requirement_message: "Añadir nota a requisito",
+};
+
+export function formatAssistantTool(tool: string) {
+  return ASSISTANT_TOOL_LABELS[tool] ?? tool;
+}
+
 export function userHasPermission(user: User, permissionCode: string) {
   return (
     user.is_superuser || (user.permissions ?? []).includes(permissionCode)

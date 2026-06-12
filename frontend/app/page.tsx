@@ -1,6 +1,7 @@
 "use client";
 
 import { AdminPanel } from "./components/AdminPanel";
+import { AssistantPanel } from "./components/AssistantPanel";
 import { Dashboard } from "./components/Dashboard";
 import { LoginForm } from "./components/LoginForm";
 import { ProjectsPanel } from "./components/ProjectsPanel";
@@ -16,6 +17,7 @@ export default function Home() {
     projectsPanelProps,
     requirementsPanelProps,
     adminPanelProps,
+    assistantPanelProps,
   } = useHomeController();
 
   if (isLoadingSession) {
@@ -35,6 +37,9 @@ export default function Home() {
       <main className="page app-page">
         <div className="workspace">
           <Dashboard {...dashboardProps} />
+          {assistantPanelProps ? (
+            <AssistantPanel {...assistantPanelProps} />
+          ) : null}
           {requirementsPanelProps ? (
             <RequirementsPanel {...requirementsPanelProps} />
           ) : null}

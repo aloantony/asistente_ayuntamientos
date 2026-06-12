@@ -680,3 +680,131 @@ tr:last-child td {
     grid-template-columns: 1fr;
   }
 }
+
+/* Asistente conversacional */
+.assistant-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.assistant-conversations ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.assistant-conversation-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.assistant-conversation-item.selected {
+  border-color: rgba(56, 189, 248, 0.8);
+}
+
+.assistant-conversation-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.assistant-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.assistant-thread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.assistant-thread-header h3 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 0.25rem;
+}
+
+.assistant-message {
+  max-width: 85%;
+  padding: 0.6rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.assistant-message.user {
+  align-self: flex-end;
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.assistant-message.assistant {
+  align-self: flex-start;
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.assistant-message-content {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.assistant-action-ok {
+  border-color: rgba(74, 222, 128, 0.6);
+}
+
+.assistant-action-error {
+  border-color: rgba(248, 113, 113, 0.7);
+}
+
+.assistant-composer {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-end;
+}
+
+.assistant-composer textarea {
+  flex: 1;
+  resize: vertical;
+}
+
+@media (max-width: 900px) {
+  .assistant-layout {
+    grid-template-columns: 1fr;
+  }
+}
