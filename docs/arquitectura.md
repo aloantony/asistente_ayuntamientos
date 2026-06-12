@@ -42,6 +42,14 @@ La distinción central del dominio:
 - Toda llamada a APIs externas de IA pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (modelo, tokens), nunca contenido.
 - Primera pieza implementada: el agente conversacional de intake de requisitos (`app/assistant/`). Bucle síncrono de tool-use contra la API de Claude (modelo configurable, por defecto `claude-opus-4-8`); las herramientas del agente ejecutan las mismas validaciones RBAC que las rutas REST, los requisitos se crean siempre como borrador con `source_type=conversation`, y cada mensaje del asistente guarda un rastro JSON de las herramientas ejecutadas. Conversaciones y mensajes persisten en PostgreSQL y son privados de su autor. Sin `ANTHROPIC_API_KEY` el módulo queda deshabilitado (503).
 
+## Frontend
+
+- App Router multi-ruta con shell de navegación lateral: `/asistente`, `/requisitos`, `/proyectos`, `/cuenta` y `/admin/{usuarios,grupos,organizaciones,roles,municipios,ordenanzas}`. Los ítems del menú usan los mismos predicados de permisos que las rutas; tras el login se aterriza en la primera sección visible.
+- La sesión vive en `SessionProvider` (layout raíz): usuario, embudo de 401 → logout, cierre de sesión. Guard client-side; sin `middleware.ts` por ahora.
+- Cada ruta monta solo su controlador de dominio y carga datos al entrar; las listas de otros dominios llegan por fetchers ligeros (`app/lib/fetchers.ts`). Los seis hooks de administración viven en `app/lib/admin/`.
+- Selección, filtros y paginación viven en la URL (deep-links, refresh y botón atrás funcionan); los filtros de municipios, ordenanzas y requisitos se aplican en el servidor.
+- Convenciones: sin librerías de UI/estado, TS estricto, texto en español, CSS monocromo propio.
+
 ## Tests
 
 - pytest + httpx dentro del contenedor backend, montando el código fuente.
@@ -52,6 +60,6 @@ La distinción central del dominio:
 
 - Sin refresh tokens ni revocación server-side del JWT (la cookie expira a los 60 min).
 - El rate limiter del login es por proceso; al pasar a varios workers debe moverse a Redis.
-- Los filtros de búsqueda de municipios/ordenanzas en el frontend operan sobre la página cargada; falta llevarlos al servidor cuando se importe el dataset INE.
+- El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
 - Sin pipeline de CI; validación local según README §9.
 - Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.
