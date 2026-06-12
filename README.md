@@ -32,7 +32,7 @@ Future priorities will be refined through Requirements Intake and through work w
 - Backend: FastAPI
 - Frontend: Next.js
 - Database: PostgreSQL
-- Cache or future worker support: Redis
+- Redis: declared in Docker Compose and reserved for future workers/cache; no backend code consumes it yet
 - Local orchestration: Docker Compose
 - ORM: SQLAlchemy
 - Migrations: Alembic
@@ -52,19 +52,21 @@ Future priorities will be refined through Requirements Intake and through work w
 ## 5. Implemented modules
 
 - Authentication: JWT login, `/auth/me` session restoration and first-admin bootstrap.
-- Users and groups: administrative management with safe deletion behavior.
-- Roles and permissions: RBAC model for administrative and functional capabilities.
+- Users and groups: administrative management. Deletion is physical (hard delete) but guarded: the last active superuser and your own account cannot be deleted, and association rows are cleaned up explicitly.
+- Roles and permissions: RBAC model for administrative and functional capabilities. The permission catalog is seeded automatically and idempotently on backend startup.
 - Organizations: tenant foundation for client entities using the application.
 - Projects: organization-scoped expedientes, work areas and initiatives.
 - Documents: upload, metadata, download and archive support for project documents.
 - Requirements: structured intake for needs, product ideas and stakeholder requests.
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
+- AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop against the Claude API through the internal Privacy/AI Gateway (`app/assistant/gateway.py`), executes its tools with the calling user's RBAC permissions, always creates requirements as drafts with `source_type=conversation`, and stores an auditable JSON trail of every tool call. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless `ANTHROPIC_API_KEY` is configured.
 
 ## 6. Architecture principles
 
 - Access control is tenant-aware through `Organization`.
-- Municipalities are global reference data, separate from tenant organizations.
+- Privileged platform operations are superuser-only: granting or revoking superuser status, creating organizations (tenants), and mutating the global roles/permissions catalog. `users.manage` only reaches users who share an organization where the admin holds the permission.
+- Municipalities are global reference data, separate from tenant organizations. Linking a document to an ordinance requires access to that document.
 - Uploaded documents are stored outside PostgreSQL.
 - PostgreSQL stores document metadata, ownership, status and relationships, not raw file bytes.
 - Uploaded files are stored in a persistent Docker volume.
@@ -93,7 +95,7 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings.
+Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings. To enable the AI assistant, set `ANTHROPIC_API_KEY` (and optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`); without it the assistant endpoints return 503 and the UI shows it as not configured.
 
 Build and start the stack:
 
@@ -139,6 +141,13 @@ docker compose exec backend alembic current
 git diff --check
 ```
 
+Run the backend test suite (PostgreSQL test database, fully isolated from dev data):
+
+```bash
+docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
+  sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q"
+```
+
 ## 10. Operational cautions
 
 - Never commit `.env`.
@@ -153,11 +162,12 @@ git diff --check
 
 The roadmap is technical and directional. Items are subject to refinement through Requirements Intake and stakeholder feedback.
 
+- AI Requirements Intake Agent v1 (conversational; the first external user is a mayor who feeds requirements through it) — shipped, see Implemented modules
+- Privacy/AI Gateway — v1 shipped with the intake agent; filtering/pseudonymization hardening pending
+- Voice input for the intake agent
 - Ordinance Comparison v1
 - Ordinance AI Assistant v1
 - Draft Generator v1
-- Privacy/AI Gateway
-- Future voice-based requirement intake
 - Future AI-assisted municipal workflows
 
 ## 12. Developer handoff checklist
