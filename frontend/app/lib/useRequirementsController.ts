@@ -9,13 +9,17 @@ import type {
   RequirementMessageType,
   RequirementStatus,
 } from "../components/types";
-import { adminRequest } from "./api";
+import { adminRequest, adminRequestWithTotal } from "./api";
+
+const REQUIREMENTS_PAGE_SIZE = 50;
 
 export type RequirementListFilters = {
   organizationId: string;
   projectId: string;
   status: string;
   includeArchived: boolean;
+  /** Página 1-indexada; el offset se calcula como (page - 1) * 50. */
+  page: number;
 };
 
 const DEFAULT_REQUIREMENT_FILTERS: RequirementListFilters = {
@@ -23,6 +27,7 @@ const DEFAULT_REQUIREMENT_FILTERS: RequirementListFilters = {
   projectId: "",
   status: "",
   includeArchived: false,
+  page: 1,
 };
 
 type RequestErrorHandler = (
@@ -112,6 +117,7 @@ export function useRequirementsController({
     RequirementMessage[]
   >([]);
   const [isLoadingRequirements, setIsLoadingRequirements] = useState(false);
+  const [requirementTotal, setRequirementTotal] = useState(0);
   const [requirementError, setRequirementError] = useState("");
   const [requirementMessage, setRequirementMessage] = useState("");
   const [filterOrganizationId, setFilterOrganizationId] = useState("");
@@ -143,6 +149,7 @@ export function useRequirementsController({
 
   function clearRequirementsState() {
     setRequirements([]);
+    setRequirementTotal(0);
     setSelectedRequirement(null);
     setRequirementMessages([]);
     setRequirementError("");
@@ -188,9 +195,10 @@ export function useRequirementsController({
     if (filters.includeArchived) {
       params.set("include_archived", "true");
     }
+    params.set("limit", String(REQUIREMENTS_PAGE_SIZE));
+    params.set("offset", String((filters.page - 1) * REQUIREMENTS_PAGE_SIZE));
 
-    const query = params.toString();
-    return query ? `/requirements?${query}` : "/requirements";
+    return `/requirements?${params.toString()}`;
   }
 
   // El filtrado es del servidor: la lista muestra exactamente lo que devuelve
@@ -204,12 +212,14 @@ export function useRequirementsController({
 
     try {
       const token = getStoredToken();
-      const requirementsData = await adminRequest<Requirement[]>(
-        buildRequirementsQuery(filters),
-        token,
-        "No se pudieron cargar los requisitos.",
-      );
+      const { items: requirementsData, total } =
+        await adminRequestWithTotal<Requirement[]>(
+          buildRequirementsQuery(filters),
+          token,
+          "No se pudieron cargar los requisitos.",
+        );
       setRequirements(requirementsData);
+      setRequirementTotal(total);
 
       if (
         selectedRequirement &&
@@ -453,6 +463,8 @@ export function useRequirementsController({
     selectedRequirement,
     requirementMessages,
     isLoadingRequirements,
+    requirementsPageSize: REQUIREMENTS_PAGE_SIZE,
+    requirementTotal,
     requirementError,
     requirementMessage,
     filterOrganizationId,

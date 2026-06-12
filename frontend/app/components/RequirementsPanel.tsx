@@ -43,6 +43,10 @@ type RequirementsPanelProps = {
   selectedRequirement: Requirement | null;
   requirementMessages: RequirementMessage[];
   isLoadingRequirements: boolean;
+  /** Página 0-indexada de la lista (la URL usa 1-indexada). */
+  requirementPage: number;
+  requirementTotal: number;
+  requirementPageSize: number;
   requirementError: string;
   requirementMessage: string;
   filterOrganizationId: string;
@@ -61,6 +65,8 @@ type RequirementsPanelProps = {
   isCreatingRequirementMessage: boolean;
   onRefresh: () => void;
   onSelectRequirement: (requirementId: number) => void;
+  onRequirementPrevPage: () => void;
+  onRequirementNextPage: () => void;
   onUpdateNewRequirement: (updates: Partial<RequirementFormState>) => void;
   onUpdateRequirementEdit: (updates: Partial<RequirementEditState>) => void;
   onFilterOrganizationIdChange: (organizationId: string) => void;
@@ -130,6 +136,9 @@ export function RequirementsPanel({
   selectedRequirement,
   requirementMessages,
   isLoadingRequirements,
+  requirementPage,
+  requirementTotal,
+  requirementPageSize,
   requirementError,
   requirementMessage,
   filterOrganizationId,
@@ -148,6 +157,8 @@ export function RequirementsPanel({
   isCreatingRequirementMessage,
   onRefresh,
   onSelectRequirement,
+  onRequirementPrevPage,
+  onRequirementNextPage,
   onUpdateNewRequirement,
   onUpdateRequirementEdit,
   onFilterOrganizationIdChange,
@@ -181,6 +192,10 @@ export function RequirementsPanel({
   const editRequirementProjects = selectedRequirement
     ? getProjectsForOrganization(projects, String(selectedRequirement.organization_id))
     : projects;
+  const requirementPageCount = Math.max(
+    1,
+    Math.ceil(requirementTotal / requirementPageSize),
+  );
 
   return (
     <section className="panel admin-panel">
@@ -314,6 +329,32 @@ export function RequirementsPanel({
             ) : (
               <p className="small-muted">No hay requisitos para mostrar.</p>
             )}
+
+            <div className="pager-row">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={onRequirementPrevPage}
+                disabled={requirementPage === 0 || isLoadingRequirements}
+              >
+                Anterior
+              </button>
+              <span className="pager-status">
+                Página {requirementPage + 1} de {requirementPageCount} (
+                {requirementTotal} en total)
+              </span>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={onRequirementNextPage}
+                disabled={
+                  requirementPage + 1 >= requirementPageCount ||
+                  isLoadingRequirements
+                }
+              >
+                Siguiente
+              </button>
+            </div>
           </div>
 
           <div className="requirement-detail">
