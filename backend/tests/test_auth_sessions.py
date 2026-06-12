@@ -235,6 +235,32 @@ def test_admin_password_reset_invalidates_member_tokens(
     assert client.get("/auth/me", headers=member_headers).status_code == 401
 
 
+def test_admin_resetting_own_password_keeps_session(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    admin = make_user(email="self-reset@example.com", password="password-123")
+    organization = make_organization()
+    grant_permissions(admin, organization, ["users.manage"])
+
+    login = client.post(
+        "/auth/login",
+        json={"email": "self-reset@example.com", "password": "password-123"},
+    )
+    assert login.status_code == 200
+
+    response = client.patch(
+        f"/admin/users/{admin.id}",
+        json={"password": "rotated-password-9"},
+    )
+    assert response.status_code == 200
+    # The refreshed cookie keeps the admin signed in despite the revocation.
+    assert "access_token=" in response.headers.get("set-cookie", "")
+    assert client.get("/auth/me").status_code == 200
+
+
 def test_admin_password_reset_preserves_whitespace(
     client,
     make_user,

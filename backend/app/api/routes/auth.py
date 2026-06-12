@@ -51,10 +51,12 @@ def login(
     # The key combines client and account: behind docker-proxy (or a future
     # reverse proxy) every browser shares one IP, and an IP-only key would
     # turn the limit into a global budget locking the whole organization out
-    # of the login. Only failed attempts consume quota.
+    # of the login. The slot is reserved atomically before the slow password
+    # check (so concurrent requests cannot exceed the budget) and refunded on
+    # success: only failed attempts end up consuming quota.
     client_host = request.client.host if request.client else "unknown"
     rate_key = f"{client_host}:{str(payload.email).lower()}"
-    if not login_rate_limiter.is_allowed(rate_key):
+    if not login_rate_limiter.try_acquire(rate_key):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts",
@@ -62,12 +64,12 @@ def login(
 
     user = get_user_by_email(db, str(payload.email))
     if user is None or not verify_password(payload.password, user.hashed_password):
-        login_rate_limiter.register_failure(rate_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    login_rate_limiter.refund(rate_key)
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -100,19 +102,20 @@ def change_password(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> DetailResponse:
     # Verifying the current password is the defense against a hijacked
-    # session; without an attempt limit it would be brute-forceable.
+    # session; without an attempt limit it would be brute-forceable. The slot
+    # is reserved atomically and refunded only when the check passes.
     rate_key = str(current_user.id)
-    if not change_password_rate_limiter.is_allowed(rate_key):
+    if not change_password_rate_limiter.try_acquire(rate_key):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many password attempts",
         )
     if not verify_password(payload.current_password, current_user.hashed_password):
-        change_password_rate_limiter.register_failure(rate_key)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
         )
+    change_password_rate_limiter.refund(rate_key)
 
     current_user.hashed_password = hash_password(payload.new_password)
     current_user.password_changed_at = datetime.now(UTC)

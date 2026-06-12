@@ -25,6 +25,8 @@ function translateApiDetail(detail: string, fallback: string) {
       return "La contraseña actual no es correcta.";
     case "Too many login attempts":
       return "Demasiados intentos de inicio de sesión. Espera un minuto e inténtalo de nuevo.";
+    case "Too many password attempts":
+      return "Demasiados intentos de contraseña. Espera un minuto e inténtalo de nuevo.";
     case "Only superusers can reset a superuser password":
       return "Solo un superusuario puede restablecer la contraseña de un superusuario.";
     case "Inactive user":

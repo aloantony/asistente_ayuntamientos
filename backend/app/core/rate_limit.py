@@ -4,8 +4,8 @@ from collections import deque
 
 from app.core.config import settings
 
-# How many register_failure() calls between sweeps of keys whose window has
-# expired, so the dict cannot grow unbounded with keys never touched again.
+# How many acquisitions between sweeps of keys whose window has expired, so
+# the dict cannot grow unbounded with keys never touched again.
 SWEEP_EVERY_OPERATIONS = 256
 
 
@@ -13,8 +13,10 @@ class SlidingWindowRateLimiter:
     """In-memory per-key sliding window. Per-process state: enough for the
     current single-worker deployment; swap for Redis when scaling out.
 
-    is_allowed() only checks the budget; an attempt is consumed with
-    register_failure(), so successful operations never spend quota.
+    try_acquire() reserves one attempt atomically — concurrent requests
+    cannot exceed the budget while a slow credential check runs — and
+    refund() returns the slot when the guarded operation succeeds, so only
+    failures end up consuming quota.
     """
 
     def __init__(self, max_attempts: int, window_seconds: float) -> None:
@@ -35,16 +37,12 @@ class SlidingWindowRateLimiter:
             return None
         return attempts
 
-    def is_allowed(self, key: str) -> bool:
+    def try_acquire(self, key: str) -> bool:
         now = time.monotonic()
         with self._lock:
             attempts = self._prune(key, now)
-            return attempts is None or len(attempts) < self.max_attempts
-
-    def register_failure(self, key: str) -> None:
-        now = time.monotonic()
-        with self._lock:
-            attempts = self._prune(key, now)
+            if attempts is not None and len(attempts) >= self.max_attempts:
+                return False
             if attempts is None:
                 attempts = deque()
                 self._attempts[key] = attempts
@@ -54,6 +52,17 @@ class SlidingWindowRateLimiter:
             if self._operations % SWEEP_EVERY_OPERATIONS == 0:
                 for stale_key in list(self._attempts):
                     self._prune(stale_key, now)
+            return True
+
+    def refund(self, key: str) -> None:
+        with self._lock:
+            attempts = self._attempts.get(key)
+            if attempts:
+                # Timestamps are fungible: releasing the newest entry returns
+                # exactly one slot to the window.
+                attempts.pop()
+                if not attempts:
+                    del self._attempts[key]
 
     def reset(self) -> None:
         with self._lock:

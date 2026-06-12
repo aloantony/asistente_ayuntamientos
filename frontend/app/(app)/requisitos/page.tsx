@@ -172,8 +172,13 @@ function RequisitosPageInner() {
       if (selectedId !== urlRequirementId) {
         // Selección ya resuelta dentro del controlador (p. ej. tras crear):
         // se marca como solicitada para que el efecto de la URL no la repita.
+        // El elemento recién creado entra siempre en la página 1 (orden
+        // created_at desc), así que la URL salta allí para que la lista
+        // recargada lo contenga.
         lastRequestedIdRef.current = selectedId;
-        replaceSearch(buildRequisitosSearch(urlFilters, selectedId));
+        replaceSearch(
+          buildRequisitosSearch({ ...urlFilters, page: 1 }, selectedId),
+        );
       }
     } else if (previousSelectedId !== null && urlRequirementId !== null) {
       replaceSearch(buildRequisitosSearch(urlFilters, null));
