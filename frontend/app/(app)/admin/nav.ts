@@ -1,22 +1,8 @@
 import { userHasPermission, type User } from "../../components/types";
-
-// Permisos que dan acceso a las secciones de municipios y ordenanzas;
-// misma lista que computaba el antiguo AdminPanel.
-const MUNICIPALITY_PERMISSIONS = [
-  "municipalities.view",
-  "municipalities.create",
-  "municipalities.edit",
-  "municipalities.archive",
-  "municipalities.manage",
-];
-
-const ORDINANCE_PERMISSIONS = [
-  "ordinances.view",
-  "ordinances.create",
-  "ordinances.edit",
-  "ordinances.archive",
-  "ordinances.manage",
-];
+import {
+  MUNICIPALITY_PERMISSIONS,
+  ORDINANCE_PERMISSIONS,
+} from "../../lib/permissions";
 
 export function canUseMunicipalitiesSection(user: User) {
   return MUNICIPALITY_PERMISSIONS.some((permissionCode) =>

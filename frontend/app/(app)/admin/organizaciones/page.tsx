@@ -13,6 +13,7 @@ import {
   fetchMunicipalityOptions,
 } from "../../../lib/fetchers";
 import { useSession } from "../../../lib/session";
+import { canListMunicipalities } from "../nav";
 
 export default function AdminOrganizacionesPage() {
   const { user, getStoredToken, handleRequestError } = useSession();
@@ -29,6 +30,10 @@ export default function AdminOrganizacionesPage() {
   const canManageOrganizations = Boolean(
     user && userHasPermission(user, "organizations.manage"),
   );
+  // El backend exige municipalities.view||manage para listar municipios: sin
+  // ese permiso el selector queda vacío en vez de disparar una petición
+  // condenada al 403 que acabaría como banner de error.
+  const canLoadMunicipalities = Boolean(user && canListMunicipalities(user));
 
   // Recarga el dominio y las listas de referencia; lo comparten el efecto de
   // montaje y el botón "Actualizar".
@@ -36,15 +41,17 @@ export default function AdminOrganizacionesPage() {
     setReferenceError("");
     void organizationsAdmin.loadOrganizations();
 
-    fetchMunicipalityOptions()
-      .then(setMunicipalities)
-      .catch((referenceFetchError) => {
-        handleRequestError(
-          referenceFetchError,
-          setReferenceError,
-          "No se pudo cargar la lista de municipios.",
-        );
-      });
+    if (canLoadMunicipalities) {
+      fetchMunicipalityOptions()
+        .then(setMunicipalities)
+        .catch((referenceFetchError) => {
+          handleRequestError(
+            referenceFetchError,
+            setReferenceError,
+            "No se pudo cargar la lista de municipios.",
+          );
+        });
+    }
 
     fetchAdminUsers()
       .then(setAdminUsers)
