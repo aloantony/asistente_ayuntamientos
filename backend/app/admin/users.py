@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -12,11 +12,13 @@ from app.admin.schemas import (
     AdminUserUpdate,
 )
 from app.auth.dependencies import get_current_user
+from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import organization_users
 from app.projects.models import project_users
 from app.rbac.models import Group, user_groups
+from app.core.security import hash_password
 from app.rbac.permissions import has_permission
 from app.users.crud import create_user
 from app.users.models import User
@@ -31,6 +33,8 @@ router = APIRouter(
 def list_users(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
 ) -> list[User]:
     query = (
         select(User)
@@ -56,7 +60,7 @@ def list_users(
             .distinct()
         )
 
-    return list(db.scalars(query))
+    return list(db.scalars(paginate(db, query, page, response)))
 
 
 @router.post("", response_model=AdminUserRead, status_code=status.HTTP_201_CREATED)
@@ -149,6 +153,17 @@ def update_admin_user(
     require_users_manage_for_target(db, current_user, user)
 
     updates = payload.model_dump(exclude_unset=True)
+
+    new_password = updates.pop("password", None)
+    if new_password is not None:
+        # Resetting a superuser's password would be an account takeover; the
+        # same boundary as granting superuser status applies.
+        if user.is_superuser and not current_user.is_superuser:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only superusers can reset a superuser password",
+            )
+        user.hashed_password = hash_password(new_password)
 
     if (
         "is_superuser" in updates

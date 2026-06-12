@@ -1,11 +1,12 @@
 "use client";
 
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import type { LoginResponse, User } from "../components/types";
+import type { User } from "../components/types";
 import { userHasPermission } from "../components/types";
 import {
   API_BASE_URL,
   ApiRequestError,
+  adminRequest,
   fetchCurrentUser,
   getErrorMessage,
   isAuthError,
@@ -85,15 +86,40 @@ export function useHomeController() {
   const [error, setError] = useState("");
   const [isLoadingSession, setIsLoadingSession] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirmation, setNewPasswordConfirmation] = useState("");
+  const [changePasswordError, setChangePasswordError] = useState("");
+  const [changePasswordMessage, setChangePasswordMessage] = useState("");
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
   const clearAdminStateRef = useRef<() => void>(() => undefined);
   const clearProjectStateRef = useRef<() => void>(() => undefined);
   const clearRequirementsStateRef = useRef<() => void>(() => undefined);
   const clearAssistantStateRef = useRef<() => void>(() => undefined);
 
+  function requestLogout() {
+    // Fire-and-forget: the cookie is httpOnly so only the backend can clear
+    // it; local state is reset regardless of whether this call succeeds.
+    void fetch(`${API_BASE_URL}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => undefined);
+  }
+
+  function clearChangePasswordState() {
+    setCurrentPassword("");
+    setNewPassword("");
+    setNewPasswordConfirmation("");
+    setChangePasswordError("");
+    setChangePasswordMessage("");
+    setIsChangingPassword(false);
+  }
+
   function handleSessionExpired(message: string) {
-    window.localStorage.removeItem("access_token");
+    requestLogout();
     setUser(null);
     setPassword("");
+    clearChangePasswordState();
     clearAdminStateRef.current();
     clearProjectStateRef.current();
     clearRequirementsStateRef.current();
@@ -117,15 +143,9 @@ export function useHomeController() {
   }
 
   function getStoredToken() {
-    const token = window.localStorage.getItem("access_token");
-    if (!token) {
-      throw new ApiRequestError(
-        "La sesión ha caducado o no es válida. Inicia sesión de nuevo.",
-        401,
-      );
-    }
-
-    return token;
+    // Auth now travels in an httpOnly cookie, so there is no token to read.
+    // The function is kept so the controllers keep their signatures.
+    return "";
   }
 
   const projectsController = useProjectsController({
@@ -164,25 +184,19 @@ export function useHomeController() {
 
   useEffect(() => {
     let isActive = true;
-    const token = window.localStorage.getItem("access_token");
 
-    if (!token) {
-      setIsLoadingSession(false);
-      return () => {
-        isActive = false;
-      };
-    }
-
-    fetchCurrentUser(token)
+    fetchCurrentUser("")
       .then((currentUser) => {
         if (isActive) {
           setUser(currentUser);
         }
       })
-      .catch((sessionError: Error) => {
-        window.localStorage.removeItem("access_token");
-        if (isActive) {
-          setError(sessionError.message);
+      .catch((sessionError: unknown) => {
+        // A 401 simply means there is no active session cookie.
+        if (isActive && !isAuthError(sessionError)) {
+          setError(
+            getErrorMessage(sessionError, "No se pudo comprobar la sesión."),
+          );
         }
       })
       .finally(() => {
@@ -236,6 +250,7 @@ export function useHomeController() {
     try {
       const loginResponse = await fetch(`${API_BASE_URL}/auth/login`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
         },
@@ -252,15 +267,12 @@ export function useHomeController() {
         );
       }
 
-      const loginData = (await loginResponse.json()) as LoginResponse;
-      window.localStorage.setItem("access_token", loginData.access_token);
-
-      const currentUser = await fetchCurrentUser(loginData.access_token);
+      // The session lives in the httpOnly cookie set by the backend.
+      const currentUser = await fetchCurrentUser("");
       setUser(currentUser);
       setPassword("");
       setError("");
     } catch (loginError) {
-      window.localStorage.removeItem("access_token");
       setUser(null);
       adminController.clearAdminState();
       projectsController.clearProjectState();
@@ -273,14 +285,65 @@ export function useHomeController() {
   }
 
   function handleLogout() {
-    window.localStorage.removeItem("access_token");
+    requestLogout();
     setUser(null);
     setPassword("");
     setError("");
+    clearChangePasswordState();
     adminController.clearAdminState();
     projectsController.clearProjectState();
     requirementsController.clearRequirementsState();
     assistantController.clearAssistantState();
+  }
+
+  async function handleChangePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setChangePasswordError("");
+    setChangePasswordMessage("");
+
+    if (newPassword.length < 8) {
+      setChangePasswordError(
+        "La nueva contraseña debe tener al menos 8 caracteres.",
+      );
+      return;
+    }
+
+    if (newPassword !== newPasswordConfirmation) {
+      setChangePasswordError(
+        "La nueva contraseña y su confirmación no coinciden.",
+      );
+      return;
+    }
+
+    setIsChangingPassword(true);
+
+    try {
+      await adminRequest<{ detail: string }>(
+        "/auth/change-password",
+        getStoredToken(),
+        "No se pudo cambiar la contraseña.",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            current_password: currentPassword,
+            new_password: newPassword,
+          }),
+        },
+      );
+
+      setCurrentPassword("");
+      setNewPassword("");
+      setNewPasswordConfirmation("");
+      setChangePasswordMessage("Contraseña actualizada.");
+    } catch (changeError) {
+      handleRequestError(
+        changeError,
+        setChangePasswordError,
+        "No se pudo cambiar la contraseña.",
+      );
+    } finally {
+      setIsChangingPassword(false);
+    }
   }
 
   const loginFormProps = {
@@ -296,7 +359,17 @@ export function useHomeController() {
   const dashboardProps = user
     ? {
         user,
+        currentPassword,
+        newPassword,
+        newPasswordConfirmation,
+        changePasswordError,
+        changePasswordMessage,
+        isChangingPassword,
         onLogout: handleLogout,
+        onCurrentPasswordChange: setCurrentPassword,
+        onNewPasswordChange: setNewPassword,
+        onNewPasswordConfirmationChange: setNewPasswordConfirmation,
+        onChangePassword: handleChangePassword,
       }
     : null;
 
@@ -476,6 +549,9 @@ export function useHomeController() {
             adminController.organizationMembershipMessage,
           isUpdatingOrganizationMembership:
             adminController.isUpdatingOrganizationMembership,
+          municipalityPage: adminController.municipalityPage,
+          municipalityTotal: adminController.municipalityTotal,
+          municipalityPageSize: adminController.adminPageSize,
           municipalitySearchText: adminController.municipalitySearchText,
           municipalityProvinceFilter:
             adminController.municipalityProvinceFilter,
@@ -493,6 +569,9 @@ export function useHomeController() {
           municipalityEditMessage: adminController.municipalityEditMessage,
           updatingMunicipalityId: adminController.updatingMunicipalityId,
           ordinances: adminController.ordinances,
+          ordinancePage: adminController.ordinancePage,
+          ordinanceTotal: adminController.ordinanceTotal,
+          ordinancePageSize: adminController.adminPageSize,
           ordinanceSearchText: adminController.ordinanceSearchText,
           ordinanceMunicipalityFilter:
             adminController.ordinanceMunicipalityFilter,
@@ -507,6 +586,8 @@ export function useHomeController() {
           ordinanceEditError: adminController.ordinanceEditError,
           ordinanceEditMessage: adminController.ordinanceEditMessage,
           updatingOrdinanceId: adminController.updatingOrdinanceId,
+          ordinanceDetailLoaded: adminController.ordinanceDetailLoaded,
+          loadingOrdinanceDetailId: adminController.loadingOrdinanceDetailId,
           userFormError: adminController.userFormError,
           isCreatingUser: adminController.isCreatingUser,
           userEdits: adminController.userEdits,
@@ -514,6 +595,8 @@ export function useHomeController() {
           userEditMessage: adminController.userEditMessage,
           updatingUserId: adminController.updatingUserId,
           deletingUserId: adminController.deletingUserId,
+          userPasswordResets: adminController.userPasswordResets,
+          resettingPasswordUserId: adminController.resettingPasswordUserId,
           newGroupName: adminController.newGroupName,
           newGroupDescription: adminController.newGroupDescription,
           newGroupOrganizationId: adminController.newGroupOrganizationId,
@@ -590,6 +673,8 @@ export function useHomeController() {
             adminController.setMunicipalityStatusFilter,
           onMunicipalityIncludeArchivedChange:
             adminController.setMunicipalityIncludeArchived,
+          onMunicipalityPrevPage: adminController.handleMunicipalityPrevPage,
+          onMunicipalityNextPage: adminController.handleMunicipalityNextPage,
           onUpdateNewMunicipality: adminController.updateNewMunicipality,
           onCreateMunicipality: adminController.handleCreateMunicipality,
           onUpdateMunicipalityEdit:
@@ -607,8 +692,11 @@ export function useHomeController() {
             adminController.setOrdinanceStatusFilter,
           onOrdinanceIncludeArchivedChange:
             adminController.setOrdinanceIncludeArchived,
+          onOrdinancePrevPage: adminController.handleOrdinancePrevPage,
+          onOrdinanceNextPage: adminController.handleOrdinanceNextPage,
           onUpdateNewOrdinance: adminController.updateNewOrdinance,
           onCreateOrdinance: adminController.handleCreateOrdinance,
+          onStartOrdinanceEdit: adminController.handleStartOrdinanceEdit,
           onUpdateOrdinanceEdit:
             adminController.updateOrdinanceEdit,
           onUpdateOrdinance: adminController.handleUpdateOrdinance,
@@ -617,6 +705,9 @@ export function useHomeController() {
           onUpdateUserEdit: adminController.updateUserEdit,
           onUpdateUser: adminController.handleUpdateUser,
           onDeleteUser: adminController.handleDeleteUser,
+          onUpdateUserPasswordReset:
+            adminController.updateUserPasswordReset,
+          onResetUserPassword: adminController.handleResetUserPassword,
           onNewGroupNameChange: adminController.setNewGroupName,
           onNewGroupDescriptionChange:
             adminController.setNewGroupDescription,
@@ -659,11 +750,16 @@ export function useHomeController() {
           isLoadingAssistant: assistantController.isLoadingAssistant,
           isSendingMessage: assistantController.isSendingMessage,
           assistantError: assistantController.assistantError,
+          includeArchivedConversations:
+            assistantController.includeArchivedConversations,
           onDraftMessageChange: assistantController.setDraftMessage,
           onSelectConversation: assistantController.selectConversation,
           onStartConversation: assistantController.startConversation,
           onSendMessage: assistantController.sendMessage,
           onArchiveConversation: assistantController.archiveConversation,
+          onRestoreConversation: assistantController.restoreConversation,
+          onIncludeArchivedConversationsChange:
+            assistantController.toggleIncludeArchivedConversations,
         }
       : null;
 

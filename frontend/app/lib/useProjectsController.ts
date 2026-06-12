@@ -496,12 +496,16 @@ export function useProjectsController({
 
     try {
       const token = getStoredToken();
+      const headers = new Headers();
+      if (token) {
+        headers.set("Authorization", `Bearer ${token}`);
+      }
+
       const response = await fetch(
         `${API_BASE_URL}/documents/${document.id}/download`,
         {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          credentials: "include",
+          headers,
         },
       );
 

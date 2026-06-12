@@ -17,6 +17,8 @@ export type UsersAdminProps = {
   userEditMessage: string;
   updatingUserId: number | null;
   deletingUserId: number | null;
+  userPasswordResets: Record<number, string>;
+  resettingPasswordUserId: number | null;
   onNewUserEmailChange: (email: string) => void;
   onNewUserPasswordChange: (password: string) => void;
   onNewUserFullNameChange: (fullName: string) => void;
@@ -29,6 +31,8 @@ export type UsersAdminProps = {
   ) => void;
   onUpdateUser: (userId: number) => void;
   onDeleteUser: (adminUser: User) => void;
+  onUpdateUserPasswordReset: (userId: number, password: string) => void;
+  onResetUserPassword: (userId: number) => void;
 };
 
 export function UsersAdmin({
@@ -47,6 +51,8 @@ export function UsersAdmin({
   userEditMessage,
   updatingUserId,
   deletingUserId,
+  userPasswordResets,
+  resettingPasswordUserId,
   onNewUserEmailChange,
   onNewUserPasswordChange,
   onNewUserFullNameChange,
@@ -56,6 +62,8 @@ export function UsersAdmin({
   onUpdateUserEdit,
   onUpdateUser,
   onDeleteUser,
+  onUpdateUserPasswordReset,
+  onResetUserPassword,
 }: UsersAdminProps) {
   return (
     <div className="admin-section">
@@ -77,6 +85,7 @@ export function UsersAdmin({
               <th>Grupos</th>
               <th>Activo</th>
               <th>Superusuario</th>
+              <th>Restablecer contraseña</th>
               <th>Acción</th>
             </tr>
           </thead>
@@ -165,6 +174,41 @@ export function UsersAdmin({
                     </td>
                     <td>
                       <div className="table-actions">
+                        <input
+                          aria-label={`Nueva contraseña de ${adminUser.email}`}
+                          autoComplete="new-password"
+                          className="table-input"
+                          minLength={8}
+                          onChange={(event) =>
+                            onUpdateUserPasswordReset(
+                              adminUser.id,
+                              event.target.value,
+                            )
+                          }
+                          placeholder="Nueva contraseña"
+                          type="password"
+                          value={userPasswordResets[adminUser.id] ?? ""}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onResetUserPassword(adminUser.id)}
+                          disabled={
+                            (userPasswordResets[adminUser.id] ?? "").length <
+                              8 ||
+                            resettingPasswordUserId === adminUser.id ||
+                            updatingUserId === adminUser.id ||
+                            deletingUserId === adminUser.id ||
+                            isLoadingAdmin
+                          }
+                        >
+                          {resettingPasswordUserId === adminUser.id
+                            ? "Restableciendo..."
+                            : "Restablecer contraseña"}
+                        </button>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="table-actions">
                         <button
                           type="button"
                           onClick={() => onUpdateUser(adminUser.id)}
@@ -205,7 +249,7 @@ export function UsersAdmin({
               })
             ) : (
               <tr>
-                <td colSpan={8}>No hay usuarios para mostrar.</td>
+                <td colSpan={9}>No hay usuarios para mostrar.</td>
               </tr>
             )}
           </tbody>

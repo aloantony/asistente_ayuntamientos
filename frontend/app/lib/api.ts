@@ -21,6 +21,12 @@ function translateApiDetail(detail: string, fallback: string) {
   switch (detail) {
     case "Incorrect email or password":
       return "No se pudo iniciar sesión. Revisa el email y la contraseña.";
+    case "Current password is incorrect":
+      return "La contraseña actual no es correcta.";
+    case "Too many login attempts":
+      return "Demasiados intentos de inicio de sesión. Espera un minuto e inténtalo de nuevo.";
+    case "Only superusers can reset a superuser password":
+      return "Solo un superusuario puede restablecer la contraseña de un superusuario.";
     case "Inactive user":
       return "El usuario está inactivo.";
     case "Could not validate credentials":
@@ -132,10 +138,14 @@ export async function readApiError(response: Response, fallback: string) {
 }
 
 export async function fetchCurrentUser(accessToken: string) {
+  const headers = new Headers();
+  if (accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+  }
+
   const response = await fetch(`${API_BASE_URL}/auth/me`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
+    credentials: "include",
+    headers,
   });
 
   if (!response.ok) {
@@ -151,14 +161,16 @@ export async function fetchCurrentUser(accessToken: string) {
   return (await response.json()) as User;
 }
 
-export async function adminRequest<T>(
+async function performAdminRequest(
   path: string,
   accessToken: string,
   fallbackError: string,
   options: RequestInit = {},
 ) {
   const headers = new Headers(options.headers);
-  headers.set("Authorization", `Bearer ${accessToken}`);
+  if (accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+  }
 
   const isFormData =
     typeof FormData !== "undefined" && options.body instanceof FormData;
@@ -168,6 +180,7 @@ export async function adminRequest<T>(
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
+    credentials: "include",
     headers,
   });
 
@@ -178,7 +191,49 @@ export async function adminRequest<T>(
     );
   }
 
+  return response;
+}
+
+export async function adminRequest<T>(
+  path: string,
+  accessToken: string,
+  fallbackError: string,
+  options: RequestInit = {},
+) {
+  const response = await performAdminRequest(
+    path,
+    accessToken,
+    fallbackError,
+    options,
+  );
+
   return (await response.json()) as T;
+}
+
+export async function adminRequestWithTotal<T>(
+  path: string,
+  accessToken: string,
+  fallbackError: string,
+  options: RequestInit = {},
+) {
+  const response = await performAdminRequest(
+    path,
+    accessToken,
+    fallbackError,
+    options,
+  );
+
+  const items = (await response.json()) as T;
+  const totalHeader = response.headers.get("X-Total-Count");
+  const parsedTotal =
+    totalHeader === null ? Number.NaN : Number.parseInt(totalHeader, 10);
+  const total = Number.isFinite(parsedTotal)
+    ? parsedTotal
+    : Array.isArray(items)
+      ? items.length
+      : 0;
+
+  return { items, total };
 }
 
 export function getErrorMessage(error: unknown, fallback: string) {

@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, insert, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import login_rate_limiter
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.session import get_db
@@ -78,6 +79,12 @@ def db(engine: Engine) -> Generator[Session, None, None]:
     session.close()
     transaction.rollback()
     connection.close()
+
+
+@pytest.fixture(autouse=True)
+def reset_login_rate_limiter() -> Generator[None, None, None]:
+    login_rate_limiter.reset()
+    yield
 
 
 @pytest.fixture()

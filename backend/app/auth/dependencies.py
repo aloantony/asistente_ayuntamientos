@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Cookie, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
@@ -15,6 +15,10 @@ bearer_scheme = HTTPBearer(auto_error=False)
 def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     db: Annotated[Session, Depends(get_db)],
+    access_token_cookie: Annotated[
+        str | None,
+        Cookie(alias="access_token"),
+    ] = None,
 ) -> User:
     credentials_error = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -22,11 +26,19 @@ def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    if credentials is None or credentials.scheme.lower() != "bearer":
+    # Browser sessions use the httpOnly cookie; API clients and tests keep
+    # using Authorization: Bearer, which takes precedence when present.
+    token: str | None = None
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        token = credentials.credentials
+    elif access_token_cookie:
+        token = access_token_cookie
+
+    if token is None:
         raise credentials_error
 
     try:
-        payload = decode_access_token(credentials.credentials)
+        payload = decode_access_token(token)
         subject = payload.get("sub")
         if not isinstance(subject, str):
             raise credentials_error

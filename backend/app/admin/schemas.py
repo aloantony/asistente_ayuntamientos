@@ -70,6 +70,7 @@ class AdminUserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=255)
     is_active: bool | None = None
     is_superuser: bool | None = None
+    password: str | None = Field(default=None, min_length=8)
 
     model_config = ConfigDict(str_strip_whitespace=True)
 

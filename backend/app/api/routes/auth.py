@@ -1,14 +1,21 @@
 import secrets
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
-from app.auth.schemas import BootstrapAdminRequest, LoginRequest, Token
+from app.auth.schemas import (
+    BootstrapAdminRequest,
+    ChangePasswordRequest,
+    DetailResponse,
+    LoginRequest,
+    Token,
+)
 from app.core.config import settings
-from app.core.security import create_access_token, verify_password
+from app.core.rate_limit import login_rate_limiter
+from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
 from app.rbac.permissions import get_user_permission_codes
@@ -18,9 +25,35 @@ from app.users.schemas import UserRead
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+ACCESS_TOKEN_COOKIE = "access_token"
+
+
+def set_session_cookie(response: Response, access_token: str) -> None:
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=access_token,
+        httponly=True,
+        samesite="lax",
+        secure=settings.environment not in ("development", "test"),
+        max_age=settings.access_token_expire_minutes * 60,
+        path="/",
+    )
+
 
 @router.post("/login", response_model=Token)
-def login(payload: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> Token:
+def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    db: Annotated[Session, Depends(get_db)],
+) -> Token:
+    client_host = request.client.host if request.client else "unknown"
+    if not login_rate_limiter.is_allowed(client_host):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts",
+        )
+
     user = get_user_by_email(db, str(payload.email))
     if user is None or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(
@@ -35,7 +68,33 @@ def login(payload: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> Tok
         )
 
     access_token = create_access_token(subject=str(user.id))
+    # httpOnly session cookie for the browser; the token is also returned in
+    # the body for API clients and tests using Authorization: Bearer.
+    set_session_cookie(response, access_token)
     return Token(access_token=access_token)
+
+
+@router.post("/logout", response_model=DetailResponse)
+def logout(response: Response) -> DetailResponse:
+    response.delete_cookie(ACCESS_TOKEN_COOKIE, path="/")
+    return DetailResponse(detail="Logged out")
+
+
+@router.post("/change-password", response_model=DetailResponse)
+def change_password(
+    payload: ChangePasswordRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> DetailResponse:
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+
+    current_user.hashed_password = hash_password(payload.new_password)
+    db.commit()
+    return DetailResponse(detail="Password updated")
 
 
 @router.get("/me", response_model=UserRead)

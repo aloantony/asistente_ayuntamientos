@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     secret_key: str = "change-me-in-development"
     access_token_expire_minutes: int = 60
+    login_rate_limit_attempts: int = 10
+    login_rate_limit_window_seconds: int = 60
     bootstrap_admin_token: str | None = None
     jwt_algorithm: str = "HS256"
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
