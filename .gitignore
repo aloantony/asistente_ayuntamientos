@@ -18,3 +18,4 @@ yarn-error.log*
 postgres_data/
 
 .DS_Store
+frontend/tsconfig.tsbuildinfo
