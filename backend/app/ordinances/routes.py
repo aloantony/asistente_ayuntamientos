@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
+from app.documents.access import user_can_access_document
 from app.documents.models import Document
 from app.municipalities.models import Municipality
 from app.ordinances.models import Ordinance
@@ -90,7 +91,7 @@ def create_ordinance(
     if payload.status == "archived":
         require_ordinance_permission(db, current_user, "ordinances.archive")
     ensure_active_municipality(db, payload.municipality_id)
-    ensure_document_exists(db, payload.document_id)
+    ensure_document_access(db, current_user, payload.document_id)
 
     ordinance = Ordinance(
         **payload.model_dump(),
@@ -140,8 +141,8 @@ def update_ordinance(
     ):
         ensure_active_municipality(db, requested_municipality_id)
 
-    if "document_id" in updates:
-        ensure_document_exists(db, updates["document_id"])
+    if "document_id" in updates and updates["document_id"] != ordinance.document_id:
+        ensure_document_access(db, current_user, updates["document_id"])
 
     for field, value in updates.items():
         setattr(ordinance, field, value)
@@ -164,7 +165,12 @@ def select_ordinances_with_summaries():
 
 def get_existing_ordinance(db: Session, ordinance_id: int) -> Ordinance:
     ordinance = db.scalar(
-        select_ordinances_with_summaries().where(Ordinance.id == ordinance_id)
+        select_ordinances_with_summaries()
+        .where(Ordinance.id == ordinance_id)
+        # Repopulate relationships when re-reading after a commit in the same
+        # request (e.g. PATCH that links a document); with expire_on_commit
+        # False the identity map would otherwise return stale relations.
+        .execution_options(populate_existing=True)
     )
     if ordinance is None:
         raise HTTPException(
@@ -191,11 +197,22 @@ def ensure_active_municipality(db: Session, municipality_id: int) -> Municipalit
     return municipality
 
 
-def ensure_document_exists(db: Session, document_id: int | None) -> None:
+def ensure_document_access(
+    db: Session,
+    current_user: User,
+    document_id: int | None,
+) -> None:
     if document_id is None:
         return
 
-    if db.get(Document, document_id) is None:
+    document = db.scalar(
+        select(Document)
+        .options(selectinload(Document.project))
+        .where(Document.id == document_id)
+    )
+    # 404 for both missing and inaccessible documents so ordinance editors
+    # cannot probe other organizations' document ids.
+    if document is None or not user_can_access_document(db, current_user, document):
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Document not found",

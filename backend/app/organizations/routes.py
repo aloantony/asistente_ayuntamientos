@@ -45,7 +45,11 @@ def create_organization(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Organization:
-    require_organizations_manage(db, current_user)
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superuser privileges required",
+        )
     ensure_municipality_can_be_linked(db, payload.municipality_id)
 
     organization = Organization(

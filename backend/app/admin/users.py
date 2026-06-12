@@ -66,6 +66,11 @@ def create_admin_user(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> User:
     require_users_manage(db, current_user)
+    if payload.is_superuser and not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superusers can change superuser status",
+        )
 
     try:
         return create_user(
@@ -141,7 +146,45 @@ def update_admin_user(
             detail="User not found",
         )
 
+    require_users_manage_for_target(db, current_user, user)
+
     updates = payload.model_dump(exclude_unset=True)
+
+    if (
+        "is_superuser" in updates
+        and updates["is_superuser"] != user.is_superuser
+        and not current_user.is_superuser
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superusers can change superuser status",
+        )
+
+    if (
+        user.is_active
+        and user.is_superuser
+        and (
+            updates.get("is_active") is False
+            or updates.get("is_superuser") is False
+        )
+    ):
+        active_superuser_ids = list(
+            db.scalars(
+                select(User.id)
+                .where(
+                    User.is_active.is_(True),
+                    User.is_superuser.is_(True),
+                )
+                .order_by(User.id)
+                .with_for_update()
+            )
+        )
+        if len(active_superuser_ids) <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot demote the last active superuser",
+            )
+
     for field, value in updates.items():
         setattr(user, field, value)
 
@@ -176,6 +219,8 @@ def delete_admin_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+
+    require_users_manage_for_target(db, current_user, user)
 
     if user.is_active and user.is_superuser and len(active_superuser_ids) <= 1:
         raise HTTPException(
@@ -224,6 +269,32 @@ def get_visible_user_organization_ids(db: Session, current_user: User) -> list[i
 
 def require_users_manage(db: Session, current_user: User) -> None:
     if has_permission(current_user, "users.manage", db):
+        return
+
+    raise_permission_required("users.manage")
+
+
+def require_users_manage_for_target(
+    db: Session,
+    current_user: User,
+    target_user: User,
+) -> None:
+    if current_user.is_superuser:
+        return
+
+    # Query the ids instead of touching target_user.organizations: loading the
+    # relationship here breaks the delete path, where association rows are
+    # removed manually before db.delete() and a populated collection makes the
+    # ORM cascade try to delete them again (StaleDataError).
+    if any(
+        has_permission(
+            current_user,
+            "users.manage",
+            db,
+            organization_id=organization_id,
+        )
+        for organization_id in get_user_organization_ids(db, target_user)
+    ):
         return
 
     raise_permission_required("users.manage")

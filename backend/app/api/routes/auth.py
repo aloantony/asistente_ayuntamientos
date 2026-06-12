@@ -1,3 +1,4 @@
+import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -69,7 +70,10 @@ def bootstrap_admin(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Bootstrap admin token is not configured",
         )
-    if bootstrap_token != settings.bootstrap_admin_token:
+    if not secrets.compare_digest(
+        bootstrap_token or "",
+        settings.bootstrap_admin_token,
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid bootstrap admin token",

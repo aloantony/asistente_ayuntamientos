@@ -77,7 +77,12 @@ def list_roles(db: Annotated[Session, Depends(get_db)]) -> list[Role]:
     )
 
 
-@roles_router.post("", response_model=RoleRead, status_code=status.HTTP_201_CREATED)
+@roles_router.post(
+    "",
+    response_model=RoleRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_superuser)],
+)
 def create_role(
     payload: RoleCreate,
     db: Annotated[Session, Depends(get_db)],
@@ -97,7 +102,11 @@ def create_role(
     return get_role_with_permissions(db, role.id)
 
 
-@roles_router.patch("/{role_id}", response_model=RoleRead)
+@roles_router.patch(
+    "/{role_id}",
+    response_model=RoleRead,
+    dependencies=[Depends(require_superuser)],
+)
 def update_role(
     role_id: int,
     payload: RoleUpdate,
@@ -126,7 +135,11 @@ def update_role(
     return get_role_with_permissions(db, role_id)
 
 
-@roles_router.delete("/{role_id}", response_model=RoleDeleteResponse)
+@roles_router.delete(
+    "/{role_id}",
+    response_model=RoleDeleteResponse,
+    dependencies=[Depends(require_superuser)],
+)
 def delete_role(
     role_id: int,
     db: Annotated[Session, Depends(get_db)],
@@ -150,6 +163,7 @@ def delete_role(
     "/{role_id}/permissions/{permission_id}",
     response_model=RolePermissionResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_superuser)],
 )
 def assign_permission_to_role(
     role_id: int,
@@ -187,6 +201,7 @@ def assign_permission_to_role(
 @roles_router.delete(
     "/{role_id}/permissions/{permission_id}",
     response_model=RolePermissionResponse,
+    dependencies=[Depends(require_superuser)],
 )
 def remove_permission_from_role(
     role_id: int,
