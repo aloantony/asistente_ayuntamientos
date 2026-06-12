@@ -32,7 +32,9 @@ import type {
   UserEditState,
 } from "../components/types";
 import { userHasPermission } from "../components/types";
-import { adminRequest } from "./api";
+import { adminRequest, adminRequestWithTotal } from "./api";
+
+const ADMIN_PAGE_SIZE = 50;
 
 type RequestErrorHandler = (
   requestError: unknown,
@@ -170,29 +172,33 @@ function createEmptyOrdinanceForm(): OrdinanceEditState {
   return { ...EMPTY_ORDINANCE_FORM };
 }
 
+function buildOrdinanceEditEntry(ordinance: Ordinance): OrdinanceEditState {
+  return {
+    municipality_id: String(ordinance.municipality_id),
+    document_id:
+      ordinance.document_id === null ? "" : String(ordinance.document_id),
+    title: ordinance.title,
+    topic: ordinance.topic,
+    subtopic: ordinance.subtopic ?? "",
+    ordinance_type: ordinance.ordinance_type,
+    summary: ordinance.summary ?? "",
+    source_url: ordinance.source_url ?? "",
+    official_bulletin: ordinance.official_bulletin ?? "",
+    bulletin_number: ordinance.bulletin_number ?? "",
+    approval_date: ordinance.approval_date ?? "",
+    publication_date: ordinance.publication_date ?? "",
+    effective_date: ordinance.effective_date ?? "",
+    status: ordinance.status,
+    text_content: ordinance.text_content ?? "",
+    notes: ordinance.notes ?? "",
+    legal_review_notes: ordinance.legal_review_notes ?? "",
+  };
+}
+
 function buildOrdinanceEditState(ordinances: Ordinance[]) {
   return ordinances.reduce<Record<number, OrdinanceEditState>>(
     (edits, ordinance) => {
-      edits[ordinance.id] = {
-        municipality_id: String(ordinance.municipality_id),
-        document_id:
-          ordinance.document_id === null ? "" : String(ordinance.document_id),
-        title: ordinance.title,
-        topic: ordinance.topic,
-        subtopic: ordinance.subtopic ?? "",
-        ordinance_type: ordinance.ordinance_type,
-        summary: ordinance.summary ?? "",
-        source_url: ordinance.source_url ?? "",
-        official_bulletin: ordinance.official_bulletin ?? "",
-        bulletin_number: ordinance.bulletin_number ?? "",
-        approval_date: ordinance.approval_date ?? "",
-        publication_date: ordinance.publication_date ?? "",
-        effective_date: ordinance.effective_date ?? "",
-        status: ordinance.status,
-        text_content: ordinance.text_content ?? "",
-        notes: ordinance.notes ?? "",
-        legal_review_notes: ordinance.legal_review_notes ?? "",
-      };
+      edits[ordinance.id] = buildOrdinanceEditEntry(ordinance);
       return edits;
     },
     {},
@@ -344,6 +350,8 @@ export function useAdminController({
   const [isUpdatingOrganizationMembership, setIsUpdatingOrganizationMembership] =
     useState(false);
 
+  const [municipalityPage, setMunicipalityPage] = useState(0);
+  const [municipalityTotal, setMunicipalityTotal] = useState(0);
   const [municipalitySearchText, setMunicipalitySearchText] = useState("");
   const [municipalityProvinceFilter, setMunicipalityProvinceFilter] =
     useState("");
@@ -368,6 +376,8 @@ export function useAdminController({
   >(null);
 
   const [ordinances, setOrdinances] = useState<Ordinance[]>([]);
+  const [ordinancePage, setOrdinancePage] = useState(0);
+  const [ordinanceTotal, setOrdinanceTotal] = useState(0);
   const [ordinanceSearchText, setOrdinanceSearchText] = useState("");
   const [ordinanceMunicipalityFilter, setOrdinanceMunicipalityFilter] =
     useState("");
@@ -387,6 +397,14 @@ export function useAdminController({
   const [updatingOrdinanceId, setUpdatingOrdinanceId] = useState<number | null>(
     null,
   );
+  // Tracks which ordinances have their full detail (text_content) loaded;
+  // list items no longer include the text, so editing requires the detail.
+  const [ordinanceDetailLoaded, setOrdinanceDetailLoaded] = useState<
+    Record<number, boolean>
+  >({});
+  const [loadingOrdinanceDetailId, setLoadingOrdinanceDetailId] = useState<
+    number | null
+  >(null);
 
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserPassword, setNewUserPassword] = useState("");
@@ -402,6 +420,12 @@ export function useAdminController({
   const [userEditMessage, setUserEditMessage] = useState("");
   const [updatingUserId, setUpdatingUserId] = useState<number | null>(null);
   const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
+  const [userPasswordResets, setUserPasswordResets] = useState<
+    Record<number, string>
+  >({});
+  const [resettingPasswordUserId, setResettingPasswordUserId] = useState<
+    number | null
+  >(null);
 
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupDescription, setNewGroupDescription] = useState("");
@@ -482,6 +506,8 @@ export function useAdminController({
     setOrganizationMembershipError("");
     setOrganizationMembershipMessage("");
     setIsUpdatingOrganizationMembership(false);
+    setMunicipalityPage(0);
+    setMunicipalityTotal(0);
     setMunicipalitySearchText("");
     setMunicipalityProvinceFilter("");
     setMunicipalityAutonomousCommunityFilter("");
@@ -493,6 +519,8 @@ export function useAdminController({
     setMunicipalityEditError("");
     setMunicipalityEditMessage("");
     setUpdatingMunicipalityId(null);
+    setOrdinancePage(0);
+    setOrdinanceTotal(0);
     setOrdinanceSearchText("");
     setOrdinanceMunicipalityFilter("");
     setOrdinanceTopicFilter("");
@@ -504,10 +532,14 @@ export function useAdminController({
     setOrdinanceEditError("");
     setOrdinanceEditMessage("");
     setUpdatingOrdinanceId(null);
+    setOrdinanceDetailLoaded({});
+    setLoadingOrdinanceDetailId(null);
     setUserFormError("");
     setUserEditError("");
     setUserEditMessage("");
     setDeletingUserId(null);
+    setUserPasswordResets({});
+    setResettingPasswordUserId(null);
     setNewGroupOrganizationId("");
     setGroupFormError("");
     setGroupEditError("");
@@ -541,7 +573,14 @@ export function useAdminController({
     return Boolean(user && userHasPermission(user, permissionCode));
   }
 
-  async function loadAdminData() {
+  async function loadAdminData(overrides?: {
+    municipalityPage?: number;
+    ordinancePage?: number;
+  }) {
+    const municipalityPageToLoad =
+      overrides?.municipalityPage ?? municipalityPage;
+    const ordinancePageToLoad = overrides?.ordinancePage ?? ordinancePage;
+
     setIsLoadingAdmin(true);
     setAdminError("");
 
@@ -567,8 +606,8 @@ export function useAdminController({
 
       const [
         organizationsData,
-        municipalitiesData,
-        ordinancesData,
+        municipalitiesResult,
+        ordinancesResult,
         usersData,
         groupsData,
         permissionsData,
@@ -582,19 +621,23 @@ export function useAdminController({
             )
           : Promise.resolve([]),
         canLoadMunicipalities
-          ? adminRequest<Municipality[]>(
-              "/municipalities?include_archived=true",
+          ? adminRequestWithTotal<Municipality[]>(
+              `/municipalities?include_archived=true&limit=${ADMIN_PAGE_SIZE}&offset=${
+                municipalityPageToLoad * ADMIN_PAGE_SIZE
+              }`,
               token,
               "No se pudo cargar la lista de municipios.",
             )
-          : Promise.resolve([]),
+          : Promise.resolve({ items: [] as Municipality[], total: 0 }),
         canLoadOrdinances
-          ? adminRequest<Ordinance[]>(
-              "/ordinances?include_archived=true",
+          ? adminRequestWithTotal<Ordinance[]>(
+              `/ordinances?include_archived=true&limit=${ADMIN_PAGE_SIZE}&offset=${
+                ordinancePageToLoad * ADMIN_PAGE_SIZE
+              }`,
               token,
               "No se pudo cargar la lista de ordenanzas.",
             )
-          : Promise.resolve([]),
+          : Promise.resolve({ items: [] as Ordinance[], total: 0 }),
         canLoadUsers
           ? adminRequest<User[]>(
               "/admin/users",
@@ -625,9 +668,14 @@ export function useAdminController({
           : Promise.resolve([]),
       ]);
 
+      const municipalitiesData = municipalitiesResult.items;
+      const ordinancesData = ordinancesResult.items;
+
       setOrganizations(organizationsData);
       setMunicipalities(municipalitiesData);
+      setMunicipalityTotal(municipalitiesResult.total);
       setOrdinances(ordinancesData);
+      setOrdinanceTotal(ordinancesResult.total);
       setAdminUsers(usersData);
       setGroups(groupsData);
       setPermissions(permissionsData);
@@ -635,6 +683,7 @@ export function useAdminController({
       setOrganizationEdits(buildOrganizationEditState(organizationsData));
       setMunicipalityEdits(buildMunicipalityEditState(municipalitiesData));
       setOrdinanceEdits(buildOrdinanceEditState(ordinancesData));
+      setOrdinanceDetailLoaded({});
       setUserEdits(buildUserEditState(usersData));
       setGroupEdits(buildGroupEditState(groupsData));
       setRoleEdits(buildRoleEditState(rolesData));
@@ -752,6 +801,143 @@ export function useAdminController({
       );
     } finally {
       setIsLoadingAdmin(false);
+    }
+  }
+
+  async function loadMunicipalitiesPage(page: number) {
+    setIsLoadingAdmin(true);
+    setAdminError("");
+
+    try {
+      const token = getStoredToken();
+      const { items, total } = await adminRequestWithTotal<Municipality[]>(
+        `/municipalities?include_archived=true&limit=${ADMIN_PAGE_SIZE}&offset=${
+          page * ADMIN_PAGE_SIZE
+        }`,
+        token,
+        "No se pudo cargar la lista de municipios.",
+      );
+
+      setMunicipalities(items);
+      setMunicipalityTotal(total);
+      setMunicipalityEdits(buildMunicipalityEditState(items));
+    } catch (loadError) {
+      handleRequestError(
+        loadError,
+        setAdminError,
+        "No se pudo cargar la lista de municipios.",
+      );
+    } finally {
+      setIsLoadingAdmin(false);
+    }
+  }
+
+  function handleMunicipalityPrevPage() {
+    if (municipalityPage === 0) {
+      return;
+    }
+
+    const targetPage = municipalityPage - 1;
+    setMunicipalityPage(targetPage);
+    void loadMunicipalitiesPage(targetPage);
+  }
+
+  function handleMunicipalityNextPage() {
+    const lastPage = Math.max(
+      0,
+      Math.ceil(municipalityTotal / ADMIN_PAGE_SIZE) - 1,
+    );
+    if (municipalityPage >= lastPage) {
+      return;
+    }
+
+    const targetPage = municipalityPage + 1;
+    setMunicipalityPage(targetPage);
+    void loadMunicipalitiesPage(targetPage);
+  }
+
+  async function loadOrdinancesPage(page: number) {
+    setIsLoadingAdmin(true);
+    setAdminError("");
+
+    try {
+      const token = getStoredToken();
+      const { items, total } = await adminRequestWithTotal<Ordinance[]>(
+        `/ordinances?include_archived=true&limit=${ADMIN_PAGE_SIZE}&offset=${
+          page * ADMIN_PAGE_SIZE
+        }`,
+        token,
+        "No se pudo cargar la lista de ordenanzas.",
+      );
+
+      setOrdinances(items);
+      setOrdinanceTotal(total);
+      setOrdinanceEdits(buildOrdinanceEditState(items));
+      setOrdinanceDetailLoaded({});
+    } catch (loadError) {
+      handleRequestError(
+        loadError,
+        setAdminError,
+        "No se pudo cargar la lista de ordenanzas.",
+      );
+    } finally {
+      setIsLoadingAdmin(false);
+    }
+  }
+
+  function handleOrdinancePrevPage() {
+    if (ordinancePage === 0) {
+      return;
+    }
+
+    const targetPage = ordinancePage - 1;
+    setOrdinancePage(targetPage);
+    void loadOrdinancesPage(targetPage);
+  }
+
+  function handleOrdinanceNextPage() {
+    const lastPage = Math.max(
+      0,
+      Math.ceil(ordinanceTotal / ADMIN_PAGE_SIZE) - 1,
+    );
+    if (ordinancePage >= lastPage) {
+      return;
+    }
+
+    const targetPage = ordinancePage + 1;
+    setOrdinancePage(targetPage);
+    void loadOrdinancesPage(targetPage);
+  }
+
+  async function handleStartOrdinanceEdit(ordinanceId: number) {
+    setOrdinanceEditError("");
+    setOrdinanceEditMessage("");
+    setLoadingOrdinanceDetailId(ordinanceId);
+
+    try {
+      const token = getStoredToken();
+      const detail = await adminRequest<Ordinance>(
+        `/ordinances/${ordinanceId}`,
+        token,
+        "No se pudo cargar el detalle de la ordenanza.",
+      );
+
+      setOrdinanceEdits((currentEdits) => ({
+        ...currentEdits,
+        [ordinanceId]: buildOrdinanceEditEntry(detail),
+      }));
+      setOrdinanceDetailLoaded((current) => ({
+        ...current,
+        [ordinanceId]: true,
+      }));
+    } catch (detailError) {
+      handleRequestError(
+        detailError,
+        setOrdinanceEditError,
+        "No se pudo cargar el detalle de la ordenanza.",
+      );
+    } finally {
+      setLoadingOrdinanceDetailId(null);
     }
   }
 
@@ -1378,6 +1564,57 @@ export function useAdminController({
     }
   }
 
+  function updateUserPasswordReset(userId: number, password: string) {
+    setUserPasswordResets((current) => ({
+      ...current,
+      [userId]: password,
+    }));
+  }
+
+  async function handleResetUserPassword(userId: number) {
+    const password = userPasswordResets[userId] ?? "";
+
+    setUserEditError("");
+    setUserEditMessage("");
+
+    if (password.length < 8) {
+      setUserEditError(
+        "La nueva contraseña debe tener al menos 8 caracteres.",
+      );
+      return;
+    }
+
+    setResettingPasswordUserId(userId);
+
+    try {
+      const token = getStoredToken();
+      await adminRequest<User>(
+        `/admin/users/${userId}`,
+        token,
+        "No se pudo restablecer la contraseña.",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ password }),
+        },
+      );
+
+      setUserPasswordResets((current) => {
+        const nextResets = { ...current };
+        delete nextResets[userId];
+        return nextResets;
+      });
+      setUserEditMessage("Contraseña restablecida.");
+    } catch (resetError) {
+      handleRequestError(
+        resetError,
+        setUserEditError,
+        "No se pudo restablecer la contraseña.",
+      );
+    } finally {
+      setResettingPasswordUserId(null);
+    }
+  }
+
   async function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setGroupFormError("");
@@ -1828,6 +2065,9 @@ export function useAdminController({
     organizationMembershipError,
     organizationMembershipMessage,
     isUpdatingOrganizationMembership,
+    adminPageSize: ADMIN_PAGE_SIZE,
+    municipalityPage,
+    municipalityTotal,
     municipalitySearchText,
     municipalityProvinceFilter,
     municipalityAutonomousCommunityFilter,
@@ -1841,6 +2081,8 @@ export function useAdminController({
     municipalityEditMessage,
     updatingMunicipalityId,
     ordinances,
+    ordinancePage,
+    ordinanceTotal,
     ordinanceSearchText,
     ordinanceMunicipalityFilter,
     ordinanceTopicFilter,
@@ -1853,6 +2095,8 @@ export function useAdminController({
     ordinanceEditError,
     ordinanceEditMessage,
     updatingOrdinanceId,
+    ordinanceDetailLoaded,
+    loadingOrdinanceDetailId,
     userFormError,
     isCreatingUser,
     userEdits,
@@ -1860,6 +2104,8 @@ export function useAdminController({
     userEditMessage,
     updatingUserId,
     deletingUserId,
+    userPasswordResets,
+    resettingPasswordUserId,
     newGroupName,
     newGroupDescription,
     newGroupOrganizationId,
@@ -1931,6 +2177,11 @@ export function useAdminController({
     setGroupRoleRoleId,
     clearAdminState,
     loadAdminData,
+    handleMunicipalityPrevPage,
+    handleMunicipalityNextPage,
+    handleOrdinancePrevPage,
+    handleOrdinanceNextPage,
+    handleStartOrdinanceEdit,
     updateUserEdit,
     updateOrganizationEdit,
     updateNewMunicipality,
@@ -1942,6 +2193,8 @@ export function useAdminController({
     handleCreateUser,
     handleUpdateUser,
     handleDeleteUser,
+    updateUserPasswordReset,
+    handleResetUserPassword,
     handleCreateOrganization,
     handleUpdateOrganization,
     handleCreateMunicipality,

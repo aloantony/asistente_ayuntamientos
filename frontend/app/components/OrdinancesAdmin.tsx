@@ -19,6 +19,9 @@ export type OrdinancesAdminProps = {
   municipalities: Municipality[];
   ordinances: Ordinance[];
   isLoadingAdmin: boolean;
+  ordinancePage: number;
+  ordinanceTotal: number;
+  ordinancePageSize: number;
   ordinanceSearchText: string;
   ordinanceMunicipalityFilter: string;
   ordinanceTopicFilter: string;
@@ -31,13 +34,18 @@ export type OrdinancesAdminProps = {
   ordinanceEditError: string;
   ordinanceEditMessage: string;
   updatingOrdinanceId: number | null;
+  ordinanceDetailLoaded: Record<number, boolean>;
+  loadingOrdinanceDetailId: number | null;
   onOrdinanceSearchTextChange: (searchText: string) => void;
   onOrdinanceMunicipalityFilterChange: (municipalityId: string) => void;
   onOrdinanceTopicFilterChange: (topic: string) => void;
   onOrdinanceStatusFilterChange: (status: string) => void;
   onOrdinanceIncludeArchivedChange: (includeArchived: boolean) => void;
+  onOrdinancePrevPage: () => void;
+  onOrdinanceNextPage: () => void;
   onUpdateNewOrdinance: (updates: Partial<OrdinanceEditState>) => void;
   onCreateOrdinance: (event: FormEvent<HTMLFormElement>) => void;
+  onStartOrdinanceEdit: (ordinanceId: number) => void;
   onUpdateOrdinanceEdit: (
     ordinanceId: number,
     updates: Partial<OrdinanceEditState>,
@@ -51,6 +59,9 @@ export function OrdinancesAdmin({
   municipalities,
   ordinances,
   isLoadingAdmin,
+  ordinancePage,
+  ordinanceTotal,
+  ordinancePageSize,
   ordinanceSearchText,
   ordinanceMunicipalityFilter,
   ordinanceTopicFilter,
@@ -63,13 +74,18 @@ export function OrdinancesAdmin({
   ordinanceEditError,
   ordinanceEditMessage,
   updatingOrdinanceId,
+  ordinanceDetailLoaded,
+  loadingOrdinanceDetailId,
   onOrdinanceSearchTextChange,
   onOrdinanceMunicipalityFilterChange,
   onOrdinanceTopicFilterChange,
   onOrdinanceStatusFilterChange,
   onOrdinanceIncludeArchivedChange,
+  onOrdinancePrevPage,
+  onOrdinanceNextPage,
   onUpdateNewOrdinance,
   onCreateOrdinance,
+  onStartOrdinanceEdit,
   onUpdateOrdinanceEdit,
   onUpdateOrdinance,
   onArchiveOrdinance,
@@ -87,6 +103,10 @@ export function OrdinancesAdmin({
     userHasPermission(currentUser, "ordinances.archive") ||
     userHasPermission(currentUser, "ordinances.manage");
 
+  const ordinancePageCount = Math.max(
+    1,
+    Math.ceil(ordinanceTotal / ordinancePageSize),
+  );
   const municipalityOptions = getMunicipalityOptions(municipalities, ordinances);
   const activeMunicipalityOptions =
     municipalities.length > 0
@@ -274,12 +294,18 @@ export function OrdinancesAdmin({
                       notes: ordinance.notes ?? "",
                       legal_review_notes: ordinance.legal_review_notes ?? "",
                     };
+                    // The list omits text_content, so a row only becomes
+                    // editable after loading the full detail with "Editar".
+                    const isRowEditing =
+                      canEdit && Boolean(ordinanceDetailLoaded[ordinance.id]);
+                    const isLoadingDetail =
+                      loadingOrdinanceDetailId === ordinance.id;
 
                     return (
                       <tr key={ordinance.id}>
                         <td>{ordinance.id}</td>
                         <td>
-                          {canEdit ? (
+                          {isRowEditing ? (
                             <select
                               aria-label={`Municipio de ${ordinance.title}`}
                               className="table-input"
@@ -304,7 +330,7 @@ export function OrdinancesAdmin({
                           )}
                         </td>
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Título de ${ordinance.title}`}
                           value={edit.title}
                           onChange={(value) =>
@@ -314,7 +340,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Tema de ${ordinance.title}`}
                           value={edit.topic}
                           onChange={(value) =>
@@ -324,7 +350,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Subtema de ${ordinance.title}`}
                           value={edit.subtopic}
                           onChange={(value) =>
@@ -334,7 +360,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <td>
-                          {canEdit ? (
+                          {isRowEditing ? (
                             <select
                               aria-label={`Tipo de ${ordinance.title}`}
                               className="table-input"
@@ -360,7 +386,7 @@ export function OrdinancesAdmin({
                           )}
                         </td>
                         <td>
-                          {canEdit ? (
+                          {isRowEditing ? (
                             <select
                               aria-label={`Estado de ${ordinance.title}`}
                               className="table-input"
@@ -383,7 +409,7 @@ export function OrdinancesAdmin({
                           )}
                         </td>
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Fuente oficial de ${ordinance.title}`}
                           type="url"
                           value={edit.source_url}
@@ -394,7 +420,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Boletín oficial de ${ordinance.title}`}
                           value={edit.official_bulletin}
                           onChange={(value) =>
@@ -404,7 +430,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Número de boletín de ${ordinance.title}`}
                           value={edit.bulletin_number}
                           onChange={(value) =>
@@ -414,7 +440,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Fecha de aprobación de ${ordinance.title}`}
                           type="date"
                           value={edit.approval_date}
@@ -425,7 +451,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Fecha de publicación de ${ordinance.title}`}
                           type="date"
                           value={edit.publication_date}
@@ -436,7 +462,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Fecha de vigencia de ${ordinance.title}`}
                           type="date"
                           value={edit.effective_date}
@@ -447,7 +473,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           inputMode="numeric"
                           label={`Documento ID de ${ordinance.title}`}
                           type="number"
@@ -459,7 +485,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextareaCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Resumen de ${ordinance.title}`}
                           value={edit.summary}
                           onChange={(value) =>
@@ -468,18 +494,29 @@ export function OrdinancesAdmin({
                             })
                           }
                         />
+                        <td>
+                          {isRowEditing ? (
+                            <textarea
+                              aria-label={`Texto de la ordenanza de ${ordinance.title}`}
+                              className="table-textarea"
+                              onChange={(event) =>
+                                onUpdateOrdinanceEdit(ordinance.id, {
+                                  text_content: event.target.value,
+                                })
+                              }
+                              rows={2}
+                              value={edit.text_content}
+                            />
+                          ) : (
+                            <span className="small-muted">
+                              {canEdit
+                                ? "Pulsa «Editar» para cargar el texto"
+                                : "Disponible en el detalle"}
+                            </span>
+                          )}
+                        </td>
                         <EditableTextareaCell
-                          canEdit={canEdit}
-                          label={`Texto de la ordenanza de ${ordinance.title}`}
-                          value={edit.text_content}
-                          onChange={(value) =>
-                            onUpdateOrdinanceEdit(ordinance.id, {
-                              text_content: value,
-                            })
-                          }
-                        />
-                        <EditableTextareaCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Notas de ${ordinance.title}`}
                           value={edit.notes}
                           onChange={(value) =>
@@ -489,7 +526,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextareaCell
-                          canEdit={canEdit}
+                          canEdit={isRowEditing}
                           label={`Notas jurídicas de ${ordinance.title}`}
                           value={edit.legal_review_notes}
                           onChange={(value) =>
@@ -500,7 +537,18 @@ export function OrdinancesAdmin({
                         />
                         <td>
                           <div className="table-actions">
-                            {canEdit ? (
+                            {canEdit && !isRowEditing ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onStartOrdinanceEdit(ordinance.id)
+                                }
+                                disabled={isLoadingDetail || isLoadingAdmin}
+                              >
+                                {isLoadingDetail ? "Cargando..." : "Editar"}
+                              </button>
+                            ) : null}
+                            {canEdit && isRowEditing ? (
                               <button
                                 type="button"
                                 onClick={() => onUpdateOrdinance(ordinance.id)}
@@ -540,6 +588,31 @@ export function OrdinancesAdmin({
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="pager-row">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onOrdinancePrevPage}
+              disabled={ordinancePage === 0 || isLoadingAdmin}
+            >
+              Anterior
+            </button>
+            <span className="pager-status">
+              Página {ordinancePage + 1} de {ordinancePageCount} (
+              {ordinanceTotal} en total)
+            </span>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onOrdinanceNextPage}
+              disabled={
+                ordinancePage + 1 >= ordinancePageCount || isLoadingAdmin
+              }
+            >
+              Siguiente
+            </button>
           </div>
         </>
       ) : (

@@ -1,10 +1,18 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    status as http_status,
+)
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
+from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.documents.access import user_can_access_document
 from app.documents.models import Document
@@ -27,6 +35,8 @@ router = APIRouter(prefix="/ordinances", tags=["ordinances"])
 def list_ordinances(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
     q: str | None = None,
     municipality_id: int | None = None,
     province: str | None = None,
@@ -74,7 +84,7 @@ def list_ordinances(
     elif not include_archived:
         query = query.where(Ordinance.status != "archived")
 
-    return list(db.scalars(query))
+    return list(db.scalars(paginate(db, query, page, response)))
 
 
 @router.post(

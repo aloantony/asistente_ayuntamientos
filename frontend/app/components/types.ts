@@ -97,7 +97,8 @@ export type Ordinance = {
   publication_date: string | null;
   effective_date: string | null;
   status: OrdinanceStatus;
-  text_content: string | null;
+  // Only present in the GET /ordinances/{id} detail; list items omit it.
+  text_content?: string | null;
   notes: string | null;
   legal_review_notes: string | null;
   created_by_id: number | null;

@@ -19,6 +19,9 @@ export type MunicipalitiesAdminProps = {
   currentUser: User;
   municipalities: Municipality[];
   isLoadingAdmin: boolean;
+  municipalityPage: number;
+  municipalityTotal: number;
+  municipalityPageSize: number;
   municipalitySearchText: string;
   municipalityProvinceFilter: string;
   municipalityAutonomousCommunityFilter: string;
@@ -38,6 +41,8 @@ export type MunicipalitiesAdminProps = {
   ) => void;
   onMunicipalityStatusFilterChange: (status: string) => void;
   onMunicipalityIncludeArchivedChange: (includeArchived: boolean) => void;
+  onMunicipalityPrevPage: () => void;
+  onMunicipalityNextPage: () => void;
   onUpdateNewMunicipality: (updates: Partial<MunicipalityEditState>) => void;
   onCreateMunicipality: (event: FormEvent<HTMLFormElement>) => void;
   onUpdateMunicipalityEdit: (
@@ -52,6 +57,9 @@ export function MunicipalitiesAdmin({
   currentUser,
   municipalities,
   isLoadingAdmin,
+  municipalityPage,
+  municipalityTotal,
+  municipalityPageSize,
   municipalitySearchText,
   municipalityProvinceFilter,
   municipalityAutonomousCommunityFilter,
@@ -69,6 +77,8 @@ export function MunicipalitiesAdmin({
   onMunicipalityAutonomousCommunityFilterChange,
   onMunicipalityStatusFilterChange,
   onMunicipalityIncludeArchivedChange,
+  onMunicipalityPrevPage,
+  onMunicipalityNextPage,
   onUpdateNewMunicipality,
   onCreateMunicipality,
   onUpdateMunicipalityEdit,
@@ -125,6 +135,10 @@ export function MunicipalitiesAdmin({
     }
     return municipalityIncludeArchived || municipality.status !== "archived";
   });
+  const municipalityPageCount = Math.max(
+    1,
+    Math.ceil(municipalityTotal / municipalityPageSize),
+  );
   const provinceOptions = Array.from(
     new Set(municipalities.map((municipality) => municipality.province)),
   ).sort();
@@ -540,6 +554,31 @@ export function MunicipalitiesAdmin({
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="pager-row">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onMunicipalityPrevPage}
+              disabled={municipalityPage === 0 || isLoadingAdmin}
+            >
+              Anterior
+            </button>
+            <span className="pager-status">
+              Página {municipalityPage + 1} de {municipalityPageCount} (
+              {municipalityTotal} en total)
+            </span>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onMunicipalityNextPage}
+              disabled={
+                municipalityPage + 1 >= municipalityPageCount || isLoadingAdmin
+              }
+            >
+              Siguiente
+            </button>
           </div>
         </>
       ) : (

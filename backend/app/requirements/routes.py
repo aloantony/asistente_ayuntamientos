@@ -1,10 +1,18 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    status as http_status,
+)
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
+from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization
@@ -53,6 +61,8 @@ REVIEW_STATUSES = {
 def list_requirements(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
     organization_id: int | None = None,
     project_id: int | None = None,
     status: Annotated[RequirementStatus | None, Query()] = None,
@@ -75,7 +85,7 @@ def list_requirements(
     if not current_user.is_superuser:
         query = query.where(build_requirement_visibility_filter(db, current_user))
 
-    return list(db.scalars(query))
+    return list(db.scalars(paginate(db, query, page, response)))
 
 
 @router.post(

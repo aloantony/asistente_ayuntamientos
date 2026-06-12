@@ -1,11 +1,12 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
+from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.municipalities.models import Municipality
 from app.municipalities.schemas import (
@@ -24,6 +25,8 @@ router = APIRouter(prefix="/municipalities", tags=["municipalities"])
 def list_municipalities(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
     q: str | None = None,
     province: str | None = None,
     autonomous_community: str | None = None,
@@ -57,7 +60,7 @@ def list_municipalities(
     elif not include_archived:
         query = query.where(Municipality.status != "archived")
 
-    return list(db.scalars(query))
+    return list(db.scalars(paginate(db, query, page, response)))
 
 
 @router.post(

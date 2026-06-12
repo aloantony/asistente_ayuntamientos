@@ -61,7 +61,6 @@ class OrdinanceBaseRead(BaseModel):
     publication_date: date | None
     effective_date: date | None
     status: OrdinanceStatus
-    text_content: str | None
     notes: str | None
     legal_review_notes: str | None
     created_by_id: int | None
@@ -74,10 +73,12 @@ class OrdinanceBaseRead(BaseModel):
 
 
 class OrdinanceListRead(OrdinanceBaseRead):
-    pass
+    """List item without text_content: full legal texts only travel on the
+    detail endpoint, never on paginated listings."""
 
 
 class OrdinanceRead(OrdinanceBaseRead):
+    text_content: str | None
     document: OrdinanceDocumentSummary | None
 
 
