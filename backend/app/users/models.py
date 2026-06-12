@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, String, false, true
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, String, false, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -24,6 +26,11 @@ class User(TimestampMixin, Base):
         default=False,
         server_default=false(),
         nullable=False,
+    )
+    # Revocation marker: JWTs with an iat older than this are rejected.
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     groups: Mapped[list["Group"]] = relationship(

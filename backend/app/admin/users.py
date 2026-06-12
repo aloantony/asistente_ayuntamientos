@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -164,6 +165,9 @@ def update_admin_user(
                 detail="Only superusers can reset a superuser password",
             )
         user.hashed_password = hash_password(new_password)
+        # Revoke tokens issued before the reset (e.g. the sessions of a
+        # compromised account whose password is being rotated).
+        user.password_changed_at = datetime.now(UTC)
 
     if (
         "is_superuser" in updates

@@ -1,4 +1,5 @@
 import secrets
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -14,7 +15,7 @@ from app.auth.schemas import (
     Token,
 )
 from app.core.config import settings
-from app.core.rate_limit import login_rate_limiter
+from app.core.rate_limit import change_password_rate_limiter, login_rate_limiter
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
@@ -47,8 +48,13 @@ def login(
     response: Response,
     db: Annotated[Session, Depends(get_db)],
 ) -> Token:
+    # The key combines client and account: behind docker-proxy (or a future
+    # reverse proxy) every browser shares one IP, and an IP-only key would
+    # turn the limit into a global budget locking the whole organization out
+    # of the login. Only failed attempts consume quota.
     client_host = request.client.host if request.client else "unknown"
-    if not login_rate_limiter.is_allowed(client_host):
+    rate_key = f"{client_host}:{str(payload.email).lower()}"
+    if not login_rate_limiter.is_allowed(rate_key):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts",
@@ -56,6 +62,7 @@ def login(
 
     user = get_user_by_email(db, str(payload.email))
     if user is None or not verify_password(payload.password, user.hashed_password):
+        login_rate_limiter.register_failure(rate_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -75,7 +82,12 @@ def login(
 
 
 @router.post("/logout", response_model=DetailResponse)
-def logout(response: Response) -> DetailResponse:
+def logout(
+    response: Response,
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> DetailResponse:
+    # Requiring a session prevents a cross-site form from logging the victim
+    # out (the deleting Set-Cookie would apply in a first-party context).
     response.delete_cookie(ACCESS_TOKEN_COOKIE, path="/")
     return DetailResponse(detail="Logged out")
 
@@ -83,17 +95,31 @@ def logout(response: Response) -> DetailResponse:
 @router.post("/change-password", response_model=DetailResponse)
 def change_password(
     payload: ChangePasswordRequest,
+    response: Response,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> DetailResponse:
+    # Verifying the current password is the defense against a hijacked
+    # session; without an attempt limit it would be brute-forceable.
+    rate_key = str(current_user.id)
+    if not change_password_rate_limiter.is_allowed(rate_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many password attempts",
+        )
     if not verify_password(payload.current_password, current_user.hashed_password):
+        change_password_rate_limiter.register_failure(rate_key)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
         )
 
     current_user.hashed_password = hash_password(payload.new_password)
+    current_user.password_changed_at = datetime.now(UTC)
     db.commit()
+    # Previously issued tokens are now revoked; refresh the cookie so the
+    # user's own session stays alive.
+    set_session_cookie(response, create_access_token(subject=str(current_user.id)))
     return DetailResponse(detail="Password updated")
 
 

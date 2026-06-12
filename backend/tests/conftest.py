@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, insert, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.core.rate_limit import login_rate_limiter
+from app.core.rate_limit import change_password_rate_limiter, login_rate_limiter
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.session import get_db
@@ -82,8 +82,9 @@ def db(engine: Engine) -> Generator[Session, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def reset_login_rate_limiter() -> Generator[None, None, None]:
+def reset_rate_limiters() -> Generator[None, None, None]:
     login_rate_limiter.reset()
+    change_password_rate_limiter.reset()
     yield
 
 
