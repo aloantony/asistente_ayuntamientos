@@ -49,6 +49,8 @@ export function useAssistantController({
   const [selectedConversation, setSelectedConversation] =
     useState<AssistantConversationDetail | null>(null);
   const [draftMessage, setDraftMessage] = useState("");
+  const [includeArchivedConversations, setIncludeArchivedConversations] =
+    useState(false);
   const [isLoadingAssistant, setIsLoadingAssistant] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [assistantError, setAssistantError] = useState("");
@@ -68,17 +70,23 @@ export function useAssistantController({
     setConversations([]);
     applySelectedConversation(null);
     setDraftMessage("");
+    setIncludeArchivedConversations(false);
     setIsLoadingAssistant(false);
     setIsSendingMessage(false);
     setAssistantError("");
   }
 
-  async function loadAssistant() {
+  async function loadAssistant(
+    includeArchived: boolean = includeArchivedConversations,
+  ) {
     setIsLoadingAssistant(true);
     setAssistantError("");
 
     try {
       const token = getStoredToken();
+      const conversationsPath = includeArchived
+        ? "/assistant/conversations?include_archived=true"
+        : "/assistant/conversations";
       const [status, conversationList] = await Promise.all([
         adminRequest<AssistantStatus>(
           "/assistant/status",
@@ -86,7 +94,7 @@ export function useAssistantController({
           "No se pudo consultar el estado del asistente.",
         ),
         adminRequest<AssistantConversation[]>(
-          "/assistant/conversations",
+          conversationsPath,
           token,
           "No se pudieron cargar las conversaciones.",
         ),
@@ -102,6 +110,11 @@ export function useAssistantController({
     } finally {
       setIsLoadingAssistant(false);
     }
+  }
+
+  function toggleIncludeArchivedConversations(includeArchived: boolean) {
+    setIncludeArchivedConversations(includeArchived);
+    void loadAssistant(includeArchived);
   }
 
   async function selectConversation(conversationId: number) {
@@ -237,6 +250,16 @@ export function useAssistantController({
         "No se pudo archivar la conversación.",
         { method: "PATCH", body: JSON.stringify({ status: "archived" }) },
       );
+
+      if (includeArchivedConversations) {
+        // The archived conversation stays visible with its new status.
+        await loadAssistant();
+        if (selectedIdRef.current === conversationId) {
+          await selectConversation(conversationId);
+        }
+        return;
+      }
+
       setConversations((existing) =>
         existing.filter((conversation) => conversation.id !== conversationId),
       );
@@ -253,20 +276,47 @@ export function useAssistantController({
     }
   }
 
+  async function restoreConversation(conversationId: number) {
+    setAssistantError("");
+
+    try {
+      await adminRequest<AssistantConversationDetail>(
+        `/assistant/conversations/${conversationId}`,
+        getStoredToken(),
+        "No se pudo restaurar la conversación.",
+        { method: "PATCH", body: JSON.stringify({ status: "active" }) },
+      );
+
+      await loadAssistant();
+      if (selectedIdRef.current === conversationId) {
+        await selectConversation(conversationId);
+      }
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo restaurar la conversación.",
+      );
+    }
+  }
+
   return {
     assistantStatus,
     conversations,
     selectedConversation,
     draftMessage,
+    includeArchivedConversations,
     isLoadingAssistant,
     isSendingMessage,
     assistantError,
     setDraftMessage,
     loadAssistant,
+    toggleIncludeArchivedConversations,
     selectConversation,
     startConversation,
     sendMessage,
     archiveConversation,
+    restoreConversation,
     clearAssistantState,
   };
 }
