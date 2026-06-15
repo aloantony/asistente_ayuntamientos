@@ -19,6 +19,7 @@ El primer usuario real es un alcalde (socio del proyecto) que comunicará las ne
 - Municipios: datos de referencia globales de municipios reales.
 - Ordenanzas: registros estructurados vinculados a municipio y opcionalmente a un documento.
 - Asistente de IA conversacional de intake de requisitos: el usuario conversa en español y el agente crea y actualiza requisitos en su nombre (siempre como borradores supervisables), respetando sus permisos RBAC y dejando rastro auditable de cada acción. Toda llamada a IA externa pasa por el gateway interno (ver restricciones). Permiso de acceso: `assistant.use`.
+- Memoria institucional controlada: el agente puede proponer conocimiento de organización, pero un responsable debe aprobarlo, editarlo, rechazarlo o bloquearlo antes de que sea reutilizable. Permisos: `assistant.memory.propose`, `assistant.memory.view`, `assistant.memory.review`.
 
 ## Requisitos técnicos
 
