@@ -39,8 +39,9 @@ La distinción central del dominio:
 ## IA (dirección)
 
 - La IA es central en la dirección del producto pero siempre supervisada: asiste, estructura y propone; no decide.
-- Toda llamada a APIs externas de IA pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (modelo, tokens), nunca contenido.
+- Toda llamada a APIs externas de IA pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación, memoria institucional aprobada y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (modelo, tokens), nunca contenido.
 - Primera pieza implementada: el agente conversacional de intake de requisitos (`app/assistant/`). Bucle síncrono de tool-use contra la API de Claude (modelo configurable, por defecto `claude-opus-4-8`); las herramientas del agente ejecutan las mismas validaciones RBAC que las rutas REST, los requisitos se crean siempre como borrador con `source_type=conversation`, y cada mensaje del asistente guarda un rastro JSON de las herramientas ejecutadas. Conversaciones y mensajes persisten en PostgreSQL y son privados de su autor. Sin `ANTHROPIC_API_KEY` el módulo queda deshabilitado (503).
+- Memoria institucional controlada: el asistente puede proponer entradas (`assistant.memory.propose`), pero solo quedan reutilizables tras aprobación humana (`assistant.memory.review`). La reutilización exige `assistant.memory.view` en la organización y solo inyecta entradas `approved` como contexto delimitado.
 
 ## Frontend
 

@@ -61,6 +61,7 @@ Future priorities will be refined through Requirements Intake and through work w
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
 - AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop against the Claude API through the internal Privacy/AI Gateway (`app/assistant/gateway.py`), executes its tools with the calling user's RBAC permissions, always creates requirements as drafts with `source_type=conversation`, and stores an auditable JSON trail of every tool call. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless `ANTHROPIC_API_KEY` is configured.
+- Controlled institutional memory: the assistant can propose organization memory, but only entries reviewed by authorized users become reusable context. Proposing, viewing and reviewing are separated by `assistant.memory.propose`, `assistant.memory.view` and `assistant.memory.review`.
 
 ## 6. Architecture principles
 
