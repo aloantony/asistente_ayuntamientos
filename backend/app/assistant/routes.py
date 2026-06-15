@@ -20,6 +20,7 @@ from app.assistant.schemas import (
 )
 from app.assistant.service import run_agent_turn
 from app.auth.dependencies import get_current_user
+from app.core.config import settings
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
 from app.rbac.permissions import has_permission
@@ -51,6 +52,7 @@ def get_assistant_status(
     require_assistant_use(db, current_user)
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
+        provider=settings.assistant_provider,
         model=settings.assistant_model,
     )
 

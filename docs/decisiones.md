@@ -85,3 +85,11 @@ La revisión de los commits del día (refactor multi-ruta y sesión por cookie) 
 - `POST /auth/change-password` recibe el mismo rate limit (indexado por usuario): la verificación de la contraseña actual es la defensa frente a una sesión secuestrada y era forzable sin tope.
 - `POST /auth/logout` exige sesión: un formulario cross-site podía cerrar la sesión de la víctima (el Set-Cookie de borrado se aplica en contexto first-party).
 - Las contraseñas no se recortan nunca: `AdminUserUpdate` aplicaba `str_strip_whitespace` también al reset del admin y almacenaba una credencial distinta de la tecleada.
+
+## ADR-016: Hermes remoto con memoria institucional controlada (2026-06-15)
+
+Se acepta incorporar Hermes como proveedor/modelo de inferencia servido por un endpoint remoto privado compatible con OpenAI, no como framework que sustituya el control propio de seguridad. El backend mantiene el gateway único, RBAC, auditoría y minimización; Hermes solo conversa y emite llamadas a herramientas.
+
+La memoria institucional no se escribe directamente por el modelo. El asistente puede llamar a `propose_memory_entry`, pero esa herramienta solo crea entradas `proposed`. Un usuario con `assistant.memory.review` debe aprobar, editar, rechazar o bloquear la propuesta. Solo las entradas `approved`, de organizaciones donde el usuario tiene `assistant.memory.view`, se inyectan en conversaciones futuras como datos de contexto delimitados, nunca como instrucciones.
+
+Hermes queda configurable con `ASSISTANT_PROVIDER=hermes`, `HERMES_BASE_URL` y `HERMES_API_KEY`. En producción se exige además `HERMES_REAL_DATA_ALLOWED=true`, que representa que el proveedor remoto ya dispone de contrato/DPA de encargado del tratamiento, región/transferencias aceptables, política de retención y garantías de seguridad revisadas. Sin esa validación, Hermes se limita a desarrollo con datos ficticios o anonimizados.

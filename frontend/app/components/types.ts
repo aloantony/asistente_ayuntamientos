@@ -685,6 +685,7 @@ export function formatRuralUrbanProfile(profile: RuralUrbanProfile) {
 
 export type AssistantStatus = {
   enabled: boolean;
+  provider: string;
   model: string;
 };
 

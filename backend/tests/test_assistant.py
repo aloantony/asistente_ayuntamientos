@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from app.assistant.gateway import _from_openai_response
 from app.assistant.models import AssistantMemoryEntry
 from app.assistant.routes import get_gateway
 from app.main import app
@@ -42,6 +43,48 @@ class FakeGateway:
 
 def fake_response(stop_reason: str, content: list):
     return SimpleNamespace(stop_reason=stop_reason, content=content)
+
+
+def test_hermes_openai_tool_call_response_is_normalized():
+    response = _from_openai_response(
+        {
+            "model": "NousResearch/Hermes-4",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "propose_memory_entry",
+                                    "arguments": json.dumps(
+                                        {
+                                            "organization_id": 1,
+                                            "category": "protocol",
+                                            "content": "Protocolo interno",
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        }
+    )
+
+    assert response.model == "NousResearch/Hermes-4"
+    assert response.stop_reason == "tool_use"
+    assert response.usage.input_tokens == 10
+    tool_call = response.content[0]
+    assert tool_call.type == "tool_use"
+    assert tool_call.id == "call_1"
+    assert tool_call.name == "propose_memory_entry"
+    assert tool_call.input["content"] == "Protocolo interno"
 
 
 @pytest.fixture()

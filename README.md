@@ -60,7 +60,7 @@ Future priorities will be refined through Requirements Intake and through work w
 - Requirements: structured intake for needs, product ideas and stakeholder requests.
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
-- AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop against the Claude API through the internal Privacy/AI Gateway (`app/assistant/gateway.py`), executes its tools with the calling user's RBAC permissions, always creates requirements as drafts with `source_type=conversation`, and stores an auditable JSON trail of every tool call. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless `ANTHROPIC_API_KEY` is configured.
+- AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop through the internal Privacy/AI Gateway (`app/assistant/gateway.py`) against the configured provider (`anthropic` or a private Hermes/OpenAI-compatible endpoint), executes its tools with the calling user's RBAC permissions, always creates requirements as drafts with `source_type=conversation`, and stores an auditable JSON trail of every tool call. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected provider is configured.
 - Controlled institutional memory: the assistant can propose organization memory, but only entries reviewed by authorized users become reusable context. Proposing, viewing and reviewing are separated by `assistant.memory.propose`, `assistant.memory.view` and `assistant.memory.review`.
 
 ## 6. Architecture principles
@@ -98,7 +98,7 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings. To enable the AI assistant, set `ANTHROPIC_API_KEY` (and optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`); without it the assistant endpoints return 503 and the UI shows it as not configured.
+Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings. To enable the AI assistant with the default provider, set `ANTHROPIC_API_KEY` (and optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). For Hermes, set `ASSISTANT_PROVIDER=hermes`, `ASSISTANT_MODEL`, `HERMES_BASE_URL` and optionally `HERMES_API_KEY`; in production, `HERMES_REAL_DATA_ALLOWED=true` must only be set after closing the provider DPA/contract and retention/transfer review. Without a configured provider the assistant endpoints return 503 and the UI shows it as not configured.
 
 Build and start the stack:
 

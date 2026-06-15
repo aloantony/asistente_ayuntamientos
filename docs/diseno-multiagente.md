@@ -18,7 +18,7 @@ Proyecto: asistente_ayuntamientos (FastAPI + Next.js, multi-tenant, RBAC usuario
 
 **D6 — Lineup v1.** Discusor y memorizador de requisitos (el agente actual renombrado + memoria) y consulta (solo lectura; test que verifique que todas sus herramientas son `read_only`). **Decisión por defecto aplicada** (pregunta 1: indiferente): documentos queda fuera de v1 → v1.1, con go/no-go el 2026-07-01 y prerrequisitos: migración de `title`/`description` en `Document` (hoy solo hay `original_filename`, puesto por usuarios y probable portador de datos personales), cambios en la API/formulario de subida, y corpus real. No sembrar ni registrar su permiso hasta entonces. Si entra: una sola herramienta `list_documents` de solo lectura reutilizando el camino probado de `documents/routes.py`, matching en servidor, top 10-20 resultados. Criterio de fusión discusor/consulta acordado ya: si la matriz de confusión del router (20-30 frases en español por agente, junto a la evaluación de ADR-013) muestra confusión persistente, se fusionan.
 
-**D7 — Hermes (Nous Research): no se adopta.** Mono-propietario sin RBAC multi-tenant, ni auditoría por acción, ni gateway de minimización; ningún framework evaluado (OpenAI Agents SDK, LangGraph, Claude Agent SDK, Mistral Agents API) ofrece esto. Se toman prestados dos patrones: memoria organizacional persistente y enrutado pegajoso. Registrar en el ADR de estructura.
+**D7 — Hermes (Nous Research): decisión revisada el 2026-06-15.** No se adopta como framework de seguridad ni como sustituto del RBAC/auditoría propios, pero sí se acepta como modelo de inferencia servido por un endpoint remoto privado compatible con OpenAI. La memoria queda controlada por el backend: Hermes solo propone entradas y una persona con permisos las aprueba, edita, rechaza o bloquea antes de reutilizarlas.
 
 **D8 — Skills automejorables: diferidas** con 4 señales medibles de adopción y umbrales numéricos en el ADR: (1) churn del system prompt, (2) secuencias de herramientas repetidas en los rastros `actions` de los mensajes, (3) correcciones humanas con patrón, (4) ratio factual/procedimental en las entradas de memoria. La columna `routing` alimenta la señal 2.
 
@@ -43,7 +43,7 @@ Proyecto: asistente_ayuntamientos (FastAPI + Next.js, multi-tenant, RBAC usuario
 
 ## Documentación a escribir (la numeración de decisiones.md va por ADR-014)
 
-- ADR-015: estructura multi-agente (registro declarativo, router, permisos en dos capas, rechazo de Hermes con los dos patrones prestados) ⟦r⟧.
+- ADR-015/016: estructura multi-agente y memoria controlada (registro declarativo, router, permisos en dos capas, Hermes solo como proveedor de inferencia y no como framework de seguridad) ⟦r⟧.
 - ADR-016: memoria organizacional persistente (diseño RGPD: borrado físico + estado bloqueada, efecto inmediato como excepción temporal) ⟦r⟧.
 - ADR-017: relajación temporal de minimización (D9) + criterios medibles de adopción de skills (D8) con umbrales y fechas de revisión.
 - Apéndice a ADR-013: evaluación en dos pistas (evaluación de proveedor de ADR-013 + matriz de confusión del router) ⟦r⟧.
