@@ -1,8 +1,14 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type MouseEvent, useEffect, useRef, useState } from "react";
 import {
+  ASSISTANT_MEMORY_CATEGORY_LABELS,
+  ASSISTANT_MEMORY_SENSITIVITY_LABELS,
   formatAssistantTool,
   type AssistantConversation,
   type AssistantConversationDetail,
+  type AssistantMemoryCategory,
+  type AssistantMemoryEntry,
+  type AssistantMemorySensitivity,
+  type AssistantMemoryStatus,
   type AssistantStatus,
 } from "./types";
 
@@ -67,6 +73,7 @@ function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null 
 type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
   conversations: AssistantConversation[];
+  memoryEntries: AssistantMemoryEntry[];
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
   isLoadingAssistant: boolean;
@@ -80,11 +87,22 @@ type AssistantPanelProps = {
   onArchiveConversation: (conversationId: number) => void;
   onRestoreConversation: (conversationId: number) => void;
   onIncludeArchivedConversationsChange: (includeArchived: boolean) => void;
+  onUpdateMemoryEntry: (
+    entryId: number,
+    updates: {
+      category?: AssistantMemoryCategory;
+      content?: string;
+      status?: AssistantMemoryStatus;
+      sensitivity?: AssistantMemorySensitivity;
+      review_notes?: string;
+    },
+  ) => void;
 };
 
 export function AssistantPanel({
   assistantStatus,
   conversations,
+  memoryEntries,
   selectedConversation,
   draftMessage,
   isLoadingAssistant,
@@ -98,6 +116,7 @@ export function AssistantPanel({
   onArchiveConversation,
   onRestoreConversation,
   onIncludeArchivedConversationsChange,
+  onUpdateMemoryEntry,
 }: AssistantPanelProps) {
   const assistantDisabled = assistantStatus !== null && !assistantStatus.enabled;
   const selectedIsArchived = selectedConversation?.status === "archived";
@@ -236,6 +255,41 @@ export function AssistantPanel({
     onSendMessage();
   }
 
+  function handleMemoryEdit(
+    event: FormEvent<HTMLFormElement>,
+    entryId: number,
+  ) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    onUpdateMemoryEntry(entryId, {
+      category: formData.get("category") as AssistantMemoryCategory,
+      content: String(formData.get("content") ?? ""),
+      sensitivity: formData.get("sensitivity") as AssistantMemorySensitivity,
+      review_notes: String(formData.get("review_notes") ?? ""),
+    });
+  }
+
+  function handleMemoryStatus(
+    event: MouseEvent<HTMLButtonElement>,
+    entryId: number,
+    status: AssistantMemoryStatus,
+  ) {
+    const form = event.currentTarget.form;
+    if (!form) {
+      onUpdateMemoryEntry(entryId, { status });
+      return;
+    }
+
+    const formData = new FormData(form);
+    onUpdateMemoryEntry(entryId, {
+      category: formData.get("category") as AssistantMemoryCategory,
+      content: String(formData.get("content") ?? ""),
+      sensitivity: formData.get("sensitivity") as AssistantMemorySensitivity,
+      review_notes: String(formData.get("review_notes") ?? ""),
+      status,
+    });
+  }
+
   return (
     <section className="panel">
       <div className="panel-header">
@@ -264,6 +318,107 @@ export function AssistantPanel({
           El asistente no está configurado en este servidor (falta la clave de
           la API de IA). Contacta con el administrador.
         </p>
+      ) : null}
+
+      {memoryEntries.length > 0 ? (
+        <section className="assistant-memory-review">
+          <div className="assistant-memory-review-header">
+            <div>
+              <p className="eyebrow">Memoria pendiente</p>
+              <h3>Conocimiento propuesto por el asistente</h3>
+            </div>
+            <span className="tag">{memoryEntries.length}</span>
+          </div>
+          <div className="assistant-memory-list">
+            {memoryEntries.map((entry) => (
+              <form
+                className="assistant-memory-item"
+                key={entry.id}
+                onSubmit={(event) => handleMemoryEdit(event, entry.id)}
+              >
+                <textarea
+                  name="content"
+                  defaultValue={entry.content}
+                  rows={3}
+                  disabled={isSendingMessage}
+                />
+                <div className="assistant-memory-fields">
+                  <label>
+                    Tipo
+                    <select
+                      name="category"
+                      defaultValue={entry.category}
+                      disabled={isSendingMessage}
+                    >
+                      {Object.entries(ASSISTANT_MEMORY_CATEGORY_LABELS).map(
+                        ([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+                  <label>
+                    Sensibilidad
+                    <select
+                      name="sensitivity"
+                      defaultValue={entry.sensitivity}
+                      disabled={isSendingMessage}
+                    >
+                      {Object.entries(ASSISTANT_MEMORY_SENSITIVITY_LABELS).map(
+                        ([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+                </div>
+                <input
+                  name="review_notes"
+                  placeholder="Nota de revisión"
+                  disabled={isSendingMessage}
+                />
+                <div className="assistant-memory-actions">
+                  <button type="submit" disabled={isSendingMessage}>
+                    Guardar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSendingMessage}
+                    onClick={(event) =>
+                      handleMemoryStatus(event, entry.id, "approved")
+                    }
+                  >
+                    Aprobar
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={isSendingMessage}
+                    onClick={(event) =>
+                      handleMemoryStatus(event, entry.id, "rejected")
+                    }
+                  >
+                    Rechazar
+                  </button>
+                  <button
+                    className="danger-button"
+                    type="button"
+                    disabled={isSendingMessage}
+                    onClick={(event) =>
+                      handleMemoryStatus(event, entry.id, "blocked")
+                    }
+                  >
+                    Bloquear
+                  </button>
+                </div>
+              </form>
+            ))}
+          </div>
+        </section>
       ) : null}
 
       <div className="assistant-layout">

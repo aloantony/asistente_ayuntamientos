@@ -688,6 +688,51 @@ export type AssistantStatus = {
   model: string;
 };
 
+export type AssistantMemoryCategory =
+  | "protocol"
+  | "preference"
+  | "context"
+  | "decision"
+  | "open_question";
+
+export type AssistantMemoryStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "archived"
+  | "blocked";
+
+export type AssistantMemorySensitivity =
+  | "normal"
+  | "personal"
+  | "sensitive"
+  | "legal";
+
+export type AssistantMemoryUser = {
+  id: number;
+  email: string;
+  full_name: string;
+};
+
+export type AssistantMemoryEntry = {
+  id: number;
+  organization_id: number;
+  category: AssistantMemoryCategory;
+  content: string;
+  status: AssistantMemoryStatus;
+  sensitivity: AssistantMemorySensitivity;
+  source_conversation_id: number | null;
+  source_message_id: number | null;
+  proposed_by_id: number | null;
+  reviewed_by_id: number | null;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  proposed_by: AssistantMemoryUser | null;
+  reviewed_by: AssistantMemoryUser | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AssistantAction = {
   tool: string;
   ok: boolean;
@@ -723,11 +768,33 @@ export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
   create_requirement: "Crear requisito",
   update_requirement: "Actualizar requisito",
   add_requirement_message: "Añadir nota a requisito",
+  propose_memory_entry: "Proponer memoria",
 };
 
 export function formatAssistantTool(tool: string) {
   return ASSISTANT_TOOL_LABELS[tool] ?? tool;
 }
+
+export const ASSISTANT_MEMORY_CATEGORY_LABELS: Record<
+  AssistantMemoryCategory,
+  string
+> = {
+  protocol: "Protocolo",
+  preference: "Preferencia",
+  context: "Contexto",
+  decision: "Decisión",
+  open_question: "Duda abierta",
+};
+
+export const ASSISTANT_MEMORY_SENSITIVITY_LABELS: Record<
+  AssistantMemorySensitivity,
+  string
+> = {
+  normal: "Normal",
+  personal: "Personal",
+  sensitive: "Sensible",
+  legal: "Legal",
+};
 
 export function userHasPermission(user: User, permissionCode: string) {
   return (

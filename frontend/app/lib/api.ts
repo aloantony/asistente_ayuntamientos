@@ -121,6 +121,8 @@ function translateApiDetail(detail: string, fallback: string) {
       return "La conversación está archivada.";
     case "Conversation not found":
       return "No se encontró la conversación.";
+    case "Assistant memory entry not found":
+      return "No se encontró la entrada de memoria.";
     default:
       return detail || fallback;
   }
