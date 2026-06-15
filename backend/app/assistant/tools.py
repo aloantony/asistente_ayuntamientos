@@ -9,12 +9,14 @@ human-only.
 
 import json
 from dataclasses import dataclass
+import re
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.assistant.models import AssistantMemoryEntry
 from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
@@ -35,6 +37,18 @@ from app.requirements.routes import (
 from app.users.models import User
 
 VALID_PRIORITIES = {"low", "medium", "high", "urgent"}
+VALID_MEMORY_CATEGORIES = {
+    "protocol",
+    "preference",
+    "context",
+    "decision",
+    "open_question",
+}
+VALID_MEMORY_SENSITIVITIES = {"normal", "personal", "sensitive", "legal"}
+PERSONAL_DATA_PATTERN = re.compile(
+    r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
+    re.IGNORECASE,
+)
 
 REQUIREMENT_CONTENT_FIELDS = (
     "title",
@@ -229,6 +243,44 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["requirement_id", "body"],
         },
     },
+    {
+        "name": "propose_memory_entry",
+        "description": (
+            "Propone una entrada de memoria institucional para revisión humana. "
+            "No la guarda como conocimiento aprobado: solo crea una propuesta "
+            "pendiente para que un responsable la valide, edite o rechace."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización a la que pertenece la propuesta",
+                },
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "protocol",
+                        "preference",
+                        "context",
+                        "decision",
+                        "open_question",
+                    ],
+                    "description": "Tipo de memoria institucional propuesta",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Resumen breve, verificable y redactado como dato interno",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "enum": ["normal", "personal", "sensitive", "legal"],
+                    "description": "Nivel de sensibilidad estimado",
+                },
+            },
+            "required": ["organization_id", "category", "content"],
+        },
+    },
 ]
 
 
@@ -238,18 +290,25 @@ class ToolResult:
     ok: bool
 
 
+@dataclass(frozen=True)
+class ToolContext:
+    conversation_id: int | None = None
+    user_message_id: int | None = None
+
+
 def execute_tool(
     db: Session,
     current_user: User,
     name: str,
     tool_input: dict,
+    context: ToolContext | None = None,
 ) -> ToolResult:
     executor = _EXECUTORS.get(name)
     if executor is None:
         return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
 
     try:
-        result = executor(db, current_user, tool_input)
+        result = executor(db, current_user, tool_input, context or ToolContext())
     except HTTPException as error:
         db.rollback()
         return ToolResult(
@@ -287,7 +346,12 @@ def _serialize_requirement(requirement: Requirement, *, full: bool) -> dict:
     return data
 
 
-def _list_organizations(db: Session, current_user: User, tool_input: dict) -> list:
+def _list_organizations(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list:
     organizations = db.scalars(
         get_accessible_organizations_query(current_user)
     ).all()
@@ -297,7 +361,12 @@ def _list_organizations(db: Session, current_user: User, tool_input: dict) -> li
     ]
 
 
-def _list_projects(db: Session, current_user: User, tool_input: dict) -> list:
+def _list_projects(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list:
     organization_ids = get_user_organization_ids(db, current_user)
     view_all_organization_ids = [
         organization_id
@@ -330,7 +399,12 @@ def _list_projects(db: Session, current_user: User, tool_input: dict) -> list:
     ]
 
 
-def _list_requirements(db: Session, current_user: User, tool_input: dict) -> list:
+def _list_requirements(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list:
     query = select(Requirement).order_by(
         Requirement.created_at.desc(),
         Requirement.id.desc(),
@@ -353,13 +427,23 @@ def _list_requirements(db: Session, current_user: User, tool_input: dict) -> lis
     ]
 
 
-def _get_requirement(db: Session, current_user: User, tool_input: dict) -> dict:
+def _get_requirement(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
     requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
     require_requirement_view(db, current_user, requirement)
     return _serialize_requirement(requirement, full=True)
 
 
-def _create_requirement(db: Session, current_user: User, tool_input: dict) -> dict:
+def _create_requirement(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
     organization_id = int(tool_input["organization_id"])
     title = str(tool_input["title"]).strip()
     if not title:
@@ -404,7 +488,12 @@ def _create_requirement(db: Session, current_user: User, tool_input: dict) -> di
     return _serialize_requirement(requirement, full=True)
 
 
-def _update_requirement(db: Session, current_user: User, tool_input: dict) -> dict:
+def _update_requirement(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
     requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
     # View access is the floor: without it, a no-op update would leak the
     # serialized requirement to users who cannot read it.
@@ -448,6 +537,7 @@ def _add_requirement_message(
     db: Session,
     current_user: User,
     tool_input: dict,
+    context: ToolContext,
 ) -> dict:
     requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
     require_requirement_view(db, current_user, requirement)
@@ -471,6 +561,62 @@ def _add_requirement_message(
     }
 
 
+def _propose_memory_entry(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    organization_id = int(tool_input["organization_id"])
+    ensure_organization_exists(db, organization_id)
+    if not has_permission(
+        current_user,
+        "assistant.memory.propose",
+        db,
+        organization_id=organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.memory.propose",
+        )
+
+    category = str(tool_input["category"]).strip()
+    if category not in VALID_MEMORY_CATEGORIES:
+        raise ValueError(f"category inválida: {category}")
+
+    content = str(tool_input["content"]).strip()
+    if not content:
+        raise ValueError("content no puede estar vacío")
+    if len(content) > 1000:
+        raise ValueError("content no puede superar 1000 caracteres")
+
+    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
+    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
+        raise ValueError(f"sensitivity inválida: {sensitivity}")
+    if sensitivity == "normal" and PERSONAL_DATA_PATTERN.search(content):
+        sensitivity = "personal"
+
+    entry = AssistantMemoryEntry(
+        organization_id=organization_id,
+        category=category,
+        content=content,
+        sensitivity=sensitivity,
+        status="proposed",
+        source_conversation_id=context.conversation_id,
+        source_message_id=context.user_message_id,
+        proposed_by_id=current_user.id,
+    )
+    db.add(entry)
+    db.commit()
+    return {
+        "id": entry.id,
+        "organization_id": entry.organization_id,
+        "category": entry.category,
+        "status": entry.status,
+        "sensitivity": entry.sensitivity,
+    }
+
+
 _EXECUTORS = {
     "list_organizations": _list_organizations,
     "list_projects": _list_projects,
@@ -479,4 +625,5 @@ _EXECUTORS = {
     "create_requirement": _create_requirement,
     "update_requirement": _update_requirement,
     "add_requirement_message": _add_requirement_message,
+    "propose_memory_entry": _propose_memory_entry,
 }

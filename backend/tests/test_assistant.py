@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from app.assistant.models import AssistantMemoryEntry
 from app.assistant.routes import get_gateway
 from app.main import app
 from app.requirements.models import Requirement
@@ -272,6 +273,176 @@ def test_agent_tool_respects_rbac_of_current_user(
     action = response.json()["messages"][1]["actions"][0]
     assert action["ok"] is False
     assert "requirements.create" in action["result"]
+
+
+def test_agent_can_only_propose_memory_until_human_approval(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Secretario Test")
+    organization = make_organization(name="Ayuntamiento Memoria")
+    grant_permissions(
+        user,
+        organization,
+        [
+            "assistant.use",
+            "assistant.memory.propose",
+            "assistant.memory.review",
+            "assistant.memory.view",
+        ],
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_1",
+                            "propose_memory_entry",
+                            {
+                                "organization_id": organization.id,
+                                "category": "protocol",
+                                "content": (
+                                    "En empadronamiento incompleto se pide primero "
+                                    "el justificante de domicilio."
+                                ),
+                            },
+                        ),
+                    ],
+                ),
+                fake_response("end_turn", [text_block("Lo dejo propuesto.")]),
+                fake_response("end_turn", [text_block("Sigo sin usarlo.")]),
+                fake_response("end_turn", [text_block("Ahora puedo tenerlo en cuenta.")]),
+            ]
+        )
+    )
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    first = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Ese trámite lo hacemos siempre así"},
+        headers=headers_for(user),
+    )
+    assert first.status_code == 200
+
+    entry = db.scalar(select(AssistantMemoryEntry))
+    assert entry is not None
+    assert entry.status == "proposed"
+    assert entry.source_conversation_id == conversation["id"]
+    assert entry.source_message_id is not None
+
+    second = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Qué recuerdas del empadronamiento?"},
+        headers=headers_for(user),
+    )
+    assert second.status_code == 200
+    assert "justificante de domicilio" not in gateway.calls[-1]["system"]
+
+    approved = client.patch(
+        f"/assistant/memory/{entry.id}",
+        json={"status": "approved"},
+        headers=headers_for(user),
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+
+    third = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Y ahora?"},
+        headers=headers_for(user),
+    )
+    assert third.status_code == 200
+    assert "justificante de domicilio" in gateway.calls[-1]["system"]
+
+
+def test_memory_review_requires_review_permission(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.use", "assistant.memory.view"])
+    entry = AssistantMemoryEntry(
+        organization_id=organization.id,
+        category="context",
+        content="Dato pendiente",
+        status="proposed",
+        proposed_by_id=user.id,
+    )
+    db.add(entry)
+    db.commit()
+
+    response = client.patch(
+        f"/assistant/memory/{entry.id}",
+        json={"status": "approved"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: assistant.memory.review"
+
+
+def test_approved_memory_is_scoped_by_organization_permissions(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user()
+    visible_org = make_organization(name="Org Visible")
+    hidden_org = make_organization(name="Org Oculta")
+    grant_permissions(user, visible_org, ["assistant.use", "assistant.memory.view"])
+    db.add_all(
+        [
+            AssistantMemoryEntry(
+                organization_id=visible_org.id,
+                category="context",
+                content="Contexto visible",
+                status="approved",
+                proposed_by_id=user.id,
+            ),
+            AssistantMemoryEntry(
+                organization_id=hidden_org.id,
+                category="context",
+                content="Contexto oculto",
+                status="approved",
+                proposed_by_id=user.id,
+            ),
+        ]
+    )
+    db.commit()
+    gateway = use_gateway(FakeGateway([fake_response("end_turn", [text_block("Hola")])]))
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Hola"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert "Contexto visible" in gateway.calls[0]["system"]
+    assert "Contexto oculto" not in gateway.calls[0]["system"]
 
 
 def test_archived_conversation_rejects_messages(
