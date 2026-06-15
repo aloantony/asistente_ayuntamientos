@@ -1,6 +1,6 @@
 # Requisitos
 
-Actualizado: 2026-06-12. Este documento refleja el estado actual del producto. La fuente de detalle operativo es `README.md`; los requisitos nuevos entran por el módulo de Requirements Intake.
+Actualizado: 2026-06-15. Este documento refleja el estado actual del producto. La fuente de detalle operativo es `README.md`; los requisitos nuevos entran por el módulo de Requirements Intake.
 
 ## Visión de producto
 
@@ -18,8 +18,8 @@ El primer usuario real es un alcalde (socio del proyecto) que comunicará las ne
 - Requirements Intake: captura estructurada de necesidades con flujo de estados, prioridades e hilo de mensajes.
 - Municipios: datos de referencia globales de municipios reales.
 - Ordenanzas: registros estructurados vinculados a municipio y opcionalmente a un documento.
-- Asistente de IA conversacional de intake de requisitos: el usuario conversa en español y el agente crea y actualiza requisitos en su nombre (siempre como borradores supervisables), respetando sus permisos RBAC y dejando rastro auditable de cada acción. Toda llamada a IA externa pasa por el gateway interno (ver restricciones). Permiso de acceso: `assistant.use`.
-- Memoria institucional controlada: el agente puede proponer conocimiento de organización, pero un responsable debe aprobarlo, editarlo, rechazarlo o bloquearlo antes de que sea reutilizable. Permisos: `assistant.memory.propose`, `assistant.memory.view`, `assistant.memory.review`.
+- Asistente de IA conversacional de intake de requisitos: el usuario conversa en español y el agente crea y actualiza requisitos en su nombre (siempre como borradores supervisables), respetando sus permisos RBAC y dejando rastro auditable de cada acción. Toda llamada a IA externa o runtime privado pasa por el gateway interno (ver restricciones). Puede ejecutarse con Anthropic o con Hermes Agent como aplicación/runtime privado. Permiso de acceso: `assistant.use`.
+- Memoria institucional controlada: el agente puede proponer conocimiento de organización, pero un responsable debe aprobarlo, editarlo, rechazarlo o bloquearlo antes de que sea reutilizable. La memoria oficial reside en PostgreSQL y se gobierna desde el backend propio, no en Hermes Agent. Permisos: `assistant.memory.propose`, `assistant.memory.view`, `assistant.memory.review`.
 
 ## Requisitos técnicos
 
@@ -31,7 +31,7 @@ El primer usuario real es un alcalde (socio del proyecto) que comunicará las ne
 ## Restricciones
 
 - La IA asiste, propone y estructura, pero no toma decisiones legales o administrativas finales sin supervisión humana.
-- Ningún documento original ni dato municipal sensible se envía directamente a APIs de IA externas; toda llamada externa pasa por el gateway de IA, con minimización de datos.
+- Ningún documento original ni dato municipal sensible se envía directamente a APIs de IA externas ni al runtime de agentes; toda llamada pasa por el gateway de IA, con minimización de datos.
 - Los documentos se almacenan en servidor propio, nunca en S3/almacenamiento externo.
 - Los objetos de negocio importantes se archivan, no se borran (usuarios y grupos son la excepción: borrado físico con guardas).
 - Backend y frontend ligados a localhost en desarrollo; PostgreSQL y Redis nunca expuestos públicamente.

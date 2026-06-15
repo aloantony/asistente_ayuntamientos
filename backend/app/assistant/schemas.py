@@ -23,7 +23,9 @@ MemorySensitivity = Literal["normal", "personal", "sensitive", "legal"]
 
 class AssistantStatusRead(BaseModel):
     enabled: bool
+    runtime: str
     model: str
+    runtime_healthy: bool | None = None
 
 
 class AssistantActionRead(BaseModel):

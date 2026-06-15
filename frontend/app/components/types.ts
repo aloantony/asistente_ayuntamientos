@@ -685,7 +685,9 @@ export function formatRuralUrbanProfile(profile: RuralUrbanProfile) {
 
 export type AssistantStatus = {
   enabled: boolean;
+  runtime: string;
   model: string;
+  runtime_healthy: boolean | null;
 };
 
 export type AssistantMemoryCategory =

@@ -23,7 +23,7 @@ AI is intended to be central to the product direction. The system should assist,
 
 Future AI functionality must go through a Privacy/AI Gateway before any external API call. Original documents and sensitive municipal data must not be sent directly to external AI services. External AI APIs may be used in the future only after filtering, minimization and pseudonymization where needed.
 
-Local AI is not implemented in the current phase.
+The assistant can run either against Anthropic directly or against a private/local Hermes Agent API Server. Hermes Agent is treated as an external runtime/app, not as the institutional memory store and not as the source of authorization decisions.
 
 Future priorities will be refined through Requirements Intake and through work with municipal stakeholders and developers. The exact first commercial module and user persona are intentionally still open.
 
@@ -60,7 +60,7 @@ Future priorities will be refined through Requirements Intake and through work w
 - Requirements: structured intake for needs, product ideas and stakeholder requests.
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
-- AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop against the Claude API through the internal Privacy/AI Gateway (`app/assistant/gateway.py`), executes its tools with the calling user's RBAC permissions, always creates requirements as drafts with `source_type=conversation`, and stores an auditable JSON trail of every tool call. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless `ANTHROPIC_API_KEY` is configured.
+- AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop through the internal Privacy/AI Gateway (`app/assistant/gateway.py`) using either Anthropic or a private Hermes Agent API Server (`ASSISTANT_RUNTIME=hermes_agent`). Its tools execute with the calling user's RBAC permissions, requirements are always created as drafts with `source_type=conversation`, and every tool call leaves an auditable JSON trail. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected runtime is configured.
 - Controlled institutional memory: the assistant can propose organization memory, but only entries reviewed by authorized users become reusable context. Proposing, viewing and reviewing are separated by `assistant.memory.propose`, `assistant.memory.view` and `assistant.memory.review`.
 
 ## 6. Architecture principles
@@ -98,7 +98,9 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings. To enable the AI assistant, set `ANTHROPIC_API_KEY` (and optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`); without it the assistant endpoints return 503 and the UI shows it as not configured.
+Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings.
+
+To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately, set `ASSISTANT_RUNTIME=hermes_agent`, `HERMES_AGENT_BASE_URL`, `HERMES_AGENT_API_KEY` and `HERMES_AGENT_MODEL`. In production, Hermes Agent stays disabled for real data unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. Without a complete runtime configuration, assistant endpoints return 503 and the UI shows the assistant as not configured.
 
 Build and start the stack:
 

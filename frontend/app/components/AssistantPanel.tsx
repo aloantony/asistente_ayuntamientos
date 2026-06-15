@@ -119,6 +119,10 @@ export function AssistantPanel({
   onUpdateMemoryEntry,
 }: AssistantPanelProps) {
   const assistantDisabled = assistantStatus !== null && !assistantStatus.enabled;
+  const runtimeHealthFailed =
+    assistantStatus?.runtime === "hermes_agent" &&
+    assistantStatus.runtime_healthy === false &&
+    assistantStatus.enabled;
   const selectedIsArchived = selectedConversation?.status === "archived";
 
   const [isListening, setIsListening] = useState(false);
@@ -315,8 +319,14 @@ export function AssistantPanel({
 
       {assistantDisabled ? (
         <p className="muted">
-          El asistente no está configurado en este servidor (falta la clave de
-          la API de IA). Contacta con el administrador.
+          El asistente no está configurado en este servidor. Revisa la
+          configuración del runtime de IA.
+        </p>
+      ) : null}
+
+      {runtimeHealthFailed ? (
+        <p className="muted">
+          Hermes Agent está configurado, pero su servidor API no responde.
         </p>
       ) : null}
 

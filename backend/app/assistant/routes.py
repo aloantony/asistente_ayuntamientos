@@ -52,7 +52,13 @@ def get_assistant_status(
     require_assistant_use(db, current_user)
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
-        model=settings.assistant_model,
+        runtime=settings.assistant_runtime,
+        model=(
+            settings.hermes_agent_model
+            if settings.assistant_runtime == "hermes_agent"
+            else settings.assistant_model
+        ),
+        runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
     )
 
 

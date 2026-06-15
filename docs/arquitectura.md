@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-06-12.
+Actualizado: 2026-06-15.
 
 ## Visión general
 
@@ -39,8 +39,8 @@ La distinción central del dominio:
 ## IA (dirección)
 
 - La IA es central en la dirección del producto pero siempre supervisada: asiste, estructura y propone; no decide.
-- Toda llamada a APIs externas de IA pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación, memoria institucional aprobada y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (modelo, tokens), nunca contenido.
-- Primera pieza implementada: el agente conversacional de intake de requisitos (`app/assistant/`). Bucle síncrono de tool-use contra la API de Claude (modelo configurable, por defecto `claude-opus-4-8`); las herramientas del agente ejecutan las mismas validaciones RBAC que las rutas REST, los requisitos se crean siempre como borrador con `source_type=conversation`, y cada mensaje del asistente guarda un rastro JSON de las herramientas ejecutadas. Conversaciones y mensajes persisten en PostgreSQL y son privados de su autor. Sin `ANTHROPIC_API_KEY` el módulo queda deshabilitado (503).
+- Toda llamada a APIs externas de IA o a un runtime privado de agentes pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación, memoria institucional aprobada y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (runtime, modelo, tokens), nunca contenido.
+- Primera pieza implementada: el agente conversacional de intake de requisitos (`app/assistant/`). Bucle síncrono de tool-use contra el runtime configurado (`ASSISTANT_RUNTIME=anthropic` o `ASSISTANT_RUNTIME=hermes_agent`). En modo Hermes Agent, el backend llama al API Server privado compatible con OpenAI; Hermes Agent actúa como aplicación/runtime, no como base de datos de memoria ni como autoridad de permisos. Las herramientas del agente ejecutan las mismas validaciones RBAC que las rutas REST, los requisitos se crean siempre como borrador con `source_type=conversation`, y cada mensaje del asistente guarda un rastro JSON de las herramientas ejecutadas. Conversaciones y mensajes persisten en PostgreSQL y son privados de su autor. Sin configuración completa del runtime seleccionado, el módulo queda deshabilitado (503).
 - Memoria institucional controlada: el asistente puede proponer entradas (`assistant.memory.propose`), pero solo quedan reutilizables tras aprobación humana (`assistant.memory.review`). La reutilización exige `assistant.memory.view` en la organización y solo inyecta entradas `approved` como contexto delimitado.
 
 ## Frontend

@@ -4,8 +4,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from app.assistant.gateway import _from_openai_response, _hermes_agent_url
 from app.assistant.models import AssistantMemoryEntry
 from app.assistant.routes import get_gateway
+from app.core.config import settings
 from app.main import app
 from app.requirements.models import Requirement
 from conftest import headers_for
@@ -28,8 +30,14 @@ def tool_use_block(block_id: str, name: str, tool_input: dict) -> FakeToolUseBlo
 
 
 class FakeGateway:
-    def __init__(self, responses: list, enabled: bool = True):
+    def __init__(
+        self,
+        responses: list,
+        enabled: bool = True,
+        runtime_healthy: bool | None = None,
+    ):
         self.enabled = enabled
+        self.runtime_healthy = runtime_healthy
         self.responses = list(responses)
         self.calls: list[dict] = []
 
@@ -83,6 +91,99 @@ def test_status_reports_disabled_gateway(client, assistant_user, use_gateway):
 
     assert response.status_code == 200
     assert response.json()["enabled"] is False
+
+
+def test_status_reports_hermes_agent_runtime(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
+    monkeypatch.setattr(settings, "hermes_agent_model", "hermes-agent-test")
+    use_gateway(FakeGateway([], runtime_healthy=True))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "enabled": True,
+        "runtime": "hermes_agent",
+        "model": "hermes-agent-test",
+        "runtime_healthy": True,
+    }
+
+
+def test_hermes_agent_urls_support_v1_base_url(monkeypatch):
+    monkeypatch.setattr(settings, "hermes_agent_base_url", "http://127.0.0.1:8642/v1")
+
+    assert _hermes_agent_url("chat/completions") == (
+        "http://127.0.0.1:8642/v1/chat/completions"
+    )
+    assert _hermes_agent_url("health") == "http://127.0.0.1:8642/health"
+
+
+def test_hermes_agent_openai_tool_calls_are_normalized():
+    completion = _from_openai_response(
+        {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": "Voy a registrar el requisito.",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "create_requirement",
+                                    "arguments": json.dumps(
+                                        {"title": "Cita previa"},
+                                        ensure_ascii=False,
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 7},
+        }
+    )
+
+    assert completion.model == "hermes-agent"
+    assert completion.stop_reason == "tool_use"
+    assert completion.usage.input_tokens == 10
+    assert completion.usage.output_tokens == 7
+    assert completion.content[0].text == "Voy a registrar el requisito."
+    assert completion.content[1].name == "create_requirement"
+    assert completion.content[1].input == {"title": "Cita previa"}
+
+
+def test_hermes_agent_inline_tool_calls_are_normalized():
+    completion = _from_openai_response(
+        {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": (
+                            'Hecho <tool_call>{"name":"propose_memory_entry",'
+                            '"arguments":{"category":"protocol"}}</tool_call>'
+                        ),
+                    },
+                }
+            ],
+        }
+    )
+
+    assert completion.stop_reason == "tool_use"
+    assert completion.content[0].text == "Hecho"
+    assert completion.content[1].name == "propose_memory_entry"
+    assert completion.content[1].input == {"category": "protocol"}
 
 
 def test_conversations_are_private_to_their_creator(

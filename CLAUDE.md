@@ -26,7 +26,7 @@ docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
   sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q"
 ```
 
-Fresh database: create the first superuser via `POST /auth/bootstrap-admin` (header `X-Bootstrap-Admin-Token`; only works while no users exist). Without `ANTHROPIC_API_KEY` the assistant endpoints return 503 by design — not a bug.
+Fresh database: create the first superuser via `POST /auth/bootstrap-admin` (header `X-Bootstrap-Admin-Token`; only works while no users exist). Without a complete assistant runtime configuration (`ANTHROPIC_API_KEY` for `ASSISTANT_RUNTIME=anthropic`, or `HERMES_AGENT_*` for `ASSISTANT_RUNTIME=hermes_agent`) the assistant endpoints return 503 by design — not a bug.
 
 Pre-handoff validation (README §9 "Useful validation commands"), packaged as the `/validar` skill. The backend test suite above is part of it; the remaining commands are:
 
@@ -46,7 +46,7 @@ There is intentionally no CI (documented as accepted debt in `docs/arquitectura.
 - Never commit or edit `.env`. `.env.example` is the documented template.
 - Never delete the `postgres_data` or `document_storage` volumes by any means (`docker compose down -v`/`--volumes`, `docker volume rm`, `prune`, ...); they are persistent user data.
 - Keep services bound to localhost; never expose PostgreSQL or Redis.
-- All external AI calls go through the Privacy/AI Gateway (`backend/app/assistant/gateway.py`) — the single egress point. Only conversation text and user-typed structured fields may be sent; never original documents or stored municipal data. Log metadata only (model, stop_reason, token counts), never message content. Keep provider-specific code (SDK imports, model ids) inside `gateway.py`; the model comes from `ASSISTANT_MODEL` — a provider swap must remain a one-file change (ADR-013).
+- All external AI calls and private agent runtime calls go through the Privacy/AI Gateway (`backend/app/assistant/gateway.py`) — the single egress point. Only conversation text, approved institutional memory and user-typed structured fields may be sent; never original documents or stored municipal files. Log metadata only (runtime, model, stop_reason, token counts), never message content. Keep runtime-specific code (SDK imports, OpenAI-compatible adapters, model ids) inside `gateway.py`; runtime selection comes from `ASSISTANT_RUNTIME` (ADR-013, ADR-016).
 - Voice dictation uses the browser's Web Speech API in local-only mode (`processLocally`); when local recognition is unavailable the mic stays disabled — never fall back to cloud speech recognition (ADR-012).
 
 ## Architecture constraints
@@ -60,7 +60,7 @@ There is intentionally no CI (documented as accepted debt in `docs/arquitectura.
 ## Testing
 
 - `backend/tests/conftest.py` is the harness: per-test savepoint-rollback sessions (app code may commit freely), `client` TestClient with a `get_db` override, factory fixtures (`make_user`, `make_organization`, `superuser`, `add_member`, `grant_permissions`) and `headers_for()` to mint JWTs.
-- Assistant tests must never call the real Claude API: override the `get_gateway` dependency with a fake via `app.dependency_overrides` (see `tests/test_assistant.py`).
+- Assistant tests must never call a real AI API or Hermes Agent server: override the `get_gateway` dependency with a fake via `app.dependency_overrides` (see `tests/test_assistant.py`).
 - New endpoints need tests covering tenancy isolation and permission gating.
 - The frontend has no test runner; this is known and accepted.
 
