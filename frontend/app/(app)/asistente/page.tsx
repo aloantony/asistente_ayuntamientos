@@ -115,6 +115,7 @@ function AsistentePageInner() {
       <AssistantPanel
         assistantStatus={assistantController.assistantStatus}
         conversations={assistantController.conversations}
+        currentUser={user}
         memoryEntries={assistantController.memoryEntries}
         selectedConversation={assistantController.selectedConversation}
         draftMessage={assistantController.draftMessage}

@@ -771,6 +771,7 @@ export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
   update_requirement: "Actualizar requisito",
   add_requirement_message: "Añadir nota a requisito",
   propose_memory_entry: "Proponer memoria",
+  web_search: "Buscar en web",
 };
 
 export function formatAssistantTool(tool: string) {
