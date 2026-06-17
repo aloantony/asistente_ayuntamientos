@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     hermes_agent_real_data_allowed: bool = False
     hermes_agent_timeout_seconds: float = 120.0
     hermes_agent_health_timeout_seconds: float = 3.0
+    hermes_web_base_url: str = "http://127.0.0.1:8643/v1"
+    hermes_web_api_key: str | None = None
+    hermes_web_model: str = "hermes-agent"
+    hermes_web_timeout_seconds: float = 60.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

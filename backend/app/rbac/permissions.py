@@ -45,6 +45,7 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "assistant.memory.propose": "Proponer memoria del asistente",
     "assistant.memory.view": "Ver memoria aprobada del asistente",
     "assistant.memory.review": "Revisar memoria propuesta del asistente",
+    "assistant.web.search": "Buscar en la web desde el asistente",
 }
 
 INITIAL_PERMISSION_CODES = tuple(INITIAL_PERMISSION_DEFINITIONS.keys())

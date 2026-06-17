@@ -102,6 +102,13 @@ Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`,
 
 To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately, set `ASSISTANT_RUNTIME=hermes_agent`, `HERMES_AGENT_BASE_URL`, `HERMES_AGENT_API_KEY` and `HERMES_AGENT_MODEL`. In production, Hermes Agent stays disabled for real data unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. Without a complete runtime configuration, assistant endpoints return 503 and the UI shows the assistant as not configured.
 
+Controlled web search uses a second local Hermes API Server instance/profile, separate from the main assistant runtime. Configure `HERMES_WEB_BASE_URL`, `HERMES_WEB_API_KEY`, `HERMES_WEB_MODEL` and grant `assistant.web.search` only to users who may search the public web from the assistant. The main Hermes API server should keep native toolsets disabled for `api_server`; the web Hermes instance should expose only the `web` toolset. The backend sends only the explicit search query to this instance and records the call in the assistant action audit trail.
+
+Expected local split:
+
+- Main assistant Hermes: `127.0.0.1:8642`, no native `api_server` toolsets exposed.
+- Controlled web Hermes: `127.0.0.1:8643`, only `web` enabled.
+
 Build and start the stack:
 
 ```bash
@@ -120,7 +127,7 @@ Local services:
 - Backend: http://localhost:8000
 - Health check: http://localhost:8000/health
 
-The frontend and backend are published on localhost. PostgreSQL and Redis are internal Docker Compose services.
+The frontend, backend, PostgreSQL and Redis are published on localhost only.
 
 To create the first administrator, configure `BOOTSTRAP_ADMIN_TOKEN` in `.env`, start the backend and call:
 

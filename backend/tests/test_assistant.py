@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from app.assistant import tools as assistant_tools
 from app.assistant.gateway import _from_openai_response, _hermes_agent_url
 from app.assistant.models import AssistantMemoryEntry
 from app.assistant.routes import get_gateway
@@ -374,6 +375,172 @@ def test_agent_tool_respects_rbac_of_current_user(
     action = response.json()["messages"][1]["actions"][0]
     assert action["ok"] is False
     assert "requirements.create" in action["result"]
+
+
+def test_agent_web_search_uses_controlled_hermes_web_tool(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.use", "assistant.web.search"])
+    calls = []
+
+    def fake_search(*, query: str, limit: int):
+        calls.append({"query": query, "limit": limit})
+        return [
+            {
+                "title": "Normativa ejemplo",
+                "url": "https://example.test/normativa",
+                "snippet": "Resumen público de la fuente.",
+                "published_at": None,
+            }
+        ]
+
+    monkeypatch.setattr(assistant_tools.hermes_web_client, "search", fake_search)
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_1",
+                            "web_search",
+                            {
+                                "query": "normativa municipal 2026",
+                                "limit": 20,
+                            },
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He encontrado una fuente pública.")],
+                ),
+            ]
+        )
+    )
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca si hay novedades de normativa municipal"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert calls == [{"query": "normativa municipal 2026", "limit": 5}]
+
+    action = response.json()["messages"][1]["actions"][0]
+    assert action["tool"] == "web_search"
+    assert action["ok"] is True
+    result = json.loads(action["result"])
+    assert result["query"] == "normativa municipal 2026"
+    assert result["limit"] == 5
+    assert result["results"][0]["url"] == "https://example.test/normativa"
+
+
+def test_agent_web_search_requires_permission(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.use"])
+
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_1",
+                            "web_search",
+                            {"query": "normativa municipal 2026"},
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No tienes permiso para buscar en la web.")],
+                ),
+            ]
+        )
+    )
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca en internet"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    action = response.json()["messages"][1]["actions"][0]
+    assert action["tool"] == "web_search"
+    assert action["ok"] is False
+    assert "assistant.web.search" in action["result"]
+
+
+def test_web_search_tool_rejects_empty_query(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.web.search"])
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "   "},
+    )
+
+    assert result.ok is False
+    assert "query no puede estar vacío" in result.content
+
+
+def test_web_search_tool_rejects_personal_data_query(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.web.search"])
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "buscar expediente de vecino@example.com"},
+    )
+
+    assert result.ok is False
+    assert "datos personales" in result.content
 
 
 def test_agent_can_only_propose_memory_until_human_approval(

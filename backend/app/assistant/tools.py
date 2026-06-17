@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
 from app.assistant.models import AssistantMemoryEntry
 from app.organizations.access import (
     get_accessible_organizations_query,
@@ -45,6 +46,8 @@ VALID_MEMORY_CATEGORIES = {
     "open_question",
 }
 VALID_MEMORY_SENSITIVITIES = {"normal", "personal", "sensitive", "legal"}
+MAX_WEB_QUERY_CHARS = 400
+MAX_WEB_RESULTS = 5
 PERSONAL_DATA_PATTERN = re.compile(
     r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
     re.IGNORECASE,
@@ -136,6 +139,30 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": "Filtrar por organización (opcional)",
                 },
             },
+        },
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Busca información pública actual en internet usando una instancia "
+            "Hermes Web controlada por el backend. Úsala solo cuando el usuario "
+            "pida buscar o verificar información externa. No incluyas datos "
+            "internos, documentos, historial ni información personal en la "
+            "consulta; envía únicamente una consulta explícita y mínima."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Consulta pública explícita para buscar en la web",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Número de resultados, máximo 5",
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -438,6 +465,45 @@ def _get_requirement(
     return _serialize_requirement(requirement, full=True)
 
 
+def _web_search(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    if not has_permission(current_user, "assistant.web.search", db):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.web.search",
+        )
+
+    query = str(tool_input["query"]).strip()
+    if not query:
+        raise ValueError("query no puede estar vacío")
+    if len(query) > MAX_WEB_QUERY_CHARS:
+        raise ValueError(f"query no puede superar {MAX_WEB_QUERY_CHARS} caracteres")
+    if PERSONAL_DATA_PATTERN.search(query):
+        raise ValueError(
+            "query no puede contener datos personales identificables"
+        )
+
+    limit = int(tool_input.get("limit") or MAX_WEB_RESULTS)
+    if limit < 1:
+        raise ValueError("limit debe ser mayor o igual que 1")
+    limit = min(limit, MAX_WEB_RESULTS)
+
+    try:
+        results = hermes_web_client.search(query=query, limit=limit)
+    except HermesWebUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    return {
+        "query": query,
+        "limit": limit,
+        "results": results,
+    }
+
+
 def _create_requirement(
     db: Session,
     current_user: User,
@@ -620,6 +686,7 @@ def _propose_memory_entry(
 _EXECUTORS = {
     "list_organizations": _list_organizations,
     "list_projects": _list_projects,
+    "web_search": _web_search,
     "list_requirements": _list_requirements,
     "get_requirement": _get_requirement,
     "create_requirement": _create_requirement,

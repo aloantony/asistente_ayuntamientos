@@ -32,7 +32,7 @@ from app.users.models import User
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql+psycopg://app:app@postgres:5432/app_test",
+    "postgresql+psycopg://app:app@127.0.0.1:5432/app_test",
 )
 TEST_DATABASE_NAME = TEST_DATABASE_URL.rsplit("/", 1)[1]
 
