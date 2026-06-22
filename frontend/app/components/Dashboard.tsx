@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import type { User } from "./types";
+import type { TelegramLinkCode, TelegramLinkStatus, User } from "./types";
 
 type DashboardProps = {
   user: User;
@@ -9,11 +9,18 @@ type DashboardProps = {
   changePasswordError: string;
   changePasswordMessage: string;
   isChangingPassword: boolean;
+  telegramStatus: TelegramLinkStatus | null;
+  telegramCode: TelegramLinkCode | null;
+  telegramError: string;
+  telegramMessage: string;
+  isTelegramBusy: boolean;
   onLogout: () => void;
   onCurrentPasswordChange: (currentPassword: string) => void;
   onNewPasswordChange: (newPassword: string) => void;
   onNewPasswordConfirmationChange: (newPasswordConfirmation: string) => void;
   onChangePassword: (event: FormEvent<HTMLFormElement>) => void;
+  onCreateTelegramCode: () => void;
+  onRevokeTelegramLink: () => void;
 };
 
 export function Dashboard({
@@ -24,11 +31,18 @@ export function Dashboard({
   changePasswordError,
   changePasswordMessage,
   isChangingPassword,
+  telegramStatus,
+  telegramCode,
+  telegramError,
+  telegramMessage,
+  isTelegramBusy,
   onLogout,
   onCurrentPasswordChange,
   onNewPasswordChange,
   onNewPasswordConfirmationChange,
   onChangePassword,
+  onCreateTelegramCode,
+  onRevokeTelegramLink,
 }: DashboardProps) {
   return (
     <section className="panel">
@@ -125,6 +139,56 @@ export function Dashboard({
             {isChangingPassword ? "Guardando..." : "Cambiar contraseña"}
           </button>
         </form>
+      </details>
+
+      <details className="change-password-section">
+        <summary>Telegram</summary>
+        <div className="telegram-link-panel">
+          <dl className="user-details">
+            <div>
+              <dt>Estado</dt>
+              <dd>
+                {telegramStatus?.linked
+                  ? `Vinculado${
+                      telegramStatus.telegram_username
+                        ? ` a @${telegramStatus.telegram_username}`
+                        : ""
+                    }`
+                  : "Sin vincular"}
+              </dd>
+            </div>
+          </dl>
+
+          {telegramCode ? (
+            <p className="success-message">
+              Código: <strong>{telegramCode.code}</strong>
+            </p>
+          ) : null}
+          {telegramError ? (
+            <p className="error-message">{telegramError}</p>
+          ) : null}
+          {telegramMessage ? (
+            <p className="success-message">{telegramMessage}</p>
+          ) : null}
+
+          <div className="button-row">
+            <button
+              type="button"
+              onClick={onCreateTelegramCode}
+              disabled={isTelegramBusy}
+            >
+              Generar código
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onRevokeTelegramLink}
+              disabled={isTelegramBusy || !telegramStatus?.linked}
+            >
+              Revocar vínculo
+            </button>
+          </div>
+        </div>
       </details>
     </section>
   );

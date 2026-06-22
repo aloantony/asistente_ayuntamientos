@@ -19,12 +19,17 @@ docker compose up -d --build                          # start the stack
 docker compose exec backend alembic upgrade head      # apply migrations
 ```
 
-Backend tests (require the postgres compose service; run inside Docker against an isolated `app_test` database):
+Backend tests (require the postgres compose service; run inside Docker against an isolated `app_test_<uuid>` database by default):
 
 ```bash
 docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
   sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q"
 ```
+
+The runtime backend image intentionally excludes `pytest`; install
+`requirements-dev.txt` in the disposable test container as shown above. If
+`TEST_DATABASE_URL` is set manually, it must point to an `app_test`-prefixed
+database.
 
 Fresh database: create the first superuser via `POST /auth/bootstrap-admin` (header `X-Bootstrap-Admin-Token`; only works while no users exist). Without a complete assistant runtime configuration (`ANTHROPIC_API_KEY` for `ASSISTANT_RUNTIME=anthropic`, or `HERMES_AGENT_*` for `ASSISTANT_RUNTIME=hermes_agent`) the assistant endpoints return 503 by design — not a bug.
 

@@ -15,6 +15,9 @@ export const ORDINANCE_PERMISSIONS = [
   "ordinances.create",
   "ordinances.edit",
   "ordinances.archive",
+  "ordinances.import",
+  "ordinances.review",
+  "ordinances.compare",
   "ordinances.manage",
 ];
 

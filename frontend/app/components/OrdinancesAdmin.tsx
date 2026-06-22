@@ -3,13 +3,16 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   formatMunicipalityOption,
+  formatOrdinanceCurationStatus,
   formatOrdinanceStatus,
   formatOrdinanceType,
+  ORDINANCE_CURATION_STATUSES,
   ORDINANCE_STATUSES,
   ORDINANCE_TYPES,
   userHasPermission,
   type Municipality,
   type Ordinance,
+  type OrdinanceCurationStatus,
   type OrdinanceEditState,
   type OrdinanceStatus,
   type OrdinanceType,
@@ -323,6 +326,7 @@ export function OrdinancesAdmin({
                   <th>Subtema</th>
                   <th>Tipo</th>
                   <th>Estado</th>
+                  <th>Revisión</th>
                   <th>Fuente oficial</th>
                   <th>Boletín oficial</th>
                   <th>Número</th>
@@ -358,6 +362,7 @@ export function OrdinancesAdmin({
                       publication_date: ordinance.publication_date ?? "",
                       effective_date: ordinance.effective_date ?? "",
                       status: ordinance.status,
+                      curation_status: ordinance.curation_status,
                       text_content: ordinance.text_content ?? "",
                       notes: ordinance.notes ?? "",
                       legal_review_notes: ordinance.legal_review_notes ?? "",
@@ -395,6 +400,31 @@ export function OrdinancesAdmin({
                             </select>
                           ) : (
                             formatMunicipalityOption(ordinance.municipality)
+                          )}
+                        </td>
+                        <td>
+                          {isRowEditing ? (
+                            <select
+                              aria-label={`Revisión de ${ordinance.title}`}
+                              className="table-input"
+                              onChange={(event) =>
+                                onUpdateOrdinanceEdit(ordinance.id, {
+                                  curation_status: event.target
+                                    .value as OrdinanceCurationStatus,
+                                })
+                              }
+                              value={edit.curation_status}
+                            >
+                              {ORDINANCE_CURATION_STATUSES.map((status) => (
+                                <option key={status} value={status}>
+                                  {formatOrdinanceCurationStatus(status)}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            formatOrdinanceCurationStatus(
+                              ordinance.curation_status,
+                            )
                           )}
                         </td>
                         <EditableTextCell
@@ -651,7 +681,7 @@ export function OrdinancesAdmin({
                   })
                 ) : (
                   <tr>
-                    <td colSpan={19}>No hay ordenanzas para mostrar.</td>
+                    <td colSpan={20}>No hay ordenanzas para mostrar.</td>
                   </tr>
                 )}
               </tbody>
@@ -892,6 +922,25 @@ function OrdinanceFormFields({
           {ORDINANCE_STATUSES.map((status) => (
             <option key={status} value={status}>
               {formatOrdinanceStatus(status)}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label>
+        Revisión
+        <select
+          onChange={(event) =>
+            onUpdate({
+              curation_status: event.target.value as OrdinanceCurationStatus,
+            })
+          }
+          required
+          value={edit.curation_status}
+        >
+          {ORDINANCE_CURATION_STATUSES.map((status) => (
+            <option key={status} value={status}>
+              {formatOrdinanceCurationStatus(status)}
             </option>
           ))}
         </select>

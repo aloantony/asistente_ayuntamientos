@@ -6,6 +6,7 @@ import {
   OrdinancesAdmin,
   type OrdinanceFilterValues,
 } from "../../../components/OrdinancesAdmin";
+import { OrdinanceImportAdmin } from "../../../components/OrdinanceImportAdmin";
 import type { Municipality } from "../../../components/types";
 import { useOrdinancesAdmin } from "../../../lib/admin/useOrdinancesAdmin";
 import { fetchMunicipalityOptions } from "../../../lib/fetchers";
@@ -271,6 +272,7 @@ function AdminOrdenanzasPageInner() {
         onUpdateOrdinance={ordinancesAdmin.handleUpdateOrdinance}
         onArchiveOrdinance={ordinancesAdmin.handleArchiveOrdinance}
       />
+      <OrdinanceImportAdmin municipalities={municipalities} />
     </section>
   );
 }

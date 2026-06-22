@@ -332,88 +332,113 @@ function CapabilityStrip({
 }: {
   capabilities: Capability[];
 }) {
+  const enabledCount = capabilities.filter((capability) => capability.enabled).length;
+
   return (
-    <div className="assistant-capabilities" aria-label="Capacidades del asistente">
-      {capabilities.map((capability) => {
-        const Icon = capability.icon;
-        return (
-          <div
-            className={
-              capability.enabled
-                ? "assistant-capability enabled"
-                : "assistant-capability"
-            }
-            key={capability.id}
-          >
-            <Icon aria-hidden size={17} />
-            <div>
-              <span>{capability.label}</span>
-              <small>{capability.detail}</small>
+    <details className="assistant-capabilities-panel">
+      <summary>
+        <span>Capacidades</span>
+        <small>
+          {enabledCount} de {capabilities.length} disponibles
+        </small>
+        <ChevronDown aria-hidden size={15} />
+      </summary>
+      <div className="assistant-capabilities" aria-label="Capacidades del asistente">
+        {capabilities.map((capability) => {
+          const Icon = capability.icon;
+          return (
+            <div
+              className={
+                capability.enabled
+                  ? "assistant-capability enabled"
+                  : "assistant-capability"
+              }
+              key={capability.id}
+            >
+              <Icon aria-hidden size={15} />
+              <div>
+                <span>{capability.label}</span>
+                <small>{capability.detail}</small>
+              </div>
             </div>
-          </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 
-function ActionTimeline({ actions }: { actions: AssistantAction[] }) {
+function ActionTimeline({
+  actions,
+  toolLabels,
+}: {
+  actions: AssistantAction[];
+  toolLabels: Record<string, string>;
+}) {
   if (actions.length === 0) {
     return null;
   }
 
   return (
-    <div className="assistant-action-timeline">
-      {actions.map((action, index) => {
-        const Icon = getActionIcon(action.tool);
-        const webResults = getWebResults(action);
+    <details className="assistant-action-timeline">
+      <summary>
+        Actividad del asistente
+        <span>{actions.length}</span>
+      </summary>
+      <div className="assistant-action-events">
+        {actions.map((action, index) => {
+          const Icon = getActionIcon(action.tool);
+          const webResults = getWebResults(action);
 
-        return (
-          <div
-            className={
-              action.ok
-                ? "assistant-action-event ok"
-                : "assistant-action-event error"
-            }
-            key={`${action.tool}-${index}`}
-          >
-            <div className="assistant-action-marker">
-              {action.ok ? (
-                <CheckCircle2 aria-hidden size={16} />
-              ) : (
-                <XCircle aria-hidden size={16} />
-              )}
-            </div>
-            <div className="assistant-action-body">
-              <div className="assistant-action-title">
-                <Icon aria-hidden size={16} />
-                <span>{formatAssistantTool(action.tool)}</span>
+          return (
+            <div
+              className={
+                action.ok
+                  ? "assistant-action-event ok"
+                  : "assistant-action-event error"
+              }
+              key={`${action.tool}-${index}`}
+            >
+              <div className="assistant-action-marker">
+                {action.ok ? (
+                  <CheckCircle2 aria-hidden size={16} />
+                ) : (
+                  <XCircle aria-hidden size={16} />
+                )}
               </div>
-              <p>{getActionSummary(action)}</p>
-              {webResults.length > 0 ? (
-                <div className="assistant-sources">
-                  {webResults.map((result) => (
-                    <a
-                      href={result.url}
-                      key={result.url}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      <span>{result.title}</span>
-                      {result.snippet ? <small>{result.snippet}</small> : null}
-                    </a>
-                  ))}
+              <div className="assistant-action-body">
+                <div className="assistant-action-title">
+                  <Icon aria-hidden size={16} />
+                  <span>{formatAssistantTool(action.tool, toolLabels)}</span>
                 </div>
-              ) : null}
-              <details className="assistant-action-detail">
-                <summary>Detalle tecnico</summary>
-                <pre>{actionDetailText(action)}</pre>
-              </details>
+                <p>{getActionSummary(action)}</p>
+                {webResults.length > 0 ? (
+                  <div className="assistant-sources">
+                    {webResults.map((result) => (
+                      <a
+                        href={result.url}
+                        key={result.url}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <span>{result.title}</span>
+                        {result.snippet ? (
+                          <small>{result.snippet}</small>
+                        ) : null}
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
+                <details className="assistant-action-detail">
+                  <summary>Detalle tecnico</summary>
+                  <pre>{actionDetailText(action)}</pre>
+                </details>
+              </div>
             </div>
-          </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 
@@ -588,12 +613,20 @@ export function AssistantPanel({
     () => buildCapabilities(currentUser, assistantStatus),
     [assistantStatus, currentUser],
   );
+  const toolLabels = useMemo(
+    () =>
+      Object.fromEntries(
+        assistantStatus?.tools.map((tool) => [tool.name, tool.label]) ?? [],
+      ),
+    [assistantStatus],
+  );
 
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState("");
   const [speechSupported, setSpeechSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
   const [isMemoryOpen, setIsMemoryOpen] = useState(memoryEntries.length > 0);
+  const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftMessageRef = useRef(draftMessage);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -782,12 +815,19 @@ export function AssistantPanel({
         </div>
       ) : null}
 
-      <div className="assistant-agent-grid">
+      <div
+        className={
+          isDetailsPanelOpen
+            ? "assistant-agent-grid details-open"
+            : "assistant-agent-grid"
+        }
+      >
         <aside className="assistant-conversations">
           <div className="assistant-list-tools">
             <div className="assistant-search">
               <Search aria-hidden size={16} />
               <input
+                aria-label="Buscar conversaciones"
                 value={conversationFilter}
                 onChange={(event) => setConversationFilter(event.target.value)}
                 placeholder="Buscar"
@@ -851,27 +891,30 @@ export function AssistantPanel({
             <>
               <div className="assistant-thread-header">
                 <div>
-                  <p className="eyebrow">
-                    {selectedIsArchived ? "Archivada" : "Activa"}
-                  </p>
                   <h3>{selectedConversation.title}</h3>
+                  {selectedIsArchived ? (
+                    <span className="assistant-thread-status">Archivada</span>
+                  ) : null}
                 </div>
                 {selectedIsArchived ? (
                   <button
-                    className="secondary-button"
+                    className="secondary-button assistant-thread-icon-button"
                     type="button"
+                    title="Restaurar conversacion"
+                    aria-label="Restaurar conversacion"
                     disabled={isSendingMessage}
                     onClick={() =>
                       onRestoreConversation(selectedConversation.id)
                     }
                   >
                     <ArchiveRestore aria-hidden size={16} />
-                    <span>Restaurar</span>
                   </button>
                 ) : (
                   <button
-                    className="danger-button"
+                    className="danger-button assistant-thread-icon-button"
                     type="button"
+                    title="Archivar conversacion"
+                    aria-label="Archivar conversacion"
                     disabled={isSendingMessage}
                     onClick={() => {
                       if (
@@ -884,7 +927,6 @@ export function AssistantPanel({
                     }}
                   >
                     <Archive aria-hidden size={16} />
-                    <span>Archivar</span>
                   </button>
                 )}
               </div>
@@ -921,7 +963,10 @@ export function AssistantPanel({
                         <p className="assistant-message-content">
                           {message.content}
                         </p>
-                        <ActionTimeline actions={message.actions} />
+                        <ActionTimeline
+                          actions={message.actions}
+                          toolLabels={toolLabels}
+                        />
                       </div>
                     </article>
                   );
@@ -968,6 +1013,10 @@ export function AssistantPanel({
                     className={
                       isListening ? "assistant-mic recording" : "assistant-mic"
                     }
+                    aria-label={
+                      isListening ? "Detener dictado" : "Iniciar dictado"
+                    }
+                    aria-pressed={isListening}
                     onClick={handleToggleListening}
                     disabled={
                       !speechSupported ||
@@ -1011,9 +1060,15 @@ export function AssistantPanel({
           ) : (
             <div className="assistant-no-selection">
               <Bot aria-hidden size={28} />
-              <h3>Selecciona una conversacion</h3>
+              <h3>
+                {isLoadingAssistant
+                  ? "Cargando conversaciones"
+                  : "Selecciona una conversacion"}
+              </h3>
               <p className="muted">
-                Tambien puedes crear una nueva para empezar desde cero.
+                {isLoadingAssistant
+                  ? "Estamos preparando el historial y el estado del asistente."
+                  : "Tambien puedes crear una nueva para empezar desde cero."}
               </p>
               <button
                 type="button"
@@ -1030,67 +1085,104 @@ export function AssistantPanel({
         </main>
 
         <aside className="assistant-side-panel">
-          <section className="assistant-side-section">
-            <div className="assistant-side-heading">
-              <ShieldCheck aria-hidden size={17} />
-              <h3>Estado</h3>
-            </div>
-            <dl className="assistant-runtime-list">
-              <div>
-                <dt>Runtime</dt>
-                <dd>{assistantStatus?.runtime ?? "Pendiente"}</dd>
-              </div>
-              <div>
-                <dt>Modelo</dt>
-                <dd>{assistantStatus?.model ?? "Pendiente"}</dd>
-              </div>
-              <div>
-                <dt>Salud</dt>
-                <dd>
-                  {!assistantStatus
-                    ? "Pendiente"
-                    : assistantStatus.runtime_healthy === false
-                      ? "Revisar"
-                      : "Operativo"}
-                </dd>
-              </div>
-            </dl>
-          </section>
-
-          <section className="assistant-side-section">
-            <button
-              className="assistant-memory-toggle"
-              type="button"
-              onClick={() => setIsMemoryOpen((open) => !open)}
-              aria-expanded={isMemoryOpen}
-            >
-              <span>
-                <Brain aria-hidden size={17} />
-                Memoria pendiente
-              </span>
-              <span className="tag">{memoryEntries.length}</span>
-              <ChevronDown aria-hidden size={16} />
-            </button>
-            {isMemoryOpen ? (
-              <MemoryReviewPanel
-                entries={memoryEntries}
-                isSendingMessage={isSendingMessage}
-                onUpdateMemoryEntry={onUpdateMemoryEntry}
-              />
+          <button
+            className="assistant-details-toggle"
+            type="button"
+            onClick={() => setIsDetailsPanelOpen((open) => !open)}
+            aria-expanded={isDetailsPanelOpen}
+            aria-label={
+              isDetailsPanelOpen
+                ? "Ocultar detalles del asistente"
+                : "Mostrar detalles del asistente"
+            }
+            title={
+              isDetailsPanelOpen
+                ? "Ocultar detalles del asistente"
+                : "Mostrar detalles del asistente"
+            }
+          >
+            <ShieldCheck aria-hidden size={17} />
+            <span>Detalles</span>
+            {memoryEntries.length > 0 ? (
+              <small>{memoryEntries.length}</small>
             ) : null}
-          </section>
+          </button>
 
-          <section className="assistant-side-section">
-            <div className="assistant-side-heading">
-              <RotateCcw aria-hidden size={17} />
-              <h3>Actividad</h3>
+          {isDetailsPanelOpen ? (
+            <div className="assistant-side-content">
+              <section className="assistant-side-section">
+                <div className="assistant-side-heading">
+                  <ShieldCheck aria-hidden size={17} />
+                  <h3>Estado</h3>
+                </div>
+                <dl className="assistant-runtime-list">
+                  <div>
+                    <dt>Runtime</dt>
+                    <dd>{assistantStatus?.runtime ?? "Pendiente"}</dd>
+                  </div>
+                  <div>
+                    <dt>Modelo</dt>
+                    <dd>{assistantStatus?.model ?? "Pendiente"}</dd>
+                  </div>
+                  <div>
+                    <dt>Salud</dt>
+                    <dd>
+                      {!assistantStatus
+                        ? "Pendiente"
+                        : assistantStatus.runtime_healthy === false
+                          ? "Revisar"
+                          : "Operativo"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Planner</dt>
+                    <dd>
+                      {!assistantStatus
+                        ? "Pendiente"
+                        : assistantStatus.planner.enabled
+                          ? assistantStatus.planner.model
+                          : "Desactivado"}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section className="assistant-side-section">
+                <button
+                  className="assistant-memory-toggle"
+                  type="button"
+                  onClick={() => setIsMemoryOpen((open) => !open)}
+                  aria-expanded={isMemoryOpen}
+                >
+                  <span>
+                    <Brain aria-hidden size={17} />
+                    Memoria pendiente
+                  </span>
+                  <span className="tag">{memoryEntries.length}</span>
+                  <ChevronDown aria-hidden size={16} />
+                </button>
+                {isMemoryOpen ? (
+                  <MemoryReviewPanel
+                    entries={memoryEntries}
+                    isSendingMessage={isSendingMessage}
+                    onUpdateMemoryEntry={onUpdateMemoryEntry}
+                  />
+                ) : null}
+              </section>
+
+              <section className="assistant-side-section">
+                <div className="assistant-side-heading">
+                  <RotateCcw aria-hidden size={17} />
+                  <h3>Actividad</h3>
+                </div>
+                <p className="muted">
+                  {selectedConversation
+                    ? `${selectedConversation.messages.length} mensajes`
+                    : "Sin conversacion abierta"}
+                </p>
+              </section>
             </div>
-            <p className="muted">
-              {selectedConversation
-                ? `${selectedConversation.messages.length} mensajes`
-                : "Sin conversacion abierta"}
-            </p>
-          </section>
+          ) : null}
         </aside>
       </div>
     </section>

@@ -15,6 +15,22 @@ services:
       redis:
         condition: service_started
 
+  worker:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    network_mode: host
+    command:
+      ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
+    volumes:
+      - document_storage:/var/lib/asistente_ayuntamientos/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   frontend:
     build:
       context: ./frontend
@@ -28,7 +44,7 @@ services:
       - backend
 
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_DB: app
       POSTGRES_USER: app

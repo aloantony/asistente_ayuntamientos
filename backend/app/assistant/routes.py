@@ -1,12 +1,18 @@
 from typing import Annotated
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status as http_status
+from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.assistant.agents import get_allowed_agents
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
-from app.assistant.models import AssistantConversation, AssistantMemoryEntry
+from app.assistant.models import (
+    AssistantConversation,
+    AssistantMemoryEntry,
+    AssistantTransversalFeature,
+    AssistantTransversalFeatureAdoption,
+)
 from app.assistant.schemas import (
     AssistantConversationCreate,
     AssistantConversationDetail,
@@ -15,11 +21,19 @@ from app.assistant.schemas import (
     AssistantMemoryEntryRead,
     AssistantMemoryEntryUpdate,
     AssistantStatusRead,
+    AssistantTransversalFeatureAdoptionRead,
+    AssistantTransversalFeatureAdoptionUpdate,
+    AssistantTransversalFeatureRead,
+    AssistantTransversalFeatureUpdate,
     AssistantUserMessageCreate,
     MemoryStatus,
+    TransversalFeatureAdoptionStatus,
+    TransversalFeatureStatus,
 )
 from app.assistant.service import run_agent_turn
-from app.auth.dependencies import get_current_user
+from app.assistant.planner import planner_enabled, planner_healthy
+from app.assistant.tools import get_tool_metadata
+from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
@@ -50,6 +64,7 @@ def get_assistant_status(
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
 ) -> AssistantStatusRead:
     require_assistant_use(db, current_user)
+    planner_is_enabled = planner_enabled()
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
         runtime=settings.assistant_runtime,
@@ -59,6 +74,16 @@ def get_assistant_status(
             else settings.assistant_model
         ),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
+        planner={
+            "runtime": settings.assistant_planner_runtime,
+            "enabled": planner_is_enabled,
+            "model": settings.assistant_planner_model
+            if settings.assistant_planner_runtime == "hermes_agent"
+            else None,
+            "runtime_healthy": planner_healthy(),
+        },
+        agents=[agent.metadata for agent in get_allowed_agents(db, current_user)],
+        tools=get_tool_metadata(),
     )
 
 
@@ -144,6 +169,131 @@ def update_memory_entry(
 
     db.commit()
     return get_existing_memory_entry(db, entry_id)
+
+
+@router.get(
+    "/transversal-features",
+    response_model=list[AssistantTransversalFeatureRead],
+)
+def list_transversal_features(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_superuser)],
+    status: Annotated[TransversalFeatureStatus | None, Query()] = None,
+) -> list[AssistantTransversalFeature]:
+    query = (
+        select(AssistantTransversalFeature)
+        .options(
+            selectinload(AssistantTransversalFeature.proposed_by),
+            selectinload(AssistantTransversalFeature.reviewed_by),
+        )
+        .order_by(
+            AssistantTransversalFeature.updated_at.desc(),
+            AssistantTransversalFeature.id.desc(),
+        )
+    )
+    if status is not None:
+        query = query.where(AssistantTransversalFeature.status == status)
+
+    return list(db.scalars(query))
+
+
+@router.patch(
+    "/transversal-features/{feature_id}",
+    response_model=AssistantTransversalFeatureRead,
+)
+def update_transversal_feature(
+    feature_id: int,
+    payload: AssistantTransversalFeatureUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_superuser)],
+) -> AssistantTransversalFeature:
+    feature = get_existing_transversal_feature(db, feature_id)
+    updates = payload.model_dump(exclude_unset=True)
+
+    for field in (
+        "title",
+        "summary",
+        "rationale",
+        "category",
+        "sensitivity",
+        "auto_activatable",
+        "review_notes",
+    ):
+        if field in updates:
+            setattr(feature, field, updates[field])
+
+    if "status" in updates and updates["status"] is not None:
+        feature.status = updates["status"]
+        feature.reviewed_by_id = current_user.id
+        feature.reviewed_at = datetime.now(timezone.utc)
+
+    db.commit()
+    return get_existing_transversal_feature(db, feature_id)
+
+
+@router.get(
+    "/transversal-feature-adoptions",
+    response_model=list[AssistantTransversalFeatureAdoptionRead],
+)
+def list_transversal_feature_adoptions(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_superuser)],
+    status: Annotated[TransversalFeatureAdoptionStatus | None, Query()] = None,
+    organization_id: int | None = None,
+    feature_id: int | None = None,
+) -> list[AssistantTransversalFeatureAdoption]:
+    query = (
+        select(AssistantTransversalFeatureAdoption)
+        .options(
+            selectinload(AssistantTransversalFeatureAdoption.feature).selectinload(
+                AssistantTransversalFeature.proposed_by
+            ),
+            selectinload(AssistantTransversalFeatureAdoption.feature).selectinload(
+                AssistantTransversalFeature.reviewed_by
+            ),
+            selectinload(AssistantTransversalFeatureAdoption.requested_by),
+            selectinload(AssistantTransversalFeatureAdoption.approved_by),
+        )
+        .order_by(
+            AssistantTransversalFeatureAdoption.updated_at.desc(),
+            AssistantTransversalFeatureAdoption.id.desc(),
+        )
+    )
+    if status is not None:
+        query = query.where(AssistantTransversalFeatureAdoption.status == status)
+    if organization_id is not None:
+        query = query.where(
+            AssistantTransversalFeatureAdoption.organization_id == organization_id
+        )
+    if feature_id is not None:
+        query = query.where(AssistantTransversalFeatureAdoption.feature_id == feature_id)
+
+    return list(db.scalars(query))
+
+
+@router.patch(
+    "/transversal-feature-adoptions/{adoption_id}",
+    response_model=AssistantTransversalFeatureAdoptionRead,
+)
+def update_transversal_feature_adoption(
+    adoption_id: int,
+    payload: AssistantTransversalFeatureAdoptionUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_superuser)],
+) -> AssistantTransversalFeatureAdoption:
+    adoption = get_existing_transversal_feature_adoption(db, adoption_id)
+    updates = payload.model_dump(exclude_unset=True)
+
+    if "notes" in updates:
+        adoption.notes = updates["notes"]
+    if "status" in updates and updates["status"] is not None:
+        adoption.status = updates["status"]
+        if adoption.status == "active":
+            adoption.approved_by_id = current_user.id
+            adoption.activated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    return get_existing_transversal_feature_adoption(db, adoption_id)
 
 
 @router.get("/conversations", response_model=list[AssistantConversationRead])
@@ -324,3 +474,51 @@ def get_existing_memory_entry(db: Session, entry_id: int) -> AssistantMemoryEntr
             detail="Assistant memory entry not found",
         )
     return entry
+
+
+def get_existing_transversal_feature(
+    db: Session,
+    feature_id: int,
+) -> AssistantTransversalFeature:
+    feature = db.scalar(
+        select(AssistantTransversalFeature)
+        .options(
+            selectinload(AssistantTransversalFeature.proposed_by),
+            selectinload(AssistantTransversalFeature.reviewed_by),
+        )
+        .where(AssistantTransversalFeature.id == feature_id)
+        .execution_options(populate_existing=True)
+    )
+    if feature is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Transversal feature not found",
+        )
+    return feature
+
+
+def get_existing_transversal_feature_adoption(
+    db: Session,
+    adoption_id: int,
+) -> AssistantTransversalFeatureAdoption:
+    adoption = db.scalar(
+        select(AssistantTransversalFeatureAdoption)
+        .options(
+            selectinload(AssistantTransversalFeatureAdoption.feature).selectinload(
+                AssistantTransversalFeature.proposed_by
+            ),
+            selectinload(AssistantTransversalFeatureAdoption.feature).selectinload(
+                AssistantTransversalFeature.reviewed_by
+            ),
+            selectinload(AssistantTransversalFeatureAdoption.requested_by),
+            selectinload(AssistantTransversalFeatureAdoption.approved_by),
+        )
+        .where(AssistantTransversalFeatureAdoption.id == adoption_id)
+        .execution_options(populate_existing=True)
+    )
+    if adoption is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Transversal feature adoption not found",
+        )
+    return adoption

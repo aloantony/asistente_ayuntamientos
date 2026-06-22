@@ -70,12 +70,7 @@ class AIGateway:
         if settings.assistant_runtime == "anthropic":
             return bool(settings.anthropic_api_key)
         if settings.assistant_runtime == "hermes_agent":
-            if not settings.hermes_agent_base_url or not settings.hermes_agent_api_key:
-                return False
-            return (
-                settings.environment != "production"
-                or settings.hermes_agent_real_data_allowed
-            )
+            return hermes_agent_enabled()
         return False
 
     @property
@@ -84,20 +79,7 @@ class AIGateway:
             return None
         if not self.enabled:
             return False
-
-        request = urlrequest.Request(
-            _hermes_agent_url("health"),
-            headers=_hermes_agent_headers(),
-            method="GET",
-        )
-        try:
-            with urlrequest.urlopen(
-                request,
-                timeout=settings.hermes_agent_health_timeout_seconds,
-            ) as response:
-                return 200 <= response.status < 300
-        except (urlerror.HTTPError, urlerror.URLError, TimeoutError):
-            return False
+        return hermes_agent_healthy(timeout=settings.hermes_agent_health_timeout_seconds)
 
     def _get_anthropic_client(self) -> anthropic.Anthropic:
         if not self.enabled:
@@ -196,50 +178,16 @@ class AIGateway:
         if not self.enabled:
             raise AssistantUnavailableError("Assistant is not configured")
 
-        payload: dict[str, Any] = {
-            "model": settings.hermes_agent_model,
-            "messages": _to_openai_messages(system, messages),
-            "max_tokens": settings.assistant_max_tokens,
-        }
-        openai_tools = _to_openai_tools(tools)
-        if openai_tools:
-            payload["tools"] = openai_tools
-            payload["tool_choice"] = "auto"
-
-        request = urlrequest.Request(
-            _hermes_agent_url("chat/completions"),
-            data=json.dumps(payload).encode("utf-8"),
-            headers=_hermes_agent_headers(),
-            method="POST",
+        completion = complete_hermes_agent(
+            system=system,
+            messages=messages,
+            tools=tools,
+            model=settings.hermes_agent_model,
+            max_tokens=settings.assistant_max_tokens,
+            timeout=settings.hermes_agent_timeout_seconds,
+            tool_choice="auto",
+            log_context="assistant",
         )
-
-        try:
-            with urlrequest.urlopen(
-                request,
-                timeout=settings.hermes_agent_timeout_seconds,
-            ) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-        except urlerror.HTTPError as error:
-            logger.error("Hermes Agent API error: status=%s", error.code)
-            raise AssistantUnavailableError("Assistant API request failed") from error
-        except (urlerror.URLError, TimeoutError) as error:
-            logger.error("Hermes Agent API connection error")
-            raise AssistantUnavailableError(
-                "Assistant API connection failed"
-            ) from error
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            logger.error("Hermes Agent API returned an invalid response")
-            raise AssistantUnavailableError(
-                "Assistant API returned an invalid response"
-            ) from error
-
-        try:
-            completion = _from_openai_response(response_data)
-        except (KeyError, TypeError, ValueError) as error:
-            logger.error("Hermes Agent API returned an invalid response")
-            raise AssistantUnavailableError(
-                "Assistant API returned an invalid response"
-            ) from error
         logger.info(
             "Assistant completion: runtime=hermes_agent model=%s stop_reason=%s input_tokens=%s output_tokens=%s",
             completion.model,
@@ -248,6 +196,94 @@ class AIGateway:
             completion.usage.output_tokens,
         )
         return completion
+
+
+def hermes_agent_enabled() -> bool:
+    if not settings.hermes_agent_base_url or not settings.hermes_agent_api_key:
+        return False
+    return (
+        settings.environment != "production"
+        or settings.hermes_agent_real_data_allowed
+    )
+
+
+def hermes_agent_healthy(*, timeout: float) -> bool:
+    request = urlrequest.Request(
+        _hermes_agent_url("health"),
+        headers=_hermes_agent_headers(),
+        method="GET",
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except (urlerror.HTTPError, urlerror.URLError, TimeoutError):
+        return False
+
+
+def complete_hermes_agent(
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    model: str,
+    max_tokens: int,
+    timeout: float,
+    tool_choice: str | dict | None,
+    log_context: str,
+) -> AICompletion:
+    if not hermes_agent_enabled():
+        raise AssistantUnavailableError("Hermes Agent is not configured")
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _to_openai_messages(system, messages),
+        "max_tokens": max_tokens,
+    }
+    openai_tools = _to_openai_tools(tools)
+    if openai_tools:
+        payload["tools"] = openai_tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+
+    request = urlrequest.Request(
+        _hermes_agent_url("chat/completions"),
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_hermes_agent_headers(),
+        method="POST",
+    )
+
+    try:
+        with urlrequest.urlopen(request, timeout=timeout) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except urlerror.HTTPError as error:
+        logger.error(
+            "Hermes Agent API error: context=%s status=%s",
+            log_context,
+            error.code,
+        )
+        raise AssistantUnavailableError("Assistant API request failed") from error
+    except (urlerror.URLError, TimeoutError) as error:
+        logger.error("Hermes Agent API connection error: context=%s", log_context)
+        raise AssistantUnavailableError("Assistant API connection failed") from error
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        logger.error(
+            "Hermes Agent API returned an invalid response: context=%s",
+            log_context,
+        )
+        raise AssistantUnavailableError(
+            "Assistant API returned an invalid response"
+        ) from error
+
+    try:
+        return _from_openai_response(response_data)
+    except (KeyError, TypeError, ValueError) as error:
+        logger.error(
+            "Hermes Agent API returned an invalid response: context=%s",
+            log_context,
+        )
+        raise AssistantUnavailableError(
+            "Assistant API returned an invalid response"
+        ) from error
 
 
 def _hermes_agent_url(path: str) -> str:
@@ -386,6 +422,13 @@ def _from_openai_response(response_data: dict) -> AICompletion:
     message = choice["message"]
     raw_content = message.get("content") or ""
     cleaned_content, inline_tool_calls = _extract_inline_tool_calls(raw_content)
+    standalone_tool_call = (
+        _parse_standalone_tool_call(cleaned_content)
+        if not inline_tool_calls and not (message.get("tool_calls") or [])
+        else None
+    )
+    if standalone_tool_call is not None:
+        cleaned_content = ""
 
     content: list[AITextBlock | AIToolUseBlock] = []
     if cleaned_content:
@@ -397,6 +440,8 @@ def _from_openai_response(response_data: dict) -> AICompletion:
             content.append(parsed_tool_call)
 
     content.extend(inline_tool_calls)
+    if standalone_tool_call is not None:
+        content.append(standalone_tool_call)
     stop_reason = (
         "tool_use"
         if any(block.type == "tool_use" for block in content)
@@ -425,6 +470,25 @@ def _extract_inline_tool_calls(
 
     cleaned_content = _INLINE_TOOL_CALL_RE.sub("", content).strip()
     return cleaned_content, tool_calls
+
+
+def _parse_standalone_tool_call(content: str) -> AIToolUseBlock | None:
+    stripped = content.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if not (
+        parsed.get("name")
+        or parsed.get("tool_name")
+        or (parsed.get("function") or {}).get("name")
+    ):
+        return None
+    return _parse_tool_call_payload(stripped)
 
 
 def _parse_openai_tool_call(tool_call: dict) -> AIToolUseBlock | None:

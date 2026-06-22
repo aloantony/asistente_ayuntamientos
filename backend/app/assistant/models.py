@@ -1,13 +1,23 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.organizations.models import Organization
+    from app.requirements.models import Requirement
     from app.users.models import User
 
 
@@ -34,6 +44,21 @@ class AssistantConversation(TimestampMixin, Base):
         index=True,
         nullable=False,
     )
+    channel: Mapped[str] = mapped_column(
+        String(30),
+        index=True,
+        default="web",
+        server_default="web",
+        nullable=False,
+    )
+    external_thread_id: Mapped[str | None] = mapped_column(
+        String(255),
+        index=True,
+        nullable=True,
+    )
+    # JSON-encoded private assistant state for deterministic follow-ups such
+    # as selected organization and pending confirmations.
+    state: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_by: Mapped["User"] = relationship("User")
     messages: Mapped[list["AssistantMessage"]] = relationship(
@@ -64,6 +89,14 @@ class AssistantMessage(Base):
     # JSON-encoded audit trail of the tool calls the agent executed while
     # producing this message: [{tool, input, result_summary, ok}, ...]
     actions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_key: Mapped[str | None] = mapped_column(
+        String(100),
+        index=True,
+        nullable=True,
+    )
+    # JSON-encoded routing metadata: candidates, chosen, source and fallback
+    # reason when the planner was disabled or unavailable.
+    routing: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -156,4 +189,205 @@ class AssistantMemoryEntry(TimestampMixin, Base):
     reviewed_by: Mapped["User | None"] = relationship(
         "User",
         foreign_keys=[reviewed_by_id],
+    )
+
+
+class AssistantTransversalFeature(TimestampMixin, Base):
+    __tablename__ = "assistant_transversal_features"
+    __table_args__ = (
+        CheckConstraint(
+            """
+            status in (
+                'proposed',
+                'approved',
+                'developed',
+                'available',
+                'rejected',
+                'archived',
+                'blocked'
+            )
+            """,
+            name="ck_assistant_transversal_features_status",
+        ),
+        CheckConstraint(
+            """
+            category in (
+                'process',
+                'compliance',
+                'automation',
+                'documents',
+                'citizen_service',
+                'other'
+            )
+            """,
+            name="ck_assistant_transversal_features_category",
+        ),
+        CheckConstraint(
+            "sensitivity in ('normal', 'personal', 'sensitive', 'legal')",
+            name="ck_assistant_transversal_features_sensitivity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_requirement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("requirements.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    source_organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    source_conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    source_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assistant_messages.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(30),
+        index=True,
+        default="proposed",
+        server_default="proposed",
+        nullable=False,
+    )
+    sensitivity: Mapped[str] = mapped_column(
+        String(30),
+        default="normal",
+        server_default="normal",
+        nullable=False,
+    )
+    auto_activatable: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )
+    proposed_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    reviewed_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    source_requirement: Mapped["Requirement | None"] = relationship("Requirement")
+    source_organization: Mapped["Organization"] = relationship("Organization")
+    source_conversation: Mapped["AssistantConversation | None"] = relationship(
+        "AssistantConversation",
+        foreign_keys=[source_conversation_id],
+    )
+    source_message: Mapped["AssistantMessage | None"] = relationship(
+        "AssistantMessage",
+        foreign_keys=[source_message_id],
+    )
+    proposed_by: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[proposed_by_id],
+    )
+    reviewed_by: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[reviewed_by_id],
+    )
+    adoptions: Mapped[list["AssistantTransversalFeatureAdoption"]] = relationship(
+        "AssistantTransversalFeatureAdoption",
+        back_populates="feature",
+    )
+
+
+class AssistantTransversalFeatureAdoption(TimestampMixin, Base):
+    __tablename__ = "assistant_transversal_feature_adoptions"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('suggested', 'accepted', 'activation_pending', 'active', 'rejected', 'paused')",
+            name="ck_assistant_transversal_feature_adoptions_status",
+        ),
+        UniqueConstraint(
+            "feature_id",
+            "organization_id",
+            name="uq_assistant_transversal_feature_adoptions_feature_org",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    feature_id: Mapped[int] = mapped_column(
+        ForeignKey("assistant_transversal_features.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(30),
+        index=True,
+        default="suggested",
+        server_default="suggested",
+        nullable=False,
+    )
+    requested_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    approved_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    source_conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    source_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assistant_messages.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    feature: Mapped["AssistantTransversalFeature"] = relationship(
+        "AssistantTransversalFeature",
+        back_populates="adoptions",
+    )
+    organization: Mapped["Organization"] = relationship("Organization")
+    requested_by: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[requested_by_id],
+    )
+    approved_by: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[approved_by_id],
+    )
+    source_conversation: Mapped["AssistantConversation | None"] = relationship(
+        "AssistantConversation",
+        foreign_keys=[source_conversation_id],
+    )
+    source_message: Mapped["AssistantMessage | None"] = relationship(
+        "AssistantMessage",
+        foreign_keys=[source_message_id],
     )

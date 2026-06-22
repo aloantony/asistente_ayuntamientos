@@ -111,7 +111,7 @@ function AsistentePageInner() {
   }
 
   return (
-    <div className="workspace">
+    <div className="workspace assistant-workspace">
       <AssistantPanel
         assistantStatus={assistantController.assistantStatus}
         conversations={assistantController.conversations}

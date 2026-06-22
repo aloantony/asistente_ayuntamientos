@@ -24,12 +24,6 @@ type UseAssistantControllerArgs = {
   onRequirementsChanged?: () => void;
 };
 
-const MUTATING_TOOLS = new Set([
-  "create_requirement",
-  "update_requirement",
-  "add_requirement_message",
-]);
-
 function toSummary(detail: AssistantConversationDetail): AssistantConversation {
   return {
     id: detail.id,
@@ -206,6 +200,8 @@ export function useAssistantController({
                 role: "user",
                 content,
                 actions: [],
+                agent_key: null,
+                routing: null,
                 created_at: new Date().toISOString(),
               },
             ],
@@ -231,9 +227,14 @@ export function useAssistantController({
         ...existing.filter((conversation) => conversation.id !== detail.id),
       ]);
 
+      const mutatingTools = new Set(
+        assistantStatus?.tools
+          .filter((tool) => !tool.read_only)
+          .map((tool) => tool.name) ?? [],
+      );
       const hasMutatingAction = detail.messages.some((message) =>
         message.actions.some(
-          (action) => action.ok && MUTATING_TOOLS.has(action.tool),
+          (action) => action.ok && mutatingTools.has(action.tool),
         ),
       );
       if (hasMutatingAction) {

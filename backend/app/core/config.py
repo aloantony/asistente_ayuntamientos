@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     assistant_model: str = "claude-opus-4-8"
     assistant_max_tokens: int = 16000
     assistant_max_tool_iterations: int = 8
+    assistant_planner_runtime: str = "disabled"
+    assistant_planner_model: str = "hermes-agent"
+    assistant_planner_max_tokens: int = 256
+    assistant_planner_timeout_seconds: float = 30.0
     hermes_agent_base_url: str = "http://127.0.0.1:8642/v1"
     hermes_agent_api_key: str | None = None
     hermes_agent_model: str = "hermes-agent"
@@ -34,6 +38,20 @@ class Settings(BaseSettings):
     hermes_web_api_key: str | None = None
     hermes_web_model: str = "hermes-agent"
     hermes_web_timeout_seconds: float = 60.0
+    ordinance_import_max_fetch_bytes: int = 15 * 1024 * 1024
+    ordinance_import_search_limit: int = 5
+    ordinance_import_max_chunks: int = 200
+    ordinance_chunk_chars: int = 1400
+    embeddings_runtime: str = "local_hash"
+    embeddings_base_url: str | None = None
+    embeddings_api_key: str | None = None
+    embeddings_model: str = "local-hash-384"
+    embeddings_dimensions: int = 384
+    embeddings_timeout_seconds: float = 60.0
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_webhook_secret: str | None = None
+    telegram_link_code_ttl_seconds: int = 600
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -54,6 +72,26 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {"anthropic", "hermes_agent"}:
             raise ValueError("assistant_runtime must be 'anthropic' or 'hermes_agent'")
+        return normalized
+
+    @field_validator("assistant_planner_runtime")
+    @classmethod
+    def validate_assistant_planner_runtime(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"disabled", "hermes_agent"}:
+            raise ValueError(
+                "assistant_planner_runtime must be 'disabled' or 'hermes_agent'"
+            )
+        return normalized
+
+    @field_validator("embeddings_runtime")
+    @classmethod
+    def validate_embeddings_runtime(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"local_hash", "openai_compatible", "disabled"}:
+            raise ValueError(
+                "embeddings_runtime must be 'local_hash', 'openai_compatible' or 'disabled'"
+            )
         return normalized
 
     @property
