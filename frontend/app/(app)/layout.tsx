@@ -88,7 +88,7 @@ export default function AppLayout({
       ? [{ href: "/asistente", label: "Asistente" }]
       : []),
     ...(shouldShowRequirementsPanel(user)
-      ? [{ href: "/requisitos", label: "Requisitos" }]
+      ? [{ href: "/requisitos", label: "Necesidades" }]
       : []),
     { href: "/proyectos", label: "Proyectos" },
     ...(shouldShowAdminPanel(user)

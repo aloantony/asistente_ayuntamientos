@@ -1077,27 +1077,27 @@ _TOOL_METADATA: dict[str, dict] = {
         "required_permission": "assistant.web.search",
     },
     "list_requirements": {
-        "label": "Consultar requisitos",
+        "label": "Consultar necesidades",
         "read_only": True,
         "domain": "requirements",
     },
     "get_requirement": {
-        "label": "Leer requisito",
+        "label": "Leer necesidad",
         "read_only": True,
         "domain": "requirements",
     },
     "create_requirement": {
-        "label": "Crear requisito",
+        "label": "Crear necesidad",
         "read_only": False,
         "domain": "requirements",
     },
     "update_requirement": {
-        "label": "Actualizar requisito",
+        "label": "Actualizar necesidad",
         "read_only": False,
         "domain": "requirements",
     },
     "add_requirement_message": {
-        "label": "Añadir nota a requisito",
+        "label": "Añadir nota a necesidad",
         "read_only": False,
         "domain": "requirements",
     },

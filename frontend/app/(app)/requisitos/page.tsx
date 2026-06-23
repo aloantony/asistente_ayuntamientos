@@ -298,9 +298,9 @@ function RequisitosPageInner() {
     return (
       <div className="workspace">
         <section className="panel">
-          <p className="eyebrow">Requisitos</p>
+          <p className="eyebrow">Necesidades</p>
           <h2>Acceso restringido</h2>
-          <p className="muted">No tienes permisos sobre requisitos.</p>
+          <p className="muted">No tienes permisos sobre necesidades.</p>
         </section>
       </div>
     );

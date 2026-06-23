@@ -216,7 +216,7 @@ export function useRequirementsController({
         await adminRequestWithTotal<Requirement[]>(
           buildRequirementsQuery(filters),
           token,
-          "No se pudieron cargar los requisitos.",
+          "No se pudieron cargar las necesidades.",
         );
       setRequirements(requirementsData);
       setRequirementTotal(total);
@@ -239,7 +239,7 @@ export function useRequirementsController({
       handleRequestError(
         requirementsLoadError,
         setRequirementError,
-        "No se pudieron cargar los requisitos.",
+        "No se pudieron cargar las necesidades.",
       );
     } finally {
       setIsLoadingRequirements(false);
@@ -262,12 +262,12 @@ export function useRequirementsController({
         adminRequest<Requirement>(
           `/requirements/${requirementId}`,
           token,
-          "No se pudo cargar el requisito.",
+          "No se pudo cargar la necesidad.",
         ),
         adminRequest<RequirementMessage[]>(
           `/requirements/${requirementId}/messages`,
           token,
-          "No se pudieron cargar los mensajes del requisito.",
+          "No se pudieron cargar los mensajes de la necesidad.",
         ),
       ]);
 
@@ -278,7 +278,7 @@ export function useRequirementsController({
       handleRequestError(
         selectError,
         setRequirementError,
-        "No se pudo cargar el requisito.",
+        "No se pudo cargar la necesidad.",
       );
     }
   }
@@ -294,7 +294,7 @@ export function useRequirementsController({
       return;
     }
     if (!newRequirement.title.trim()) {
-      setRequirementFormError("El título del requisito no puede estar vacío.");
+      setRequirementFormError("El título de la necesidad no puede estar vacío.");
       return;
     }
 
@@ -305,7 +305,7 @@ export function useRequirementsController({
       const createdRequirement = await adminRequest<Requirement>(
         "/requirements",
         token,
-        "No se pudo crear el requisito.",
+        "No se pudo crear la necesidad.",
         {
           method: "POST",
           body: JSON.stringify({
@@ -316,14 +316,14 @@ export function useRequirementsController({
       );
 
       setNewRequirement(emptyRequirementForm);
-      setRequirementMessage("Requisito creado.");
+      setRequirementMessage("Necesidad creada.");
       await loadRequirements();
       await selectRequirement(createdRequirement.id);
     } catch (createError) {
       handleRequestError(
         createError,
         setRequirementFormError,
-        "No se pudo crear el requisito.",
+        "No se pudo crear la necesidad.",
       );
     } finally {
       setIsCreatingRequirement(false);
@@ -332,11 +332,11 @@ export function useRequirementsController({
 
   async function handleUpdateRequirement() {
     if (!selectedRequirement || !requirementEdit) {
-      setRequirementEditError("Selecciona un requisito para editar.");
+      setRequirementEditError("Selecciona una necesidad para editar.");
       return;
     }
     if (!requirementEdit.title.trim()) {
-      setRequirementEditError("El título del requisito no puede estar vacío.");
+      setRequirementEditError("El título de la necesidad no puede estar vacío.");
       return;
     }
 
@@ -349,7 +349,7 @@ export function useRequirementsController({
       const updatedRequirement = await adminRequest<Requirement>(
         `/requirements/${selectedRequirement.id}`,
         token,
-        "No se pudo actualizar el requisito.",
+        "No se pudo actualizar la necesidad.",
         {
           method: "PATCH",
           body: JSON.stringify({
@@ -361,13 +361,13 @@ export function useRequirementsController({
 
       setSelectedRequirement(updatedRequirement);
       setRequirementEdit(buildRequirementEditState(updatedRequirement));
-      setRequirementMessage("Requisito actualizado.");
+      setRequirementMessage("Necesidad actualizada.");
       await loadRequirements();
     } catch (updateError) {
       handleRequestError(
         updateError,
         setRequirementEditError,
-        "No se pudo actualizar el requisito.",
+        "No se pudo actualizar la necesidad.",
       );
     } finally {
       setIsUpdatingRequirement(false);
@@ -376,7 +376,7 @@ export function useRequirementsController({
 
   async function handleChangeRequirementStatus(status: RequirementStatus) {
     if (!selectedRequirement) {
-      setRequirementEditError("Selecciona un requisito.");
+      setRequirementEditError("Selecciona una necesidad.");
       return;
     }
 
@@ -389,7 +389,7 @@ export function useRequirementsController({
       const updatedRequirement = await adminRequest<Requirement>(
         `/requirements/${selectedRequirement.id}`,
         token,
-        "No se pudo cambiar el estado del requisito.",
+        "No se pudo cambiar el estado de la necesidad.",
         {
           method: "PATCH",
           body: JSON.stringify({ status }),
@@ -404,7 +404,7 @@ export function useRequirementsController({
       handleRequestError(
         statusError,
         setRequirementEditError,
-        "No se pudo cambiar el estado del requisito.",
+        "No se pudo cambiar el estado de la necesidad.",
       );
     } finally {
       setIsUpdatingRequirement(false);
@@ -414,7 +414,7 @@ export function useRequirementsController({
   async function handleCreateRequirementMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedRequirement) {
-      setRequirementMessagesError("Selecciona un requisito.");
+      setRequirementMessagesError("Selecciona una necesidad.");
       return;
     }
     if (!newRequirementMessageBody.trim()) {
@@ -444,7 +444,7 @@ export function useRequirementsController({
       const messages = await adminRequest<RequirementMessage[]>(
         `/requirements/${selectedRequirement.id}/messages`,
         token,
-        "No se pudieron cargar los mensajes del requisito.",
+        "No se pudieron cargar los mensajes de la necesidad.",
       );
       setRequirementMessages(messages);
     } catch (messageError) {

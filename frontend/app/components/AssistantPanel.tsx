@@ -181,7 +181,7 @@ function buildCapabilities(
     },
     {
       id: "requirements",
-      label: "Requisitos",
+      label: "Necesidades",
       detail: userHasAnyPermission(currentUser, REQUIREMENT_PERMISSIONS)
         ? "Lectura y borradores"
         : "Sin permiso",
@@ -777,7 +777,7 @@ export function AssistantPanel({
           <p className="eyebrow">Asistente</p>
           <h2>Agente municipal</h2>
           <p className="muted">
-            Conversacion, requisitos, memoria y busqueda web gobernadas por
+            Conversacion, necesidades, memoria y busqueda web gobernadas por
             permisos.
           </p>
         </div>
@@ -937,7 +937,7 @@ export function AssistantPanel({
                     <Sparkles aria-hidden size={22} />
                     <p>
                       Escribe el primer mensaje para iniciar la captura de
-                      requisitos.
+                      necesidades.
                     </p>
                   </div>
                 ) : null}

@@ -100,15 +100,15 @@ function translateApiDetail(detail: string, fallback: string) {
     case "Document project organization mismatch":
       return "El documento no coincide con la organización del proyecto.";
     case "Requirement not found":
-      return "No se encontró el requisito indicado.";
+      return "No se encontró la necesidad indicada.";
     case "Requirement message not found":
-      return "No se encontró el mensaje del requisito.";
+      return "No se encontró el mensaje de la necesidad.";
     case "Requirement access denied":
-      return "No tienes acceso a ese requisito.";
+      return "No tienes acceso a esa necesidad.";
     case "Requirement status does not allow content edits":
-      return "El estado del requisito no permite editar su contenido.";
+      return "El estado de la necesidad no permite editar su contenido.";
     case "Project does not belong to the requirement organization":
-      return "El proyecto no pertenece a la organización del requisito.";
+      return "El proyecto no pertenece a la organización de la necesidad.";
     case "Organization not found":
       return "No se encontró la organización indicada.";
     case "Organization access denied":
