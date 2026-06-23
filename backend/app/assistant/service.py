@@ -492,7 +492,22 @@ def resolve_organization_reference(
         return None, id_matches
 
     scored: list[tuple[int, Organization]] = []
-    tokens = [token for token in TOKEN_PATTERN.findall(normalized) if len(token) >= 3]
+    organization_reference_stopwords = {
+        "crea",
+        "crear",
+        "creame",
+        "necesidad",
+        "necesidades",
+        "otra",
+        "otro",
+        "requisito",
+        "requisitos",
+    }
+    tokens = [
+        token
+        for token in TOKEN_PATTERN.findall(normalized)
+        if len(token) >= 3 and token not in organization_reference_stopwords
+    ]
     for organization in organizations:
         name = normalize_text(organization.name)
         name_tokens = set(TOKEN_PATTERN.findall(name))
@@ -533,9 +548,9 @@ def organization_prompt(organizations: list[Organization], purpose: str) -> str:
         for organization in organizations[:3]
     )
     if purpose == "create_requirement":
-        prefix = "¿En qué organización quieres crear el requisito?"
+        prefix = "¿En qué organización quieres crear la necesidad?"
     else:
-        prefix = "¿De qué organización quieres consultar los requisitos?"
+        prefix = "¿De qué organización quieres consultar las necesidades?"
     if examples:
         return f"{prefix} Tienes varias disponibles, por ejemplo {examples}."
     return prefix
@@ -543,6 +558,20 @@ def organization_prompt(organizations: list[Organization], purpose: str) -> str:
 
 def is_affirmative(text: str) -> bool:
     return normalize_text(text) in AFFIRMATIVE_TEXTS
+
+
+def accepts_proposed_requirement_draft(text: str) -> bool:
+    normalized = normalize_text(text)
+    return is_affirmative(text) or any(
+        phrase in normalized
+        for phrase in {
+            "encaja",
+            "me encaja",
+            "me parece bien",
+            "correcto",
+            "perfecto",
+        }
+    )
 
 
 def is_negative(text: str) -> bool:
@@ -562,9 +591,39 @@ def is_retry_request(text: str) -> bool:
     )
 
 
+def mentions_need_or_requirement(normalized: str) -> bool:
+    return any(
+        word in normalized
+        for word in {"requisito", "requisitos", "necesidad", "necesidades"}
+    )
+
+
+def uses_need_language(text: str) -> bool:
+    normalized = normalize_text(text)
+    return any(word in normalized for word in {"necesidad", "necesidades"})
+
+
+def requirement_display_terms(*, use_needs: bool) -> dict[str, str]:
+    if use_needs:
+        return {
+            "singular": "necesidad",
+            "plural": "necesidades",
+            "article_plural": "las",
+            "these_are": "Estas son las",
+            "registered": "registradas",
+        }
+    return {
+        "singular": "requisito",
+        "plural": "requisitos",
+        "article_plural": "los",
+        "these_are": "Estos son los",
+        "registered": "registrados",
+    }
+
+
 def is_list_requirements_request(text: str) -> bool:
     normalized = normalize_text(text)
-    if "requisito" not in normalized:
+    if not mentions_need_or_requirement(normalized):
         return False
     return any(
         word in normalized
@@ -575,6 +634,8 @@ def is_list_requirements_request(text: str) -> bool:
             "hay",
             "lista",
             "listar",
+            "registrada",
+            "registradas",
             "registrado",
             "registrados",
             "tenemos",
@@ -585,10 +646,11 @@ def is_list_requirements_request(text: str) -> bool:
 
 def is_empty_requirements_followup(text: str) -> bool:
     normalized = normalize_text(text)
-    return "requisito" in normalized and any(
+    return mentions_need_or_requirement(normalized) and any(
         phrase in normalized
         for phrase in {
             "no hay",
+            "ninguna necesidad",
             "ningun requisito",
             "ningún requisito",
             "lista vacia",
@@ -600,18 +662,22 @@ def is_empty_requirements_followup(text: str) -> bool:
 def is_create_test_requirement_request(text: str) -> bool:
     normalized = normalize_text(text)
     has_create = any(word in normalized for word in {"crea", "crear", "creame"})
-    return has_create and "requisito" in normalized and "prueba" in normalized
+    return has_create and mentions_need_or_requirement(normalized) and "prueba" in normalized
 
 
 def is_create_another_requirement_request(text: str) -> bool:
     normalized = normalize_text(text)
     has_create = any(word in normalized for word in {"crea", "crear", "creame"})
-    return has_create and "requisito" in normalized and "otro" in normalized
+    return (
+        has_create
+        and mentions_need_or_requirement(normalized)
+        and any(word in normalized for word in {"otro", "otra"})
+    )
 
 
 def is_create_requirement_capability_question(text: str) -> bool:
     normalized = normalize_text(text)
-    if "requisito" not in normalized:
+    if not mentions_need_or_requirement(normalized):
         return False
     has_create = any(word in normalized for word in {"crea", "crear", "creame"})
     if not has_create:
@@ -725,26 +791,26 @@ def requirement_content_prompt(organization: Organization, draft: dict | None = 
     missing = requirement_missing_fields(draft)
     if missing == ["título", "problema"]:
         return (
-            f"Claro. Lo creo en {organization.name}.\n\n"
+            f"Claro. La creo en {organization.name}.\n\n"
             "Dime, por favor:\n"
-            "1. Título breve del requisito.\n"
+            "1. Título breve de la necesidad.\n"
             "2. Qué problema o necesidad queréis resolver."
         )
     if missing == ["título"]:
         return (
-            f"Me falta el título breve para crear el requisito en {organization.name}."
+            f"Me falta el título breve para crear la necesidad en {organization.name}."
         )
     if missing == ["problema"]:
         return (
             f"Me falta el problema o necesidad que queréis resolver para crear "
-            f"el requisito en {organization.name}."
+            f"la necesidad en {organization.name}."
         )
     return ""
 
 
 def delegated_requirement_content_reply(organization: Organization) -> str:
     return (
-        f"Puedo crearlo en {organization.name}, pero no debo inventar la necesidad.\n\n"
+        f"Puedo crearla en {organization.name}, pero no debo inventar la necesidad.\n\n"
         "Dime solo estas dos cosas y con eso preparo el borrador:\n"
         "1. Título breve.\n"
         "2. Problema que queréis resolver."
@@ -755,7 +821,7 @@ def create_requirement_organization_prompt(organizations: list[Organization]) ->
     return (
         f"{organization_prompt(organizations, 'create_requirement')}\n\n"
         "Y dime, por favor:\n"
-        "1. Título breve del requisito.\n"
+        "1. Título breve de la necesidad.\n"
         "2. Qué problema o necesidad queréis resolver."
     )
 
@@ -799,12 +865,61 @@ def recent_assistant_requested_requirement_content(
             continue
         normalized = normalize_text(message.content)
         if (
-            "requisito" in normalized
+            mentions_need_or_requirement(normalized)
             and "titulo" in normalized
             and "problema" in normalized
         ):
             return True
     return False
+
+
+def extract_proposed_requirement_draft_from_text(text: str) -> dict:
+    title_match = re.search(
+        r"(?:^|\n)\s*T[ií]tulo\s*:\s*(?P<title>.+?)(?:\n|$)",
+        text,
+        re.IGNORECASE,
+    )
+    problem_match = re.search(
+        r"(?:^|\n)\s*Problema\s*:\s*(?P<problem>.+?)(?:\n|$)",
+        text,
+        re.IGNORECASE,
+    )
+    draft: dict[str, str] = {}
+    if title_match:
+        draft["title"] = clean_requirement_field(title_match.group("title"))
+    if problem_match:
+        draft["problem"] = clean_requirement_field(problem_match.group("problem"))
+    return {key: value for key, value in draft.items() if value}
+
+
+def update_pending_work_from_assistant_reply(
+    conversation: AssistantConversation,
+    organizations: list[Organization],
+    user_text: str,
+    reply_text: str,
+) -> None:
+    draft = extract_proposed_requirement_draft_from_text(reply_text)
+    if not requirement_draft_is_complete(draft):
+        return
+
+    state = load_conversation_state(conversation)
+    resolved_organization, ambiguous_organizations = resolve_organization_reference(
+        user_text,
+        organizations,
+    )
+    if ambiguous_organizations:
+        return
+    organization = (
+        resolved_organization
+        or selected_or_single_organization(organizations, state)
+        or recent_organization_reference(conversation, organizations)
+    )
+    if organization is None:
+        return
+
+    record_selected_organization(state, organization)
+    set_pending_work(state, build_create_requirement_pending_work(organization, draft))
+    dump_conversation_state(conversation, state)
 
 
 def selected_or_single_organization(
@@ -828,6 +943,28 @@ def set_pending_action(state: dict, pending_action: dict | None) -> None:
         state.pop("pending_action", None)
     else:
         state["pending_action"] = pending_action
+
+
+def set_pending_work(state: dict, pending_work: dict | None) -> None:
+    if pending_work is None:
+        state.pop("pending_work", None)
+    else:
+        state["pending_work"] = pending_work
+
+
+def build_create_requirement_pending_work(
+    organization: Organization,
+    draft: dict,
+) -> dict:
+    return {
+        "type": "create_requirement",
+        "status": "awaiting_confirmation",
+        "organization_id": organization.id,
+        "draft": {
+            "title": str(draft.get("title") or "").strip(),
+            "problem": str(draft.get("problem") or "").strip(),
+        },
+    }
 
 
 def execute_direct_tool(
@@ -870,10 +1007,12 @@ def requirements_list_reply(
     result_content: str,
     *,
     ok: bool,
+    use_needs: bool = False,
 ) -> tuple[str, int | None]:
+    terms = requirement_display_terms(use_needs=use_needs)
     if not ok:
         return (
-            f"No he podido consultar los requisitos de {organization.name}: "
+            f"No he podido consultar {terms['article_plural']} {terms['plural']} de {organization.name}: "
             f"{result_content}",
             None,
         )
@@ -881,17 +1020,17 @@ def requirements_list_reply(
     requirements = decode_tool_json(result_content)
     if not isinstance(requirements, list):
         return (
-            f"La consulta de requisitos de {organization.name} devolvió una "
+            f"La consulta de {terms['plural']} de {organization.name} devolvió una "
             "respuesta inesperada.",
             None,
         )
     if not requirements:
         return (
-            f"No hay requisitos visibles registrados en {organization.name}.",
+            f"No hay {terms['plural']} visibles {terms['registered']} en {organization.name}.",
             0,
         )
 
-    lines = [f"Estos son los requisitos visibles en {organization.name}:"]
+    lines = [f"{terms['these_are']} {terms['plural']} visibles en {organization.name}:"]
     for requirement in requirements[:10]:
         title = requirement.get("title", "Sin título")
         status = requirement.get("status", "sin estado")
@@ -944,6 +1083,7 @@ def handle_direct_list_requirements(
     organization: Organization,
     *,
     reason: str,
+    use_needs: bool = False,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, "consultation")
     if agent is None:
@@ -963,12 +1103,14 @@ def handle_direct_list_requirements(
         organization,
         result_content,
         ok=ok,
+        use_needs=use_needs,
     )
     state["last_direct_action"] = {
         "type": "list_requirements",
         "organization_id": organization.id,
         "result_count": result_count,
         "ok": ok,
+        "use_needs": use_needs,
     }
     return persist_assistant_message(
         db,
@@ -1349,6 +1491,9 @@ def try_handle_direct_turn(
     if not isinstance(pending_action, dict):
         pending_action = None
     pending_type = pending_action.get("type") if pending_action else None
+    pending_work = state.get("pending_work")
+    if not isinstance(pending_work, dict):
+        pending_work = None
     parsed_draft = extract_requirement_draft_from_text(user_text)
 
     if ambiguous_organizations:
@@ -1369,6 +1514,46 @@ def try_handle_direct_turn(
             content=f"He encontrado varias organizaciones posibles: {names}. ¿Cuál consulto?",
             reason="ambiguous_organization",
         )
+
+    if (
+        pending_work
+        and pending_work.get("type") == "create_requirement"
+        and pending_work.get("status") == "awaiting_confirmation"
+    ):
+        organization = (
+            resolved_organization
+            or organization_by_id(organizations, pending_work.get("organization_id"))
+            or selected_organization
+        )
+        draft = merge_requirement_draft(pending_work.get("draft"), parsed_draft)
+        if organization is not None and (
+            accepts_proposed_requirement_draft(user_text)
+            or requirement_draft_is_complete(parsed_draft)
+        ):
+            set_pending_work(state, None)
+            record_selected_organization(state, organization)
+            return handle_direct_create_requirement(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                organization,
+                draft,
+                reason="pending_work_create_requirement_confirmed",
+            )
+        if is_negative(user_text):
+            set_pending_work(state, None)
+            return persist_direct_prompt(
+                db,
+                conversation,
+                allowed_agents,
+                state,
+                agent_key="requirements_intake",
+                content="De acuerdo, no guardo la necesidad propuesta.",
+                reason="pending_work_create_requirement_cancelled",
+            )
 
     if pending_type == "list_requirements":
         organization = (
@@ -1391,6 +1576,8 @@ def try_handle_direct_turn(
                 state,
                 organization,
                 reason="pending_list_requirements",
+                use_needs=bool((pending_action or {}).get("use_needs"))
+                or uses_need_language(user_text),
             )
 
     if pending_type == "create_requirement_organization":
@@ -1613,6 +1800,8 @@ def try_handle_direct_turn(
             last_action.get("organization_id"),
         )
         organization_name = organization.name if organization else "esa organización"
+        use_needs = bool(last_action.get("use_needs")) or uses_need_language(user_text)
+        terms = requirement_display_terms(use_needs=use_needs)
         return persist_direct_prompt(
             db,
             conversation,
@@ -1620,9 +1809,9 @@ def try_handle_direct_turn(
             state,
             agent_key="consultation",
             content=(
-                f"Sí. La última consulta devolvió 0 requisitos visibles en "
+                f"Sí. La última consulta devolvió 0 {terms['plural']} visibles en "
                 f"{organization_name}; eso significa que ahora mismo no hay "
-                "requisitos registrados o visibles ahí."
+                f"{terms['plural']} {terms['registered']} o visibles ahí."
             ),
             reason="direct_empty_requirements_followup",
         )
@@ -1646,6 +1835,7 @@ def try_handle_direct_turn(
         )
 
     if is_list_requirements_request(user_text):
+        use_needs = uses_need_language(user_text)
         if selected_organization is not None:
             return handle_direct_list_requirements(
                 db,
@@ -1656,8 +1846,12 @@ def try_handle_direct_turn(
                 state,
                 selected_organization,
                 reason="direct_list_requirements",
+                use_needs=use_needs,
             )
-        set_pending_action(state, {"type": "list_requirements"})
+        set_pending_action(
+            state,
+            {"type": "list_requirements", "use_needs": use_needs},
+        )
         return persist_direct_prompt(
             db,
             conversation,
@@ -1890,6 +2084,13 @@ def run_agent_turn(
 
     if not reply_text:
         reply_text = FALLBACK_REPLY
+
+    update_pending_work_from_assistant_reply(
+        conversation,
+        accessible_organizations(db, current_user),
+        user_text,
+        reply_text,
+    )
 
     assistant_message = AssistantMessage(
         conversation_id=conversation.id,

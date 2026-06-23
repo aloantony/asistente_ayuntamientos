@@ -280,8 +280,8 @@ def test_requirements_intake_prompt_lists_write_tools(db, assistant_user):
         get_agent_tools(agent),
     )
 
-    assert "Agente activo: Requisitos (requirements_intake)" in prompt
-    assert "Tu tarea es capturar requisitos" in prompt
+    assert "Agente activo: Necesidades (requirements_intake)" in prompt
+    assert "Tu tarea es capturar necesidades" in prompt
     assert "- create_requirement" in prompt
     assert "- update_requirement" in prompt
     assert "- record_transversal_feature_acceptance" in prompt
@@ -602,6 +602,38 @@ def test_direct_empty_requirements_followup_uses_last_result(
     assert gateway.calls == []
 
 
+def test_direct_empty_needs_followup_uses_last_result(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    listed = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Qué necesidades tenemos registradas?"},
+        headers=headers_for(user),
+    )
+    followup = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "puede ser por qué no hay ninguna necesidad?"},
+        headers=headers_for(user),
+    )
+
+    assert listed.status_code == 200
+    assert followup.status_code == 200
+    assistant_message = followup.json()["messages"][-1]
+    assert assistant_message["agent_key"] == "consultation"
+    assert assistant_message["actions"] == []
+    assert f"0 necesidades visibles en {organization.name}" in assistant_message["content"]
+    assert gateway.calls == []
+
+
 def test_direct_create_test_requirement_confirmed(
     client,
     db,
@@ -777,6 +809,245 @@ def test_direct_create_another_requirement_collects_org_and_content(
     assert gateway.calls == []
 
 
+def test_direct_create_another_need_collects_org_and_content(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    default_organization = make_organization(name="Default organization")
+    other_organization = make_organization(name="Otra organización")
+    for organization in (default_organization, other_organization):
+        grant_permissions(
+            user,
+            organization,
+            ["assistant.use", "requirements.create", "requirements.view"],
+        )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    ask_organization = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "crea otra necesidad"},
+        headers=headers_for(user),
+    )
+    refuse_invention = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "en default. decide tú el resto"},
+        headers=headers_for(user),
+    )
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "prueba2, y el problema es probar2"},
+        headers=headers_for(user),
+    )
+
+    assert ask_organization.status_code == 200
+    assert "¿En qué organización" in ask_organization.json()["messages"][-1]["content"]
+    assert "Título breve" in ask_organization.json()["messages"][-1]["content"]
+    assert refuse_invention.status_code == 200
+    assert "no debo inventar" in refuse_invention.json()["messages"][-1]["content"]
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["agent_key"] == "requirements_intake"
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "prueba2")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == default_organization.id
+    assert requirement.problem == "probar2"
+    assert requirement.summary == "probar2"
+    assert requirement.status == "draft"
+    assert f"borrador #{requirement.id}" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_confirming_gateway_proposed_need_creates_draft_deterministically(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Default organization")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.create", "requirements.view"],
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "stop",
+                    [
+                        text_block(
+                            "Perfecto. ¿Para qué organización quieres registrarlo?"
+                        )
+                    ],
+                ),
+                fake_response(
+                    "stop",
+                    [
+                        text_block(
+                            "Para guardarlo necesito concretar un poco más el borrador.\n\n"
+                            "Te propongo este enfoque:\n"
+                            "Título: “Carga y visualización de datos municipales en mapa”\n"
+                            "Problema: “El ayuntamiento necesita centralizar en un mapa del municipio distintos datos útiles para consulta y gestión.”\n\n"
+                            "¿Te encaja así?"
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    first = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "quiero que el sistema pueda cargar datos en un mapa del pueblo"},
+        headers=headers_for(user),
+    )
+    proposal = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "default. todo tipo de datos que puedan ser útiles"},
+        headers=headers_for(user),
+    )
+
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_work"] == {
+        "type": "create_requirement",
+        "status": "awaiting_confirmation",
+        "organization_id": organization.id,
+        "draft": {
+            "title": "Carga y visualización de datos municipales en mapa",
+            "problem": "El ayuntamiento necesita centralizar en un mapa del municipio distintos datos útiles para consulta y gestión.",
+        },
+    }
+
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "me encaja y se cargarán de ambos"},
+        headers=headers_for(user),
+    )
+
+    assert first.status_code == 200
+    assert proposal.status_code == 200
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(
+            Requirement.title == "Carga y visualización de datos municipales en mapa"
+        )
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert requirement.status == "draft"
+    assert "centralizar en un mapa" in requirement.problem
+    assert len(gateway.calls) == 2
+
+
+def test_confirming_pending_work_creates_need_without_reparsing_assistant_text(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Default organization")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.create", "requirements.view"],
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation_response = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    )
+    conversation = conversation_response.json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "selected_organization_id": organization.id,
+            "pending_work": {
+                "type": "create_requirement",
+                "status": "awaiting_confirmation",
+                "organization_id": organization.id,
+                "draft": {
+                    "title": "Mapa municipal de datos",
+                    "problem": "Centralizar datos municipales útiles sobre un mapa del pueblo.",
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+    db.add(
+        AssistantMessage(
+            conversation_id=stored_conversation.id,
+            role="assistant",
+            content="Tengo una propuesta pendiente. ¿La guardo?",
+        )
+    )
+    db.commit()
+
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "me encaja"},
+        headers=headers_for(user),
+    )
+
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Mapa municipal de datos")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert requirement.problem == "Centralizar datos municipales útiles sobre un mapa del pueblo."
+    db.expire_all()
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    updated_state = json.loads(updated_conversation.state or "{}")
+    assert "pending_work" not in updated_state
+    assert gateway.calls == []
+
+
 def test_direct_create_capability_embedded_default_starts_intake(
     client,
     make_user,
@@ -816,7 +1087,7 @@ def test_direct_create_capability_embedded_default_starts_intake(
     )
     assert assistant_message["actions"] == []
     assert assistant_message["content"].startswith(
-        "Claro. Lo creo en Default organization."
+        "Claro. La creo en Default organization."
     )
     assert "Título breve" in assistant_message["content"]
     assert "problema o necesidad" in assistant_message["content"]
@@ -872,7 +1143,7 @@ def test_direct_create_agent_reference_switches_to_intake_without_internal_copy(
     assert "copia" not in normalized_content
     assert "agente" not in normalized_content
     assert assistant_message["content"].startswith(
-        "Claro. Lo creo en Default organization."
+        "Claro. La creo en Default organization."
     )
     assert gateway.calls == []
 
