@@ -19,8 +19,8 @@
   --text-secondary: #5c574e;
   --text-muted: #948e82;
   --text-faint: #b8b1a3;
-  --accent: #ec5b2b;
-  --accent-hover: #d44e22;
+  --accent: #3caf8c;
+  --accent-hover: #34a07f;
   --accent-contrast: #fdfcf9;
   --success-fg: #2f6a4e;
   --success-bg: #eaf3ee;
@@ -103,7 +103,7 @@ a {
   width: min(100%, 720px);
   padding: 40px;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: 9px;
   background: var(--surface);
 }
 
@@ -232,7 +232,7 @@ select,
 textarea {
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: 9px;
   padding: 11px 13px;
   color: var(--text);
   background: var(--surface);
@@ -349,7 +349,7 @@ input[type="radio"] {
 button {
   width: fit-content;
   border: 1px solid var(--text);
-  border-radius: 2px;
+  border-radius: 9px;
   padding: 11px 18px;
   color: var(--surface);
   background: var(--text);
@@ -394,6 +394,18 @@ button:disabled {
   border-color: var(--border);
 }
 
+.accent-button {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.accent-button:hover:not(:disabled) {
+  color: var(--accent-contrast);
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
 .danger-button {
   color: var(--text);
   background: var(--surface);
@@ -424,7 +436,7 @@ button:disabled {
   max-width: none;
   border: 1px solid var(--text);
   border-left: 4px solid var(--text);
-  border-radius: 2px;
+  border-radius: 9px;
   padding: 10px 14px;
   color: var(--text);
   background: var(--surface);
@@ -443,7 +455,7 @@ button:disabled {
   max-width: none;
   border: 1px solid var(--border);
   border-left: 4px solid var(--text-muted);
-  border-radius: 2px;
+  border-radius: 9px;
   padding: 10px 14px;
   color: var(--text);
   background: var(--fill);
@@ -504,7 +516,7 @@ button:disabled {
 .table-wrapper {
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: 9px;
 }
 
 table {
@@ -702,7 +714,7 @@ tr:last-child td {
 .project-documents-list {
   display: grid;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: 9px;
   overflow: hidden;
 }
 
@@ -793,7 +805,7 @@ tr:last-child td {
   gap: 4px;
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: 9px;
   padding: 12px 14px;
   color: var(--text);
   background: var(--surface);
@@ -829,7 +841,7 @@ tr:last-child td {
   gap: 18px;
   min-width: 0;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: 9px;
   padding: 20px;
 }
 
@@ -2105,6 +2117,13 @@ tr:last-child td {
   min-height: 100vh;
 }
 
+/* Columna principal: barra superior (contexto de ruta) + contenido. */
+.app-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .app-sidebar {
   display: flex;
   flex-direction: column;
@@ -2169,6 +2188,12 @@ tr:last-child td {
   background: var(--fill);
 }
 
+/* En escritorio el cambio de tema vive en la barra superior; en móvil (sin
+ * barra superior) se mantiene aquí, en la barra lateral. */
+.app-session .app-theme-toggle {
+  display: none;
+}
+
 .app-session-user {
   display: grid;
   gap: 2px;
@@ -2184,27 +2209,85 @@ tr:last-child td {
 .app-nav {
   display: flex;
   flex-direction: column;
+  gap: 14px;
+}
+
+.app-nav-group {
+  display: flex;
+  flex-direction: column;
   gap: 2px;
 }
 
-.app-nav a {
-  display: block;
+.app-nav-section {
+  padding: 0 12px 4px;
+  color: var(--text-faint);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.app-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 11px;
   padding: 9px 12px;
-  color: var(--text);
-  border-left: 2px solid transparent;
+  border-radius: 8px;
+  color: var(--text-secondary);
   text-decoration: none;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.3;
 }
 
-.app-nav a:hover {
+.app-nav-link svg {
+  flex: none;
+}
+
+.app-nav-link:hover {
+  color: var(--text);
   background: var(--fill);
 }
 
-.app-nav a.active {
-  border-left: 2px solid var(--accent);
+.app-nav-link.active {
+  color: var(--text);
   background: var(--fill);
   font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.app-nav-label {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Badge de conteo real (estilo del prototipo: píldora naranja). */
+.app-nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  flex: none;
+  padding: 0 5px;
+  border-radius: 9px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.app-nav-beta {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--accent);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
 }
 
 .app-content {
@@ -2227,7 +2310,7 @@ tr:last-child td {
 .menu-toggle {
   display: none;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: 9px;
   padding: 6px 14px;
   color: var(--text);
   background: var(--surface);
@@ -2280,9 +2363,10 @@ tr:last-child td {
     gap: 12px;
   }
 
-  .app-theme-toggle {
+  .app-session .app-theme-toggle {
     width: auto;
     flex: none;
+    display: inline-flex;
   }
 
   .app-theme-toggle span {
@@ -2367,4 +2451,424 @@ tr:last-child td {
   border-bottom-color: var(--accent);
   color: var(--text);
   font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+ * Barra superior (contexto de ruta + acceso rápido a Bral)
+ * ------------------------------------------------------------------------ */
+
+.app-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 60px;
+  border-bottom: 1px solid var(--border);
+  padding: 12px 32px;
+  background: var(--surface);
+}
+
+.app-topbar-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.app-topbar-crumb {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.app-topbar-title {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.app-topbar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(300px, 34vw);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 0 12px;
+  color: var(--text-muted);
+  background: var(--bg);
+}
+
+.app-topbar-search:focus-within {
+  border-color: var(--text);
+  color: var(--text);
+}
+
+.app-topbar-search input {
+  border: 0;
+  padding: 9px 0;
+  background: transparent;
+  font-size: 13px;
+}
+
+.app-topbar-search input:focus,
+.app-topbar-search input:focus-visible {
+  outline: 0;
+}
+
+/* Botón cuadrado de tema (icono sol/luna), como en el prototipo. */
+.app-topbar-theme {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-secondary);
+  background: var(--surface);
+}
+
+.app-topbar-theme:hover:not(:disabled) {
+  border-color: var(--text);
+  color: var(--text);
+  background: var(--surface);
+}
+
+/* Botón Bral con contorno de acento. */
+.app-topbar-bral {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 13px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  color: var(--accent);
+  background: var(--surface);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.app-topbar-bral:hover:not(:disabled) {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+@media (max-width: 900px) {
+  /* En móvil manda la barra lateral colapsada + las cabeceras propias de cada
+   * página; la barra superior se oculta para no duplicar contexto. */
+  .app-topbar {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Panel de inicio (dashboard)
+ * ------------------------------------------------------------------------ */
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.dashboard-head h1 {
+  font-size: 28px;
+}
+
+.dashboard-date {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  text-transform: capitalize;
+}
+
+.dashboard-ask {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 6px 6px 6px 16px;
+  background: var(--surface);
+}
+
+.dashboard-ask:focus-within {
+  border-color: var(--text);
+}
+
+.dashboard-ask-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--accent);
+}
+
+.dashboard-ask input {
+  flex: 1;
+  border: 0;
+  padding: 9px 0;
+  background: transparent;
+  font-size: 15px;
+}
+
+.dashboard-ask input:focus,
+.dashboard-ask input:focus-visible {
+  outline: 0;
+}
+
+.dashboard-ask button {
+  flex: none;
+}
+
+.dashboard-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 16px;
+  color: var(--text);
+  background: var(--surface);
+  text-decoration: none;
+}
+
+.stat-card:hover {
+  border-color: var(--text);
+}
+
+.stat-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stat-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-faint);
+}
+
+.stat-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.stat-label {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.stat-value {
+  color: var(--text);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.dashboard-cols {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 18px;
+  align-items: start;
+}
+
+.dashboard-recent {
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.dashboard-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dashboard-section-head h3 {
+  font-size: 15px;
+}
+
+.dashboard-see-all {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.dashboard-see-all:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.dashboard-recent > p {
+  margin: 0;
+  padding: 16px 18px;
+}
+
+.dashboard-recent-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dashboard-recent-list li {
+  border-top: 1px solid var(--border);
+}
+
+.dashboard-recent-list li:first-child {
+  border-top: 0;
+}
+
+.dashboard-recent-list a {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 13px 18px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.dashboard-recent-list a:hover {
+  background: var(--bg);
+}
+
+.dashboard-recent-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.dashboard-recent-meta {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.dashboard-bral {
+  border: 1px solid var(--accent);
+  border-radius: 13px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.dashboard-bral-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dashboard-bral-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.dashboard-bral-body .small-muted {
+  margin: 0;
+}
+
+.dashboard-bral-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dashboard-suggestion {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.dashboard-suggestion span:first-child {
+  flex: none;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.dashboard-suggestion:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--surface);
+}
+
+.dashboard-bral-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  border: 1px solid var(--text);
+  border-radius: 8px;
+  padding: 8px 13px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.dashboard-bral-cta:hover {
+  color: var(--surface);
+  background: var(--text);
+}
+
+.dashboard-bral-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.dashboard-bral-note svg {
+  flex: none;
+}
+
+@media (max-width: 900px) {
+  .dashboard-cols {
+    grid-template-columns: 1fr;
+  }
 }

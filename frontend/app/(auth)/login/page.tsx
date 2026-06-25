@@ -10,11 +10,7 @@ import {
   getErrorMessage,
   readApiError,
 } from "../../lib/api";
-import {
-  getDefaultRouteForUser,
-  sanitizeNextPath,
-  useSession,
-} from "../../lib/session";
+import { sanitizeNextPath, useSession } from "../../lib/session";
 
 const SESSION_EXPIRED_MESSAGE =
   "La sesión ha caducado o no es válida. Inicia sesión de nuevo.";
@@ -35,9 +31,9 @@ function LoginPageInner() {
 
   useEffect(() => {
     if (!isLoadingSession && user) {
-      // Vuelve al destino solicitado o aterriza en la sección por defecto
-      // del usuario en un solo salto (sin pasar por "/").
-      router.replace(nextPath ?? getDefaultRouteForUser(user));
+      // Vuelve al destino solicitado o aterriza en el panel de inicio ("/"),
+      // que ahora es el dashboard accesible a cualquier usuario autenticado.
+      router.replace(nextPath ?? "/");
     }
   }, [isLoadingSession, user, router, nextPath]);
 

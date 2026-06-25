@@ -5,7 +5,7 @@ import type {
   Project,
   User,
 } from "../components/types";
-import { adminRequest } from "./api";
+import { adminRequest, adminRequestWithTotal } from "./api";
 
 // Small standalone loaders for pages that need shared reference data
 // without instantiating a whole domain controller. Auth travels in the
@@ -51,5 +51,39 @@ export function fetchMunicipalityOptions() {
     "/municipalities?limit=200",
     "",
     "No se pudo cargar la lista de municipios.",
+  );
+}
+
+// Totales para las tarjetas de métricas del panel de inicio: piden una sola
+// fila (limit=1) y leen el conteo real de la cabecera X-Total-Count, sin
+// traerse la lista entera. Cada llamada exige el permiso de su recurso, así
+// que el dashboard solo invoca las que el usuario puede ver.
+async function fetchTotal(path: string, fallbackError: string) {
+  const { total } = await adminRequestWithTotal<unknown[]>(
+    path,
+    "",
+    fallbackError,
+  );
+  return total;
+}
+
+export function fetchRequirementsTotal() {
+  return fetchTotal(
+    "/requirements?limit=1",
+    "No se pudieron contar las necesidades.",
+  );
+}
+
+export function fetchMunicipalitiesTotal() {
+  return fetchTotal(
+    "/municipalities?limit=1",
+    "No se pudo contar la lista de municipios.",
+  );
+}
+
+export function fetchOrdinancesTotal() {
+  return fetchTotal(
+    "/ordinances?limit=1",
+    "No se pudo contar la lista de ordenanzas.",
   );
 }
