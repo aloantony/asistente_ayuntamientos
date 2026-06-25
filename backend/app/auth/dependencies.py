@@ -45,9 +45,17 @@ def get_current_user(
         user_id = int(subject)
     except (InvalidTokenError, ValueError):
         raise credentials_error from None
+    issued_at = payload.get("iat")
 
     user = db.get(User, user_id)
     if user is None:
+        raise credentials_error
+    # Tokens issued before the last password change/reset are revoked; tokens
+    # predating the iat claim carry no claim and count as issued in the past.
+    if user.password_changed_at is not None and (
+        not isinstance(issued_at, (int, float))
+        or issued_at < user.password_changed_at.timestamp()
+    ):
         raise credentials_error
     if not user.is_active:
         raise HTTPException(

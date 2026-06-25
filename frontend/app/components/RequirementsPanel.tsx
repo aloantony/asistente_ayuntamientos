@@ -43,6 +43,10 @@ type RequirementsPanelProps = {
   selectedRequirement: Requirement | null;
   requirementMessages: RequirementMessage[];
   isLoadingRequirements: boolean;
+  /** Página 0-indexada de la lista (la URL usa 1-indexada). */
+  requirementPage: number;
+  requirementTotal: number;
+  requirementPageSize: number;
   requirementError: string;
   requirementMessage: string;
   filterOrganizationId: string;
@@ -61,6 +65,8 @@ type RequirementsPanelProps = {
   isCreatingRequirementMessage: boolean;
   onRefresh: () => void;
   onSelectRequirement: (requirementId: number) => void;
+  onRequirementPrevPage: () => void;
+  onRequirementNextPage: () => void;
   onUpdateNewRequirement: (updates: Partial<RequirementFormState>) => void;
   onUpdateRequirementEdit: (updates: Partial<RequirementEditState>) => void;
   onFilterOrganizationIdChange: (organizationId: string) => void;
@@ -130,6 +136,9 @@ export function RequirementsPanel({
   selectedRequirement,
   requirementMessages,
   isLoadingRequirements,
+  requirementPage,
+  requirementTotal,
+  requirementPageSize,
   requirementError,
   requirementMessage,
   filterOrganizationId,
@@ -148,6 +157,8 @@ export function RequirementsPanel({
   isCreatingRequirementMessage,
   onRefresh,
   onSelectRequirement,
+  onRequirementPrevPage,
+  onRequirementNextPage,
   onUpdateNewRequirement,
   onUpdateRequirementEdit,
   onFilterOrganizationIdChange,
@@ -181,13 +192,17 @@ export function RequirementsPanel({
   const editRequirementProjects = selectedRequirement
     ? getProjectsForOrganization(projects, String(selectedRequirement.organization_id))
     : projects;
+  const requirementPageCount = Math.max(
+    1,
+    Math.ceil(requirementTotal / requirementPageSize),
+  );
 
   return (
     <section className="panel admin-panel">
       <div className="panel-header">
         <div>
           <p className="eyebrow">Producto</p>
-          <h2>Requisitos</h2>
+          <h2>Necesidades</h2>
         </div>
         <button
           className="secondary-button"
@@ -208,9 +223,9 @@ export function RequirementsPanel({
 
       <div className="admin-section">
         <div className="section-header">
-          <h3>Requisitos pendientes</h3>
+          <h3>Necesidades pendientes</h3>
           {isLoadingRequirements ? (
-            <p className="small-muted">Cargando requisitos.</p>
+            <p className="small-muted">Cargando necesidades.</p>
           ) : null}
         </div>
 
@@ -312,8 +327,34 @@ export function RequirementsPanel({
                 </button>
               ))
             ) : (
-              <p className="small-muted">No hay requisitos para mostrar.</p>
+              <p className="small-muted">No hay necesidades para mostrar.</p>
             )}
+
+            <div className="pager-row">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={onRequirementPrevPage}
+                disabled={requirementPage === 0 || isLoadingRequirements}
+              >
+                Anterior
+              </button>
+              <span className="pager-status">
+                Página {requirementPage + 1} de {requirementPageCount} (
+                {requirementTotal} en total)
+              </span>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={onRequirementNextPage}
+                disabled={
+                  requirementPage + 1 >= requirementPageCount ||
+                  isLoadingRequirements
+                }
+              >
+                Siguiente
+              </button>
+            </div>
           </div>
 
           <div className="requirement-detail">
@@ -407,7 +448,7 @@ export function RequirementsPanel({
 
                 {canEditRequirements && requirementEdit ? (
                   <div className="requirement-edit-box">
-                    <h4>Editar requisito</h4>
+                    <h4>Editar necesidad</h4>
                     <div className="form-grid">
                       <label>
                         Proyecto
@@ -578,7 +619,7 @@ export function RequirementsPanel({
               </>
             ) : (
               <p className="small-muted">
-                Selecciona un requisito para ver su detalle.
+                Selecciona una necesidad para ver su detalle.
               </p>
             )}
           </div>
@@ -588,7 +629,7 @@ export function RequirementsPanel({
       {canCreateRequirements ? (
         <div className="admin-section">
           <form className="admin-form" onSubmit={onCreateRequirement}>
-            <h3>Nuevo requisito</h3>
+            <h3>Nueva necesidad</h3>
             <div className="form-grid">
               <label>
                 Organización
@@ -695,7 +736,7 @@ export function RequirementsPanel({
               <p className="error-message">{requirementFormError}</p>
             ) : null}
             <button type="submit" disabled={isCreatingRequirement}>
-              {isCreatingRequirement ? "Creando..." : "Crear requisito"}
+              {isCreatingRequirement ? "Creando..." : "Crear necesidad"}
             </button>
           </form>
         </div>

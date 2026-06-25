@@ -8,13 +8,22 @@ human-only.
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import re
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
+from app.assistant.models import (
+    AssistantMemoryEntry,
+    AssistantTransversalFeature,
+    AssistantTransversalFeatureAdoption,
+)
 from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
@@ -34,7 +43,33 @@ from app.requirements.routes import (
 )
 from app.users.models import User
 
+ToolExecutor = Callable[..., object]
+
 VALID_PRIORITIES = {"low", "medium", "high", "urgent"}
+VALID_MEMORY_CATEGORIES = {
+    "protocol",
+    "preference",
+    "context",
+    "decision",
+    "open_question",
+}
+VALID_MEMORY_SENSITIVITIES = {"normal", "personal", "sensitive", "legal"}
+VALID_TRANSVERSAL_FEATURE_CATEGORIES = {
+    "process",
+    "compliance",
+    "automation",
+    "documents",
+    "citizen_service",
+    "other",
+}
+MAX_WEB_QUERY_CHARS = 400
+MAX_WEB_RESULTS = 5
+MAX_TRANSVERSAL_TITLE_CHARS = 255
+MAX_TRANSVERSAL_TEXT_CHARS = 2000
+PERSONAL_DATA_PATTERN = re.compile(
+    r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
+    re.IGNORECASE,
+)
 
 REQUIREMENT_CONTENT_FIELDS = (
     "title",
@@ -97,7 +132,7 @@ _REQUIREMENT_FIELD_PROPERTIES = {
     },
 }
 
-TOOL_DEFINITIONS: list[dict] = [
+_TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "list_organizations",
         "description": (
@@ -122,6 +157,30 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": "Filtrar por organización (opcional)",
                 },
             },
+        },
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Busca información pública actual en internet usando una instancia "
+            "Hermes Web controlada por el backend. Úsala solo cuando el usuario "
+            "pida buscar o verificar información externa. No incluyas datos "
+            "internos, documentos, historial ni información personal en la "
+            "consulta; envía únicamente una consulta explícita y mínima."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Consulta pública explícita para buscar en la web",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Número de resultados, máximo 5",
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -229,6 +288,146 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["requirement_id", "body"],
         },
     },
+    {
+        "name": "propose_memory_entry",
+        "description": (
+            "Propone una entrada de memoria institucional para revisión humana. "
+            "No la guarda como conocimiento aprobado: solo crea una propuesta "
+            "pendiente para que un responsable la valide, edite o rechace."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización a la que pertenece la propuesta",
+                },
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "protocol",
+                        "preference",
+                        "context",
+                        "decision",
+                        "open_question",
+                    ],
+                    "description": "Tipo de memoria institucional propuesta",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Resumen breve, verificable y redactado como dato interno",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "enum": ["normal", "personal", "sensitive", "legal"],
+                    "description": "Nivel de sensibilidad estimado",
+                },
+            },
+            "required": ["organization_id", "category", "content"],
+        },
+    },
+    {
+        "name": "propose_transversal_feature",
+        "description": (
+            "Propone una funcionalidad transversal nacida de un requisito visible "
+            "para el usuario. La propuesta queda pendiente de revisión por el "
+            "equipo plataforma. Usa solo un resumen anonimizado: no incluyas "
+            "nombres, datos personales, documentos originales ni detalles locales "
+            "innecesarios."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_requirement_id": {
+                    "type": "integer",
+                    "description": "ID del requisito fuente visible para el usuario",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Nombre corto de la funcionalidad transversal",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Resumen anonimizado de la funcionalidad",
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "Por qué puede ser útil para otros ayuntamientos",
+                },
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "process",
+                        "compliance",
+                        "automation",
+                        "documents",
+                        "citizen_service",
+                        "other",
+                    ],
+                    "description": "Tipo de funcionalidad transversal",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "enum": ["normal", "personal", "sensitive", "legal"],
+                    "description": "Nivel de sensibilidad estimado",
+                },
+            },
+            "required": [
+                "source_requirement_id",
+                "title",
+                "summary",
+                "rationale",
+                "category",
+            ],
+        },
+    },
+    {
+        "name": "list_available_transversal_features",
+        "description": (
+            "Lista funcionalidades transversales disponibles para sugerir a una "
+            "organización. Devuelve solo resúmenes aprobados y anonimizados; no "
+            "incluye el ayuntamiento ni el requisito de origen."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "integer",
+                    "description": (
+                        "Organización para la que se quiere comprobar el estado "
+                        "de adopción (opcional)"
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "record_transversal_feature_acceptance",
+        "description": (
+            "Registra que una organización ha dado un OK explícito para aplicar "
+            "una funcionalidad transversal disponible. Si la funcionalidad es "
+            "autoactivable queda activa; si no, queda pendiente de activación "
+            "humana."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feature_id": {
+                    "type": "integer",
+                    "description": "ID de la funcionalidad transversal disponible",
+                },
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización que da el OK explícito",
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Nota breve opcional sobre el OK recibido",
+                },
+            },
+            "required": ["feature_id", "organization_id"],
+        },
+    },
 ]
 
 
@@ -238,18 +437,62 @@ class ToolResult:
     ok: bool
 
 
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    label: str
+    description: str
+    input_schema: dict
+    executor: ToolExecutor
+    read_only: bool
+    domain: str
+    required_permission: str | None = None
+
+    @property
+    def definition(self) -> dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+        }
+
+    @property
+    def metadata(self) -> dict:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "read_only": self.read_only,
+            "domain": self.domain,
+            "required_permission": self.required_permission,
+        }
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    conversation_id: int | None = None
+    user_message_id: int | None = None
+
+
 def execute_tool(
     db: Session,
     current_user: User,
     name: str,
     tool_input: dict,
+    context: ToolContext | None = None,
+    allowed: frozenset[str] | None = None,
 ) -> ToolResult:
-    executor = _EXECUTORS.get(name)
-    if executor is None:
+    if allowed is not None and name not in allowed:
+        return ToolResult(
+            content=f"Herramienta no disponible para este agente: {name}",
+            ok=False,
+        )
+
+    spec = TOOL_CATALOG.get(name)
+    if spec is None:
         return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
 
     try:
-        result = executor(db, current_user, tool_input)
+        result = spec.executor(db, current_user, tool_input, context or ToolContext())
     except HTTPException as error:
         db.rollback()
         return ToolResult(
@@ -287,7 +530,12 @@ def _serialize_requirement(requirement: Requirement, *, full: bool) -> dict:
     return data
 
 
-def _list_organizations(db: Session, current_user: User, tool_input: dict) -> list:
+def _list_organizations(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list:
     organizations = db.scalars(
         get_accessible_organizations_query(current_user)
     ).all()
@@ -297,7 +545,12 @@ def _list_organizations(db: Session, current_user: User, tool_input: dict) -> li
     ]
 
 
-def _list_projects(db: Session, current_user: User, tool_input: dict) -> list:
+def _list_projects(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list:
     organization_ids = get_user_organization_ids(db, current_user)
     view_all_organization_ids = [
         organization_id
@@ -330,7 +583,12 @@ def _list_projects(db: Session, current_user: User, tool_input: dict) -> list:
     ]
 
 
-def _list_requirements(db: Session, current_user: User, tool_input: dict) -> list:
+def _list_requirements(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list:
     query = select(Requirement).order_by(
         Requirement.created_at.desc(),
         Requirement.id.desc(),
@@ -353,13 +611,62 @@ def _list_requirements(db: Session, current_user: User, tool_input: dict) -> lis
     ]
 
 
-def _get_requirement(db: Session, current_user: User, tool_input: dict) -> dict:
+def _get_requirement(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
     requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
     require_requirement_view(db, current_user, requirement)
     return _serialize_requirement(requirement, full=True)
 
 
-def _create_requirement(db: Session, current_user: User, tool_input: dict) -> dict:
+def _web_search(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    if not has_permission(current_user, "assistant.web.search", db):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.web.search",
+        )
+
+    query = str(tool_input["query"]).strip()
+    if not query:
+        raise ValueError("query no puede estar vacío")
+    if len(query) > MAX_WEB_QUERY_CHARS:
+        raise ValueError(f"query no puede superar {MAX_WEB_QUERY_CHARS} caracteres")
+    if PERSONAL_DATA_PATTERN.search(query):
+        raise ValueError(
+            "query no puede contener datos personales identificables"
+        )
+
+    limit = int(tool_input.get("limit") or MAX_WEB_RESULTS)
+    if limit < 1:
+        raise ValueError("limit debe ser mayor o igual que 1")
+    limit = min(limit, MAX_WEB_RESULTS)
+
+    try:
+        results = hermes_web_client.search(query=query, limit=limit)
+    except HermesWebUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    return {
+        "query": query,
+        "limit": limit,
+        "results": results,
+    }
+
+
+def _create_requirement(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
     organization_id = int(tool_input["organization_id"])
     title = str(tool_input["title"]).strip()
     if not title:
@@ -404,7 +711,12 @@ def _create_requirement(db: Session, current_user: User, tool_input: dict) -> di
     return _serialize_requirement(requirement, full=True)
 
 
-def _update_requirement(db: Session, current_user: User, tool_input: dict) -> dict:
+def _update_requirement(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
     requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
     # View access is the floor: without it, a no-op update would leak the
     # serialized requirement to users who cannot read it.
@@ -448,6 +760,7 @@ def _add_requirement_message(
     db: Session,
     current_user: User,
     tool_input: dict,
+    context: ToolContext,
 ) -> dict:
     requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
     require_requirement_view(db, current_user, requirement)
@@ -471,12 +784,376 @@ def _add_requirement_message(
     }
 
 
+def _propose_memory_entry(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    organization_id = int(tool_input["organization_id"])
+    ensure_organization_exists(db, organization_id)
+    if not has_permission(
+        current_user,
+        "assistant.memory.propose",
+        db,
+        organization_id=organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.memory.propose",
+        )
+
+    category = str(tool_input["category"]).strip()
+    if category not in VALID_MEMORY_CATEGORIES:
+        raise ValueError(f"category inválida: {category}")
+
+    content = str(tool_input["content"]).strip()
+    if not content:
+        raise ValueError("content no puede estar vacío")
+    if len(content) > 1000:
+        raise ValueError("content no puede superar 1000 caracteres")
+
+    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
+    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
+        raise ValueError(f"sensitivity inválida: {sensitivity}")
+    if sensitivity == "normal" and PERSONAL_DATA_PATTERN.search(content):
+        sensitivity = "personal"
+
+    entry = AssistantMemoryEntry(
+        organization_id=organization_id,
+        category=category,
+        content=content,
+        sensitivity=sensitivity,
+        status="proposed",
+        source_conversation_id=context.conversation_id,
+        source_message_id=context.user_message_id,
+        proposed_by_id=current_user.id,
+    )
+    db.add(entry)
+    db.commit()
+    return {
+        "id": entry.id,
+        "organization_id": entry.organization_id,
+        "category": entry.category,
+        "status": entry.status,
+        "sensitivity": entry.sensitivity,
+    }
+
+
+def _clean_transversal_text(name: str, value: object, max_chars: int) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{name} no puede estar vacío")
+    if len(text) > max_chars:
+        raise ValueError(f"{name} no puede superar {max_chars} caracteres")
+    if PERSONAL_DATA_PATTERN.search(text):
+        raise ValueError(
+            f"{name} no puede contener datos personales identificables"
+        )
+    return text
+
+
+def _serialize_transversal_feature_for_tool(
+    feature: AssistantTransversalFeature,
+    *,
+    adoption_status: str | None = None,
+) -> dict:
+    data = {
+        "id": feature.id,
+        "title": feature.title,
+        "summary": feature.summary,
+        "category": feature.category,
+        "auto_activatable": feature.auto_activatable,
+    }
+    if adoption_status is not None:
+        data["adoption_status"] = adoption_status
+    return data
+
+
+def _propose_transversal_feature(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    requirement = get_existing_requirement(db, int(tool_input["source_requirement_id"]))
+    require_requirement_view(db, current_user, requirement)
+
+    title = _clean_transversal_text(
+        "title",
+        tool_input["title"],
+        MAX_TRANSVERSAL_TITLE_CHARS,
+    )
+    summary = _clean_transversal_text(
+        "summary",
+        tool_input["summary"],
+        MAX_TRANSVERSAL_TEXT_CHARS,
+    )
+    rationale = _clean_transversal_text(
+        "rationale",
+        tool_input["rationale"],
+        MAX_TRANSVERSAL_TEXT_CHARS,
+    )
+
+    category = str(tool_input["category"]).strip()
+    if category not in VALID_TRANSVERSAL_FEATURE_CATEGORIES:
+        raise ValueError(f"category inválida: {category}")
+
+    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
+    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
+        raise ValueError(f"sensitivity inválida: {sensitivity}")
+
+    feature = AssistantTransversalFeature(
+        source_requirement_id=requirement.id,
+        source_organization_id=requirement.organization_id,
+        source_conversation_id=context.conversation_id,
+        source_message_id=context.user_message_id,
+        title=title,
+        summary=summary,
+        rationale=rationale,
+        category=category,
+        sensitivity=sensitivity,
+        status="proposed",
+        proposed_by_id=current_user.id,
+    )
+    db.add(feature)
+    db.commit()
+    return {
+        "id": feature.id,
+        "status": feature.status,
+        "source_requirement_id": feature.source_requirement_id,
+        "source_organization_id": feature.source_organization_id,
+        "sensitivity": feature.sensitivity,
+    }
+
+
+def _list_available_transversal_features(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list:
+    organization_id = tool_input.get("organization_id")
+    adoption_statuses: dict[int, str] = {}
+    if organization_id is not None:
+        organization_id = int(organization_id)
+        ensure_organization_exists(db, organization_id)
+        if not has_permission(
+            current_user,
+            "assistant.use",
+            db,
+            organization_id=organization_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Permission required: assistant.use",
+            )
+        adoptions = db.scalars(
+            select(AssistantTransversalFeatureAdoption).where(
+                AssistantTransversalFeatureAdoption.organization_id == organization_id
+            )
+        ).all()
+        adoption_statuses = {
+            adoption.feature_id: adoption.status
+            for adoption in adoptions
+        }
+
+    features = db.scalars(
+        select(AssistantTransversalFeature)
+        .where(AssistantTransversalFeature.status == "available")
+        .order_by(
+            AssistantTransversalFeature.updated_at.desc(),
+            AssistantTransversalFeature.id.desc(),
+        )
+        .limit(20)
+    ).all()
+    return [
+        _serialize_transversal_feature_for_tool(
+            feature,
+            adoption_status=adoption_statuses.get(feature.id),
+        )
+        for feature in features
+    ]
+
+
+def _record_transversal_feature_acceptance(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    feature = db.get(AssistantTransversalFeature, int(tool_input["feature_id"]))
+    if feature is None:
+        raise HTTPException(status_code=404, detail="Transversal feature not found")
+    if feature.status != "available":
+        raise HTTPException(
+            status_code=409,
+            detail="Transversal feature is not available",
+        )
+
+    organization_id = int(tool_input["organization_id"])
+    ensure_organization_exists(db, organization_id)
+    if not has_permission(
+        current_user,
+        "assistant.use",
+        db,
+        organization_id=organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.use",
+        )
+
+    notes = tool_input.get("notes")
+    if notes is not None:
+        notes = _clean_transversal_text("notes", notes, MAX_TRANSVERSAL_TEXT_CHARS)
+
+    adoption = db.scalar(
+        select(AssistantTransversalFeatureAdoption).where(
+            AssistantTransversalFeatureAdoption.feature_id == feature.id,
+            AssistantTransversalFeatureAdoption.organization_id == organization_id,
+        )
+    )
+    new_status = "active" if feature.auto_activatable else "activation_pending"
+    activated_at = datetime.now(timezone.utc) if new_status == "active" else None
+
+    if adoption is None:
+        adoption = AssistantTransversalFeatureAdoption(
+            feature_id=feature.id,
+            organization_id=organization_id,
+        )
+        db.add(adoption)
+
+    adoption.status = new_status
+    adoption.requested_by_id = current_user.id
+    adoption.approved_by_id = current_user.id if new_status == "active" else None
+    adoption.source_conversation_id = context.conversation_id
+    adoption.source_message_id = context.user_message_id
+    adoption.notes = notes
+    adoption.activated_at = activated_at
+
+    db.commit()
+    return {
+        "id": adoption.id,
+        "feature_id": adoption.feature_id,
+        "organization_id": adoption.organization_id,
+        "status": adoption.status,
+        "activated_at": adoption.activated_at.isoformat()
+        if adoption.activated_at
+        else None,
+    }
+
+
 _EXECUTORS = {
     "list_organizations": _list_organizations,
     "list_projects": _list_projects,
+    "web_search": _web_search,
     "list_requirements": _list_requirements,
     "get_requirement": _get_requirement,
     "create_requirement": _create_requirement,
     "update_requirement": _update_requirement,
     "add_requirement_message": _add_requirement_message,
+    "propose_memory_entry": _propose_memory_entry,
+    "propose_transversal_feature": _propose_transversal_feature,
+    "list_available_transversal_features": _list_available_transversal_features,
+    "record_transversal_feature_acceptance": _record_transversal_feature_acceptance,
 }
+
+_TOOL_METADATA: dict[str, dict] = {
+    "list_organizations": {
+        "label": "Consultar organizaciones",
+        "read_only": True,
+        "domain": "organizations",
+    },
+    "list_projects": {
+        "label": "Consultar proyectos",
+        "read_only": True,
+        "domain": "projects",
+    },
+    "web_search": {
+        "label": "Buscar en web",
+        "read_only": True,
+        "domain": "web",
+        "required_permission": "assistant.web.search",
+    },
+    "list_requirements": {
+        "label": "Consultar necesidades",
+        "read_only": True,
+        "domain": "requirements",
+    },
+    "get_requirement": {
+        "label": "Leer necesidad",
+        "read_only": True,
+        "domain": "requirements",
+    },
+    "create_requirement": {
+        "label": "Crear necesidad",
+        "read_only": False,
+        "domain": "requirements",
+    },
+    "update_requirement": {
+        "label": "Actualizar necesidad",
+        "read_only": False,
+        "domain": "requirements",
+    },
+    "add_requirement_message": {
+        "label": "Añadir nota a necesidad",
+        "read_only": False,
+        "domain": "requirements",
+    },
+    "propose_memory_entry": {
+        "label": "Proponer memoria",
+        "read_only": False,
+        "domain": "memory",
+        "required_permission": "assistant.memory.propose",
+    },
+    "propose_transversal_feature": {
+        "label": "Proponer funcionalidad transversal",
+        "read_only": False,
+        "domain": "transversal_features",
+    },
+    "list_available_transversal_features": {
+        "label": "Consultar funcionalidades disponibles",
+        "read_only": True,
+        "domain": "transversal_features",
+    },
+    "record_transversal_feature_acceptance": {
+        "label": "Registrar activación transversal",
+        "read_only": False,
+        "domain": "transversal_features",
+    },
+}
+
+
+def _build_tool_catalog() -> dict[str, ToolSpec]:
+    catalog: dict[str, ToolSpec] = {}
+    for definition in _TOOL_DEFINITIONS:
+        name = definition["name"]
+        metadata = _TOOL_METADATA[name]
+        catalog[name] = ToolSpec(
+            name=name,
+            label=metadata["label"],
+            description=definition.get("description", ""),
+            input_schema=definition.get("input_schema", {"type": "object"}),
+            executor=_EXECUTORS[name],
+            read_only=metadata["read_only"],
+            domain=metadata["domain"],
+            required_permission=metadata.get("required_permission"),
+        )
+    return catalog
+
+
+TOOL_CATALOG = _build_tool_catalog()
+TOOL_DEFINITIONS = [spec.definition for spec in TOOL_CATALOG.values()]
+
+
+def get_tool_definitions(tool_names: frozenset[str]) -> list[dict]:
+    return [
+        TOOL_CATALOG[name].definition
+        for name in TOOL_CATALOG
+        if name in tool_names
+    ]
+
+
+def get_tool_metadata() -> list[dict]:
+    return [spec.metadata for spec in TOOL_CATALOG.values()]

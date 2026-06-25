@@ -18,8 +18,16 @@ def verify_password(password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(subject: str) -> str:
-    expires_at = datetime.now(UTC) + timedelta(minutes=settings.access_token_expire_minutes)
-    payload: dict[str, Any] = {"sub": subject, "exp": expires_at}
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(minutes=settings.access_token_expire_minutes)
+    # iat keeps sub-second precision (float) so a token minted right after a
+    # password change is not revoked for sharing the same second with
+    # users.password_changed_at.
+    payload: dict[str, Any] = {
+        "sub": subject,
+        "iat": now.timestamp(),
+        "exp": expires_at,
+    }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 

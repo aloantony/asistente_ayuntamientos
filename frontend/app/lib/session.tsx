@@ -18,41 +18,7 @@ import {
   getErrorMessage,
   isAuthError,
 } from "./api";
-
-export const ADMIN_DATA_PERMISSIONS = [
-  "users.manage",
-  "groups.manage",
-  "organizations.manage",
-  "roles.manage",
-  "projects.manage_members",
-  "municipalities.view",
-  "municipalities.create",
-  "municipalities.edit",
-  "municipalities.archive",
-  "municipalities.manage",
-  "ordinances.view",
-  "ordinances.create",
-  "ordinances.edit",
-  "ordinances.archive",
-  "ordinances.manage",
-];
-
-export const ADMIN_PANEL_PERMISSIONS = [
-  "users.manage",
-  "groups.manage",
-  "organizations.manage",
-  "roles.manage",
-  "municipalities.view",
-  "municipalities.create",
-  "municipalities.edit",
-  "municipalities.archive",
-  "municipalities.manage",
-  "ordinances.view",
-  "ordinances.create",
-  "ordinances.edit",
-  "ordinances.archive",
-  "ordinances.manage",
-];
+import { ADMIN_PANEL_PERMISSIONS } from "./permissions";
 
 export const REQUIREMENT_PERMISSIONS = [
   "requirements.view",
@@ -89,11 +55,22 @@ export function getDefaultRouteForUser(user: User) {
   return "/proyectos";
 }
 
-// Valida que ?next sea una ruta interna ("/algo", nunca "//host") para
-// evitar redirecciones abiertas tras el login.
+// Valida que ?next sea una ruta interna ("/algo") para evitar redirecciones
+// abiertas tras el login. El parser WHATWG elimina tabuladores y saltos de
+// línea y normaliza "\" a "/", así que "/\\evil.com" o "/\t/evil.com"
+// acabarían siendo "//evil.com" (protocol-relative): se normaliza igual
+// antes de validar.
 export function sanitizeNextPath(value: string | null) {
-  if (value && value.startsWith("/") && !value.startsWith("//")) {
-    return value;
+  if (!value) {
+    return null;
+  }
+  const normalized = value.replace(/[\t\n\r]/g, "");
+  if (
+    normalized.startsWith("/") &&
+    !normalized.startsWith("//") &&
+    !normalized.startsWith("/\\")
+  ) {
+    return normalized;
   }
   return null;
 }

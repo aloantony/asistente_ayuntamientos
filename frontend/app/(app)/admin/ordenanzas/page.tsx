@@ -6,11 +6,16 @@ import {
   OrdinancesAdmin,
   type OrdinanceFilterValues,
 } from "../../../components/OrdinancesAdmin";
+import { OrdinanceImportAdmin } from "../../../components/OrdinanceImportAdmin";
 import type { Municipality } from "../../../components/types";
 import { useOrdinancesAdmin } from "../../../lib/admin/useOrdinancesAdmin";
 import { fetchMunicipalityOptions } from "../../../lib/fetchers";
 import { useSession } from "../../../lib/session";
-import { canListOrdinances, canUseOrdinancesSection } from "../nav";
+import {
+  canListMunicipalities,
+  canListOrdinances,
+  canUseOrdinancesSection,
+} from "../nav";
 
 function parsePageParam(value: string | null) {
   const parsed = value ? Number.parseInt(value, 10) : Number.NaN;
@@ -58,6 +63,14 @@ function AdminOrdenanzasPageInner() {
     canList,
   });
   const [municipalities, setMunicipalities] = useState<Municipality[]>([]);
+  // Fallo de la lista de referencia de municipios; sin ella el selector del
+  // formulario queda vacío, así que el error se muestra como en el resto de
+  // páginas de admin.
+  const [referenceError, setReferenceError] = useState("");
+  // El backend exige municipalities.view||manage para listar municipios: sin
+  // ese permiso no se dispara una petición condenada al 403 (el selector cae
+  // a los municipios derivados de las ordenanzas listadas).
+  const canLoadMunicipalities = Boolean(user && canListMunicipalities(user));
 
   // La URL es la única fuente de verdad de filtros y página.
   const urlFilters: OrdinanceFilterValues = {
@@ -112,11 +125,12 @@ function AdminOrdenanzasPageInner() {
   ]);
 
   useEffect(() => {
-    if (!canUseOrdinances) {
+    if (!canUseOrdinances || !canLoadMunicipalities) {
       return;
     }
 
     let isActive = true;
+    setReferenceError("");
 
     fetchMunicipalityOptions()
       .then((municipalitiesData) => {
@@ -124,8 +138,14 @@ function AdminOrdenanzasPageInner() {
           setMunicipalities(municipalitiesData);
         }
       })
-      .catch(() => {
-        // El selector de municipio queda vacío si no se puede cargar.
+      .catch((referenceFetchError) => {
+        if (isActive) {
+          handleRequestError(
+            referenceFetchError,
+            setReferenceError,
+            "No se pudo cargar la lista de municipios.",
+          );
+        }
       });
 
     return () => {
@@ -213,8 +233,10 @@ function AdminOrdenanzasPageInner() {
         ) : null}
       </div>
 
-      {ordinancesAdmin.ordinancesError ? (
-        <p className="error-message">{ordinancesAdmin.ordinancesError}</p>
+      {ordinancesAdmin.ordinancesError || referenceError ? (
+        <p className="error-message">
+          {ordinancesAdmin.ordinancesError || referenceError}
+        </p>
       ) : null}
 
       <OrdinancesAdmin
@@ -250,6 +272,7 @@ function AdminOrdenanzasPageInner() {
         onUpdateOrdinance={ordinancesAdmin.handleUpdateOrdinance}
         onArchiveOrdinance={ordinancesAdmin.handleArchiveOrdinance}
       />
+      <OrdinanceImportAdmin municipalities={municipalities} />
     </section>
   );
 }

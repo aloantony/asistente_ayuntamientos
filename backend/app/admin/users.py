@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -18,7 +19,8 @@ from app.organizations.access import get_user_organization_ids
 from app.organizations.models import organization_users
 from app.projects.models import project_users
 from app.rbac.models import Group, user_groups
-from app.core.security import hash_password
+from app.api.routes.auth import set_session_cookie
+from app.core.security import create_access_token, hash_password
 from app.rbac.permissions import has_permission
 from app.users.crud import create_user
 from app.users.models import User
@@ -131,6 +133,7 @@ def get_admin_user(
 def update_admin_user(
     user_id: int,
     payload: AdminUserUpdate,
+    response: Response,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> User:
@@ -164,6 +167,14 @@ def update_admin_user(
                 detail="Only superusers can reset a superuser password",
             )
         user.hashed_password = hash_password(new_password)
+        # Revoke tokens issued before the reset (e.g. the sessions of a
+        # compromised account whose password is being rotated).
+        user.password_changed_at = datetime.now(UTC)
+        if user.id == current_user.id:
+            # An admin resetting their own password from the users table
+            # would revoke their own session mid-flight; refresh the cookie
+            # like the self-service change does.
+            set_session_cookie(response, create_access_token(subject=str(user.id)))
 
     if (
         "is_superuser" in updates

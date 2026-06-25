@@ -111,10 +111,12 @@ function AsistentePageInner() {
   }
 
   return (
-    <div className="workspace">
+    <div className="workspace assistant-workspace">
       <AssistantPanel
         assistantStatus={assistantController.assistantStatus}
         conversations={assistantController.conversations}
+        currentUser={user}
+        memoryEntries={assistantController.memoryEntries}
         selectedConversation={assistantController.selectedConversation}
         draftMessage={assistantController.draftMessage}
         isLoadingAssistant={assistantController.isLoadingAssistant}
@@ -129,6 +131,7 @@ function AsistentePageInner() {
         onSendMessage={assistantController.sendMessage}
         onArchiveConversation={assistantController.archiveConversation}
         onRestoreConversation={assistantController.restoreConversation}
+        onUpdateMemoryEntry={assistantController.updateMemoryEntry}
         onIncludeArchivedConversationsChange={
           assistantController.toggleIncludeArchivedConversations
         }

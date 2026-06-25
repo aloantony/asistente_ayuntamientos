@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class AdminOrganizationSummary(BaseModel):
@@ -70,9 +70,17 @@ class AdminUserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=255)
     is_active: bool | None = None
     is_superuser: bool | None = None
+    # No model-wide str_strip_whitespace: it would also trim the password and
+    # store a credential different from the one typed (login and
+    # change-password do not trim). Only full_name is normalized.
     password: str | None = Field(default=None, min_length=8)
 
-    model_config = ConfigDict(str_strip_whitespace=True)
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def strip_full_name(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 class AdminGroupRead(BaseModel):

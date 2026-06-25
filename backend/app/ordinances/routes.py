@@ -1,4 +1,7 @@
+import json
+from datetime import UTC, datetime
 from typing import Annotated
+from urllib import parse as urlparse
 
 from fastapi import (
     APIRouter,
@@ -12,16 +15,39 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
+from app.core.jobs import get_default_queue
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.documents.access import user_can_access_document
 from app.documents.models import Document
 from app.municipalities.models import Municipality
-from app.ordinances.models import Ordinance
+from app.ordinances.embeddings import embed_text, vector_similarity
+from app.ordinances.import_service import run_import_job
+from app.ordinances.models import (
+    OfficialLegalSource,
+    Ordinance,
+    OrdinanceImportItem,
+    OrdinanceImportJob,
+    OrdinanceLegalChunk,
+    OrdinanceReviewReport,
+)
 from app.ordinances.schemas import (
+    OfficialLegalSourceCreate,
+    OfficialLegalSourceRead,
+    OfficialLegalSourceUpdate,
+    OrdinanceComparisonRead,
     OrdinanceCreate,
+    OrdinanceImportEnqueueRead,
+    OrdinanceImportItemRead,
+    OrdinanceImportItemReviewUpdate,
+    OrdinanceImportJobCreate,
+    OrdinanceImportJobDetail,
+    OrdinanceImportJobRead,
+    OrdinanceLegalChunkRead,
     OrdinanceListRead,
     OrdinanceRead,
+    OrdinanceReviewReportRead,
+    OrdinanceSemanticSearchResult,
     OrdinanceStatus,
     OrdinanceUpdate,
 )
@@ -46,6 +72,7 @@ def list_ordinances(
         OrdinanceStatus | None,
         Query(alias="status"),
     ] = None,
+    curation_status: str | None = None,
     include_archived: bool = False,
 ) -> list[Ordinance]:
     require_ordinance_permission(db, current_user, "ordinances.view")
@@ -83,6 +110,8 @@ def list_ordinances(
         query = query.where(Ordinance.status == status_filter)
     elif not include_archived:
         query = query.where(Ordinance.status != "archived")
+    if curation_status:
+        query = query.where(Ordinance.curation_status == curation_status)
 
     return list(db.scalars(paginate(db, query, page, response)))
 
@@ -114,6 +143,362 @@ def create_ordinance(
     return get_existing_ordinance(db, ordinance.id)
 
 
+@router.get(
+    "/official-sources",
+    response_model=list[OfficialLegalSourceRead],
+)
+def list_official_sources(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    include_archived: bool = False,
+) -> list[OfficialLegalSource]:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    query = select(OfficialLegalSource).order_by(OfficialLegalSource.name)
+    if not include_archived:
+        query = query.where(OfficialLegalSource.status == "active")
+    return list(db.scalars(query))
+
+
+@router.post(
+    "/official-sources",
+    response_model=OfficialLegalSourceRead,
+    status_code=http_status.HTTP_201_CREATED,
+)
+def create_official_source(
+    payload: OfficialLegalSourceCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> OfficialLegalSource:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    source = OfficialLegalSource(**payload.model_dump())
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+    return source
+
+
+@router.patch(
+    "/official-sources/{source_id}",
+    response_model=OfficialLegalSourceRead,
+)
+def update_official_source(
+    source_id: int,
+    payload: OfficialLegalSourceUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> OfficialLegalSource:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    source = db.get(OfficialLegalSource, source_id)
+    if source is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Official legal source not found",
+        )
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(source, field, value)
+    db.commit()
+    db.refresh(source)
+    return source
+
+
+@router.post(
+    "/import-jobs",
+    response_model=OrdinanceImportJobRead,
+    status_code=http_status.HTTP_201_CREATED,
+)
+def create_import_job(
+    payload: OrdinanceImportJobCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    validate_import_job_payload(db, payload)
+    job = OrdinanceImportJob(
+        title=payload.title,
+        description=payload.description,
+        topic=payload.topic,
+        subtopic=payload.subtopic,
+        search_query=payload.search_query,
+        municipality_ids_json=json.dumps(payload.municipality_ids),
+        official_source_ids_json=json.dumps(payload.official_source_ids),
+        source_urls_json=json.dumps(
+            [source.model_dump() for source in payload.source_urls],
+            ensure_ascii=False,
+        ),
+        review_criteria=payload.review_criteria,
+        created_by_id=current_user.id,
+    )
+    db.add(job)
+    db.commit()
+    return serialize_import_job(job)
+
+
+@router.get(
+    "/import-jobs",
+    response_model=list[OrdinanceImportJobRead],
+)
+def list_import_jobs(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+) -> list[dict]:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    query = (
+        select(OrdinanceImportJob)
+        .options(selectinload(OrdinanceImportJob.items))
+        .order_by(OrdinanceImportJob.created_at.desc(), OrdinanceImportJob.id.desc())
+    )
+    if status_filter:
+        query = query.where(OrdinanceImportJob.status == status_filter)
+    return [serialize_import_job(job) for job in db.scalars(query)]
+
+
+@router.get(
+    "/import-jobs/{job_id}",
+    response_model=OrdinanceImportJobDetail,
+)
+def get_import_job(
+    job_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    return serialize_import_job_detail(get_existing_import_job(db, job_id))
+
+
+@router.post(
+    "/import-jobs/{job_id}/enqueue",
+    response_model=OrdinanceImportEnqueueRead,
+)
+def enqueue_import_job(
+    job_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> OrdinanceImportEnqueueRead:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    job = get_existing_import_job(db, job_id)
+    if job.status in {"running", "queued"}:
+        return OrdinanceImportEnqueueRead(
+            job_id=job.id,
+            status=job.status,
+            queue_job_id=None,
+        )
+    job.status = "queued"
+    job.error_message = None
+    db.commit()
+    try:
+        queue_job = get_default_queue().enqueue(run_import_job, job.id)
+    except Exception as error:
+        job.status = "failed"
+        job.error_message = str(error)[:2000]
+        db.commit()
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Import queue is unavailable",
+        ) from error
+    return OrdinanceImportEnqueueRead(
+        job_id=job.id,
+        status="queued",
+        queue_job_id=queue_job.id,
+    )
+
+
+@router.post(
+    "/import-jobs/{job_id}/run-inline",
+    response_model=OrdinanceImportJobDetail,
+)
+def run_import_job_inline(
+    job_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    get_existing_import_job(db, job_id)
+    run_import_job(job_id, db=db)
+    return serialize_import_job_detail(get_existing_import_job(db, job_id))
+
+
+@router.patch(
+    "/import-items/{item_id}/review",
+    response_model=OrdinanceImportItemRead,
+)
+def review_import_item(
+    item_id: int,
+    payload: OrdinanceImportItemReviewUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.review")
+    item = get_existing_import_item(db, item_id)
+    if item.ordinance is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="Import item has no ordinance",
+        )
+    now = datetime.now(UTC)
+    if payload.decision == "approve":
+        item.status = "approved"
+        item.ordinance.curation_status = "approved"
+        for chunk in item.ordinance.legal_chunks:
+            chunk.review_status = "approved"
+        report_status = "human_approved"
+    elif payload.decision == "needs_changes":
+        item.status = "pending_review"
+        item.ordinance.curation_status = "needs_changes"
+        report_status = "superseded"
+    else:
+        item.status = "rejected"
+        item.ordinance.curation_status = "rejected"
+        for chunk in item.ordinance.legal_chunks:
+            chunk.review_status = "rejected"
+        report_status = "human_rejected"
+
+    report = latest_review_report(item)
+    if report is not None:
+        report.status = report_status
+        report.reviewed_by_agent = False
+        report.reviewed_by_id = current_user.id
+        report.reviewed_at = now
+        if payload.notes:
+            report.doubts = payload.notes
+    item.ordinance.updated_by_id = current_user.id
+    db.commit()
+    return serialize_import_item(get_existing_import_item(db, item_id))
+
+
+@router.get(
+    "/comparison",
+    response_model=OrdinanceComparisonRead,
+)
+def compare_ordinances(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    municipality_ids: Annotated[list[int], Query()],
+    topic: str | None = None,
+    include_pending: bool = False,
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.compare")
+    query = (
+        select_ordinances_with_summaries()
+        .where(Ordinance.municipality_id.in_(municipality_ids))
+        .order_by(Ordinance.topic, Ordinance.subtopic, Municipality.name)
+    )
+    if topic:
+        query = query.where(Ordinance.topic.ilike(f"%{topic.strip()}%"))
+    if include_pending:
+        query = query.where(Ordinance.curation_status != "rejected")
+    else:
+        query = query.where(Ordinance.curation_status == "approved")
+
+    rows: dict[tuple[str, str | None], list[dict]] = {}
+    for ordinance in db.scalars(query):
+        key = (ordinance.topic, ordinance.subtopic)
+        rows.setdefault(key, []).append(
+            {
+                "municipality_id": ordinance.municipality_id,
+                "municipality_name": ordinance.municipality.name,
+                "ordinance_id": ordinance.id,
+                "title": ordinance.title,
+                "topic": ordinance.topic,
+                "subtopic": ordinance.subtopic,
+                "status": ordinance.status,
+                "curation_status": ordinance.curation_status,
+                "publication_date": ordinance.publication_date,
+                "effective_date": ordinance.effective_date,
+                "source_url": ordinance.source_url,
+                "summary": ordinance.summary,
+                "confidence_score": ordinance.confidence_score,
+            }
+        )
+    return {
+        "municipality_ids": municipality_ids,
+        "include_pending": include_pending,
+        "rows": [
+            {"topic": key[0], "subtopic": key[1], "entries": entries}
+            for key, entries in rows.items()
+        ],
+    }
+
+
+@router.get(
+    "/semantic-search",
+    response_model=list[OrdinanceSemanticSearchResult],
+)
+def semantic_search_ordinances(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    q: str,
+    municipality_id: int | None = None,
+    include_pending: bool = False,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> list[dict]:
+    require_ordinance_permission(db, current_user, "ordinances.compare")
+    query_vector, _, status = embed_text(q)
+    if status != "ready" or query_vector is None:
+        return []
+    query = (
+        select(OrdinanceLegalChunk)
+        .join(OrdinanceLegalChunk.ordinance)
+        .join(Ordinance.municipality)
+        .where(OrdinanceLegalChunk.embedding_status == "ready")
+        .options(
+            selectinload(OrdinanceLegalChunk.ordinance).selectinload(
+                Ordinance.municipality
+            )
+        )
+    )
+    if municipality_id is not None:
+        query = query.where(Ordinance.municipality_id == municipality_id)
+    if include_pending:
+        query = query.where(Ordinance.curation_status != "rejected")
+    else:
+        query = query.where(
+            Ordinance.curation_status == "approved",
+            OrdinanceLegalChunk.review_status == "approved",
+        )
+
+    scored = []
+    for chunk in db.scalars(query.limit(500)):
+        score = vector_similarity(query_vector, chunk.embedding)
+        if score <= 0:
+            continue
+        scored.append((score, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {
+            "chunk_id": chunk.id,
+            "ordinance_id": chunk.ordinance_id,
+            "title": chunk.ordinance.title,
+            "municipality_name": chunk.ordinance.municipality.name,
+            "citation": chunk.citation,
+            "text": chunk.text,
+            "source_url": chunk.source_url,
+            "score": round(score, 4),
+        }
+        for score, chunk in scored[:limit]
+    ]
+
+
+@router.get(
+    "/{ordinance_id}/chunks",
+    response_model=list[OrdinanceLegalChunkRead],
+)
+def list_ordinance_chunks(
+    ordinance_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> list[OrdinanceLegalChunk]:
+    require_ordinance_permission(db, current_user, "ordinances.view")
+    get_existing_ordinance(db, ordinance_id)
+    return list(
+        db.scalars(
+            select(OrdinanceLegalChunk)
+            .where(OrdinanceLegalChunk.ordinance_id == ordinance_id)
+            .order_by(OrdinanceLegalChunk.chunk_index)
+        )
+    )
+
+
 @router.get("/{ordinance_id}", response_model=OrdinanceRead)
 def get_ordinance(
     ordinance_id: int,
@@ -143,6 +528,8 @@ def update_ordinance(
         require_ordinance_permission(db, current_user, "ordinances.edit")
     if updates.get("status") == "archived":
         require_ordinance_permission(db, current_user, "ordinances.archive")
+    if "curation_status" in updates:
+        require_ordinance_permission(db, current_user, "ordinances.review")
 
     requested_municipality_id = updates.get("municipality_id")
     if (
@@ -230,12 +617,230 @@ def ensure_document_access(
 
 
 def reject_null_required_fields(updates: dict[str, object]) -> None:
-    required_fields = {"municipality_id", "title", "topic", "ordinance_type", "status"}
+    required_fields = {
+        "municipality_id",
+        "title",
+        "topic",
+        "ordinance_type",
+        "status",
+        "curation_status",
+    }
     if any(field in updates and updates[field] is None for field in required_fields):
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Required ordinance fields cannot be null",
         )
+
+
+def validate_import_job_payload(
+    db: Session,
+    payload: OrdinanceImportJobCreate,
+) -> None:
+    if not payload.source_urls and not (
+        payload.search_query and payload.municipality_ids
+    ):
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Import job needs seed URLs or search query with municipalities",
+        )
+    if payload.municipality_ids:
+        existing = set(
+            db.scalars(
+                select(Municipality.id).where(
+                    Municipality.id.in_(payload.municipality_ids),
+                    Municipality.status == "active",
+                )
+            )
+        )
+        missing = set(payload.municipality_ids) - existing
+        if missing:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail="Municipality not found",
+            )
+    source_query = select(OfficialLegalSource).where(
+        OfficialLegalSource.status == "active"
+    )
+    if payload.official_source_ids:
+        source_query = source_query.where(
+            OfficialLegalSource.id.in_(payload.official_source_ids)
+        )
+    sources = list(db.scalars(source_query))
+    if not sources:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Import job needs active official sources",
+        )
+    if payload.source_urls:
+        for source_input in payload.source_urls:
+            if not url_allowed(source_input.url, sources):
+                raise HTTPException(
+                    status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Import source URL is not official",
+                )
+
+
+def url_allowed(url: str, sources: list[OfficialLegalSource]) -> bool:
+    host = (urlparse.urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    for source in sources:
+        domain = source.domain.lower()
+        if host == domain or host.endswith(f".{domain}"):
+            return True
+    return False
+
+
+def get_existing_import_job(db: Session, job_id: int) -> OrdinanceImportJob:
+    job = db.scalar(
+        select(OrdinanceImportJob)
+        .options(
+            selectinload(OrdinanceImportJob.items)
+            .selectinload(OrdinanceImportItem.ordinance)
+            .selectinload(Ordinance.municipality),
+            selectinload(OrdinanceImportJob.items)
+            .selectinload(OrdinanceImportItem.review_reports),
+            selectinload(OrdinanceImportJob.items)
+            .selectinload(OrdinanceImportItem.ordinance)
+            .selectinload(Ordinance.legal_chunks),
+        )
+        .where(OrdinanceImportJob.id == job_id)
+        .execution_options(populate_existing=True)
+    )
+    if job is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Ordinance import job not found",
+        )
+    return job
+
+
+def get_existing_import_item(db: Session, item_id: int) -> OrdinanceImportItem:
+    item = db.scalar(
+        select(OrdinanceImportItem)
+        .options(
+            selectinload(OrdinanceImportItem.ordinance).selectinload(
+                Ordinance.municipality
+            ),
+            selectinload(OrdinanceImportItem.ordinance).selectinload(
+                Ordinance.legal_chunks
+            ),
+            selectinload(OrdinanceImportItem.review_reports),
+        )
+        .where(OrdinanceImportItem.id == item_id)
+        .execution_options(populate_existing=True)
+    )
+    if item is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Ordinance import item not found",
+        )
+    return item
+
+
+def serialize_import_job(job: OrdinanceImportJob) -> dict:
+    return {
+        "id": job.id,
+        "title": job.title,
+        "description": job.description,
+        "topic": job.topic,
+        "subtopic": job.subtopic,
+        "search_query": job.search_query,
+        "municipality_ids": parse_json_list(job.municipality_ids_json),
+        "official_source_ids": parse_json_list(job.official_source_ids_json),
+        "source_urls": parse_json_list(job.source_urls_json),
+        "review_criteria": job.review_criteria,
+        "source_policy": job.source_policy,
+        "status": job.status,
+        "created_by_id": job.created_by_id,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "error_message": job.error_message,
+        "item_count": len(job.items),
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def serialize_import_job_detail(job: OrdinanceImportJob) -> dict:
+    data = serialize_import_job(job)
+    data["items"] = [serialize_import_item(item) for item in job.items]
+    return data
+
+
+def serialize_import_item(item: OrdinanceImportItem) -> dict:
+    return {
+        "id": item.id,
+        "job_id": item.job_id,
+        "municipality_id": item.municipality_id,
+        "official_source_id": item.official_source_id,
+        "ordinance_id": item.ordinance_id,
+        "source_url": item.source_url,
+        "source_title": item.source_title,
+        "status": item.status,
+        "source_hash": item.source_hash,
+        "extracted_metadata": parse_json_object(item.extracted_metadata_json),
+        "confidence_score": item.confidence_score,
+        "error_message": item.error_message,
+        "ordinance": item.ordinance,
+        "review_reports": [
+            serialize_review_report(report)
+            for report in sorted(
+                item.review_reports,
+                key=lambda report: report.id,
+                reverse=True,
+            )
+        ],
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def serialize_review_report(report: OrdinanceReviewReport) -> dict:
+    return {
+        "id": report.id,
+        "ordinance_id": report.ordinance_id,
+        "import_item_id": report.import_item_id,
+        "status": report.status,
+        "proposed_decision": report.proposed_decision,
+        "confidence_score": report.confidence_score,
+        "checklist": parse_json_list(report.checklist_json),
+        "summary": report.summary,
+        "doubts": report.doubts,
+        "reviewed_by_agent": report.reviewed_by_agent,
+        "reviewed_by_id": report.reviewed_by_id,
+        "reviewed_at": report.reviewed_at,
+        "created_at": report.created_at,
+        "updated_at": report.updated_at,
+    }
+
+
+def latest_review_report(
+    item: OrdinanceImportItem,
+) -> OrdinanceReviewReport | None:
+    if not item.review_reports:
+        return None
+    return max(item.review_reports, key=lambda report: report.id)
+
+
+def parse_json_list(value: str | None) -> list:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def parse_json_object(value: str | None) -> dict | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def require_ordinance_permission(

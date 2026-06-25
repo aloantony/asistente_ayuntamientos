@@ -6,6 +6,7 @@ import io
 from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
+from app.ordinances import import_service
 from app.projects.models import Project, project_users
 from conftest import headers_for, unique_suffix
 
@@ -579,3 +580,151 @@ def test_list_ordinances_filters_by_municipality_id(client, superuser):
     listed_ids = [o["id"] for o in response.json()]
     assert match["id"] in listed_ids
     assert other["id"] not in listed_ids
+
+
+# ---------------------------------------------------------------------------
+# 11. Import jobs, review, comparison and semantic chunks
+# ---------------------------------------------------------------------------
+
+
+def create_official_source(client, headers, **overrides) -> dict:
+    payload = {
+        "name": f"Fuente {unique_suffix()}",
+        "base_url": "https://bop.example.gov",
+        "domain": "bop.example.gov",
+        "source_type": "bop",
+    }
+    payload.update(overrides)
+    response = client.post(
+        "/ordinances/official-sources",
+        headers=headers,
+        json=payload,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_import_job_rejects_non_official_seed_url(
+    client, make_user, make_organization, grant_permissions
+):
+    user = make_user()
+    grant_permissions(user, make_organization(), ["ordinances.import"])
+    headers = headers_for(user)
+    create_official_source(client, headers, domain="bop.example.gov")
+
+    response = client.post(
+        "/ordinances/import-jobs",
+        headers=headers,
+        json={
+            "title": "Importación no oficial",
+            "topic": "residuos",
+            "source_urls": [{"url": "https://noticias.example.com/ordenanza.pdf"}],
+            "review_criteria": "Solo fuentes oficiales.",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Import source URL is not official"
+
+
+def test_import_job_run_creates_pending_ordinance_and_review_report(
+    client, monkeypatch, superuser, make_user, make_organization, grant_permissions
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(
+        user,
+        organization,
+        ["ordinances.import", "ordinances.review", "ordinances.compare"],
+    )
+    headers = headers_for(user)
+    municipality = create_municipality(
+        client,
+        headers_for(superuser),
+        name="Villa Importada",
+        province="Madrid",
+        autonomous_community="Comunidad de Madrid",
+    )
+    source = create_official_source(client, headers, domain="bop.example.gov")
+
+    ordinance_text = (
+        "Ordenanza municipal reguladora de residuos de Villa Importada.\n\n"
+        "Artículo 1. Objeto. Esta ordenanza regula la recogida de residuos.\n\n"
+        "Artículo 2. Obligaciones. La ciudadanía deberá cumplir los horarios.\n\n"
+        "Publicado el 12/05/2026 en el boletín oficial."
+    )
+
+    def fake_fetch(_url):
+        return import_service.FetchedSource(
+            content=ordinance_text.encode("utf-8"),
+            content_type="text/plain",
+        )
+
+    monkeypatch.setattr(import_service, "_fetch_source", fake_fetch)
+
+    created = client.post(
+        "/ordinances/import-jobs",
+        headers=headers,
+        json={
+            "title": "Residuos piloto",
+            "topic": "residuos",
+            "municipality_ids": [municipality["id"]],
+            "official_source_ids": [source["id"]],
+            "source_urls": [
+                {
+                    "url": "https://bop.example.gov/anuncio/ordenanza-residuos.txt",
+                    "municipality_id": municipality["id"],
+                    "official_source_id": source["id"],
+                }
+            ],
+            "review_criteria": "Validar municipio, fuente oficial y articulado.",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    detail = client.post(
+        f"/ordinances/import-jobs/{created.json()['id']}/run-inline",
+        headers=headers,
+    )
+
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["status"] == "completed"
+    item = body["items"][0]
+    assert item["status"] == "pending_review"
+    assert item["ordinance"]["curation_status"] == "pending_review"
+    assert item["review_reports"][0]["proposed_decision"] == "approve"
+    assert item["review_reports"][0]["checklist"]
+
+    comparison_hidden = client.get(
+        "/ordinances/comparison",
+        headers=headers,
+        params={"municipality_ids": municipality["id"], "topic": "residuos"},
+    )
+    assert comparison_hidden.status_code == 200
+    assert comparison_hidden.json()["rows"] == []
+
+    approved = client.patch(
+        f"/ordinances/import-items/{item['id']}/review",
+        headers=headers,
+        json={"decision": "approve"},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["ordinance"]["curation_status"] == "approved"
+
+    comparison = client.get(
+        "/ordinances/comparison",
+        headers=headers,
+        params={"municipality_ids": municipality["id"], "topic": "residuos"},
+    )
+    assert comparison.status_code == 200
+    rows = comparison.json()["rows"]
+    assert rows[0]["entries"][0]["municipality_name"] == "Villa Importada"
+
+    semantic = client.get(
+        "/ordinances/semantic-search",
+        headers=headers,
+        params={"q": "recogida de residuos", "municipality_id": municipality["id"]},
+    )
+    assert semantic.status_code == 200
+    assert semantic.json()[0]["ordinance_id"] == item["ordinance_id"]

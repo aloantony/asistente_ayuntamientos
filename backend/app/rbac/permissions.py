@@ -40,8 +40,15 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "ordinances.create": "Crear ordenanzas",
     "ordinances.edit": "Editar ordenanzas",
     "ordinances.archive": "Archivar ordenanzas",
+    "ordinances.import": "Importar ordenanzas",
+    "ordinances.review": "Revisar ordenanzas importadas",
+    "ordinances.compare": "Comparar ordenanzas",
     "ordinances.manage": "Gestionar ordenanzas",
     "assistant.use": "Usar el asistente conversacional",
+    "assistant.memory.propose": "Proponer memoria del asistente",
+    "assistant.memory.view": "Ver memoria aprobada del asistente",
+    "assistant.memory.review": "Revisar memoria propuesta del asistente",
+    "assistant.web.search": "Buscar en la web desde el asistente",
 }
 
 INITIAL_PERMISSION_CODES = tuple(INITIAL_PERMISSION_DEFINITIONS.keys())

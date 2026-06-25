@@ -23,7 +23,7 @@ AI is intended to be central to the product direction. The system should assist,
 
 Future AI functionality must go through a Privacy/AI Gateway before any external API call. Original documents and sensitive municipal data must not be sent directly to external AI services. External AI APIs may be used in the future only after filtering, minimization and pseudonymization where needed.
 
-Local AI is not implemented in the current phase.
+The assistant can run either against Anthropic directly or against a private/local Hermes Agent API Server. Hermes Agent is treated as an external runtime/app, not as the institutional memory store and not as the source of authorization decisions.
 
 Future priorities will be refined through Requirements Intake and through work with municipal stakeholders and developers. The exact first commercial module and user persona are intentionally still open.
 
@@ -60,7 +60,10 @@ Future priorities will be refined through Requirements Intake and through work w
 - Requirements: structured intake for needs, product ideas and stakeholder requests.
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
-- AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop against the Claude API through the internal Privacy/AI Gateway (`app/assistant/gateway.py`), executes its tools with the calling user's RBAC permissions, always creates requirements as drafts with `source_type=conversation`, and stores an auditable JSON trail of every tool call. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless `ANTHROPIC_API_KEY` is configured.
+- Ordinance import and comparison: official-source import jobs run through a Redis/RQ worker, create pending-review ordinances, split legal text into reviewable/vectorized chunks and expose a thematic comparison matrix between municipalities.
+- AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop through the internal Privacy/AI Gateway (`app/assistant/gateway.py`) using either Anthropic or a private Hermes Agent API Server (`ASSISTANT_RUNTIME=hermes_agent`). Its tools execute with the calling user's RBAC permissions, requirements are always created as drafts with `source_type=conversation`, and every tool call leaves an auditable JSON trail. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected runtime is configured.
+- Controlled institutional memory: the assistant can propose organization memory, but only entries reviewed by authorized users become reusable context. Proposing, viewing and reviewing are separated by `assistant.memory.propose`, `assistant.memory.view` and `assistant.memory.review`.
+- Telegram assistant channel: existing users can generate a short-lived one-use link code from the account page, link a Telegram chat and use the assistant through a separate audited conversation channel with the same RBAC permissions.
 
 ## 6. Architecture principles
 
@@ -68,6 +71,8 @@ Future priorities will be refined through Requirements Intake and through work w
 - Privileged platform operations are superuser-only: granting or revoking superuser status, creating organizations (tenants), and mutating the global roles/permissions catalog. `users.manage` only reaches users who share an organization where the admin holds the permission.
 - Municipalities are global reference data, separate from tenant organizations. Linking a document to an ordinance requires access to that document.
 - List endpoints for municipalities, ordinances, requirements and admin users are paginated (`limit` 1-200 default 100, `offset`) and expose the total via the `X-Total-Count` header. Ordinance listings omit `text_content`; the full legal text only travels on the detail endpoint.
+- Imported ordinances are never approved automatically: importer output enters `pending_review`, the review agent stores a checklist and score, and a user with `ordinances.review` must approve, reject or request changes.
+- Legal chunks are stored in PostgreSQL and use pgvector when available. Development uses deterministic local hash embeddings by default; production can switch to a configured OpenAI-compatible embeddings provider.
 - Assistant voice input uses the browser's on-device speech recognition only (`processLocally`); it is disabled rather than falling back to the browser's cloud service (see ADR-012).
 - Uploaded documents are stored outside PostgreSQL.
 - PostgreSQL stores document metadata, ownership, status and relationships, not raw file bytes.
@@ -97,7 +102,22 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings. To enable the AI assistant, set `ANTHROPIC_API_KEY` (and optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`); without it the assistant endpoints return 503 and the UI shows it as not configured.
+Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings.
+
+To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately, set `ASSISTANT_RUNTIME=hermes_agent`, `HERMES_AGENT_BASE_URL`, `HERMES_AGENT_API_KEY` and `HERMES_AGENT_MODEL`. In production, Hermes Agent stays disabled for real data unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. Without a complete runtime configuration, assistant endpoints return 503 and the UI shows the assistant as not configured.
+
+Hermes Agent can also be enabled as a separate planner/router with `ASSISTANT_PLANNER_RUNTIME=hermes_agent`. In that mode Hermes only chooses the backend agent for a turn (`requirements_intake` or `consultation`); the backend still filters tools, validates RBAC, executes actions and stores the audit trail. If the planner is disabled or unavailable, the assistant falls back to the requirements intake agent.
+
+Controlled web search uses a second local Hermes API Server instance/profile, separate from the main assistant runtime. Configure `HERMES_WEB_BASE_URL`, `HERMES_WEB_API_KEY`, `HERMES_WEB_MODEL` and grant `assistant.web.search` only to users who may search the public web from the assistant. The main Hermes API server should keep native toolsets disabled for `api_server`; the web Hermes instance should expose only the `web` toolset. The backend sends only the explicit search query to this instance and records the call in the assistant action audit trail.
+
+Ordinance import jobs use Redis/RQ. `docker compose up -d --build` starts the `worker` service; jobs can also be run inline from the admin UI in development. Search/crawl is restricted to configured official legal source domains. Configure embeddings with `EMBEDDINGS_RUNTIME`, `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY` and `EMBEDDINGS_MODEL` when moving beyond local hash embeddings.
+
+Telegram is disabled by default. To enable it, set `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, then configure the Telegram Bot API webhook to point to `/telegram/webhook` with the same secret token.
+
+Expected local split:
+
+- Main assistant Hermes: `127.0.0.1:8642`, no native `api_server` toolsets exposed.
+- Controlled web Hermes: `127.0.0.1:8643`, only `web` enabled.
 
 Build and start the stack:
 
@@ -117,7 +137,7 @@ Local services:
 - Backend: http://localhost:8000
 - Health check: http://localhost:8000/health
 
-The frontend and backend are published on localhost. PostgreSQL and Redis are internal Docker Compose services.
+The frontend, backend, PostgreSQL and Redis are published on localhost only.
 
 To create the first administrator, configure `BOOTSTRAP_ADMIN_TOKEN` in `.env`, start the backend and call:
 
@@ -149,6 +169,12 @@ Run the backend test suite (PostgreSQL test database, fully isolated from dev da
 docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
   sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q"
 ```
+
+The runtime backend image intentionally does not include `pytest`; the command
+above installs dev-only dependencies in a disposable container. Unless
+`TEST_DATABASE_URL` is explicitly set, the test harness creates a unique
+`app_test_<uuid>` database and drops it after the run. Custom test databases
+must keep an `app_test` prefix.
 
 ## 10. Operational cautions
 

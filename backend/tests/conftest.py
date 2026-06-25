@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 from collections.abc import Callable, Generator
 
@@ -10,9 +11,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, insert, select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import Session
 
-from app.core.rate_limit import login_rate_limiter
+from app.core.rate_limit import change_password_rate_limiter, login_rate_limiter
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.session import get_db
@@ -30,32 +32,72 @@ from app.rbac.permissions import ensure_initial_permissions
 from app.users.crud import create_user
 from app.users.models import User
 
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+psycopg://app:app@postgres:5432/app_test",
+_TEST_DATABASE_NAME_RE = re.compile(r"^app_test[A-Za-z0-9_]*$")
+_CONFIGURED_TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
+
+
+def _default_test_database_url() -> str:
+    url = make_url("postgresql+psycopg://app:app@127.0.0.1:5432/app")
+    return url.set(database=f"app_test_{uuid.uuid4().hex}").render_as_string(
+        hide_password=False
+    )
+
+
+TEST_DATABASE_URL = _CONFIGURED_TEST_DATABASE_URL or _default_test_database_url()
+_TEST_DATABASE_URL = make_url(TEST_DATABASE_URL)
+TEST_DATABASE_NAME = _TEST_DATABASE_URL.database or ""
+SERVER_DATABASE_URL = _TEST_DATABASE_URL.set(database="app").render_as_string(
+    hide_password=False
 )
-TEST_DATABASE_NAME = TEST_DATABASE_URL.rsplit("/", 1)[1]
+DROP_TEST_DATABASE = _CONFIGURED_TEST_DATABASE_URL is None
+
+
+def _validate_test_database_name() -> None:
+    if not _TEST_DATABASE_NAME_RE.fullmatch(TEST_DATABASE_NAME):
+        raise RuntimeError(
+            "TEST_DATABASE_URL must point to an app_test-prefixed database "
+            "containing only letters, numbers and underscores."
+        )
+
+
+def _quoted_database_name() -> str:
+    _validate_test_database_name()
+    return f'"{TEST_DATABASE_NAME}"'
 
 
 @pytest.fixture(scope="session")
 def engine() -> Generator[Engine, None, None]:
-    server_url = TEST_DATABASE_URL.rsplit("/", 1)[0] + "/app"
-    server_engine = create_engine(server_url, isolation_level="AUTOCOMMIT")
+    server_engine = create_engine(SERVER_DATABASE_URL, isolation_level="AUTOCOMMIT")
     with server_engine.connect() as connection:
         exists = connection.execute(
             text("SELECT 1 FROM pg_database WHERE datname = :name"),
             {"name": TEST_DATABASE_NAME},
         ).scalar()
         if not exists:
-            connection.execute(text(f'CREATE DATABASE "{TEST_DATABASE_NAME}"'))
+            connection.execute(text(f"CREATE DATABASE {_quoted_database_name()}"))
     server_engine.dispose()
 
     engine = create_engine(TEST_DATABASE_URL)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
-    yield engine
-    Base.metadata.drop_all(engine)
-    engine.dispose()
+    try:
+        yield engine
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+        if DROP_TEST_DATABASE:
+            server_engine = create_engine(
+                SERVER_DATABASE_URL,
+                isolation_level="AUTOCOMMIT",
+            )
+            with server_engine.connect() as connection:
+                connection.execute(
+                    text(
+                        "DROP DATABASE IF EXISTS "
+                        f"{_quoted_database_name()} WITH (FORCE)"
+                    )
+                )
+            server_engine.dispose()
 
 
 @pytest.fixture()
@@ -82,8 +124,9 @@ def db(engine: Engine) -> Generator[Session, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def reset_login_rate_limiter() -> Generator[None, None, None]:
+def reset_rate_limiters() -> Generator[None, None, None]:
     login_rate_limiter.reset()
+    change_password_rate_limiter.reset()
     yield
 
 

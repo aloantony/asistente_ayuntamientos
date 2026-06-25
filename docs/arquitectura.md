@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-06-12.
+Actualizado: 2026-06-15.
 
 ## Visión general
 
@@ -22,7 +22,7 @@ La distinción central del dominio:
 
 ## Control de acceso
 
-- Autenticación: JWT HS256 de acceso (60 min) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id; cambio self-service (`POST /auth/change-password`) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios). Rate limiting en memoria en el login.
+- Autenticación: JWT HS256 de acceso (60 min, con `iat`) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia y exige sesión); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id, nunca recortadas; cambio self-service (`POST /auth/change-password`, reemite la cookie) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios); ambos revocan los tokens emitidos antes (`iat` vs `users.password_changed_at`, ADR-015). Rate limiting en memoria por cliente+cuenta en login y cambio de contraseña: solo los intentos fallidos consumen cupo.
 - Autorización: cadena RBAC usuario → grupo → rol → permiso. Los permisos de un grupo solo cuentan si el usuario es además miembro de la organización del grupo, lo que hace el modelo consciente del tenant.
 - `is_superuser` puentea todos los chequeos. Conceder o retirar superusuario es operación de superusuarios.
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
@@ -39,8 +39,9 @@ La distinción central del dominio:
 ## IA (dirección)
 
 - La IA es central en la dirección del producto pero siempre supervisada: asiste, estructura y propone; no decide.
-- Toda llamada a APIs externas de IA pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (modelo, tokens), nunca contenido.
-- Primera pieza implementada: el agente conversacional de intake de requisitos (`app/assistant/`). Bucle síncrono de tool-use contra la API de Claude (modelo configurable, por defecto `claude-opus-4-8`); las herramientas del agente ejecutan las mismas validaciones RBAC que las rutas REST, los requisitos se crean siempre como borrador con `source_type=conversation`, y cada mensaje del asistente guarda un rastro JSON de las herramientas ejecutadas. Conversaciones y mensajes persisten en PostgreSQL y son privados de su autor. Sin `ANTHROPIC_API_KEY` el módulo queda deshabilitado (503).
+- Toda llamada a APIs externas de IA o a un runtime privado de agentes pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación, memoria institucional aprobada y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (runtime, modelo, tokens), nunca contenido.
+- Primera pieza implementada: el asistente conversacional (`app/assistant/`) con registro declarativo de agentes (`requirements_intake` y `consultation`) y catálogo backend de herramientas. Cada turno selecciona un agente; si `ASSISTANT_PLANNER_RUNTIME=hermes_agent`, Hermes Agent puede actuar como planner/router privado, pero solo propone el agente. El backend filtra las herramientas permitidas por agente, ejecuta los mismos chequeos RBAC que las rutas REST y persiste `agent_key`, `routing` y el rastro JSON de herramientas. El bucle síncrono de tool-use usa el runtime configurado (`ASSISTANT_RUNTIME=anthropic` o `ASSISTANT_RUNTIME=hermes_agent`). En modo Hermes Agent, el backend llama al API Server privado compatible con OpenAI; Hermes Agent actúa como aplicación/runtime o planner, no como base de datos de memoria ni como autoridad de permisos. Los requisitos se crean siempre como borrador con `source_type=conversation`. Conversaciones y mensajes persisten en PostgreSQL y son privados de su autor. Sin configuración completa del runtime seleccionado, el módulo queda deshabilitado (503).
+- Memoria institucional controlada: el asistente puede proponer entradas (`assistant.memory.propose`), pero solo quedan reutilizables tras aprobación humana (`assistant.memory.review`). La reutilización exige `assistant.memory.view` en la organización y solo inyecta entradas `approved` como contexto delimitado.
 
 ## Frontend
 
@@ -58,8 +59,8 @@ La distinción central del dominio:
 
 ## Carencias conocidas (deuda aceptada conscientemente)
 
-- Sin refresh tokens ni revocación server-side del JWT (la cookie expira a los 60 min).
-- El rate limiter del login es por proceso; al pasar a varios workers debe moverse a Redis.
+- Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
+- Los rate limiters (login, cambio de contraseña) son por proceso; al pasar a varios workers deben moverse a Redis (y valorar entonces un límite secundario por cuenta frente a password spraying, ADR-015).
 - El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
 - Sin pipeline de CI; validación local según README §9.
 - Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.

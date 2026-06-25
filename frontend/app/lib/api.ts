@@ -13,9 +13,41 @@ export class ApiRequestError extends Error {
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+function translateProviderError(detail: string) {
+  const normalized = detail.toLowerCase();
+
+  if (
+    normalized.includes("http 429") ||
+    normalized.includes("usage limit") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("quota") ||
+    normalized.includes("insufficient_quota")
+  ) {
+    return "No se ha podido obtener respuesta porque se ha alcanzado el límite de uso del proveedor. Inténtalo de nuevo más tarde.";
+  }
+
+  if (
+    normalized.includes("api call failed") ||
+    (normalized.includes("after ") && normalized.includes(" retries")) ||
+    normalized.includes("runtime error") ||
+    normalized.includes("provider error")
+  ) {
+    return "El asistente no ha podido obtener respuesta del proveedor. Inténtalo de nuevo más tarde.";
+  }
+
+  return null;
+}
+
 function translateApiDetail(detail: string, fallback: string) {
   if (detail.startsWith("Permission required:")) {
     return "No tienes el permiso necesario para esta acción.";
+  }
+
+  const providerError = translateProviderError(detail);
+  if (providerError) {
+    console.warn("Assistant provider error hidden from user:", detail);
+    return providerError;
   }
 
   switch (detail) {
@@ -25,6 +57,8 @@ function translateApiDetail(detail: string, fallback: string) {
       return "La contraseña actual no es correcta.";
     case "Too many login attempts":
       return "Demasiados intentos de inicio de sesión. Espera un minuto e inténtalo de nuevo.";
+    case "Too many password attempts":
+      return "Demasiados intentos de contraseña. Espera un minuto e inténtalo de nuevo.";
     case "Only superusers can reset a superuser password":
       return "Solo un superusuario puede restablecer la contraseña de un superusuario.";
     case "Inactive user":
@@ -66,15 +100,15 @@ function translateApiDetail(detail: string, fallback: string) {
     case "Document project organization mismatch":
       return "El documento no coincide con la organización del proyecto.";
     case "Requirement not found":
-      return "No se encontró el requisito indicado.";
+      return "No se encontró la necesidad indicada.";
     case "Requirement message not found":
-      return "No se encontró el mensaje del requisito.";
+      return "No se encontró el mensaje de la necesidad.";
     case "Requirement access denied":
-      return "No tienes acceso a ese requisito.";
+      return "No tienes acceso a esa necesidad.";
     case "Requirement status does not allow content edits":
-      return "El estado del requisito no permite editar su contenido.";
+      return "El estado de la necesidad no permite editar su contenido.";
     case "Project does not belong to the requirement organization":
-      return "El proyecto no pertenece a la organización del requisito.";
+      return "El proyecto no pertenece a la organización de la necesidad.";
     case "Organization not found":
       return "No se encontró la organización indicada.";
     case "Organization access denied":
@@ -89,6 +123,26 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró la ordenanza indicada.";
     case "Required ordinance fields cannot be null":
       return "Los campos obligatorios de la ordenanza no pueden estar vacíos.";
+    case "Official legal source not found":
+      return "No se encontró la fuente oficial.";
+    case "Import job needs seed URLs or search query with municipalities":
+      return "La importación necesita URLs semilla o una búsqueda con municipios.";
+    case "Import job needs active official sources":
+      return "La importación necesita fuentes oficiales activas.";
+    case "Import source URL is not official":
+      return "La URL no pertenece a una fuente oficial permitida.";
+    case "Ordinance import job not found":
+      return "No se encontró la importación.";
+    case "Ordinance import item not found":
+      return "No se encontró el elemento importado.";
+    case "Import queue is unavailable":
+      return "La cola de importación no está disponible.";
+    case "Import item has no ordinance":
+      return "El elemento importado no tiene ordenanza asociada.";
+    case "Telegram is not enabled":
+      return "Telegram no está habilitado en este servidor.";
+    case "Invalid Telegram webhook secret":
+      return "El secreto del webhook de Telegram no es válido.";
     case "User does not belong to the group organization":
       return "El usuario no pertenece a la organización del grupo.";
     case "User does not belong to the project organization":
@@ -119,6 +173,14 @@ function translateApiDetail(detail: string, fallback: string) {
       return "La conversación está archivada.";
     case "Conversation not found":
       return "No se encontró la conversación.";
+    case "Assistant memory entry not found":
+      return "No se encontró la entrada de memoria.";
+    case "Transversal feature not found":
+      return "No se encontró la funcionalidad transversal.";
+    case "Transversal feature adoption not found":
+      return "No se encontró la activación transversal.";
+    case "Transversal feature is not available":
+      return "La funcionalidad transversal no está disponible.";
     default:
       return detail || fallback;
   }

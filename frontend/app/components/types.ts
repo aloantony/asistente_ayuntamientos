@@ -35,6 +35,41 @@ export type OrdinanceStatus =
   | "unknown"
   | "archived";
 
+export type OrdinanceCurationStatus =
+  | "approved"
+  | "pending_review"
+  | "needs_changes"
+  | "rejected";
+
+export type OfficialLegalSourceType =
+  | "boe"
+  | "bop"
+  | "autonomic"
+  | "municipal"
+  | "other";
+
+export type OfficialLegalSourceStatus = "active" | "archived";
+
+export type OrdinanceImportJobStatus =
+  | "draft"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type OrdinanceImportItemStatus =
+  | "discovered"
+  | "fetching"
+  | "extracted"
+  | "pending_review"
+  | "approved"
+  | "rejected"
+  | "duplicate"
+  | "failed";
+
+export type OrdinanceReviewDecision = "approve" | "needs_changes" | "reject";
+
 export type MunicipalityType =
   | "municipality"
   | "minor_local_entity"
@@ -97,6 +132,11 @@ export type Ordinance = {
   publication_date: string | null;
   effective_date: string | null;
   status: OrdinanceStatus;
+  curation_status: OrdinanceCurationStatus;
+  import_job_id: number | null;
+  source_hash: string | null;
+  extraction_status: string;
+  confidence_score: number | null;
   // Only present in the GET /ordinances/{id} detail; list items omit it.
   text_content?: string | null;
   notes: string | null;
@@ -360,9 +400,137 @@ export type OrdinanceEditState = {
   publication_date: string;
   effective_date: string;
   status: OrdinanceStatus;
+  curation_status: OrdinanceCurationStatus;
   text_content: string;
   notes: string;
   legal_review_notes: string;
+};
+
+export type OfficialLegalSource = {
+  id: number;
+  name: string;
+  base_url: string;
+  domain: string;
+  source_type: OfficialLegalSourceType;
+  status: OfficialLegalSourceStatus;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OrdinanceImportSourceInput = {
+  url: string;
+  municipality_id: number | null;
+  official_source_id: number | null;
+  title: string | null;
+};
+
+export type OrdinanceReviewChecklistItem = {
+  key: string;
+  label: string;
+  passed: boolean;
+  detail: string | null;
+};
+
+export type OrdinanceReviewReport = {
+  id: number;
+  ordinance_id: number;
+  import_item_id: number | null;
+  status: string;
+  proposed_decision: OrdinanceReviewDecision;
+  confidence_score: number;
+  checklist: OrdinanceReviewChecklistItem[];
+  summary: string | null;
+  doubts: string | null;
+  reviewed_by_agent: boolean;
+  reviewed_by_id: number | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OrdinanceImportItem = {
+  id: number;
+  job_id: number;
+  municipality_id: number | null;
+  official_source_id: number | null;
+  ordinance_id: number | null;
+  source_url: string;
+  source_title: string | null;
+  status: OrdinanceImportItemStatus;
+  source_hash: string | null;
+  extracted_metadata: Record<string, unknown> | null;
+  confidence_score: number | null;
+  error_message: string | null;
+  ordinance: Ordinance | null;
+  review_reports: OrdinanceReviewReport[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type OrdinanceImportJob = {
+  id: number;
+  title: string;
+  description: string | null;
+  topic: string | null;
+  subtopic: string | null;
+  search_query: string | null;
+  municipality_ids: number[];
+  official_source_ids: number[];
+  source_urls: OrdinanceImportSourceInput[];
+  review_criteria: string;
+  source_policy: "official_only";
+  status: OrdinanceImportJobStatus;
+  created_by_id: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_message: string | null;
+  item_count: number;
+  items?: OrdinanceImportItem[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type OrdinanceComparisonEntry = {
+  municipality_id: number;
+  municipality_name: string;
+  ordinance_id: number;
+  title: string;
+  topic: string;
+  subtopic: string | null;
+  status: OrdinanceStatus;
+  curation_status: OrdinanceCurationStatus;
+  publication_date: string | null;
+  effective_date: string | null;
+  source_url: string | null;
+  summary: string | null;
+  confidence_score: number | null;
+};
+
+export type OrdinanceComparisonRow = {
+  topic: string;
+  subtopic: string | null;
+  entries: OrdinanceComparisonEntry[];
+};
+
+export type OrdinanceComparison = {
+  municipality_ids: number[];
+  include_pending: boolean;
+  rows: OrdinanceComparisonRow[];
+};
+
+export type TelegramLinkStatus = {
+  linked: boolean;
+  status: string | null;
+  telegram_username: string | null;
+  linked_at: string | null;
+  revoked_at: string | null;
+};
+
+export type TelegramLinkCode = {
+  code: string;
+  expires_at: string;
+  ttl_seconds: number;
 };
 
 export type RoleEditState = {
@@ -504,6 +672,13 @@ export const ORDINANCE_STATUSES: OrdinanceStatus[] = [
   "archived",
 ];
 
+export const ORDINANCE_CURATION_STATUSES: OrdinanceCurationStatus[] = [
+  "approved",
+  "pending_review",
+  "needs_changes",
+  "rejected",
+];
+
 export const MUNICIPALITY_TYPES: MunicipalityType[] = [
   "municipality",
   "minor_local_entity",
@@ -594,6 +769,42 @@ const ORDINANCE_STATUS_LABELS: Record<OrdinanceStatus, string> = {
   archived: "Archivada",
 };
 
+const ORDINANCE_CURATION_STATUS_LABELS: Record<
+  OrdinanceCurationStatus,
+  string
+> = {
+  approved: "Aprobada",
+  pending_review: "Pendiente de revisión",
+  needs_changes: "Necesita cambios",
+  rejected: "Rechazada",
+};
+
+const ORDINANCE_IMPORT_JOB_STATUS_LABELS: Record<
+  OrdinanceImportJobStatus,
+  string
+> = {
+  draft: "Borrador",
+  queued: "En cola",
+  running: "En ejecución",
+  completed: "Completado",
+  failed: "Fallido",
+  cancelled: "Cancelado",
+};
+
+const ORDINANCE_IMPORT_ITEM_STATUS_LABELS: Record<
+  OrdinanceImportItemStatus,
+  string
+> = {
+  discovered: "Descubierta",
+  fetching: "Descargando",
+  extracted: "Extraída",
+  pending_review: "Pendiente de revisión",
+  approved: "Aprobada",
+  rejected: "Rechazada",
+  duplicate: "Duplicada",
+  failed: "Fallida",
+};
+
 const MUNICIPALITY_TYPE_LABELS: Record<MunicipalityType, string> = {
   municipality: "Municipio",
   minor_local_entity: "Entidad local menor",
@@ -675,6 +886,24 @@ export function formatOrdinanceStatus(status: OrdinanceStatus) {
   return ORDINANCE_STATUS_LABELS[status];
 }
 
+export function formatOrdinanceCurationStatus(
+  status: OrdinanceCurationStatus,
+) {
+  return ORDINANCE_CURATION_STATUS_LABELS[status];
+}
+
+export function formatOrdinanceImportJobStatus(
+  status: OrdinanceImportJobStatus,
+) {
+  return ORDINANCE_IMPORT_JOB_STATUS_LABELS[status];
+}
+
+export function formatOrdinanceImportItemStatus(
+  status: OrdinanceImportItemStatus,
+) {
+  return ORDINANCE_IMPORT_ITEM_STATUS_LABELS[status];
+}
+
 export function formatMunicipalityType(municipalityType: MunicipalityType) {
   return MUNICIPALITY_TYPE_LABELS[municipalityType];
 }
@@ -685,7 +914,80 @@ export function formatRuralUrbanProfile(profile: RuralUrbanProfile) {
 
 export type AssistantStatus = {
   enabled: boolean;
+  runtime: string;
   model: string;
+  runtime_healthy: boolean | null;
+  planner: AssistantPlannerStatus;
+  agents: AssistantAgent[];
+  tools: AssistantTool[];
+};
+
+export type AssistantPlannerStatus = {
+  runtime: string;
+  enabled: boolean;
+  model: string | null;
+  runtime_healthy: boolean | null;
+};
+
+export type AssistantAgent = {
+  key: string;
+  name: string;
+  description: string;
+  tool_names: string[];
+  required_permission: string;
+};
+
+export type AssistantTool = {
+  name: string;
+  label: string;
+  read_only: boolean;
+  domain: string;
+  required_permission: string | null;
+};
+
+export type AssistantMemoryCategory =
+  | "protocol"
+  | "preference"
+  | "context"
+  | "decision"
+  | "open_question";
+
+export type AssistantMemoryStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "archived"
+  | "blocked";
+
+export type AssistantMemorySensitivity =
+  | "normal"
+  | "personal"
+  | "sensitive"
+  | "legal";
+
+export type AssistantMemoryUser = {
+  id: number;
+  email: string;
+  full_name: string;
+};
+
+export type AssistantMemoryEntry = {
+  id: number;
+  organization_id: number;
+  category: AssistantMemoryCategory;
+  content: string;
+  status: AssistantMemoryStatus;
+  sensitivity: AssistantMemorySensitivity;
+  source_conversation_id: number | null;
+  source_message_id: number | null;
+  proposed_by_id: number | null;
+  reviewed_by_id: number | null;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  proposed_by: AssistantMemoryUser | null;
+  reviewed_by: AssistantMemoryUser | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type AssistantAction = {
@@ -700,6 +1002,8 @@ export type AssistantMessage = {
   role: "user" | "assistant";
   content: string;
   actions: AssistantAction[];
+  agent_key: string | null;
+  routing: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -718,16 +1022,45 @@ export type AssistantConversationDetail = AssistantConversation & {
 export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
   list_organizations: "Consultar organizaciones",
   list_projects: "Consultar proyectos",
-  list_requirements: "Consultar requisitos",
-  get_requirement: "Leer requisito",
-  create_requirement: "Crear requisito",
-  update_requirement: "Actualizar requisito",
-  add_requirement_message: "Añadir nota a requisito",
+  list_requirements: "Consultar necesidades",
+  get_requirement: "Leer necesidad",
+  create_requirement: "Crear necesidad",
+  update_requirement: "Actualizar necesidad",
+  add_requirement_message: "Añadir nota a necesidad",
+  propose_memory_entry: "Proponer memoria",
+  propose_transversal_feature: "Proponer funcionalidad transversal",
+  list_available_transversal_features: "Consultar funcionalidades disponibles",
+  record_transversal_feature_acceptance: "Registrar activación transversal",
+  web_search: "Buscar en web",
 };
 
-export function formatAssistantTool(tool: string) {
-  return ASSISTANT_TOOL_LABELS[tool] ?? tool;
+export function formatAssistantTool(
+  tool: string,
+  toolLabels?: Record<string, string>,
+) {
+  return toolLabels?.[tool] ?? ASSISTANT_TOOL_LABELS[tool] ?? tool;
 }
+
+export const ASSISTANT_MEMORY_CATEGORY_LABELS: Record<
+  AssistantMemoryCategory,
+  string
+> = {
+  protocol: "Protocolo",
+  preference: "Preferencia",
+  context: "Contexto",
+  decision: "Decisión",
+  open_question: "Duda abierta",
+};
+
+export const ASSISTANT_MEMORY_SENSITIVITY_LABELS: Record<
+  AssistantMemorySensitivity,
+  string
+> = {
+  normal: "Normal",
+  personal: "Personal",
+  sensitive: "Sensible",
+  legal: "Legal",
+};
 
 export function userHasPermission(user: User, permissionCode: string) {
   return (

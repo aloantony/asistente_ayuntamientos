@@ -4,8 +4,25 @@ services:
       context: ./backend
     env_file:
       - .env
-    ports:
-      - "127.0.0.1:8000:8000"
+    network_mode: host
+    command:
+      ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
+    volumes:
+      - document_storage:/var/lib/asistente_ayuntamientos/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    network_mode: host
+    command:
+      ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
     depends_on:
@@ -27,11 +44,13 @@ services:
       - backend
 
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_DB: app
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d app"]
       interval: 5s
@@ -42,6 +61,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
 
 volumes:
   postgres_data:

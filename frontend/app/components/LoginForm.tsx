@@ -22,6 +22,23 @@ export function LoginForm({
   return (
     <main className="page">
       <section className="panel">
+        <div className="login-brand">
+          <span className="app-brand-star" aria-hidden="true">
+            <svg
+              fill="none"
+              height="20"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="1.7"
+              viewBox="0 0 24 24"
+              width="20"
+            >
+              <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
+            </svg>
+          </span>
+          <span className="login-brand-name">Asistente Bral</span>
+        </div>
         <p className="eyebrow">Plataforma privada municipal</p>
         <h1>Iniciar sesión</h1>
 

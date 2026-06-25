@@ -4,6 +4,10 @@ import { useRef, useState } from "react";
 import type {
   AssistantConversation,
   AssistantConversationDetail,
+  AssistantMemoryCategory,
+  AssistantMemoryEntry,
+  AssistantMemorySensitivity,
+  AssistantMemoryStatus,
   AssistantStatus,
 } from "../components/types";
 import { adminRequest } from "./api";
@@ -19,12 +23,6 @@ type UseAssistantControllerArgs = {
   handleRequestError: RequestErrorHandler;
   onRequirementsChanged?: () => void;
 };
-
-const MUTATING_TOOLS = new Set([
-  "create_requirement",
-  "update_requirement",
-  "add_requirement_message",
-]);
 
 function toSummary(detail: AssistantConversationDetail): AssistantConversation {
   return {
@@ -44,6 +42,9 @@ export function useAssistantController({
   const [assistantStatus, setAssistantStatus] =
     useState<AssistantStatus | null>(null);
   const [conversations, setConversations] = useState<AssistantConversation[]>(
+    [],
+  );
+  const [memoryEntries, setMemoryEntries] = useState<AssistantMemoryEntry[]>(
     [],
   );
   const [selectedConversation, setSelectedConversation] =
@@ -68,6 +69,7 @@ export function useAssistantController({
   function clearAssistantState() {
     setAssistantStatus(null);
     setConversations([]);
+    setMemoryEntries([]);
     applySelectedConversation(null);
     setDraftMessage("");
     setIncludeArchivedConversations(false);
@@ -87,7 +89,7 @@ export function useAssistantController({
       const conversationsPath = includeArchived
         ? "/assistant/conversations?include_archived=true"
         : "/assistant/conversations";
-      const [status, conversationList] = await Promise.all([
+      const [status, conversationList, pendingMemory] = await Promise.all([
         adminRequest<AssistantStatus>(
           "/assistant/status",
           token,
@@ -98,9 +100,15 @@ export function useAssistantController({
           token,
           "No se pudieron cargar las conversaciones.",
         ),
+        adminRequest<AssistantMemoryEntry[]>(
+          "/assistant/memory?status=proposed",
+          token,
+          "No se pudieron cargar las propuestas de memoria.",
+        ),
       ]);
       setAssistantStatus(status);
       setConversations(conversationList);
+      setMemoryEntries(pendingMemory);
     } catch (requestError) {
       handleRequestError(
         requestError,
@@ -192,6 +200,8 @@ export function useAssistantController({
                 role: "user",
                 content,
                 actions: [],
+                agent_key: null,
+                routing: null,
                 created_at: new Date().toISOString(),
               },
             ],
@@ -217,9 +227,14 @@ export function useAssistantController({
         ...existing.filter((conversation) => conversation.id !== detail.id),
       ]);
 
+      const mutatingTools = new Set(
+        assistantStatus?.tools
+          .filter((tool) => !tool.read_only)
+          .map((tool) => tool.name) ?? [],
+      );
       const hasMutatingAction = detail.messages.some((message) =>
         message.actions.some(
-          (action) => action.ok && MUTATING_TOOLS.has(action.tool),
+          (action) => action.ok && mutatingTools.has(action.tool),
         ),
       );
       if (hasMutatingAction) {
@@ -309,9 +324,58 @@ export function useAssistantController({
     }
   }
 
+  async function loadMemoryEntries(status: AssistantMemoryStatus = "proposed") {
+    setAssistantError("");
+
+    try {
+      const entries = await adminRequest<AssistantMemoryEntry[]>(
+        `/assistant/memory?status=${status}`,
+        getStoredToken(),
+        "No se pudieron cargar las propuestas de memoria.",
+      );
+      setMemoryEntries(entries);
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudieron cargar las propuestas de memoria.",
+      );
+    }
+  }
+
+  async function updateMemoryEntry(
+    entryId: number,
+    updates: {
+      category?: AssistantMemoryCategory;
+      content?: string;
+      status?: AssistantMemoryStatus;
+      sensitivity?: AssistantMemorySensitivity;
+      review_notes?: string;
+    },
+  ) {
+    setAssistantError("");
+
+    try {
+      await adminRequest<AssistantMemoryEntry>(
+        `/assistant/memory/${entryId}`,
+        getStoredToken(),
+        "No se pudo actualizar la memoria.",
+        { method: "PATCH", body: JSON.stringify(updates) },
+      );
+      await loadMemoryEntries();
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo actualizar la memoria.",
+      );
+    }
+  }
+
   return {
     assistantStatus,
     conversations,
+    memoryEntries,
     selectedConversation,
     draftMessage,
     includeArchivedConversations,
@@ -320,6 +384,7 @@ export function useAssistantController({
     assistantError,
     setDraftMessage,
     loadAssistant,
+    loadMemoryEntries,
     toggleIncludeArchivedConversations,
     selectConversation,
     deselectConversation,
@@ -327,6 +392,7 @@ export function useAssistantController({
     sendMessage,
     archiveConversation,
     restoreConversation,
+    updateMemoryEntry,
     clearAssistantState,
   };
 }
