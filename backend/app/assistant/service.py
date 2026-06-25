@@ -892,6 +892,19 @@ def extract_proposed_requirement_draft_from_text(text: str) -> dict:
     return {key: value for key, value in draft.items() if value}
 
 
+def extract_recent_proposed_requirement_draft(
+    conversation: AssistantConversation,
+) -> dict:
+    for message in reversed(conversation.messages[-8:]):
+        if message.role != "assistant" or not message.content:
+            continue
+        draft = extract_proposed_requirement_draft_from_text(message.content)
+        if requirement_draft_is_complete(draft):
+            return draft
+    return {}
+
+
+
 def update_pending_work_from_assistant_reply(
     conversation: AssistantConversation,
     organizations: list[Organization],
@@ -1553,6 +1566,22 @@ def try_handle_direct_turn(
                 agent_key="requirements_intake",
                 content="De acuerdo, no guardo la necesidad propuesta.",
                 reason="pending_work_create_requirement_cancelled",
+            )
+
+    if pending_work is None and accepts_proposed_requirement_draft(user_text):
+        legacy_draft = extract_recent_proposed_requirement_draft(conversation)
+        if requirement_draft_is_complete(legacy_draft) and selected_organization is not None:
+            record_selected_organization(state, selected_organization)
+            return handle_direct_create_requirement(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                selected_organization,
+                legacy_draft,
+                reason="legacy_proposal_create_requirement_confirmed",
             )
 
     if pending_type == "list_requirements":

@@ -874,6 +874,107 @@ def test_direct_create_another_need_collects_org_and_content(
     assert gateway.calls == []
 
 
+def test_confirming_exact_generic_map_proposal_creates_draft_deterministically(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Default organization")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.create", "requirements.view"],
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "stop",
+                    [
+                        text_block(
+                            "Claro. ¿Para qué organización quieres plantearlo?\n\n"
+                            "Y para entenderlo bien: ¿qué tipo de información queréis guardar en el mapa?"
+                        )
+                    ],
+                ),
+                fake_response(
+                    "stop",
+                    [
+                        text_block(
+                            "De acuerdo, lo planteamos en “Default organization” salvo que luego me digas otra.\n\n"
+                            "Para poder guardarlo como requisito necesito concretar un poco:\n"
+                            "¿Qué problema queréis resolver hoy con ese mapa?"
+                        )
+                    ],
+                ),
+                fake_response(
+                    "stop",
+                    [
+                        text_block(
+                            "Puedo prepararlo como requisito genérico, pero necesito tu OK sobre este enfoque:\n\n"
+                            "Título: “Gestión de información municipal desde un mapa”\n"
+                            "Problema: “El ayuntamiento necesita registrar, consultar y actualizar información geolocalizada en un mapa para facilitar su gestión diaria.”\n\n"
+                            "¿Te vale así como borrador para la organización “Default organization”?"
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    first = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "quiero que podamos guardar y gestionar desde un mapa información"},
+        headers=headers_for(user),
+    )
+    organization_reply = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "cualquiera"},
+        headers=headers_for(user),
+    )
+    proposal = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "cualquiera"},
+        headers=headers_for(user),
+    )
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
+
+    assert first.status_code == 200
+    assert organization_reply.status_code == 200
+    assert proposal.status_code == 200
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(
+            Requirement.title == "Gestión de información municipal desde un mapa"
+        )
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert requirement.status == "draft"
+    assert "información geolocalizada" in requirement.problem
+    assert len(gateway.calls) == 3
+
+
+
 def test_confirming_gateway_proposed_need_creates_draft_deterministically(
     client,
     db,
@@ -971,6 +1072,75 @@ def test_confirming_gateway_proposed_need_creates_draft_deterministically(
     assert requirement.status == "draft"
     assert "centralizar en un mapa" in requirement.problem
     assert len(gateway.calls) == 2
+
+
+def test_affirmative_after_legacy_unpersisted_proposal_recovers_and_creates_draft(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Default organization")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.create", "requirements.view"],
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation_response = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    )
+    conversation = conversation_response.json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {"selected_organization_id": organization.id},
+        ensure_ascii=False,
+    )
+    db.add(
+        AssistantMessage(
+            conversation_id=stored_conversation.id,
+            role="assistant",
+            agent_key="requirements_intake",
+            content=(
+                "Puedo prepararlo como requisito genérico, pero necesito tu OK sobre este enfoque:\n\n"
+                "Título: “Gestión de información municipal desde un mapa”\n"
+                "Problema: “El ayuntamiento necesita registrar, consultar y actualizar información geolocalizada en un mapa para facilitar su gestión diaria.”\n\n"
+                "¿Te vale así como borrador para la organización “Default organization”?"
+            ),
+        )
+    )
+    db.commit()
+
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
+
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "legacy_proposal_create_requirement_confirmed"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(
+            Requirement.title == "Gestión de información municipal desde un mapa"
+        )
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert "información geolocalizada" in requirement.problem
+    assert gateway.calls == []
+
 
 
 def test_confirming_pending_work_creates_need_without_reparsing_assistant_text(
