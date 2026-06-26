@@ -404,6 +404,16 @@ class OrdinanceCoverageMunicipalityRead(BaseModel):
     ready_for_assistant: bool
 
 
+class OrdinanceImportFailureRead(BaseModel):
+    item_id: int
+    job_id: int
+    municipality_id: int | None
+    municipality_name: str | None
+    source_url: str
+    error_message: str | None
+    requires_manual_review: bool
+
+
 class OrdinanceCoverageRead(BaseModel):
     province: str
     municipalities_total: int
@@ -415,4 +425,22 @@ class OrdinanceCoverageRead(BaseModel):
     chunks_ready: int
     chunks_approved: int
     chunks_failed: int
+    import_failures_total: int
+    import_failures: list[OrdinanceImportFailureRead]
     municipalities: list[OrdinanceCoverageMunicipalityRead]
+
+
+class OrdinanceFailedEmbeddingRead(BaseModel):
+    chunk_id: int
+    ordinance_id: int
+    municipality_name: str
+    citation: str | None
+    embedding_status: OrdinanceEmbeddingStatus
+
+
+class OrdinanceEmbeddingRetryRead(BaseModel):
+    province: str
+    retried: int
+    restored: int
+    failed: int
+    still_failed: list[OrdinanceFailedEmbeddingRead]

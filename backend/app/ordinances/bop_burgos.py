@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from html import unescape
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.municipalities.models import Municipality
-from app.ordinances.models import Ordinance, OrdinanceLegalChunk
+from app.ordinances.embeddings import EmbeddingsUnavailableError, embed_text
+from app.ordinances.models import Ordinance, OrdinanceImportItem, OrdinanceLegalChunk
 
 BOP_BURGOS_BASE_URL = "http://bopbur.diputaciondeburgos.es"
 BOP_BURGOS_DOMAIN = "bopbur.diputaciondeburgos.es"
@@ -149,6 +151,7 @@ def build_burgos_coverage_report(db: Session) -> dict:
         }
         for row in rows
     ]
+    import_failures = _burgos_import_failures(db)
     return {
         "province": BOP_BURGOS_PROVINCE,
         "municipalities_total": len(municipalities),
@@ -164,8 +167,107 @@ def build_burgos_coverage_report(db: Session) -> dict:
         "chunks_ready": sum(row["chunks_ready"] for row in municipalities),
         "chunks_approved": sum(row["chunks_approved"] for row in municipalities),
         "chunks_failed": sum(row["chunks_failed"] for row in municipalities),
+        "import_failures_total": len(import_failures),
+        "import_failures": import_failures,
         "municipalities": municipalities,
     }
+
+
+def retry_failed_burgos_embeddings(db: Session) -> dict:
+    """Retry failed embeddings for Burgos legal chunks."""
+
+    chunks = list(
+        db.scalars(
+            select(OrdinanceLegalChunk)
+            .join(OrdinanceLegalChunk.ordinance)
+            .join(Ordinance.municipality)
+            .options(
+                selectinload(OrdinanceLegalChunk.ordinance).selectinload(
+                    Ordinance.municipality
+                )
+            )
+            .where(
+                Municipality.province.ilike(BOP_BURGOS_PROVINCE),
+                OrdinanceLegalChunk.embedding_status == "failed",
+            )
+            .order_by(OrdinanceLegalChunk.id)
+        )
+    )
+    retried = 0
+    restored = 0
+    still_failed: list[dict] = []
+    for chunk in chunks:
+        retried += 1
+        try:
+            embedding, embedding_model, embedding_status = embed_text(chunk.text)
+        except EmbeddingsUnavailableError:
+            embedding = None
+            embedding_model = None
+            embedding_status = "failed"
+        chunk.embedding = embedding
+        if embedding_model:
+            chunk.embedding_model = embedding_model
+        chunk.embedding_status = embedding_status
+        chunk.embedded_at = datetime.now(UTC) if embedding_status == "ready" else None
+        if embedding_status == "ready":
+            restored += 1
+            continue
+        still_failed.append(_summarize_failed_chunk(chunk))
+    db.commit()
+    return {
+        "province": BOP_BURGOS_PROVINCE,
+        "retried": retried,
+        "restored": restored,
+        "failed": len(still_failed),
+        "still_failed": still_failed,
+    }
+
+
+def _burgos_import_failures(db: Session) -> list[dict]:
+    items = db.scalars(
+        select(OrdinanceImportItem)
+        .options(selectinload(OrdinanceImportItem.municipality))
+        .where(OrdinanceImportItem.status == "failed")
+        .order_by(OrdinanceImportItem.updated_at.desc(), OrdinanceImportItem.id.desc())
+    )
+    failures = []
+    for item in items:
+        host = (urlparse.urlparse(item.source_url).hostname or "").lower()
+        is_burgos_municipality = bool(
+            item.municipality
+            and item.municipality.province.lower() == BOP_BURGOS_PROVINCE.lower()
+        )
+        if host != BOP_BURGOS_DOMAIN and not is_burgos_municipality:
+            continue
+        failures.append(
+            {
+                "item_id": item.id,
+                "job_id": item.job_id,
+                "municipality_id": item.municipality_id,
+                "municipality_name": item.municipality.name if item.municipality else None,
+                "source_url": item.source_url,
+                "error_message": item.error_message,
+                "requires_manual_review": _requires_manual_review(item.error_message),
+            }
+        )
+    return failures
+
+
+def _summarize_failed_chunk(chunk: OrdinanceLegalChunk) -> dict:
+    return {
+        "chunk_id": chunk.id,
+        "ordinance_id": chunk.ordinance_id,
+        "municipality_name": chunk.ordinance.municipality.name,
+        "citation": chunk.citation,
+        "embedding_status": chunk.embedding_status,
+    }
+
+
+def _requires_manual_review(error_message: str | None) -> bool:
+    if not error_message:
+        return False
+    normalized = error_message.lower()
+    return any(marker in normalized for marker in ("ocr", "revisión manual", "texto suficiente"))
 
 
 def _parse_announcement(

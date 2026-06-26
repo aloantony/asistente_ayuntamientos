@@ -21,7 +21,10 @@ from app.db.session import get_db
 from app.documents.access import user_can_access_document
 from app.documents.models import Document
 from app.municipalities.models import Municipality
-from app.ordinances.bop_burgos import build_burgos_coverage_report
+from app.ordinances.bop_burgos import (
+    build_burgos_coverage_report,
+    retry_failed_burgos_embeddings,
+)
 from app.ordinances.embeddings import embed_text, vector_similarity
 from app.ordinances.import_service import run_import_job
 from app.ordinances.models import (
@@ -39,6 +42,7 @@ from app.ordinances.schemas import (
     OrdinanceComparisonRead,
     OrdinanceCoverageRead,
     OrdinanceCreate,
+    OrdinanceEmbeddingRetryRead,
     OrdinanceImportEnqueueRead,
     OrdinanceImportItemRead,
     OrdinanceImportItemReviewUpdate,
@@ -155,6 +159,18 @@ def get_burgos_coverage(
 ) -> dict:
     require_ordinance_permission(db, current_user, "ordinances.view")
     return build_burgos_coverage_report(db)
+
+
+@router.post(
+    "/coverage/burgos/retry-embeddings",
+    response_model=OrdinanceEmbeddingRetryRead,
+)
+def retry_burgos_failed_embeddings(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    return retry_failed_burgos_embeddings(db)
 
 
 @router.get(

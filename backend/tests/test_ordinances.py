@@ -886,4 +886,98 @@ def test_burgos_coverage_endpoint_reports_ready_municipalities(
     assert body["province"] == "Burgos"
     assert body["municipalities_ready_for_assistant"] == 1
     assert body["chunks_ready"] == 1
+    assert body["import_failures_total"] == 0
+    assert body["import_failures"] == []
     assert body["municipalities"][0]["ready_for_assistant"] is True
+
+
+def test_burgos_coverage_reports_failed_imports_requiring_manual_review(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    municipality = create_municipality(
+        client,
+        headers,
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    job = import_service.OrdinanceImportJob(
+        title="Fallo OCR BOPBUR",
+        municipality_ids_json="[]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Fuente oficial BOPBUR.",
+        created_by_id=superuser.id,
+    )
+    db.add(job)
+    db.flush()
+    db.add(
+        import_service.OrdinanceImportItem(
+            job_id=job.id,
+            municipality_id=municipality["id"],
+            source_url="http://bopbur.diputaciondeburgos.es/demo-escaneado.pdf",
+            status="failed",
+            error_message="El PDF no tiene texto extraíble; requiere OCR o revisión manual.",
+        )
+    )
+    db.commit()
+
+    response = client.get("/ordinances/coverage/burgos", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["import_failures_total"] == 1
+    assert body["import_failures"][0]["municipality_name"] == "Cascajares de la Sierra"
+    assert body["import_failures"][0]["requires_manual_review"] is True
+
+
+def test_retry_burgos_failed_embeddings_restores_ready_chunk(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    municipality = create_municipality(
+        client,
+        headers,
+        name="Belorado",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    ordinance = create_ordinance(
+        client,
+        headers,
+        municipality["id"],
+        title="Ordenanza fiscal de agua",
+        topic="agua",
+        curation_status="approved",
+    )
+    chunk = OrdinanceLegalChunk(
+        ordinance_id=ordinance["id"],
+        chunk_index=0,
+        heading="Artículo 1. Objeto",
+        citation="Artículo 1",
+        text="Artículo 1. Objeto. Regula el suministro de agua potable.",
+        source_url="http://bopbur.diputaciondeburgos.es/demo.pdf",
+        source_locator="articulo-1",
+        review_status="approved",
+        embedding_model="local_hash",
+        embedding=None,
+        embedding_status="failed",
+    )
+    db.add(chunk)
+    db.commit()
+
+    response = client.post("/ordinances/coverage/burgos/retry-embeddings", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["retried"] == 1
+    assert body["restored"] == 1
+    assert body["failed"] == 0
+    db.refresh(chunk)
+    assert chunk.embedding_status == "ready"
+    assert chunk.embedding is not None
