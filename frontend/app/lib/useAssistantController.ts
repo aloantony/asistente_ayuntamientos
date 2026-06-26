@@ -324,6 +324,39 @@ export function useAssistantController({
     }
   }
 
+  async function renameConversation(conversationId: number, title: string) {
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle) {
+      return;
+    }
+    setAssistantError("");
+
+    try {
+      const detail = await adminRequest<AssistantConversationDetail>(
+        `/assistant/conversations/${conversationId}`,
+        getStoredToken(),
+        "No se pudo renombrar la conversación.",
+        { method: "PATCH", body: JSON.stringify({ title: normalizedTitle }) },
+      );
+
+      setConversations((existing) =>
+        existing.map((conversation) =>
+          conversation.id === detail.id ? toSummary(detail) : conversation,
+        ),
+      );
+      setSelectedConversation((current) =>
+        current && current.id === detail.id ? detail : current,
+      );
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo renombrar la conversación.",
+      );
+      throw requestError;
+    }
+  }
+
   async function loadMemoryEntries(status: AssistantMemoryStatus = "proposed") {
     setAssistantError("");
 
@@ -392,6 +425,7 @@ export function useAssistantController({
     sendMessage,
     archiveConversation,
     restoreConversation,
+    renameConversation,
     updateMemoryEntry,
     clearAssistantState,
   };

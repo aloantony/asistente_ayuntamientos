@@ -101,31 +101,6 @@ type NavItem = {
 
 type NavGroup = { label: string; items: NavItem[] };
 
-// Migaja + título de la barra superior según la ruta activa (mismas etiquetas
-// que el menú lateral). Las páginas mantienen su propia cabecera; la barra solo
-// da contexto de ubicación.
-function pageMetaFor(pathname: string): { crumb: string; title: string } {
-  if (pathname === "/") {
-    return { crumb: "Trabajo", title: "Inicio" };
-  }
-  if (pathname.startsWith("/asistente")) {
-    return { crumb: "Inteligencia", title: "Bral" };
-  }
-  if (pathname.startsWith("/requisitos")) {
-    return { crumb: "Trabajo", title: "Necesidades" };
-  }
-  if (pathname.startsWith("/proyectos")) {
-    return { crumb: "Trabajo", title: "Proyectos" };
-  }
-  if (pathname.startsWith("/admin")) {
-    return { crumb: "Gestión", title: "Administración" };
-  }
-  if (pathname.startsWith("/cuenta")) {
-    return { crumb: "Cuenta", title: "Mi cuenta" };
-  }
-  return { crumb: "Asistente Bral", title: "" };
-}
-
 // El tema (claro/oscuro) lo aplica el script anti-parpadeo del layout raíz
 // añadiendo la clase .dark a <html>; aquí sólo leemos ese estado tras montar
 // (para no romper la hidratación) y lo alternamos, persistiéndolo en
@@ -151,6 +126,18 @@ function useDarkMode() {
   }, []);
 
   return { dark, toggle };
+}
+
+function getUserInitials(fullName: string) {
+  const initials = fullName
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+
+  return initials || "U";
 }
 
 export default function AppLayout({
@@ -252,6 +239,11 @@ export default function AppLayout({
   }
 
   const canUseAssistant = userHasPermission(user, "assistant.use");
+  const brandName =
+    user.organizations?.[0]?.municipality?.name ??
+    user.organizations?.[0]?.name ??
+    "Bral";
+  const userInitials = getUserInitials(user.full_name);
 
   const navGroups: NavGroup[] = [
     {
@@ -278,7 +270,7 @@ export default function AppLayout({
             items: [
               {
                 href: "/asistente",
-                label: "Bral",
+                label: "Anacleto",
                 icon: "bral" as const,
                 beta: true,
               },
@@ -316,8 +308,6 @@ export default function AppLayout({
     setTopbarAsk("");
   }
 
-  const pageMeta = pageMetaFor(pathname);
-
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
@@ -336,7 +326,9 @@ export default function AppLayout({
               <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
             </svg>
           </span>
-          <span className="app-brand-name">Asistente Bral</span>
+          <span className="app-brand-name" title={brandName}>
+            {brandName}
+          </span>
         </div>
         <button
           aria-expanded={isMenuOpen}
@@ -428,12 +420,6 @@ export default function AppLayout({
       </aside>
       <div className="app-main">
         <header className="app-topbar">
-          <div className="app-topbar-titles">
-            <span className="app-topbar-crumb">{pageMeta.crumb}</span>
-            {pageMeta.title ? (
-              <span className="app-topbar-title">{pageMeta.title}</span>
-            ) : null}
-          </div>
           {canUseAssistant ? (
             <form className="app-topbar-search" onSubmit={handleTopbarAsk}>
               <svg
@@ -458,66 +444,78 @@ export default function AppLayout({
               />
             </form>
           ) : null}
-          <button
-            aria-pressed={dark}
-            className="app-topbar-theme"
-            onClick={toggleTheme}
-            title="Cambiar tema"
-            type="button"
-          >
-            {dark ? (
-              <svg
-                aria-hidden="true"
-                fill="none"
-                height="17"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="1.6"
-                viewBox="0 0 24 24"
-                width="17"
-              >
-                <circle cx="12" cy="12" r="4" />
-                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-              </svg>
-            ) : (
-              <svg
-                aria-hidden="true"
-                fill="none"
-                height="17"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="1.6"
-                viewBox="0 0 24 24"
-                width="17"
-              >
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
-            )}
-          </button>
-          {canUseAssistant ? (
+          <div className="app-topbar-actions">
             <button
-              className="app-topbar-bral"
-              onClick={() => router.push("/asistente")}
+              aria-pressed={dark}
+              className="app-topbar-theme"
+              onClick={toggleTheme}
+              title="Cambiar tema"
               type="button"
             >
-              <svg
-                aria-hidden="true"
-                fill="none"
-                height="15"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="1.7"
-                viewBox="0 0 24 24"
-                width="15"
-              >
-                <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
-              </svg>
-              Bral
+              {dark ? (
+                <svg
+                  aria-hidden="true"
+                  fill="none"
+                  height="17"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="1.6"
+                  viewBox="0 0 24 24"
+                  width="17"
+                >
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                </svg>
+              ) : (
+                <svg
+                  aria-hidden="true"
+                  fill="none"
+                  height="17"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="1.6"
+                  viewBox="0 0 24 24"
+                  width="17"
+                >
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+              )}
             </button>
-          ) : null}
+            {canUseAssistant ? (
+              <button
+                aria-label="Abrir asistente"
+                className="app-topbar-bral"
+                onClick={() => router.push("/asistente")}
+                title="Abrir asistente"
+                type="button"
+              >
+                <svg
+                  aria-hidden="true"
+                  fill="none"
+                  height="15"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="1.7"
+                  viewBox="0 0 24 24"
+                  width="15"
+                >
+                  <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
+                </svg>
+              </button>
+            ) : null}
+            <button
+              aria-label="Abrir mi cuenta"
+              className="app-topbar-user"
+              onClick={() => router.push("/cuenta")}
+              title={user.full_name}
+              type="button"
+            >
+              {userInitials}
+            </button>
+          </div>
         </header>
         <main className="app-content">{children}</main>
       </div>

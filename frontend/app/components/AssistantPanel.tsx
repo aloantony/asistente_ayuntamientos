@@ -7,6 +7,7 @@ import {
   ChevronDown,
   CircleAlert,
   Clock3,
+  Copy,
   Database,
   FileText,
   Globe2,
@@ -107,6 +108,7 @@ type AssistantPanelProps = {
   onSendMessage: () => void;
   onArchiveConversation: (conversationId: number) => void;
   onRestoreConversation: (conversationId: number) => void;
+  onRenameConversation: (conversationId: number, title: string) => Promise<void>;
   onIncludeArchivedConversationsChange: (includeArchived: boolean) => void;
   onUpdateMemoryEntry: (
     entryId: number,
@@ -143,6 +145,13 @@ const MEMORY_PERMISSIONS = [
   "assistant.memory.propose",
   "assistant.memory.view",
   "assistant.memory.review",
+];
+
+// Sugerencias rápidas del compositor: sólo prerrellenan el borrador, no envían.
+const SUGGESTED_PROMPTS = [
+  "Preparar un resumen ejecutivo",
+  "Comparar dos ordenanzas",
+  "Ordenar mis notas de trabajo",
 ];
 
 function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
@@ -601,6 +610,7 @@ export function AssistantPanel({
   onSendMessage,
   onArchiveConversation,
   onRestoreConversation,
+  onRenameConversation,
   onIncludeArchivedConversationsChange,
   onUpdateMemoryEntry,
 }: AssistantPanelProps) {
@@ -630,9 +640,15 @@ export function AssistantPanel({
   const [conversationFilter, setConversationFilter] = useState("");
   const [isMemoryOpen, setIsMemoryOpen] = useState(memoryEntries.length > 0);
   const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [editingConversationTitleId, setEditingConversationTitleId] =
+    useState<number | null>(null);
+  const [conversationTitleDraft, setConversationTitleDraft] = useState("");
+  const [isRenamingConversation, setIsRenamingConversation] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const filteredConversations = useMemo(() => {
@@ -658,6 +674,25 @@ export function AssistantPanel({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [selectedConversation?.messages.length, isSendingMessage]);
+
+  useEffect(() => {
+    if (!selectedConversation) {
+      setEditingConversationTitleId(null);
+      setConversationTitleDraft("");
+      return;
+    }
+
+    if (editingConversationTitleId !== selectedConversation.id) {
+      setConversationTitleDraft(selectedConversation.title);
+    }
+  }, [editingConversationTitleId, selectedConversation]);
+
+  useEffect(() => {
+    if (editingConversationTitleId !== null) {
+      titleInputRef.current?.focus({ preventScroll: true });
+      titleInputRef.current?.select();
+    }
+  }, [editingConversationTitleId]);
 
   useEffect(() => {
     if (!selectedConversation || composerDisabled) {
@@ -796,6 +831,79 @@ export function AssistantPanel({
     onSendMessage();
   }
 
+  function startTitleEdit() {
+    if (!selectedConversation || isRenamingConversation) {
+      return;
+    }
+    setConversationTitleDraft(selectedConversation.title);
+    setEditingConversationTitleId(selectedConversation.id);
+  }
+
+  function cancelTitleEdit() {
+    setEditingConversationTitleId(null);
+    setConversationTitleDraft(selectedConversation?.title ?? "");
+  }
+
+  async function submitTitleEdit() {
+    if (!selectedConversation || isRenamingConversation) {
+      return;
+    }
+
+    const nextTitle = conversationTitleDraft.trim();
+    if (!nextTitle) {
+      cancelTitleEdit();
+      return;
+    }
+    if (nextTitle === selectedConversation.title) {
+      setEditingConversationTitleId(null);
+      return;
+    }
+
+    setIsRenamingConversation(true);
+    try {
+      await onRenameConversation(selectedConversation.id, nextTitle);
+      setEditingConversationTitleId(null);
+    } catch {
+      titleInputRef.current?.focus({ preventScroll: true });
+    } finally {
+      setIsRenamingConversation(false);
+    }
+  }
+
+  function handleTitleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void submitTitleEdit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelTitleEdit();
+    }
+  }
+
+  function handleCopyMessage(messageId: number, content: string) {
+    if (!navigator.clipboard) {
+      return;
+    }
+    navigator.clipboard
+      .writeText(content)
+      .then(() => {
+        setCopiedMessageId(messageId);
+        window.setTimeout(() => {
+          setCopiedMessageId((current) =>
+            current === messageId ? null : current,
+          );
+        }, 1500);
+      })
+      .catch(() => undefined);
+  }
+
+  // Estado de la barra de privacidad: refleja la salud real del runtime.
+  const bralStatusLabel = assistantDisabled
+    ? "Sin configurar"
+    : runtimeHealthFailed
+      ? "Revisar"
+      : "En línea";
+
   return (
     <section className="panel assistant-agent-panel">
       <div className="assistant-agent-header">
@@ -803,8 +911,8 @@ export function AssistantPanel({
           <p className="eyebrow">Asistente</p>
           <h2>Agente municipal</h2>
           <p className="muted">
-            Conversacion, necesidades, memoria y busqueda web gobernadas por
-            permisos.
+            Conversa con Bral para consultar, estructurar trabajo y preparar
+            borradores supervisados.
           </p>
         </div>
         <button
@@ -840,6 +948,26 @@ export function AssistantPanel({
           <span>Hermes Agent esta configurado, pero su API no responde.</span>
         </div>
       ) : null}
+
+      <div className="assistant-banner">
+        <span className="assistant-banner-icon">
+          <ShieldCheck aria-hidden size={15} />
+        </span>
+        <p>
+          <strong>Privacy/AI Gateway activo.</strong> Los datos se
+          pseudonimizan antes de cualquier llamada externa. La IA asiste, no
+          decide.
+        </p>
+        <span
+          className={
+            bralStatusLabel === "En línea"
+              ? "assistant-banner-status online"
+              : "assistant-banner-status"
+          }
+        >
+          {bralStatusLabel}
+        </span>
+      </div>
 
       <div
         className={
@@ -916,8 +1044,32 @@ export function AssistantPanel({
           {selectedConversation ? (
             <>
               <div className="assistant-thread-header">
-                <div>
-                  <h3>{selectedConversation.title}</h3>
+                <div className="assistant-thread-title-block">
+                  {editingConversationTitleId === selectedConversation.id ? (
+                    <input
+                      ref={titleInputRef}
+                      aria-label="Nombre de la conversación"
+                      className="assistant-thread-title-input"
+                      value={conversationTitleDraft}
+                      maxLength={255}
+                      disabled={isRenamingConversation}
+                      onBlur={() => void submitTitleEdit()}
+                      onChange={(event) =>
+                        setConversationTitleDraft(event.target.value)
+                      }
+                      onKeyDown={handleTitleKeyDown}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="assistant-thread-title-button"
+                      onClick={startTitleEdit}
+                      title="Renombrar conversación"
+                    >
+                      <span>{selectedConversation.title}</span>
+                      <small>Editar nombre</small>
+                    </button>
+                  )}
                   {selectedIsArchived ? (
                     <span className="assistant-thread-status">Archivada</span>
                   ) : null}
@@ -961,10 +1113,7 @@ export function AssistantPanel({
                 {selectedConversation.messages.length === 0 ? (
                   <div className="assistant-empty-thread">
                     <Sparkles aria-hidden size={22} />
-                    <p>
-                      Escribe el primer mensaje para iniciar la captura de
-                      necesidades.
-                    </p>
+                    <p>Escribe el primer mensaje para empezar a trabajar.</p>
                   </div>
                 ) : null}
                 {selectedConversation.messages.map((message) => {
@@ -976,23 +1125,43 @@ export function AssistantPanel({
                     >
                       <div className="assistant-message-avatar">
                         {isAssistant ? (
-                          <Bot aria-hidden size={17} />
+                          <Sparkles aria-hidden size={16} />
                         ) : (
                           <span>{currentUser.full_name.slice(0, 1)}</span>
                         )}
                       </div>
                       <div className="assistant-message-main">
                         <div className="assistant-message-meta">
-                          <span>{isAssistant ? "Asistente" : "Tu"}</span>
+                          <span>{isAssistant ? "Bral" : "Tu"}</span>
                           <small>{formatDate(message.created_at)}</small>
                         </div>
-                        <p className="assistant-message-content">
-                          {message.content}
-                        </p>
+                        <div className="assistant-message-bubble">
+                          <p className="assistant-message-content">
+                            {message.content}
+                          </p>
+                        </div>
                         <ActionTimeline
                           actions={message.actions}
                           toolLabels={toolLabels}
                         />
+                        {isAssistant && message.content.trim().length > 0 ? (
+                          <div className="assistant-message-actions">
+                            <button
+                              type="button"
+                              className="assistant-msg-action"
+                              onClick={() =>
+                                handleCopyMessage(message.id, message.content)
+                              }
+                            >
+                              <Copy aria-hidden size={13} />
+                              <span>
+                                {copiedMessageId === message.id
+                                  ? "Copiado"
+                                  : "Copiar"}
+                              </span>
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </article>
                   );
@@ -1004,12 +1173,15 @@ export function AssistantPanel({
                     </div>
                     <div className="assistant-message-main">
                       <div className="assistant-message-meta">
-                        <span>Asistente</span>
+                        <span>Bral</span>
                         <small>Trabajando</small>
                       </div>
-                      <p className="assistant-message-content muted">
-                        Analizando la conversacion y herramientas disponibles...
-                      </p>
+                      <div className="assistant-message-bubble">
+                        <p className="assistant-message-content muted">
+                          Analizando la conversacion y herramientas
+                          disponibles...
+                        </p>
+                      </div>
                     </div>
                   </article>
                 ) : null}
@@ -1023,51 +1195,77 @@ export function AssistantPanel({
                 </p>
               ) : null}
 
+              {!composerDisabled ? (
+                <div className="assistant-chips">
+                  {SUGGESTED_PROMPTS.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="assistant-chip"
+                      onClick={() => {
+                        onDraftMessageChange(prompt);
+                        messageTextareaRef.current?.focus({
+                          preventScroll: true,
+                        });
+                      }}
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
               <form className="assistant-composer" onSubmit={handleSubmit}>
                 <textarea
                   ref={messageTextareaRef}
                   value={draftMessage}
                   onChange={(event) => onDraftMessageChange(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
-                  placeholder="Escribe tu mensaje..."
+                  placeholder="Escribe tu consulta o pide un borrador…"
                   rows={3}
                   disabled={composerDisabled}
                 />
-                <div className="assistant-composer-actions">
-                  <button
-                    type="button"
-                    className={
-                      isListening ? "assistant-mic recording" : "assistant-mic"
-                    }
-                    aria-label={
-                      isListening ? "Detener dictado" : "Iniciar dictado"
-                    }
-                    aria-pressed={isListening}
-                    onClick={handleToggleListening}
-                    disabled={
-                      !speechSupported || composerDisabled
-                    }
-                    title={
-                      speechSupported
-                        ? "Dictado local en el dispositivo"
-                        : "Dictado local no disponible en este navegador"
-                    }
-                  >
-                    {isListening ? (
-                      <MicOff aria-hidden size={18} />
-                    ) : (
-                      <Mic aria-hidden size={18} />
-                    )}
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={
-                      composerDisabled || draftMessage.trim().length === 0
-                    }
-                  >
-                    <Send aria-hidden size={17} />
-                    <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
-                  </button>
+                <div className="assistant-composer-foot">
+                  <div className="assistant-composer-context">
+                    <ShieldCheck aria-hidden size={13} />
+                    <span>Contexto pseudonimizado · la IA asiste, no decide</span>
+                  </div>
+                  <div className="assistant-composer-actions">
+                    <button
+                      type="button"
+                      className={
+                        isListening
+                          ? "assistant-mic recording"
+                          : "assistant-mic"
+                      }
+                      aria-label={
+                        isListening ? "Detener dictado" : "Iniciar dictado"
+                      }
+                      aria-pressed={isListening}
+                      onClick={handleToggleListening}
+                      disabled={!speechSupported || composerDisabled}
+                      title={
+                        speechSupported
+                          ? "Dictado local en el dispositivo"
+                          : "Dictado local no disponible en este navegador"
+                      }
+                    >
+                      {isListening ? (
+                        <MicOff aria-hidden size={18} />
+                      ) : (
+                        <Mic aria-hidden size={18} />
+                      )}
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={
+                        composerDisabled || draftMessage.trim().length === 0
+                      }
+                    >
+                      <Send aria-hidden size={17} />
+                      <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
+                    </button>
+                  </div>
                 </div>
               </form>
 

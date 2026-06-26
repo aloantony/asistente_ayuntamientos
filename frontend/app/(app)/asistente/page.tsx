@@ -154,6 +154,7 @@ function AsistentePageInner() {
         onSendMessage={assistantController.sendMessage}
         onArchiveConversation={assistantController.archiveConversation}
         onRestoreConversation={assistantController.restoreConversation}
+        onRenameConversation={assistantController.renameConversation}
         onUpdateMemoryEntry={assistantController.updateMemoryEntry}
         onIncludeArchivedConversationsChange={
           assistantController.toggleIncludeArchivedConversations

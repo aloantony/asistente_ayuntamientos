@@ -1,5 +1,5 @@
 /*
- * Asistente Bral — hoja de estilos
+ * Bral — hoja de estilos
  * Paleta cálida con modo claro (crema) y oscuro (carbón), sobre tokens CSS.
  *
  * Los colores viven en variables (:root para claro, html.dark para oscuro);
@@ -1145,6 +1145,14 @@ tr:last-child td {
   outline: 0;
 }
 
+html.dark .assistant-search {
+  background: var(--bg);
+}
+
+html.dark .assistant-search input {
+  background: transparent;
+}
+
 .assistant-conversations ul {
   display: flex;
   flex-direction: column;
@@ -1228,7 +1236,7 @@ tr:last-child td {
   min-width: 0;
   min-height: min(740px, calc(100vh - 180px));
   border: 0;
-  border-radius: 0;
+  border-radius: 18px;
   background: var(--surface);
   overflow: visible;
 }
@@ -1238,18 +1246,67 @@ tr:last-child td {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 0 16px 8px;
+  padding: 14px 16px 12px;
   background: transparent;
 }
 
-.assistant-thread-header h3 {
-  margin: 0;
-  overflow: hidden;
+.assistant-thread-title-block {
+  min-width: 0;
+}
+
+.assistant-thread-title-button {
+  width: min(100%, 560px);
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 10px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  padding: 7px 10px;
   color: var(--text);
-  font-size: 15px;
-  font-weight: 600;
+  background: transparent;
+  text-align: left;
+}
+
+.assistant-thread-title-button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--fill);
+}
+
+.assistant-thread-title-button span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.assistant-thread-title-button small {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.assistant-thread-title-button:hover small,
+.assistant-thread-title-button:focus-visible small {
+  opacity: 1;
+}
+
+.assistant-thread-title-input {
+  width: min(100%, 560px);
+  border-radius: 13px;
+  padding: 7px 10px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  background: var(--fill);
 }
 
 .assistant-thread-status {
@@ -1266,6 +1323,14 @@ tr:last-child td {
   padding: 0;
   font-size: 13px;
   white-space: nowrap;
+}
+
+.assistant-thread-header .assistant-thread-title-button {
+  border-color: transparent;
+  border-radius: 13px;
+  padding: 7px 10px;
+  font-size: inherit;
+  white-space: normal;
 }
 
 .assistant-thread-icon-button {
@@ -1309,7 +1374,7 @@ tr:last-child td {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
-  border-radius: 50%;
+  border-radius: 9px;
   color: var(--text);
   background: var(--surface);
   font-size: 13px;
@@ -1317,11 +1382,21 @@ tr:last-child td {
   text-transform: uppercase;
 }
 
+/* La estrella de Bral viaja sobre el acento, como en el resto del shell. */
+.assistant-message.assistant .assistant-message-avatar {
+  border-color: transparent;
+  color: var(--accent-contrast);
+  background: var(--accent);
+}
+
 .assistant-message.working .assistant-message-avatar svg {
   animation: assistant-spin 1s linear infinite;
 }
 
 .assistant-message-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   min-width: 0;
   border: 0;
   border-radius: 0;
@@ -1329,14 +1404,28 @@ tr:last-child td {
   background: transparent;
 }
 
-.assistant-message.assistant .assistant-message-main {
-  background: transparent;
+.assistant-message.user .assistant-message-main {
+  align-items: flex-end;
 }
 
-.assistant-message.user .assistant-message-main {
+/* Burbujas con esquinas asimétricas (Bral): la asistente, panel con borde
+ * sobre superficie; la del usuario, relleno suave alineado a la derecha. */
+.assistant-message-bubble {
+  max-width: 100%;
+}
+
+.assistant-message.assistant .assistant-message-bubble {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 13px 16px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 3%);
+}
+
+.assistant-message.user .assistant-message-bubble {
   max-width: min(76%, 680px);
-  border-radius: 18px;
-  padding: 11px 14px;
+  border-radius: 14px 14px 3px 14px;
+  padding: 11px 15px;
   background: var(--fill);
 }
 
@@ -1739,19 +1828,45 @@ tr:last-child td {
 
 .assistant-composer {
   position: sticky;
-  bottom: 0;
+  bottom: 22px;
   z-index: 2;
   width: min(calc(100% - 32px), 860px);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: end;
-  margin: 0 auto 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 auto 22px;
   border: 1px solid var(--border);
-  border-radius: 24px;
-  padding: 10px 10px 10px 16px;
+  border-radius: 16px;
+  padding: 13px 16px 11px;
   background: var(--surface);
   box-shadow: 0 14px 36px rgb(0 0 0 / 7%);
+}
+
+.assistant-composer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.assistant-composer-context {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.assistant-composer-context svg {
+  flex: none;
+  color: var(--accent);
+}
+
+.assistant-composer-context span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .assistant-composer:focus-within {
@@ -1880,6 +1995,118 @@ tr:last-child td {
     outline: 1px solid rgb(17 17 17 / 60%);
     outline-offset: 0;
   }
+}
+
+/* Banda de privacidad (Privacy/AI Gateway): recuerda que los datos se
+ * pseudonimizan y que la IA asiste, no decide. Refleja la salud del runtime. */
+.assistant-banner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 11px 15px;
+  background: var(--surface);
+}
+
+.assistant-banner-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+}
+
+.assistant-banner p {
+  flex: 1;
+  margin: 0;
+  max-width: none;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.assistant-banner strong {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.assistant-banner-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.assistant-banner-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.assistant-banner-status.online::before {
+  background: var(--success-fg);
+}
+
+/* Sugerencias rápidas: sólo prerrellenan el borrador del compositor. */
+.assistant-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: min(calc(100% - 32px), 860px);
+  margin: 0 auto 10px;
+}
+
+.assistant-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 13px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.assistant-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface);
+}
+
+/* Acciones por respuesta del asistente (de momento, copiar). */
+.assistant-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.assistant-msg-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 9px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.assistant-msg-action:hover:not(:disabled) {
+  color: var(--text-secondary);
+  background: var(--fill);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2129,7 +2356,7 @@ tr:last-child td {
   flex-direction: column;
   gap: 24px;
   border-right: 1px solid var(--border);
-  padding: 28px 20px;
+  padding: 12px 20px 28px;
   background: var(--surface);
   position: sticky;
   top: 0;
@@ -2145,6 +2372,7 @@ tr:last-child td {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 38px;
   margin: 0;
 }
 
@@ -2161,11 +2389,15 @@ tr:last-child td {
 }
 
 .app-brand-name {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text);
   font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-theme-toggle {
@@ -2454,7 +2686,7 @@ tr:last-child td {
 }
 
 /* ---------------------------------------------------------------------------
- * Barra superior (contexto de ruta + acceso rápido a Bral)
+ * Barra superior (búsqueda global centrada + acciones rápidas)
  * ------------------------------------------------------------------------ */
 
 .app-topbar {
@@ -2463,42 +2695,26 @@ tr:last-child td {
   z-index: 5;
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 16px;
   min-height: 60px;
   border-bottom: 1px solid var(--border);
   padding: 12px 32px;
   background: var(--surface);
 }
 
-.app-topbar-titles {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
+.app-topbar::before {
+  content: "";
+  flex: 1 1 0;
   min-width: 0;
 }
 
-.app-topbar-crumb {
-  color: var(--text-muted);
-  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.app-topbar-title {
-  color: var(--text);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
 .app-topbar-search {
+  flex: 0 1 min(560px, 48vw);
+  width: min(560px, 48vw);
   display: flex;
   align-items: center;
   gap: 8px;
-  width: min(300px, 34vw);
+  max-width: 560px;
   border: 1px solid var(--border);
   border-radius: 9px;
   padding: 0 12px;
@@ -2512,6 +2728,8 @@ tr:last-child td {
 }
 
 .app-topbar-search input {
+  flex: 1;
+  min-width: 0;
   border: 0;
   padding: 9px 0;
   background: transparent;
@@ -2521,6 +2739,25 @@ tr:last-child td {
 .app-topbar-search input:focus,
 .app-topbar-search input:focus-visible {
   outline: 0;
+}
+
+html.dark .app-topbar-search,
+html.dark .dashboard-ask {
+  background: var(--bg);
+}
+
+html.dark .app-topbar-search input,
+html.dark .dashboard-ask input {
+  background: transparent;
+}
+
+.app-topbar-actions {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 /* Botón cuadrado de tema (icono sol/luna), como en el prototipo. */
@@ -2544,25 +2781,48 @@ tr:last-child td {
   background: var(--surface);
 }
 
-/* Botón Bral con contorno de acento. */
+/* Acceso rápido al asistente con contorno de acento. */
 .app-topbar-bral {
   flex: none;
+  width: 38px;
+  height: 38px;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 13px;
+  justify-content: center;
+  padding: 0;
   border: 1px solid var(--accent);
   border-radius: 9px;
   color: var(--accent);
   background: var(--surface);
-  font-size: 12.5px;
-  font-weight: 600;
 }
 
 .app-topbar-bral:hover:not(:disabled) {
   color: var(--accent-contrast);
   background: var(--accent);
   border-color: var(--accent);
+}
+
+.app-topbar-user {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  background: var(--fill);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.app-topbar-user:hover:not(:disabled) {
+  border-color: var(--text);
+  color: var(--text);
+  background: var(--surface);
 }
 
 @media (max-width: 900px) {
