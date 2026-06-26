@@ -1796,6 +1796,117 @@ def test_consultation_agent_can_search_approved_ordinance_chunks(
     assert payload["results"][0]["source_url"] == ordinance.source_url
 
 
+def test_agent_turn_searches_ordinances_with_structured_filters(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    municipality = Municipality(
+        name="Miranda de Ebro",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Modificación de varias ordenanzas fiscales",
+        topic="ordenanzas fiscales",
+        subtopic="IBI, impuestos y tasas municipales",
+        ordinance_type="tax_ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/miranda.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text(
+        "Modificación del impuesto sobre bienes inmuebles y tasas municipales."
+    )
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Artículo 1",
+            text="Modificación del impuesto sobre bienes inmuebles y tasas municipales.",
+            source_url=ordinance.source_url,
+            review_status="approved",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+
+    monkeypatch.setattr(
+        assistant_service,
+        "choose_agent",
+        lambda **kwargs: SimpleNamespace(
+            agent=AGENT_REGISTRY["consultation"],
+            routing={"chosen": "consultation", "source": "test"},
+        ),
+    )
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_ordinance",
+                            "semantic_search_ordinances",
+                            {
+                                "query": "Modificación del impuesto sobre bienes inmuebles y tasas municipales",
+                                "municipality_name": "Miranda de Ebro",
+                                "topic": "ordenanzas fiscales",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Miranda de Ebro tiene una modificación de varias "
+                            "ordenanzas fiscales publicada en BOPBUR."
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Qué dice Miranda de Ebro sobre el IBI?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["agent_key"] == "consultation"
+    assert "Miranda de Ebro" in assistant_message["content"]
+    action = assistant_message["actions"][0]
+    assert action["tool"] == "semantic_search_ordinances"
+    assert action["ok"] is True
+    assert action["input"]["municipality_name"] == "Miranda de Ebro"
+    assert action["input"]["topic"] == "ordenanzas fiscales"
+    assert '"municipality_name": "Miranda de Ebro"' in action["result"]
+    assert '"topic": "ordenanzas fiscales"' in action["result"]
+
+
 def test_ordinance_semantic_search_tool_filters_by_municipality_name_and_topic(
     db,
     make_user,
