@@ -1796,6 +1796,92 @@ def test_consultation_agent_can_search_approved_ordinance_chunks(
     assert payload["results"][0]["source_url"] == ordinance.source_url
 
 
+def test_ordinance_semantic_search_tool_filters_by_municipality_name_and_topic(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["ordinances.compare"])
+    miranda = Municipality(
+        name="Miranda de Ebro",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    cascajares = Municipality(
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add_all([miranda, cascajares])
+    db.flush()
+    miranda_ordinance = Ordinance(
+        municipality_id=miranda.id,
+        title="Modificación de varias ordenanzas fiscales",
+        topic="ordenanzas fiscales",
+        subtopic="IBI, impuestos y tasas municipales",
+        ordinance_type="tax_ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/miranda.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    other_ordinance = Ordinance(
+        municipality_id=cascajares.id,
+        title="Ordenanza de leñas de hogar",
+        topic="montes municipales",
+        ordinance_type="ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/lenas.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add_all([miranda_ordinance, other_ordinance])
+    db.flush()
+    for ordinance, text in (
+        (
+            miranda_ordinance,
+            "Modificación del impuesto sobre bienes inmuebles y tasas municipales.",
+        ),
+        (other_ordinance, "Aprovechamiento de leñas de hogar en montes municipales."),
+    ):
+        embedding, model, status = embed_text(text)
+        db.add(
+            OrdinanceLegalChunk(
+                ordinance_id=ordinance.id,
+                chunk_index=0,
+                citation="Artículo 1",
+                text=text,
+                source_url=ordinance.source_url,
+                review_status="approved",
+                embedding=embedding,
+                embedding_model=model,
+                embedding_status=status,
+            )
+        )
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {
+            "query": "Modificación del impuesto sobre bienes inmuebles y tasas municipales",
+            "municipality_name": "Miranda de Ebro",
+            "topic": "ordenanzas fiscales",
+        },
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.content)
+    assert payload["municipality_name"] == "Miranda de Ebro"
+    assert payload["topic"] == "ordenanzas fiscales"
+    assert [row["municipality_name"] for row in payload["results"]] == [
+        "Miranda de Ebro"
+    ]
+    assert payload["results"][0]["topic"] == "ordenanzas fiscales"
+
+
 def test_ordinance_semantic_search_tool_requires_compare_permission(
     db,
     make_user,

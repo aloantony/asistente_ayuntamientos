@@ -767,6 +767,18 @@ def test_import_job_run_creates_pending_ordinance_and_review_report(
     assert semantic.status_code == 200
     assert semantic.json()[0]["ordinance_id"] == item["ordinance_id"]
 
+    semantic_by_name_and_topic = client.get(
+        "/ordinances/semantic-search",
+        headers=headers,
+        params={
+            "q": "recogida de residuos",
+            "municipality_name": "Villa Importada",
+            "topic": "residuos",
+        },
+    )
+    assert semantic_by_name_and_topic.status_code == 200
+    assert semantic_by_name_and_topic.json()[0]["ordinance_id"] == item["ordinance_id"]
+
 
 def test_parse_bop_burgos_search_results_extracts_official_pdf_metadata():
     results = parse_bop_burgos_search_results(BOP_BURGOS_SEARCH_HTML)

@@ -24,6 +24,7 @@ from app.assistant.models import (
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
 )
+from app.municipalities.models import Municipality
 from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
@@ -207,6 +208,14 @@ _TOOL_DEFINITIONS: list[dict] = [
                 "municipality_id": {
                     "type": "integer",
                     "description": "Filtrar por municipio si el usuario lo ha indicado",
+                },
+                "municipality_name": {
+                    "type": "string",
+                    "description": "Nombre del municipio cuando el usuario lo indique y no se conozca su ID",
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Materia o tema regulado a filtrar, por ejemplo agua, residuos, terrazas o animales",
                 },
                 "include_pending": {
                     "type": "boolean",
@@ -742,6 +751,17 @@ def _semantic_search_ordinances(
     municipality_id = tool_input.get("municipality_id")
     if municipality_id is not None:
         query = query.where(Ordinance.municipality_id == int(municipality_id))
+    municipality_name = str(tool_input.get("municipality_name") or "").strip()
+    if municipality_name:
+        query = query.where(Municipality.name.ilike(municipality_name))
+    topic = str(tool_input.get("topic") or "").strip()
+    if topic:
+        topic_pattern = f"%{topic}%"
+        query = query.where(
+            (Ordinance.topic.ilike(topic_pattern))
+            | (Ordinance.subtopic.ilike(topic_pattern))
+            | (Ordinance.title.ilike(topic_pattern))
+        )
     if include_pending:
         query = query.where(Ordinance.curation_status != "rejected")
     else:
@@ -760,6 +780,8 @@ def _semantic_search_ordinances(
 
     return {
         "query": query_text,
+        "municipality_name": municipality_name or None,
+        "topic": topic or None,
         "limit": limit,
         "results": [
             {

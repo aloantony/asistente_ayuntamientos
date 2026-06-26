@@ -459,6 +459,8 @@ def semantic_search_ordinances(
     current_user: Annotated[User, Depends(get_current_user)],
     q: str,
     municipality_id: int | None = None,
+    municipality_name: str | None = None,
+    topic: str | None = None,
     include_pending: bool = False,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> list[dict]:
@@ -479,6 +481,15 @@ def semantic_search_ordinances(
     )
     if municipality_id is not None:
         query = query.where(Ordinance.municipality_id == municipality_id)
+    if municipality_name:
+        query = query.where(Municipality.name.ilike(municipality_name.strip()))
+    if topic:
+        topic_pattern = f"%{topic.strip()}%"
+        query = query.where(
+            (Ordinance.topic.ilike(topic_pattern))
+            | (Ordinance.subtopic.ilike(topic_pattern))
+            | (Ordinance.title.ilike(topic_pattern))
+        )
     if include_pending:
         query = query.where(Ordinance.curation_status != "rejected")
     else:
