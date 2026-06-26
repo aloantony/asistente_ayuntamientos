@@ -390,3 +390,29 @@ class OrdinanceSemanticSearchResult(BaseModel):
     text: str
     source_url: str | None
     score: float
+
+
+class OrdinanceCoverageMunicipalityRead(BaseModel):
+    municipality_id: int
+    municipality_name: str
+    ordinances_total: int
+    ordinances_approved: int
+    chunks_total: int
+    chunks_ready: int
+    chunks_approved: int
+    chunks_failed: int
+    ready_for_assistant: bool
+
+
+class OrdinanceCoverageRead(BaseModel):
+    province: str
+    municipalities_total: int
+    municipalities_with_approved_ordinances: int
+    municipalities_ready_for_assistant: int
+    ordinances_total: int
+    ordinances_approved: int
+    chunks_total: int
+    chunks_ready: int
+    chunks_approved: int
+    chunks_failed: int
+    municipalities: list[OrdinanceCoverageMunicipalityRead]

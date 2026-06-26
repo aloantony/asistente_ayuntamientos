@@ -21,6 +21,7 @@ from app.db.session import get_db
 from app.documents.access import user_can_access_document
 from app.documents.models import Document
 from app.municipalities.models import Municipality
+from app.ordinances.bop_burgos import build_burgos_coverage_report
 from app.ordinances.embeddings import embed_text, vector_similarity
 from app.ordinances.import_service import run_import_job
 from app.ordinances.models import (
@@ -36,6 +37,7 @@ from app.ordinances.schemas import (
     OfficialLegalSourceRead,
     OfficialLegalSourceUpdate,
     OrdinanceComparisonRead,
+    OrdinanceCoverageRead,
     OrdinanceCreate,
     OrdinanceImportEnqueueRead,
     OrdinanceImportItemRead,
@@ -141,6 +143,18 @@ def create_ordinance(
     db.commit()
 
     return get_existing_ordinance(db, ordinance.id)
+
+
+@router.get(
+    "/coverage/burgos",
+    response_model=OrdinanceCoverageRead,
+)
+def get_burgos_coverage(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.view")
+    return build_burgos_coverage_report(db)
 
 
 @router.get(
