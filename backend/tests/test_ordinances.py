@@ -891,6 +891,67 @@ def test_burgos_coverage_endpoint_reports_ready_municipalities(
     assert body["municipalities"][0]["ready_for_assistant"] is True
 
 
+def test_burgos_coverage_groups_duplicate_municipality_names(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    first = create_municipality(
+        client,
+        headers,
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    second = create_municipality(
+        client,
+        headers,
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    for municipality, title, index in (
+        (first, "Ordenanza de solares", 0),
+        (second, "Ordenanza de leñas", 1),
+    ):
+        ordinance = create_ordinance(
+            client,
+            headers,
+            municipality["id"],
+            title=title,
+            topic="servicios municipales",
+            curation_status="approved",
+        )
+        db.add(
+            OrdinanceLegalChunk(
+                ordinance_id=ordinance["id"],
+                chunk_index=0,
+                heading="Artículo 1. Objeto",
+                citation="Artículo 1",
+                text=f"Artículo 1. Objeto {index}.",
+                source_url="http://bopbur.diputaciondeburgos.es/demo.pdf",
+                source_locator=f"articulo-{index}",
+                review_status="approved",
+                embedding_model="local_hash",
+                embedding="[0.1, 0.2]",
+                embedding_status="ready",
+            )
+        )
+    db.commit()
+
+    response = client.get("/ordinances/coverage/burgos", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["municipalities_total"] == 1
+    assert body["ordinances_approved"] == 2
+    assert body["chunks_ready"] == 2
+    assert body["municipalities"][0]["municipality_id"] == first["id"]
+    assert body["municipalities"][0]["municipality_name"] == "Cascajares de la Sierra"
+    assert body["municipalities"][0]["ordinances_approved"] == 2
+
+
 def test_burgos_coverage_reports_failed_imports_requiring_manual_review(
     client,
     db,

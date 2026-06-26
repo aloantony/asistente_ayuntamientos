@@ -111,7 +111,7 @@ def build_burgos_coverage_report(db: Session) -> dict:
 
     rows = db.execute(
         select(
-            Municipality.id,
+            func.min(Municipality.id).label("id"),
             Municipality.name,
             func.count(func.distinct(Ordinance.id)).label("ordinances_total"),
             func.count(func.distinct(Ordinance.id))
@@ -131,7 +131,7 @@ def build_burgos_coverage_report(db: Session) -> dict:
         .outerjoin(Ordinance, Ordinance.municipality_id == Municipality.id)
         .outerjoin(OrdinanceLegalChunk, OrdinanceLegalChunk.ordinance_id == Ordinance.id)
         .where(Municipality.province.ilike(BOP_BURGOS_PROVINCE))
-        .group_by(Municipality.id, Municipality.name)
+        .group_by(Municipality.name)
         .order_by(Municipality.name)
     ).all()
 
