@@ -96,6 +96,13 @@ def upgrade() -> None:
                 "domain": "boe.es",
                 "source_type": "boe",
                 "status": "active",
+            },
+            {
+                "name": "Boletín Oficial de la Provincia de Burgos",
+                "base_url": "https://bopbur.diputaciondeburgos.es/",
+                "domain": "bopbur.diputaciondeburgos.es",
+                "source_type": "bop",
+                "status": "active",
             }
         ],
     )
@@ -358,28 +365,10 @@ def upgrade() -> None:
             [column],
             unique=False,
         )
-    op.execute(
-        """
-        DO $$
-        BEGIN
-            CREATE EXTENSION IF NOT EXISTS vector;
-        EXCEPTION WHEN undefined_file THEN
-            RAISE NOTICE 'pgvector extension is not available; embedding column remains text';
-        END $$;
-        """
-    )
-    op.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
-                ALTER TABLE ordinance_legal_chunks
-                ALTER COLUMN embedding TYPE vector(384)
-                USING NULL;
-            END IF;
-        END $$;
-        """
-    )
+    # Embeddings are stored as JSON text for now because the application model
+    # and local deterministic similarity code read/write string vectors. A
+    # future pgvector migration should introduce a matching SQLAlchemy type and
+    # database-side similarity before changing this column type.
 
     op.create_table(
         "telegram_user_links",

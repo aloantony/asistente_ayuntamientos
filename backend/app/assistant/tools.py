@@ -16,7 +16,7 @@ import re
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
 from app.assistant.models import (
@@ -28,6 +28,8 @@ from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
 )
+from app.ordinances.embeddings import embed_text, vector_similarity
+from app.ordinances.models import Ordinance, OrdinanceLegalChunk
 from app.projects.access import select_visible_projects
 from app.projects.models import Project
 from app.rbac.permissions import has_permission
@@ -64,6 +66,8 @@ VALID_TRANSVERSAL_FEATURE_CATEGORIES = {
 }
 MAX_WEB_QUERY_CHARS = 400
 MAX_WEB_RESULTS = 5
+MAX_ORDINANCE_QUERY_CHARS = 400
+MAX_ORDINANCE_RESULTS = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 PERSONAL_DATA_PATTERN = re.compile(
@@ -178,6 +182,39 @@ _TOOL_DEFINITIONS: list[dict] = [
                 "limit": {
                     "type": "integer",
                     "description": "Número de resultados, máximo 5",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "semantic_search_ordinances",
+        "description": (
+            "Busca en las ordenanzas municipales ya importadas, revisadas y "
+            "vectorizadas en la base de datos interna. Úsala para responder "
+            "preguntas sobre normativa municipal, obligaciones, tasas, residuos, "
+            "agua, convivencia u otras materias reguladas. Devuelve fragmentos "
+            "citables con municipio, ordenanza y URL oficial; si no hay resultados, "
+            "no inventes normativa y explica la falta de cobertura."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Pregunta o texto breve a buscar en el corpus interno de ordenanzas",
+                },
+                "municipality_id": {
+                    "type": "integer",
+                    "description": "Filtrar por municipio si el usuario lo ha indicado",
+                },
+                "include_pending": {
+                    "type": "boolean",
+                    "description": "Incluir ordenanzas pendientes de revisión; por defecto false",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Número de fragmentos, máximo 5",
                 },
             },
             "required": ["query"],
@@ -661,6 +698,88 @@ def _web_search(
     }
 
 
+def _semantic_search_ordinances(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    if not has_permission(current_user, "ordinances.compare", db):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.compare",
+        )
+
+    query_text = str(tool_input["query"]).strip()
+    if not query_text:
+        raise ValueError("query no puede estar vacío")
+    if len(query_text) > MAX_ORDINANCE_QUERY_CHARS:
+        raise ValueError(
+            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
+        )
+
+    limit = int(tool_input.get("limit") or MAX_ORDINANCE_RESULTS)
+    if limit < 1:
+        raise ValueError("limit debe ser mayor o igual que 1")
+    limit = min(limit, MAX_ORDINANCE_RESULTS)
+
+    query_vector, _, embedding_status = embed_text(query_text)
+    if embedding_status != "ready" or query_vector is None:
+        return {"query": query_text, "limit": limit, "results": []}
+
+    include_pending = bool(tool_input.get("include_pending") or False)
+    query = (
+        select(OrdinanceLegalChunk)
+        .join(OrdinanceLegalChunk.ordinance)
+        .join(Ordinance.municipality)
+        .where(OrdinanceLegalChunk.embedding_status == "ready")
+        .options(
+            selectinload(OrdinanceLegalChunk.ordinance).selectinload(
+                Ordinance.municipality
+            )
+        )
+    )
+    municipality_id = tool_input.get("municipality_id")
+    if municipality_id is not None:
+        query = query.where(Ordinance.municipality_id == int(municipality_id))
+    if include_pending:
+        query = query.where(Ordinance.curation_status != "rejected")
+    else:
+        query = query.where(
+            Ordinance.curation_status == "approved",
+            OrdinanceLegalChunk.review_status == "approved",
+        )
+
+    scored: list[tuple[float, OrdinanceLegalChunk]] = []
+    for chunk in db.scalars(query.limit(500)):
+        score = vector_similarity(query_vector, chunk.embedding)
+        if score <= 0:
+            continue
+        scored.append((score, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    return {
+        "query": query_text,
+        "limit": limit,
+        "results": [
+            {
+                "chunk_id": chunk.id,
+                "ordinance_id": chunk.ordinance_id,
+                "title": chunk.ordinance.title,
+                "municipality_id": chunk.ordinance.municipality_id,
+                "municipality_name": chunk.ordinance.municipality.name,
+                "topic": chunk.ordinance.topic,
+                "curation_status": chunk.ordinance.curation_status,
+                "citation": chunk.citation,
+                "text": chunk.text,
+                "source_url": chunk.source_url or chunk.ordinance.source_url,
+                "score": round(score, 4),
+            }
+            for score, chunk in scored[:limit]
+        ],
+    }
+
+
 def _create_requirement(
     db: Session,
     current_user: User,
@@ -1048,6 +1167,7 @@ _EXECUTORS = {
     "list_organizations": _list_organizations,
     "list_projects": _list_projects,
     "web_search": _web_search,
+    "semantic_search_ordinances": _semantic_search_ordinances,
     "list_requirements": _list_requirements,
     "get_requirement": _get_requirement,
     "create_requirement": _create_requirement,
@@ -1075,6 +1195,12 @@ _TOOL_METADATA: dict[str, dict] = {
         "read_only": True,
         "domain": "web",
         "required_permission": "assistant.web.search",
+    },
+    "semantic_search_ordinances": {
+        "label": "Buscar ordenanzas",
+        "read_only": True,
+        "domain": "ordinances",
+        "required_permission": "ordinances.compare",
     },
     "list_requirements": {
         "label": "Consultar necesidades",

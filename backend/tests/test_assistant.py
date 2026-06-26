@@ -20,6 +20,9 @@ from app.assistant.planner import choose_agent
 from app.assistant.routes import get_gateway
 from app.core.config import settings
 from app.main import app
+from app.municipalities.models import Municipality
+from app.ordinances.embeddings import embed_text
+from app.ordinances.models import Ordinance, OrdinanceLegalChunk
 from app.requirements.models import Requirement
 from conftest import headers_for
 
@@ -1732,6 +1735,148 @@ def test_agent_web_search_requires_permission(
     assert action["tool"] == "web_search"
     assert action["ok"] is False
     assert "assistant.web.search" in action["result"]
+
+
+def test_consultation_agent_can_search_approved_ordinance_chunks(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["ordinances.compare"])
+    municipality = Municipality(
+        name="Villarcayo",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza municipal de residuos",
+        topic="residuos",
+        ordinance_type="ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/residuos.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text("recogida de residuos")
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Artículo 1",
+            text="La recogida de residuos se realizará en los horarios establecidos.",
+            source_url=ordinance.source_url,
+            review_status="approved",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "recogida de residuos", "municipality_id": municipality.id},
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.content)
+    assert payload["query"] == "recogida de residuos"
+    assert payload["results"][0]["title"] == "Ordenanza municipal de residuos"
+    assert payload["results"][0]["municipality_name"] == "Villarcayo"
+    assert payload["results"][0]["citation"] == "Artículo 1"
+    assert payload["results"][0]["source_url"] == ordinance.source_url
+
+
+def test_ordinance_semantic_search_tool_requires_compare_permission(
+    db,
+    make_user,
+):
+    user = make_user()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "recogida de residuos"},
+    )
+
+    assert result.ok is False
+    assert "ordinances.compare" in result.content
+
+
+def test_ordinance_semantic_search_tool_returns_empty_without_approved_coverage(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["ordinances.compare"])
+    municipality = Municipality(
+        name="Municipio sin cobertura aprobada",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza pendiente de residuos",
+        topic="residuos",
+        ordinance_type="ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/pendiente.pdf",
+        curation_status="pending_review",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text("recogida de residuos")
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Artículo pendiente",
+            text="La recogida de residuos está pendiente de revisión.",
+            source_url=ordinance.source_url,
+            review_status="pending_review",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "recogida de residuos", "municipality_id": municipality.id},
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.content)
+    assert payload["results"] == []
+
+
+def test_consultation_agent_exposes_ordinance_search_as_read_only_tool():
+    consultation = AGENT_REGISTRY["consultation"]
+
+    assert "semantic_search_ordinances" in consultation.tool_names
+    assert assistant_tools.TOOL_CATALOG["semantic_search_ordinances"].read_only
+    assert (
+        assistant_tools.TOOL_CATALOG["semantic_search_ordinances"].domain
+        == "ordinances"
+    )
 
 
 def test_web_search_tool_rejects_empty_query(

@@ -53,6 +53,7 @@ CONSULTATION_INSTRUCTIONS = """Tu tarea es consultar información visible.
 - Si el usuario pregunta por datos registrados en la aplicación, usa la herramienta de lectura disponible que corresponda antes de responder. No inventes listados ni estados.
 - Si falta un dato necesario, como la organización, intenta resolverlo con las organizaciones visibles. Si sigue siendo ambiguo, haz una pregunta breve.
 - Para necesidades registradas, usa list_requirements cuando el usuario pida un listado, resumen, estado general o "qué tenemos"; usa get_requirement solo cuando necesites el detalle de una necesidad concreta.
+- Para preguntas sobre ordenanzas, reglamentos o normativa municipal ya cargada, usa semantic_search_ordinances antes de responder. Cita el municipio, la ordenanza y la fuente devuelta; si no hay resultados, explica que no hay cobertura aprobada suficiente en la base de datos.
 - Puedes usar web_search solo cuando el usuario pida buscar o verificar información externa actual. No envíes datos internos, documentos, historial ni datos personales a la búsqueda web.
 - No digas que estás en modo consulta, solo lectura o que el usuario debe cambiar de agente.
 """
@@ -109,6 +110,7 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
                 "web_search",
                 "list_requirements",
                 "get_requirement",
+                "semantic_search_ordinances",
                 "list_available_transversal_features",
             }
         ),

@@ -3,10 +3,12 @@ including the document-linking access rule."""
 
 import io
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.ordinances import import_service
+from app.ordinances.models import OfficialLegalSource
+from app.ordinances.seed import ensure_initial_official_legal_sources
 from app.projects.models import Project, project_users
 from conftest import headers_for, unique_suffix
 
@@ -602,6 +604,22 @@ def create_official_source(client, headers, **overrides) -> dict:
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def test_seed_initial_official_sources_includes_bop_burgos(db):
+    created = ensure_initial_official_legal_sources(db)
+
+    source = db.scalar(
+        select(OfficialLegalSource).where(
+            OfficialLegalSource.domain == "bopbur.diputaciondeburgos.es"
+        )
+    )
+
+    assert "bopbur.diputaciondeburgos.es" in created
+    assert source is not None
+    assert source.name == "Boletín Oficial de la Provincia de Burgos"
+    assert source.source_type == "bop"
+    assert source.status == "active"
 
 
 def test_import_job_rejects_non_official_seed_url(
