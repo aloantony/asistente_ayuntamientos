@@ -1817,7 +1817,13 @@ export function AssistantPanel({
           ) : null}
         </aside>
 
-        <main className="assistant-thread">
+        <main
+          className={
+            selectedConversation
+              ? "assistant-thread"
+              : "assistant-thread assistant-thread-empty"
+          }
+        >
           {selectedConversation ? (
             <>
               <div className="assistant-thread-header">
@@ -1972,85 +1978,87 @@ export function AssistantPanel({
                 </p>
               ) : null}
 
-              {!composerDisabled ? (
-                <div className="assistant-chips">
-                  {SUGGESTED_PROMPTS.map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      className="assistant-chip"
-                      onClick={() => {
-                        onDraftMessageChange(prompt);
-                        messageTextareaRef.current?.focus({
-                          preventScroll: true,
-                        });
-                      }}
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-
-              <form className="assistant-composer" onSubmit={handleSubmit}>
-                <textarea
-                  ref={messageTextareaRef}
-                  value={draftMessage}
-                  onChange={(event) => onDraftMessageChange(event.target.value)}
-                  onKeyDown={handleComposerKeyDown}
-                  placeholder="Escribe tu consulta o pide un borrador…"
-                  rows={3}
-                  disabled={composerDisabled}
-                />
-                <div className="assistant-composer-foot">
-                  <div className="assistant-composer-context">
-                    <ShieldCheck aria-hidden size={13} />
-                    <span>Contexto pseudonimizado · la IA asiste, no decide</span>
+              <div className="assistant-composer-stack">
+                {!composerDisabled ? (
+                  <div className="assistant-chips">
+                    {SUGGESTED_PROMPTS.map((prompt) => (
+                      <button
+                        key={prompt}
+                        type="button"
+                        className="assistant-chip"
+                        onClick={() => {
+                          onDraftMessageChange(prompt);
+                          messageTextareaRef.current?.focus({
+                            preventScroll: true,
+                          });
+                        }}
+                      >
+                        {prompt}
+                      </button>
+                    ))}
                   </div>
-                  <div className="assistant-composer-actions">
-                    <button
-                      type="button"
-                      className={
-                        isListening
-                          ? "assistant-mic recording"
-                          : "assistant-mic"
-                      }
-                      aria-label={
-                        isListening ? "Detener dictado" : "Iniciar dictado"
-                      }
-                      aria-pressed={isListening}
-                      onClick={handleToggleListening}
-                      disabled={!speechSupported || composerDisabled}
-                      title={
-                        speechSupported
-                          ? "Dictado local en el dispositivo"
-                          : "Dictado local no disponible en este navegador"
-                      }
-                    >
-                      {isListening ? (
-                        <MicOff aria-hidden size={18} />
-                      ) : (
-                        <Mic aria-hidden size={18} />
-                      )}
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={
-                        composerDisabled || draftMessage.trim().length === 0
-                      }
-                    >
-                      <Send aria-hidden size={17} />
-                      <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
-                    </button>
-                  </div>
-                </div>
-              </form>
+                ) : null}
 
-              {voiceError ? (
-                <p className="error-message assistant-voice-error">
-                  {voiceError}
-                </p>
-              ) : null}
+                <form className="assistant-composer" onSubmit={handleSubmit}>
+                  <textarea
+                    ref={messageTextareaRef}
+                    value={draftMessage}
+                    onChange={(event) => onDraftMessageChange(event.target.value)}
+                    onKeyDown={handleComposerKeyDown}
+                    placeholder="Escribe tu consulta o pide un borrador…"
+                    rows={3}
+                    disabled={composerDisabled}
+                  />
+                  <div className="assistant-composer-foot">
+                    <div className="assistant-composer-context">
+                      <ShieldCheck aria-hidden size={13} />
+                      <span>Contexto pseudonimizado · la IA asiste, no decide</span>
+                    </div>
+                    <div className="assistant-composer-actions">
+                      <button
+                        type="button"
+                        className={
+                          isListening
+                            ? "assistant-mic recording"
+                            : "assistant-mic"
+                        }
+                        aria-label={
+                          isListening ? "Detener dictado" : "Iniciar dictado"
+                        }
+                        aria-pressed={isListening}
+                        onClick={handleToggleListening}
+                        disabled={!speechSupported || composerDisabled}
+                        title={
+                          speechSupported
+                            ? "Dictado local en el dispositivo"
+                            : "Dictado local no disponible en este navegador"
+                        }
+                      >
+                        {isListening ? (
+                          <MicOff aria-hidden size={18} />
+                        ) : (
+                          <Mic aria-hidden size={18} />
+                        )}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={
+                          composerDisabled || draftMessage.trim().length === 0
+                        }
+                      >
+                        <Send aria-hidden size={17} />
+                        <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
+                      </button>
+                    </div>
+                  </div>
+                </form>
+
+                {voiceError ? (
+                  <p className="error-message assistant-voice-error">
+                    {voiceError}
+                  </p>
+                ) : null}
+              </div>
             </>
           ) : (
             <div className="assistant-no-selection">
