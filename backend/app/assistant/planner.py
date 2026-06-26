@@ -334,7 +334,6 @@ def _heuristic_agent(
     read_markers = (
         "consulta",
         "consultar",
-        "qué",
         "listar",
         "lista",
         "ver",
