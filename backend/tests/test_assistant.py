@@ -94,6 +94,81 @@ def test_assistant_requires_permission(client, make_user):
     assert response.json()["detail"] == "Permission required: assistant.use"
 
 
+def test_conversation_folders_are_private_and_persisted(
+    client,
+    assistant_user,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user, _ = assistant_user
+    other_user = make_user(full_name="Otra Alcaldesa")
+    grant_permissions(other_user, make_organization(), ["assistant.use"])
+
+    folder_response = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Seguimiento político"},
+        headers=headers_for(user),
+    )
+    assert folder_response.status_code == 201
+    folder = folder_response.json()
+    assert folder["name"] == "Seguimiento político"
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={"title": "Licencias urbanísticas"},
+        headers=headers_for(user),
+    ).json()
+    assigned = client.patch(
+        f"/assistant/conversations/{conversation['id']}",
+        json={"folder_id": folder["id"]},
+        headers=headers_for(user),
+    )
+
+    assert assigned.status_code == 200
+    assert assigned.json()["folder_id"] == folder["id"]
+    listed = client.get("/assistant/conversations", headers=headers_for(user)).json()
+    assert listed[0]["folder_id"] == folder["id"]
+
+    other_folders = client.get(
+        "/assistant/conversation-folders",
+        headers=headers_for(other_user),
+    )
+    assert other_folders.status_code == 200
+    assert other_folders.json() == []
+
+
+def test_conversation_folder_delete_unassigns_conversations(client, assistant_user):
+    user, _ = assistant_user
+    folder = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Borradores"},
+        headers=headers_for(user),
+    ).json()
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    client.patch(
+        f"/assistant/conversations/{conversation['id']}",
+        json={"folder_id": folder["id"]},
+        headers=headers_for(user),
+    )
+
+    response = client.delete(
+        f"/assistant/conversation-folders/{folder['id']}",
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 204
+    refreshed = client.get(
+        f"/assistant/conversations/{conversation['id']}",
+        headers=headers_for(user),
+    ).json()
+    assert refreshed["folder_id"] is None
+
+
 def test_status_reports_disabled_gateway(
     client,
     assistant_user,

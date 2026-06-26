@@ -1181,22 +1181,10 @@ tr:last-child td {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-  align-items: end;
+  align-items: center;
 }
 
-.assistant-list-options label:not(.checkbox-label) {
-  gap: 4px;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.assistant-list-options select {
-  min-height: 32px;
-  border-radius: 999px;
-  padding: 6px 24px 6px 10px;
-  font-size: 12px;
-}
-
+.assistant-list-mode-toggle,
 .assistant-archived-toggle {
   display: inline-flex;
   align-items: center;
@@ -1219,12 +1207,33 @@ tr:last-child td {
     box-shadow 140ms ease;
 }
 
+.assistant-list-mode-toggle {
+  position: relative;
+  justify-content: flex-start;
+  padding-right: 32px;
+  font-weight: 700;
+}
+
+.assistant-list-mode-toggle::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  width: 15px;
+  height: 15px;
+  border: 1px solid currentcolor;
+  border-radius: 50%;
+  opacity: 0.36;
+  box-shadow: inset -3px 0 0 rgb(0 0 0 / 10%);
+}
+
+.assistant-list-mode-toggle:hover:not(:disabled),
 .assistant-archived-toggle:hover:not(:disabled) {
   color: var(--text-secondary);
   background: var(--fill);
   border-color: var(--text-faint);
 }
 
+.assistant-list-mode-toggle[aria-pressed="true"],
 .assistant-archived-toggle[aria-pressed="true"] {
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 12%, var(--surface));
@@ -1232,6 +1241,7 @@ tr:last-child td {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
+.assistant-list-mode-toggle svg,
 .assistant-archived-toggle svg {
   flex: none;
 }
@@ -1655,6 +1665,19 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   border-radius: 18px;
   background: var(--surface);
   overflow: visible;
+}
+
+.assistant-thread-empty {
+  align-self: start;
+  min-height: 0;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface) 86%, var(--bg)),
+      var(--surface)
+    );
+  box-shadow: 0 10px 32px rgb(0 0 0 / 4%);
 }
 
 .assistant-thread-header {
@@ -2242,15 +2265,21 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   font-size: 12px;
 }
 
-.assistant-composer {
+.assistant-composer-stack {
   position: sticky;
   bottom: 22px;
   z-index: 2;
   width: min(calc(100% - 32px), 860px);
+  display: grid;
+  gap: 8px;
+  margin: 0 auto 22px;
+}
+
+.assistant-composer {
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin: 0 auto 22px;
   border: 1px solid var(--border);
   border-radius: 16px;
   padding: 13px 16px 11px;
@@ -2360,6 +2389,12 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   text-align: center;
 }
 
+.assistant-thread-empty .assistant-no-selection {
+  min-height: 300px;
+  width: min(100%, 560px);
+  padding: 34px 24px;
+}
+
 .assistant-empty-thread svg,
 .assistant-no-selection > svg {
   border: 1px solid var(--border);
@@ -2381,8 +2416,8 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .assistant-archived-note,
 .assistant-voice-error {
-  width: min(calc(100% - 40px), 920px);
-  margin: 0 auto 12px;
+  width: 100%;
+  margin: 0;
   font-size: 13px;
 }
 
@@ -2496,8 +2531,9 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  width: min(calc(100% - 32px), 860px);
-  margin: 0 auto 10px;
+  width: 100%;
+  margin: 0;
+  padding: 0 2px;
 }
 
 .assistant-chip {

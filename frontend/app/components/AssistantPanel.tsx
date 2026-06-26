@@ -49,6 +49,7 @@ import {
   type AssistantAction,
   type AssistantConversation,
   type AssistantConversationDetail,
+  type AssistantConversationFolder,
   type AssistantMemoryCategory,
   type AssistantMemoryEntry,
   type AssistantMemorySensitivity,
@@ -103,6 +104,7 @@ type SpeechRecognitionConstructor = (new () => SpeechRecognitionLike) & {
 type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
   conversations: AssistantConversation[];
+  conversationFolders: AssistantConversationFolder[];
   currentUser: User;
   memoryEntries: AssistantMemoryEntry[];
   selectedConversation: AssistantConversationDetail | null;
@@ -118,6 +120,15 @@ type AssistantPanelProps = {
   onArchiveConversation: (conversationId: number) => void;
   onRestoreConversation: (conversationId: number) => void;
   onRenameConversation: (conversationId: number, title: string) => Promise<void>;
+  onAssignConversationFolder: (
+    conversationId: number,
+    folderId: number | null,
+  ) => Promise<void>;
+  onCreateConversationFolder: (
+    name: string,
+  ) => Promise<AssistantConversationFolder | null>;
+  onRenameConversationFolder: (folderId: number, name: string) => Promise<void>;
+  onDeleteConversationFolder: (folderId: number) => Promise<void>;
   onIncludeArchivedConversationsChange: (includeArchived: boolean) => void;
   onUpdateMemoryEntry: (
     entryId: number,
@@ -146,25 +157,22 @@ type ParsedActionResult = {
 
 type ConversationListMode = "recent" | "folders";
 
-type ConversationFolder = {
-  id: string;
-  name: string;
-};
+type ConversationFolderId = number | typeof UNCATEGORIZED_FOLDER_ID;
 
 type ConversationGroup = {
-  id: string;
+  id: ConversationFolderId | string;
   label: string;
   conversations: AssistantConversation[];
 };
 
 type ConversationDragTarget =
   | { type: "conversation"; id: number }
-  | { type: "folder"; id: string }
+  | { type: "folder"; id: ConversationFolderId | string }
   | null;
 
 type ConversationContextMenu =
   | { type: "conversation"; conversationId: number; x: number; y: number }
-  | { type: "folder"; folderId: string; x: number; y: number }
+  | { type: "folder"; folderId: ConversationFolderId; x: number; y: number }
   | null;
 
 const REQUIREMENT_PERMISSIONS = [
@@ -187,25 +195,8 @@ const SUGGESTED_PROMPTS = [
 ];
 
 const UNCATEGORIZED_FOLDER_ID = "sin-carpeta";
-const DEFAULT_CONVERSATION_FOLDERS: ConversationFolder[] = [
-  { id: "seguimiento", name: "Seguimiento" },
-  { id: "borradores", name: "Borradores" },
-  { id: "consultas", name: "Consultas" },
-];
-
 function normalizeFolderName(value: string) {
   return value.trim().replace(/\s+/g, " ");
-}
-
-function createFolderId(name: string) {
-  const slug = normalizeFolderName(name)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-
-  return slug ? `folder-${slug}` : `folder-${Date.now()}`;
 }
 
 function daysBetweenNow(value: string) {
@@ -247,8 +238,8 @@ function buildRecentConversationGroups(
 
 function buildFolderConversationGroups(
   conversations: AssistantConversation[],
-  folders: ConversationFolder[],
-  conversationFolderMap: Record<number, string>,
+  folders: AssistantConversationFolder[],
+  conversationFolderMap: Record<number, ConversationFolderId>,
 ): ConversationGroup[] {
   const groups: ConversationGroup[] = [
     ...folders.map((folder) => ({
@@ -711,6 +702,7 @@ function MemoryReviewPanel({
 export function AssistantPanel({
   assistantStatus,
   conversations,
+  conversationFolders,
   currentUser,
   memoryEntries,
   selectedConversation,
@@ -726,6 +718,10 @@ export function AssistantPanel({
   onArchiveConversation,
   onRestoreConversation,
   onRenameConversation,
+  onAssignConversationFolder,
+  onCreateConversationFolder,
+  onRenameConversationFolder,
+  onDeleteConversationFolder,
   onIncludeArchivedConversationsChange,
   onUpdateMemoryEntry,
 }: AssistantPanelProps) {
@@ -756,14 +752,15 @@ export function AssistantPanel({
   const [isConversationListOpen, setIsConversationListOpen] = useState(true);
   const [conversationListMode, setConversationListMode] =
     useState<ConversationListMode>("recent");
-  const [conversationFolders, setConversationFolders] = useState<
-    ConversationFolder[]
-  >(DEFAULT_CONVERSATION_FOLDERS);
-  const [conversationFolderMap, setConversationFolderMap] = useState<
-    Record<number, string>
-  >({});
-  const [areConversationFoldersLoaded, setAreConversationFoldersLoaded] =
-    useState(false);
+  const conversationFolderMap = useMemo(
+    () =>
+      Object.fromEntries(
+        conversations
+          .filter((conversation) => conversation.folder_id !== null)
+          .map((conversation) => [conversation.id, conversation.folder_id]),
+      ) as Record<number, ConversationFolderId>,
+    [conversations],
+  );
   const [draggedConversationId, setDraggedConversationId] = useState<
     number | null
   >(null);
@@ -771,7 +768,7 @@ export function AssistantPanel({
     useState<ConversationDragTarget>(null);
   const [conversationContextMenu, setConversationContextMenu] =
     useState<ConversationContextMenu>(null);
-  const [lastCreatedFolderId, setLastCreatedFolderId] = useState<string | null>(
+  const [lastCreatedFolderId, setLastCreatedFolderId] = useState<ConversationFolderId | null>(
     null,
   );
   const [isMemoryOpen, setIsMemoryOpen] = useState(memoryEntries.length > 0);
@@ -817,89 +814,6 @@ export function AssistantPanel({
   useEffect(() => {
     draftMessageRef.current = draftMessage;
   }, [draftMessage]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    setAreConversationFoldersLoaded(false);
-    const stored = window.localStorage.getItem(
-      `assistant-conversation-folders:${currentUser.id}`,
-    );
-    if (!stored) {
-      setConversationFolders(DEFAULT_CONVERSATION_FOLDERS);
-      setConversationFolderMap({});
-      setAreConversationFoldersLoaded(true);
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(stored) as {
-        folders?: ConversationFolder[];
-        assignments?: Record<string, string>;
-      };
-      if (Array.isArray(parsed.folders)) {
-        const folders = parsed.folders
-          .filter(
-            (folder): folder is ConversationFolder =>
-              Boolean(folder) &&
-              typeof folder.id === "string" &&
-              typeof folder.name === "string" &&
-              folder.id !== UNCATEGORIZED_FOLDER_ID,
-          )
-          .map((folder) => ({
-            id: folder.id,
-            name: normalizeFolderName(folder.name),
-          }))
-          .filter((folder) => folder.name);
-
-        setConversationFolders(
-          folders.length > 0 ? folders : DEFAULT_CONVERSATION_FOLDERS,
-        );
-      } else {
-        setConversationFolders(DEFAULT_CONVERSATION_FOLDERS);
-      }
-      if (parsed.assignments && typeof parsed.assignments === "object") {
-        const assignments: Record<number, string> = {};
-        for (const [conversationId, folderId] of Object.entries(
-          parsed.assignments,
-        )) {
-          const parsedConversationId = Number(conversationId);
-          if (Number.isInteger(parsedConversationId) && typeof folderId === "string") {
-            assignments[parsedConversationId] = folderId;
-          }
-        }
-        setConversationFolderMap(assignments);
-      } else {
-        setConversationFolderMap({});
-      }
-    } catch {
-      setConversationFolders(DEFAULT_CONVERSATION_FOLDERS);
-      setConversationFolderMap({});
-    } finally {
-      setAreConversationFoldersLoaded(true);
-    }
-  }, [currentUser.id]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !areConversationFoldersLoaded) {
-      return;
-    }
-
-    window.localStorage.setItem(
-      `assistant-conversation-folders:${currentUser.id}`,
-      JSON.stringify({
-        folders: conversationFolders,
-        assignments: conversationFolderMap,
-      }),
-    );
-  }, [
-    areConversationFoldersLoaded,
-    conversationFolderMap,
-    conversationFolders,
-    currentUser.id,
-  ]);
 
   useEffect(() => {
     if (memoryEntries.length > 0) {
@@ -1097,19 +1011,14 @@ export function AssistantPanel({
     onSendMessage();
   }
 
-  function handleConversationFolderChange(
+  async function handleConversationFolderChange(
     conversationId: number,
-    folderId: string,
+    folderId: ConversationFolderId,
   ) {
-    setConversationFolderMap((current) => {
-      const next = { ...current };
-      if (folderId === UNCATEGORIZED_FOLDER_ID) {
-        delete next[conversationId];
-      } else {
-        next[conversationId] = folderId;
-      }
-      return next;
-    });
+    await onAssignConversationFolder(
+      conversationId,
+      folderId === UNCATEGORIZED_FOLDER_ID ? null : folderId,
+    );
   }
 
   function openConversationContextMenu(
@@ -1126,7 +1035,10 @@ export function AssistantPanel({
     });
   }
 
-  function openFolderContextMenu(event: MouseEvent<HTMLElement>, folderId: string) {
+  function openFolderContextMenu(
+    event: MouseEvent<HTMLElement>,
+    folderId: ConversationFolderId,
+  ) {
     if (conversationListMode !== "folders") {
       return;
     }
@@ -1148,25 +1060,14 @@ export function AssistantPanel({
     return conversationFolderMap[conversationId] ?? UNCATEGORIZED_FOLDER_ID;
   }
 
-  function makeUniqueFolderId(baseName: string) {
-    const baseFolderId = createFolderId(baseName);
-    if (!conversationFolders.some((folder) => folder.id === baseFolderId)) {
-      return baseFolderId;
-    }
-
-    let suffix = 2;
-    while (
-      conversationFolders.some((folder) => folder.id === `${baseFolderId}-${suffix}`)
-    ) {
-      suffix += 1;
-    }
-    return `${baseFolderId}-${suffix}`;
-  }
-
-  function moveConversationToFolder(conversationId: number, folderId: string) {
-    handleConversationFolderChange(conversationId, folderId);
+  async function moveConversationToFolder(
+    conversationId: number,
+    folderId: ConversationFolderId,
+  ) {
+    await handleConversationFolderChange(conversationId, folderId);
     setConversationListMode("folders");
   }
+
 
   async function renameConversationFromMenu(conversationId: number) {
     const conversation = conversations.find(
@@ -1185,7 +1086,7 @@ export function AssistantPanel({
     await onRenameConversation(conversationId, normalizedTitle);
   }
 
-  function createFolderForConversation(conversationId: number) {
+  async function createFolderForConversation(conversationId: number) {
     const conversation = conversations.find(
       (candidate) => candidate.id === conversationId,
     );
@@ -1204,16 +1105,17 @@ export function AssistantPanel({
     const existing = conversationFolders.find(
       (folder) => folder.name.toLowerCase() === name.toLowerCase(),
     );
-    const folderId = existing?.id ?? makeUniqueFolderId(name);
-    if (!existing) {
-      setConversationFolders((folders) => [...folders, { id: folderId, name }]);
+    const folder = existing ?? (await onCreateConversationFolder(name));
+    if (!folder) {
+      return;
     }
-    moveConversationToFolder(conversationId, folderId);
+    const folderId = folder.id;
+    await void moveConversationToFolder(conversationId, folderId);
     setLastCreatedFolderId(folderId);
     window.setTimeout(() => setLastCreatedFolderId(null), 1200);
   }
 
-  function renameFolderFromMenu(folderId: string) {
+  async function renameFolderFromMenu(folderId: ConversationFolderId) {
     if (folderId === UNCATEGORIZED_FOLDER_ID) {
       return;
     }
@@ -1240,26 +1142,21 @@ export function AssistantPanel({
       return;
     }
 
-    setConversationFolders((folders) =>
-      folders.map((candidate) =>
-        candidate.id === folderId ? { ...candidate, name: nextName } : candidate,
+    await onRenameConversationFolder(folderId, nextName);
+  }
+
+  async function emptyFolder(folderId: ConversationFolderId) {
+    const conversationsInFolder = conversations.filter(
+      (conversation) => getConversationFolderId(conversation.id) === folderId,
+    );
+    await Promise.all(
+      conversationsInFolder.map((conversation) =>
+        onAssignConversationFolder(conversation.id, null),
       ),
     );
   }
 
-  function emptyFolder(folderId: string) {
-    setConversationFolderMap((current) => {
-      const next = { ...current };
-      for (const [conversationId, assignedFolderId] of Object.entries(current)) {
-        if (assignedFolderId === folderId) {
-          delete next[Number(conversationId)];
-        }
-      }
-      return next;
-    });
-  }
-
-  function deleteFolder(folderId: string) {
+  async function deleteFolder(folderId: ConversationFolderId) {
     if (folderId === UNCATEGORIZED_FOLDER_ID) {
       return;
     }
@@ -1277,13 +1174,10 @@ export function AssistantPanel({
       return;
     }
 
-    setConversationFolders((folders) =>
-      folders.filter((candidate) => candidate.id !== folderId),
-    );
-    emptyFolder(folderId);
+    await onDeleteConversationFolder(folderId);
   }
 
-  function archiveFolderConversations(folderId: string) {
+  function archiveFolderConversations(folderId: ConversationFolderId) {
     const conversationsInFolder = conversations.filter((conversation) => {
       const assignedFolderId = getConversationFolderId(conversation.id);
       return assignedFolderId === folderId && conversation.status !== "archived";
@@ -1315,7 +1209,7 @@ export function AssistantPanel({
     void navigator.clipboard.writeText(url.toString());
   }
 
-  function createFolderFromConversationPair(
+  async function createFolderFromConversationPair(
     sourceConversationId: number,
     targetConversationId: number,
   ) {
@@ -1335,7 +1229,7 @@ export function AssistantPanel({
 
     const targetFolderId = conversationFolderMap[targetConversationId];
     if (targetFolderId && targetFolderId !== UNCATEGORIZED_FOLDER_ID) {
-      moveConversationToFolder(sourceConversationId, targetFolderId);
+      void moveConversationToFolder(sourceConversationId, targetFolderId);
       setLastCreatedFolderId(targetFolderId);
       window.setTimeout(() => setLastCreatedFolderId(null), 1200);
       return;
@@ -1343,17 +1237,16 @@ export function AssistantPanel({
 
     const folderName = normalizeFolderName(targetConversation.title).slice(0, 40);
     const nextFolderName = folderName || "Nueva carpeta";
-    const folderId = makeUniqueFolderId(nextFolderName);
+    const folder = await onCreateConversationFolder(nextFolderName);
+    if (!folder) {
+      return;
+    }
+    const folderId = folder.id;
 
-    setConversationFolders((folders) => [
-      ...folders,
-      { id: folderId, name: nextFolderName },
+    await Promise.all([
+      onAssignConversationFolder(sourceConversation.id, folderId),
+      onAssignConversationFolder(targetConversation.id, folderId),
     ]);
-    setConversationFolderMap((current) => ({
-      ...current,
-      [sourceConversation.id]: folderId,
-      [targetConversation.id]: folderId,
-    }));
     setConversationListMode("folders");
     setLastCreatedFolderId(folderId);
     window.setTimeout(() => setLastCreatedFolderId(null), 1200);
@@ -1376,7 +1269,7 @@ export function AssistantPanel({
 
   function handleConversationDragOverFolder(
     event: DragEvent<HTMLElement>,
-    folderId: string,
+    folderId: ConversationFolderId,
   ) {
     if (draggedConversationId === null || conversationListMode !== "folders") {
       return;
@@ -1389,7 +1282,7 @@ export function AssistantPanel({
 
   function handleConversationDropOnFolder(
     event: DragEvent<HTMLElement>,
-    folderId: string,
+    folderId: ConversationFolderId,
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -1398,7 +1291,7 @@ export function AssistantPanel({
     if (conversationId === null) {
       return;
     }
-    moveConversationToFolder(conversationId, folderId);
+    void moveConversationToFolder(conversationId, folderId);
   }
 
   function handleConversationDragOverConversation(
@@ -1428,7 +1321,7 @@ export function AssistantPanel({
     if (sourceConversationId === null) {
       return;
     }
-    createFolderFromConversationPair(sourceConversationId, targetConversationId);
+    void createFolderFromConversationPair(sourceConversationId, targetConversationId);
   }
 
   function startTitleEdit() {
@@ -1622,20 +1515,38 @@ export function AssistantPanel({
                   />
                 </div>
                 <div className="assistant-list-options">
-                  <label>
-                    Vista
-                    <select
-                      value={conversationListMode}
-                      onChange={(event) =>
-                        setConversationListMode(
-                          event.target.value as ConversationListMode,
-                        )
-                      }
-                    >
-                      <option value="recent">Recientes</option>
-                      <option value="folders">Carpetas</option>
-                    </select>
-                  </label>
+                  <button
+                    className="assistant-list-mode-toggle"
+                    type="button"
+                    aria-pressed={conversationListMode === "folders"}
+                    aria-label={
+                      conversationListMode === "folders"
+                        ? "Cambiar a vista recientes"
+                        : "Cambiar a vista por carpetas"
+                    }
+                    title={
+                      conversationListMode === "folders"
+                        ? "Cambiar a vista recientes"
+                        : "Cambiar a vista por carpetas"
+                    }
+                    onClick={() =>
+                      setConversationListMode((mode) =>
+                        mode === "folders" ? "recent" : "folders",
+                      )
+                    }
+                    disabled={isLoadingAssistant}
+                  >
+                    {conversationListMode === "folders" ? (
+                      <Folder aria-hidden size={13} />
+                    ) : (
+                      <Clock3 aria-hidden size={13} />
+                    )}
+                    <span>
+                      {conversationListMode === "folders"
+                        ? "Carpetas"
+                        : "Recientes"}
+                    </span>
+                  </button>
                   <button
                     className="assistant-archived-toggle"
                     type="button"
@@ -1688,15 +1599,24 @@ export function AssistantPanel({
                       key={group.id}
                       open
                       onDragOver={(event) =>
-                        handleConversationDragOverFolder(event, group.id)
+                        handleConversationDragOverFolder(
+                          event,
+                          group.id as ConversationFolderId,
+                        )
                       }
                       onDrop={(event) =>
-                        handleConversationDropOnFolder(event, group.id)
+                        handleConversationDropOnFolder(
+                          event,
+                          group.id as ConversationFolderId,
+                        )
                       }
                     >
                       <summary
                         onContextMenu={(event) =>
-                          openFolderContextMenu(event, group.id)
+                          openFolderContextMenu(
+                            event,
+                            group.id as ConversationFolderId,
+                          )
                         }
                       >
                         <FolderIcon aria-hidden size={14} />
@@ -2342,6 +2262,7 @@ export function AssistantPanel({
               if (!folder) {
                 return null;
               }
+              const folderId = folder.id as ConversationFolderId;
               const isUncategorized = folder.id === UNCATEGORIZED_FOLDER_ID;
               return (
                 <>
@@ -2355,7 +2276,7 @@ export function AssistantPanel({
                       role="menuitem"
                       onClick={() => {
                         closeConversationContextMenu();
-                        renameFolderFromMenu(folder.id);
+                        renameFolderFromMenu(folderId);
                       }}
                     >
                       <Pencil aria-hidden size={15} />
@@ -2366,7 +2287,7 @@ export function AssistantPanel({
                     type="button"
                     role="menuitem"
                     onClick={() => {
-                      emptyFolder(folder.id);
+                      emptyFolder(folderId);
                       closeConversationContextMenu();
                     }}
                   >
@@ -2377,7 +2298,7 @@ export function AssistantPanel({
                     type="button"
                     role="menuitem"
                     onClick={() => {
-                      archiveFolderConversations(folder.id);
+                      archiveFolderConversations(folderId);
                       closeConversationContextMenu();
                     }}
                   >
@@ -2391,7 +2312,7 @@ export function AssistantPanel({
                       className="danger"
                       onClick={() => {
                         closeConversationContextMenu();
-                        deleteFolder(folder.id);
+                        deleteFolder(folderId);
                       }}
                     >
                       <XCircle aria-hidden size={15} />

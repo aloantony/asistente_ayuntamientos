@@ -120,6 +120,7 @@ class AssistantConversationRead(BaseModel):
     id: int
     title: str
     status: Literal["active", "archived"]
+    folder_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -139,6 +140,31 @@ class AssistantConversationCreate(BaseModel):
 class AssistantConversationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     status: Literal["active", "archived"] | None = None
+    folder_id: int | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantConversationFolderRead(BaseModel):
+    id: int
+    name: str
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AssistantConversationFolderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    sort_order: int = 0
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantConversationFolderUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    sort_order: int | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
 

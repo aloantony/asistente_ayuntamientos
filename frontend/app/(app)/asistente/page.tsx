@@ -138,6 +138,7 @@ function AsistentePageInner() {
       <AssistantPanel
         assistantStatus={assistantController.assistantStatus}
         conversations={assistantController.conversations}
+        conversationFolders={assistantController.conversationFolders}
         currentUser={user}
         memoryEntries={assistantController.memoryEntries}
         selectedConversation={assistantController.selectedConversation}
@@ -155,6 +156,10 @@ function AsistentePageInner() {
         onArchiveConversation={assistantController.archiveConversation}
         onRestoreConversation={assistantController.restoreConversation}
         onRenameConversation={assistantController.renameConversation}
+        onAssignConversationFolder={assistantController.assignConversationFolder}
+        onCreateConversationFolder={assistantController.createConversationFolder}
+        onRenameConversationFolder={assistantController.renameConversationFolder}
+        onDeleteConversationFolder={assistantController.deleteConversationFolder}
         onUpdateMemoryEntry={assistantController.updateMemoryEntry}
         onIncludeArchivedConversationsChange={
           assistantController.toggleIncludeArchivedConversations
