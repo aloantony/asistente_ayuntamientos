@@ -42,7 +42,7 @@ function firstNameOf(fullName: string) {
 
 // Atajos frecuentes que se vuelcan tal cual en el asistente (?q=). Son tareas
 // reales del producto, no respuestas de IA prefabricadas.
-const BRAL_SUGGESTIONS = [
+const ANACLETO_SUGGESTIONS = [
   "Ayúdame a redactar una necesidad nueva a partir de mis notas.",
   "Compara dos ordenanzas de municipios distintos.",
   "Localiza los documentos de un proyecto.",
@@ -343,7 +343,7 @@ export default function HomePage() {
 
   // Atajos reales: abren el asistente con la instrucción ya escrita. No son
   // salida inventada de la IA, sino accesos rápidos a tareas frecuentes.
-  function askBral(prompt: string) {
+  function askAnacleto(prompt: string) {
     router.push(`/asistente?q=${encodeURIComponent(prompt)}`);
   }
 
@@ -368,9 +368,9 @@ export default function HomePage() {
             <StarIcon />
           </span>
           <input
-            aria-label="Preguntar a Bral"
+            aria-label="Preguntar a Anacleto"
             onChange={(event) => setAskText(event.target.value)}
-            placeholder="Pregúntale a Bral sobre tus proyectos, necesidades u ordenanzas…"
+            placeholder="Pregúntale a Anacleto sobre tus proyectos, necesidades u ordenanzas…"
             value={askText}
           />
           <button className="accent-button" type="submit">
@@ -432,21 +432,21 @@ export default function HomePage() {
           )}
         </section>
 
-        <aside className="dashboard-bral">
-          <div className="dashboard-bral-head">
+        <aside className="dashboard-anacleto">
+          <div className="dashboard-anacleto-head">
             <StarIcon />
-            <span>Bral</span>
+            <span>Anacleto</span>
           </div>
-          <div className="dashboard-bral-body">
+          <div className="dashboard-anacleto-body">
             {canUseAssistant ? (
               <>
                 <p className="small-muted">Sugerencias para empezar:</p>
-                <div className="dashboard-bral-suggestions">
-                  {BRAL_SUGGESTIONS.map((suggestion) => (
+                <div className="dashboard-anacleto-suggestions">
+                  {ANACLETO_SUGGESTIONS.map((suggestion) => (
                     <button
                       className="dashboard-suggestion"
                       key={suggestion}
-                      onClick={() => askBral(suggestion)}
+                      onClick={() => askAnacleto(suggestion)}
                       type="button"
                     >
                       <span aria-hidden="true">→</span>
@@ -460,7 +460,7 @@ export default function HomePage() {
                 No tienes acceso al asistente en esta cuenta.
               </p>
             )}
-            <p className="dashboard-bral-note">
+            <p className="dashboard-anacleto-note">
               <ShieldIcon />
               Supervisado por humanos · datos pseudonimizados
             </p>

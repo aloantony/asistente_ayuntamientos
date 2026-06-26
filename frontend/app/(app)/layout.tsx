@@ -23,7 +23,7 @@ type NavIconName =
   | "home"
   | "needs"
   | "projects"
-  | "bral"
+  | "anacleto"
   | "admin"
   | "account";
 
@@ -63,7 +63,7 @@ function NavIcon({ name }: { name: NavIconName }) {
           <path d="M4 5h5l2 2.5h9A1.5 1.5 0 0 1 21 9v9.5A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5v-12A1.5 1.5 0 0 1 4 5Z" />
         </svg>
       );
-    case "bral":
+    case "anacleto":
       return (
         <svg {...common}>
           <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
@@ -242,7 +242,7 @@ export default function AppLayout({
   const brandName =
     user.organizations?.[0]?.municipality?.name ??
     user.organizations?.[0]?.name ??
-    "Bral";
+    "Anacleto";
   const userInitials = getUserInitials(user.full_name);
 
   const navGroups: NavGroup[] = [
@@ -271,7 +271,7 @@ export default function AppLayout({
               {
                 href: "/asistente",
                 label: "Anacleto",
-                icon: "bral" as const,
+                icon: "anacleto" as const,
                 beta: true,
               },
             ],
@@ -437,9 +437,9 @@ export default function AppLayout({
                 <path d="m21 21-4.3-4.3" />
               </svg>
               <input
-                aria-label="Buscar o preguntar a Bral"
+                aria-label="Buscar o preguntar a Anacleto"
                 onChange={(event) => setTopbarAsk(event.target.value)}
-                placeholder="Buscar o preguntar a Bral…"
+                placeholder="Buscar o preguntar a Anacleto…"
                 value={topbarAsk}
               />
             </form>
@@ -486,7 +486,7 @@ export default function AppLayout({
             {canUseAssistant ? (
               <button
                 aria-label="Abrir asistente"
-                className="app-topbar-bral"
+                className="app-topbar-anacleto"
                 onClick={() => router.push("/asistente")}
                 title="Abrir asistente"
                 type="button"

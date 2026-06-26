@@ -10,12 +10,20 @@ import {
   Copy,
   Database,
   FileText,
+  Folder,
+  FolderPlus,
   Globe2,
+  GripVertical,
   Hammer,
+  Inbox,
   Loader2,
   MessageSquarePlus,
   Mic,
   MicOff,
+  MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Pencil,
   RotateCcw,
   Search,
   Send,
@@ -25,6 +33,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  type DragEvent,
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent,
@@ -135,6 +144,29 @@ type ParsedActionResult = {
   text: string;
 };
 
+type ConversationListMode = "recent" | "folders";
+
+type ConversationFolder = {
+  id: string;
+  name: string;
+};
+
+type ConversationGroup = {
+  id: string;
+  label: string;
+  conversations: AssistantConversation[];
+};
+
+type ConversationDragTarget =
+  | { type: "conversation"; id: number }
+  | { type: "folder"; id: string }
+  | null;
+
+type ConversationContextMenu =
+  | { type: "conversation"; conversationId: number; x: number; y: number }
+  | { type: "folder"; folderId: string; x: number; y: number }
+  | null;
+
 const REQUIREMENT_PERMISSIONS = [
   "requirements.view",
   "requirements.create",
@@ -153,6 +185,89 @@ const SUGGESTED_PROMPTS = [
   "Comparar dos ordenanzas",
   "Ordenar mis notas de trabajo",
 ];
+
+const UNCATEGORIZED_FOLDER_ID = "sin-carpeta";
+const DEFAULT_CONVERSATION_FOLDERS: ConversationFolder[] = [
+  { id: "seguimiento", name: "Seguimiento" },
+  { id: "borradores", name: "Borradores" },
+  { id: "consultas", name: "Consultas" },
+];
+
+function normalizeFolderName(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function createFolderId(name: string) {
+  const slug = normalizeFolderName(name)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  return slug ? `folder-${slug}` : `folder-${Date.now()}`;
+}
+
+function daysBetweenNow(value: string) {
+  const updatedAt = new Date(value).getTime();
+  if (Number.isNaN(updatedAt)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return (Date.now() - updatedAt) / 86_400_000;
+}
+
+function buildRecentConversationGroups(
+  conversations: AssistantConversation[],
+): ConversationGroup[] {
+  const groups: ConversationGroup[] = [
+    { id: "today", label: "Hoy", conversations: [] },
+    { id: "week", label: "Últimos 7 días", conversations: [] },
+    { id: "older", label: "Anteriores", conversations: [] },
+    { id: "archived", label: "Archivadas", conversations: [] },
+  ];
+
+  for (const conversation of conversations) {
+    if (conversation.status === "archived") {
+      groups[3].conversations.push(conversation);
+      continue;
+    }
+
+    const ageInDays = daysBetweenNow(conversation.updated_at);
+    if (ageInDays < 1) {
+      groups[0].conversations.push(conversation);
+    } else if (ageInDays < 7) {
+      groups[1].conversations.push(conversation);
+    } else {
+      groups[2].conversations.push(conversation);
+    }
+  }
+
+  return groups.filter((group) => group.conversations.length > 0);
+}
+
+function buildFolderConversationGroups(
+  conversations: AssistantConversation[],
+  folders: ConversationFolder[],
+  conversationFolderMap: Record<number, string>,
+): ConversationGroup[] {
+  const groups: ConversationGroup[] = [
+    ...folders.map((folder) => ({
+      id: folder.id,
+      label: folder.name,
+      conversations: [] as AssistantConversation[],
+    })),
+    { id: UNCATEGORIZED_FOLDER_ID, label: "Sin carpeta", conversations: [] },
+  ];
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+
+  for (const conversation of conversations) {
+    const folderId = conversationFolderMap[conversation.id] ?? UNCATEGORIZED_FOLDER_ID;
+    const group = groupById.get(folderId) ?? groupById.get(UNCATEGORIZED_FOLDER_ID);
+    group?.conversations.push(conversation);
+  }
+
+  return groups.filter((group) => group.conversations.length > 0);
+}
 
 function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
   if (typeof window === "undefined") {
@@ -638,6 +753,27 @@ export function AssistantPanel({
   const [voiceError, setVoiceError] = useState("");
   const [speechSupported, setSpeechSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
+  const [isConversationListOpen, setIsConversationListOpen] = useState(true);
+  const [conversationListMode, setConversationListMode] =
+    useState<ConversationListMode>("recent");
+  const [conversationFolders, setConversationFolders] = useState<
+    ConversationFolder[]
+  >(DEFAULT_CONVERSATION_FOLDERS);
+  const [conversationFolderMap, setConversationFolderMap] = useState<
+    Record<number, string>
+  >({});
+  const [areConversationFoldersLoaded, setAreConversationFoldersLoaded] =
+    useState(false);
+  const [draggedConversationId, setDraggedConversationId] = useState<
+    number | null
+  >(null);
+  const [conversationDragTarget, setConversationDragTarget] =
+    useState<ConversationDragTarget>(null);
+  const [conversationContextMenu, setConversationContextMenu] =
+    useState<ConversationContextMenu>(null);
+  const [lastCreatedFolderId, setLastCreatedFolderId] = useState<string | null>(
+    null,
+  );
   const [isMemoryOpen, setIsMemoryOpen] = useState(memoryEntries.length > 0);
   const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
@@ -661,9 +797,109 @@ export function AssistantPanel({
     );
   }, [conversationFilter, conversations]);
 
+  const conversationGroups = useMemo(() => {
+    if (conversationListMode === "folders") {
+      return buildFolderConversationGroups(
+        filteredConversations,
+        conversationFolders,
+        conversationFolderMap,
+      );
+    }
+
+    return buildRecentConversationGroups(filteredConversations);
+  }, [
+    conversationFolderMap,
+    conversationFolders,
+    conversationListMode,
+    filteredConversations,
+  ]);
+
   useEffect(() => {
     draftMessageRef.current = draftMessage;
   }, [draftMessage]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    setAreConversationFoldersLoaded(false);
+    const stored = window.localStorage.getItem(
+      `assistant-conversation-folders:${currentUser.id}`,
+    );
+    if (!stored) {
+      setConversationFolders(DEFAULT_CONVERSATION_FOLDERS);
+      setConversationFolderMap({});
+      setAreConversationFoldersLoaded(true);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(stored) as {
+        folders?: ConversationFolder[];
+        assignments?: Record<string, string>;
+      };
+      if (Array.isArray(parsed.folders)) {
+        const folders = parsed.folders
+          .filter(
+            (folder): folder is ConversationFolder =>
+              Boolean(folder) &&
+              typeof folder.id === "string" &&
+              typeof folder.name === "string" &&
+              folder.id !== UNCATEGORIZED_FOLDER_ID,
+          )
+          .map((folder) => ({
+            id: folder.id,
+            name: normalizeFolderName(folder.name),
+          }))
+          .filter((folder) => folder.name);
+
+        setConversationFolders(
+          folders.length > 0 ? folders : DEFAULT_CONVERSATION_FOLDERS,
+        );
+      } else {
+        setConversationFolders(DEFAULT_CONVERSATION_FOLDERS);
+      }
+      if (parsed.assignments && typeof parsed.assignments === "object") {
+        const assignments: Record<number, string> = {};
+        for (const [conversationId, folderId] of Object.entries(
+          parsed.assignments,
+        )) {
+          const parsedConversationId = Number(conversationId);
+          if (Number.isInteger(parsedConversationId) && typeof folderId === "string") {
+            assignments[parsedConversationId] = folderId;
+          }
+        }
+        setConversationFolderMap(assignments);
+      } else {
+        setConversationFolderMap({});
+      }
+    } catch {
+      setConversationFolders(DEFAULT_CONVERSATION_FOLDERS);
+      setConversationFolderMap({});
+    } finally {
+      setAreConversationFoldersLoaded(true);
+    }
+  }, [currentUser.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !areConversationFoldersLoaded) {
+      return;
+    }
+
+    window.localStorage.setItem(
+      `assistant-conversation-folders:${currentUser.id}`,
+      JSON.stringify({
+        folders: conversationFolders,
+        assignments: conversationFolderMap,
+      }),
+    );
+  }, [
+    areConversationFoldersLoaded,
+    conversationFolderMap,
+    conversationFolders,
+    currentUser.id,
+  ]);
 
   useEffect(() => {
     if (memoryEntries.length > 0) {
@@ -674,6 +910,36 @@ export function AssistantPanel({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [selectedConversation?.messages.length, isSendingMessage]);
+
+  useEffect(() => {
+    if (!conversationContextMenu) {
+      return;
+    }
+
+    function closeMenu() {
+      setConversationContextMenu(null);
+    }
+
+    function handleMenuKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    }
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("contextmenu", closeMenu);
+    window.addEventListener("keydown", handleMenuKeyDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("contextmenu", closeMenu);
+      window.removeEventListener("keydown", handleMenuKeyDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [conversationContextMenu]);
 
   useEffect(() => {
     if (!selectedConversation) {
@@ -831,6 +1097,340 @@ export function AssistantPanel({
     onSendMessage();
   }
 
+  function handleConversationFolderChange(
+    conversationId: number,
+    folderId: string,
+  ) {
+    setConversationFolderMap((current) => {
+      const next = { ...current };
+      if (folderId === UNCATEGORIZED_FOLDER_ID) {
+        delete next[conversationId];
+      } else {
+        next[conversationId] = folderId;
+      }
+      return next;
+    });
+  }
+
+  function openConversationContextMenu(
+    event: MouseEvent<HTMLElement>,
+    conversationId: number,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setConversationContextMenu({
+      type: "conversation",
+      conversationId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function openFolderContextMenu(event: MouseEvent<HTMLElement>, folderId: string) {
+    if (conversationListMode !== "folders") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setConversationContextMenu({
+      type: "folder",
+      folderId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function closeConversationContextMenu() {
+    setConversationContextMenu(null);
+  }
+
+  function getConversationFolderId(conversationId: number) {
+    return conversationFolderMap[conversationId] ?? UNCATEGORIZED_FOLDER_ID;
+  }
+
+  function makeUniqueFolderId(baseName: string) {
+    const baseFolderId = createFolderId(baseName);
+    if (!conversationFolders.some((folder) => folder.id === baseFolderId)) {
+      return baseFolderId;
+    }
+
+    let suffix = 2;
+    while (
+      conversationFolders.some((folder) => folder.id === `${baseFolderId}-${suffix}`)
+    ) {
+      suffix += 1;
+    }
+    return `${baseFolderId}-${suffix}`;
+  }
+
+  function moveConversationToFolder(conversationId: number, folderId: string) {
+    handleConversationFolderChange(conversationId, folderId);
+    setConversationListMode("folders");
+  }
+
+  async function renameConversationFromMenu(conversationId: number) {
+    const conversation = conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    if (!conversation) {
+      return;
+    }
+
+    const nextTitle = window.prompt("Nuevo nombre de la conversación", conversation.title);
+    const normalizedTitle = normalizeFolderName(nextTitle ?? "");
+    if (!normalizedTitle || normalizedTitle === conversation.title) {
+      return;
+    }
+
+    await onRenameConversation(conversationId, normalizedTitle);
+  }
+
+  function createFolderForConversation(conversationId: number) {
+    const conversation = conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    if (!conversation) {
+      return;
+    }
+
+    const suggestedName = normalizeFolderName(conversation.title).slice(0, 40);
+    const name = normalizeFolderName(
+      window.prompt("Nombre de la nueva carpeta", suggestedName || "Nueva carpeta") ?? "",
+    );
+    if (!name) {
+      return;
+    }
+
+    const existing = conversationFolders.find(
+      (folder) => folder.name.toLowerCase() === name.toLowerCase(),
+    );
+    const folderId = existing?.id ?? makeUniqueFolderId(name);
+    if (!existing) {
+      setConversationFolders((folders) => [...folders, { id: folderId, name }]);
+    }
+    moveConversationToFolder(conversationId, folderId);
+    setLastCreatedFolderId(folderId);
+    window.setTimeout(() => setLastCreatedFolderId(null), 1200);
+  }
+
+  function renameFolderFromMenu(folderId: string) {
+    if (folderId === UNCATEGORIZED_FOLDER_ID) {
+      return;
+    }
+
+    const folder = conversationFolders.find((candidate) => candidate.id === folderId);
+    if (!folder) {
+      return;
+    }
+
+    const nextName = normalizeFolderName(
+      window.prompt("Nuevo nombre de la carpeta", folder.name) ?? "",
+    );
+    if (!nextName || nextName === folder.name) {
+      return;
+    }
+
+    const nameExists = conversationFolders.some(
+      (candidate) =>
+        candidate.id !== folderId &&
+        candidate.name.toLowerCase() === nextName.toLowerCase(),
+    );
+    if (nameExists) {
+      window.alert("Ya existe una carpeta con ese nombre.");
+      return;
+    }
+
+    setConversationFolders((folders) =>
+      folders.map((candidate) =>
+        candidate.id === folderId ? { ...candidate, name: nextName } : candidate,
+      ),
+    );
+  }
+
+  function emptyFolder(folderId: string) {
+    setConversationFolderMap((current) => {
+      const next = { ...current };
+      for (const [conversationId, assignedFolderId] of Object.entries(current)) {
+        if (assignedFolderId === folderId) {
+          delete next[Number(conversationId)];
+        }
+      }
+      return next;
+    });
+  }
+
+  function deleteFolder(folderId: string) {
+    if (folderId === UNCATEGORIZED_FOLDER_ID) {
+      return;
+    }
+
+    const folder = conversationFolders.find((candidate) => candidate.id === folderId);
+    if (!folder) {
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Eliminar la carpeta "${folder.name}"? Las conversaciones quedarán en Sin carpeta.`,
+      )
+    ) {
+      return;
+    }
+
+    setConversationFolders((folders) =>
+      folders.filter((candidate) => candidate.id !== folderId),
+    );
+    emptyFolder(folderId);
+  }
+
+  function archiveFolderConversations(folderId: string) {
+    const conversationsInFolder = conversations.filter((conversation) => {
+      const assignedFolderId = getConversationFolderId(conversation.id);
+      return assignedFolderId === folderId && conversation.status !== "archived";
+    });
+    if (conversationsInFolder.length === 0) {
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Archivar ${conversationsInFolder.length} conversaciones de esta carpeta?`,
+      )
+    ) {
+      return;
+    }
+
+    for (const conversation of conversationsInFolder) {
+      onArchiveConversation(conversation.id);
+    }
+  }
+
+  function copyConversationLink(conversationId: number) {
+    if (!navigator.clipboard) {
+      return;
+    }
+
+    const url = new URL("/asistente", window.location.origin);
+    url.searchParams.set("c", String(conversationId));
+    void navigator.clipboard.writeText(url.toString());
+  }
+
+  function createFolderFromConversationPair(
+    sourceConversationId: number,
+    targetConversationId: number,
+  ) {
+    if (sourceConversationId === targetConversationId) {
+      return;
+    }
+
+    const sourceConversation = conversations.find(
+      (conversation) => conversation.id === sourceConversationId,
+    );
+    const targetConversation = conversations.find(
+      (conversation) => conversation.id === targetConversationId,
+    );
+    if (!sourceConversation || !targetConversation) {
+      return;
+    }
+
+    const targetFolderId = conversationFolderMap[targetConversationId];
+    if (targetFolderId && targetFolderId !== UNCATEGORIZED_FOLDER_ID) {
+      moveConversationToFolder(sourceConversationId, targetFolderId);
+      setLastCreatedFolderId(targetFolderId);
+      window.setTimeout(() => setLastCreatedFolderId(null), 1200);
+      return;
+    }
+
+    const folderName = normalizeFolderName(targetConversation.title).slice(0, 40);
+    const nextFolderName = folderName || "Nueva carpeta";
+    const folderId = makeUniqueFolderId(nextFolderName);
+
+    setConversationFolders((folders) => [
+      ...folders,
+      { id: folderId, name: nextFolderName },
+    ]);
+    setConversationFolderMap((current) => ({
+      ...current,
+      [sourceConversation.id]: folderId,
+      [targetConversation.id]: folderId,
+    }));
+    setConversationListMode("folders");
+    setLastCreatedFolderId(folderId);
+    window.setTimeout(() => setLastCreatedFolderId(null), 1200);
+  }
+
+  function handleConversationDragStart(
+    event: DragEvent<HTMLDivElement>,
+    conversationId: number,
+  ) {
+    setDraggedConversationId(conversationId);
+    setConversationDragTarget(null);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(conversationId));
+  }
+
+  function handleConversationDragEnd() {
+    setDraggedConversationId(null);
+    setConversationDragTarget(null);
+  }
+
+  function handleConversationDragOverFolder(
+    event: DragEvent<HTMLElement>,
+    folderId: string,
+  ) {
+    if (draggedConversationId === null || conversationListMode !== "folders") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setConversationDragTarget({ type: "folder", id: folderId });
+  }
+
+  function handleConversationDropOnFolder(
+    event: DragEvent<HTMLElement>,
+    folderId: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const conversationId = draggedConversationId;
+    handleConversationDragEnd();
+    if (conversationId === null) {
+      return;
+    }
+    moveConversationToFolder(conversationId, folderId);
+  }
+
+  function handleConversationDragOverConversation(
+    event: DragEvent<HTMLDivElement>,
+    targetConversationId: number,
+  ) {
+    if (
+      draggedConversationId === null ||
+      draggedConversationId === targetConversationId
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setConversationDragTarget({ type: "conversation", id: targetConversationId });
+  }
+
+  function handleConversationDropOnConversation(
+    event: DragEvent<HTMLDivElement>,
+    targetConversationId: number,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const sourceConversationId = draggedConversationId;
+    handleConversationDragEnd();
+    if (sourceConversationId === null) {
+      return;
+    }
+    createFolderFromConversationPair(sourceConversationId, targetConversationId);
+  }
+
   function startTitleEdit() {
     if (!selectedConversation || isRenamingConversation) {
       return;
@@ -898,11 +1498,14 @@ export function AssistantPanel({
   }
 
   // Estado de la barra de privacidad: refleja la salud real del runtime.
-  const bralStatusLabel = assistantDisabled
+  const anacletoStatusLabel = assistantDisabled
     ? "Sin configurar"
     : runtimeHealthFailed
       ? "Revisar"
       : "En línea";
+  const ConversationToggleIcon = isConversationListOpen
+    ? PanelLeftClose
+    : PanelLeftOpen;
 
   return (
     <section className="panel assistant-agent-panel">
@@ -911,7 +1514,7 @@ export function AssistantPanel({
           <p className="eyebrow">Asistente</p>
           <h2>Agente municipal</h2>
           <p className="muted">
-            Conversa con Bral para consultar, estructurar trabajo y preparar
+            Conversa con Anacleto para consultar, estructurar trabajo y preparar
             borradores supervisados.
           </p>
         </div>
@@ -960,84 +1563,258 @@ export function AssistantPanel({
         </p>
         <span
           className={
-            bralStatusLabel === "En línea"
+            anacletoStatusLabel === "En línea"
               ? "assistant-banner-status online"
               : "assistant-banner-status"
           }
         >
-          {bralStatusLabel}
+          {anacletoStatusLabel}
         </span>
       </div>
 
       <div
-        className={
-          isDetailsPanelOpen
-            ? "assistant-agent-grid details-open"
-            : "assistant-agent-grid"
-        }
+        className={[
+          "assistant-agent-grid",
+          isDetailsPanelOpen ? "details-open" : "",
+          isConversationListOpen ? "" : "conversations-collapsed",
+        ]
+          .filter(Boolean)
+          .join(" ")}
       >
-        <aside className="assistant-conversations">
-          <div className="assistant-list-tools">
-            <div className="assistant-search">
-              <Search aria-hidden size={16} />
-              <input
-                aria-label="Buscar conversaciones"
-                value={conversationFilter}
-                onChange={(event) => setConversationFilter(event.target.value)}
-                placeholder="Buscar"
-                disabled={isLoadingAssistant}
-              />
-            </div>
-            <label className="checkbox-label assistant-archived-toggle">
-              <input
-                checked={includeArchivedConversations}
-                onChange={(event) =>
-                  onIncludeArchivedConversationsChange(event.target.checked)
-                }
-                type="checkbox"
-                disabled={isLoadingAssistant || isSendingMessage}
-              />
-              Archivadas
-            </label>
-          </div>
+        <aside
+          className={
+            isConversationListOpen
+              ? "assistant-conversations"
+              : "assistant-conversations collapsed"
+          }
+        >
+          <button
+            className="assistant-conversations-toggle"
+            type="button"
+            onClick={() => setIsConversationListOpen((open) => !open)}
+            aria-expanded={isConversationListOpen}
+            aria-label={
+              isConversationListOpen
+                ? "Plegar lista de chats"
+                : "Desplegar lista de chats"
+            }
+            title={
+              isConversationListOpen
+                ? "Plegar lista de chats"
+                : "Desplegar lista de chats"
+            }
+          >
+            <ConversationToggleIcon aria-hidden size={18} strokeWidth={1.8} />
+            <span>Chats</span>
+          </button>
 
-          {isLoadingAssistant ? (
-            <p className="muted assistant-empty-state">Cargando conversaciones...</p>
+          {isConversationListOpen ? (
+            <>
+              <div className="assistant-list-tools">
+                <div className="assistant-search">
+                  <Search aria-hidden size={16} />
+                  <input
+                    aria-label="Buscar conversaciones"
+                    value={conversationFilter}
+                    onChange={(event) => setConversationFilter(event.target.value)}
+                    placeholder="Buscar"
+                    disabled={isLoadingAssistant}
+                  />
+                </div>
+                <div className="assistant-list-options">
+                  <label>
+                    Vista
+                    <select
+                      value={conversationListMode}
+                      onChange={(event) =>
+                        setConversationListMode(
+                          event.target.value as ConversationListMode,
+                        )
+                      }
+                    >
+                      <option value="recent">Recientes</option>
+                      <option value="folders">Carpetas</option>
+                    </select>
+                  </label>
+                  <button
+                    className="assistant-archived-toggle"
+                    type="button"
+                    aria-pressed={includeArchivedConversations}
+                    onClick={() =>
+                      onIncludeArchivedConversationsChange(
+                        !includeArchivedConversations,
+                      )
+                    }
+                    disabled={isLoadingAssistant || isSendingMessage}
+                  >
+                    <Archive aria-hidden size={13} />
+                    Archivadas
+                  </button>
+                </div>
+              </div>
+
+              {isLoadingAssistant ? (
+                <p className="muted assistant-empty-state">Cargando conversaciones...</p>
+              ) : null}
+              {!isLoadingAssistant && filteredConversations.length === 0 ? (
+                <p className="muted assistant-empty-state">
+                  No hay conversaciones que mostrar.
+                </p>
+              ) : null}
+              {conversationListMode === "folders" ? (
+                <p className="assistant-drag-helper">
+                  Arrastra un chat a una carpeta para moverlo, o encima de otro
+                  chat para crear una carpeta con ambos.
+                </p>
+              ) : null}
+              <div className="assistant-conversation-groups">
+                {conversationGroups.map((group) => {
+                  const isFolderDropTarget =
+                    conversationDragTarget?.type === "folder" &&
+                    conversationDragTarget.id === group.id;
+                  const wasJustCreated = lastCreatedFolderId === group.id;
+                  const FolderIcon =
+                    group.id === UNCATEGORIZED_FOLDER_ID ? Inbox : Folder;
+
+                  return (
+                    <details
+                      className={[
+                        "assistant-conversation-group",
+                        isFolderDropTarget ? "drop-target" : "",
+                        wasJustCreated ? "just-created" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      key={group.id}
+                      open
+                      onDragOver={(event) =>
+                        handleConversationDragOverFolder(event, group.id)
+                      }
+                      onDrop={(event) =>
+                        handleConversationDropOnFolder(event, group.id)
+                      }
+                    >
+                      <summary
+                        onContextMenu={(event) =>
+                          openFolderContextMenu(event, group.id)
+                        }
+                      >
+                        <FolderIcon aria-hidden size={14} />
+                        <span>{group.label}</span>
+                        <small>{group.conversations.length}</small>
+                      </summary>
+                      <ul>
+                        {group.conversations.map((conversation) => {
+                          const isConversationDropTarget =
+                            conversationDragTarget?.type === "conversation" &&
+                            conversationDragTarget.id === conversation.id;
+                          const isDragging = draggedConversationId === conversation.id;
+                          const folderId =
+                            conversationFolderMap[conversation.id] ??
+                            UNCATEGORIZED_FOLDER_ID;
+                          const folder = conversationFolders.find(
+                            (candidate) => candidate.id === folderId,
+                          );
+
+                          return (
+                            <li key={conversation.id}>
+                              <div
+                                className={[
+                                  "assistant-conversation-row",
+                                  selectedConversation?.id === conversation.id
+                                    ? "selected"
+                                    : "",
+                                  isDragging ? "dragging" : "",
+                                  isConversationDropTarget ? "drop-target" : "",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
+                                draggable={!isSendingMessage}
+                                onDragStart={(event) =>
+                                  handleConversationDragStart(event, conversation.id)
+                                }
+                                onDragEnd={handleConversationDragEnd}
+                                onDragOver={(event) =>
+                                  handleConversationDragOverConversation(
+                                    event,
+                                    conversation.id,
+                                  )
+                                }
+                                onDrop={(event) =>
+                                  handleConversationDropOnConversation(
+                                    event,
+                                    conversation.id,
+                                  )
+                                }
+                                onContextMenu={(event) =>
+                                  openConversationContextMenu(
+                                    event,
+                                    conversation.id,
+                                  )
+                                }
+                              >
+                                <button
+                                  type="button"
+                                  className="assistant-conversation-item"
+                                  onClick={() => onSelectConversation(conversation.id)}
+                                  disabled={isSendingMessage}
+                                >
+                                  <span className="assistant-conversation-drag-handle">
+                                    <GripVertical aria-hidden size={14} />
+                                  </span>
+                                  <span className="assistant-conversation-copy">
+                                    <span className="assistant-conversation-title">
+                                      {conversation.title}
+                                    </span>
+                                    <span className="assistant-conversation-meta">
+                                      <Clock3 aria-hidden size={13} />
+                                      {formatShortDate(conversation.updated_at)}
+                                      {conversation.status === "archived" ? (
+                                        <span className="tag assistant-archived-tag">
+                                          Archivada
+                                        </span>
+                                      ) : null}
+                                      {conversationListMode === "folders" && folder ? (
+                                        <span className="assistant-folder-pill">
+                                          <Folder aria-hidden size={11} />
+                                          {folder.name}
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="assistant-conversation-menu-button"
+                                  aria-label={`Acciones de ${conversation.title}`}
+                                  title="Acciones"
+                                  disabled={isSendingMessage}
+                                  onClick={(event) =>
+                                    openConversationContextMenu(
+                                      event,
+                                      conversation.id,
+                                    )
+                                  }
+                                >
+                                  <MoreHorizontal aria-hidden size={15} />
+                                </button>
+                                {conversationListMode === "folders" ? (
+                                  <span className="assistant-drop-hint">
+                                    <FolderPlus aria-hidden size={14} />
+                                    Suelta para agrupar
+                                  </span>
+                                ) : null}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </details>
+                  );
+                })}
+              </div>
+            </>
           ) : null}
-          {!isLoadingAssistant && filteredConversations.length === 0 ? (
-            <p className="muted assistant-empty-state">
-              No hay conversaciones que mostrar.
-            </p>
-          ) : null}
-          <ul>
-            {filteredConversations.map((conversation) => (
-              <li key={conversation.id}>
-                <button
-                  type="button"
-                  className={
-                    selectedConversation?.id === conversation.id
-                      ? "assistant-conversation-item selected"
-                      : "assistant-conversation-item"
-                  }
-                  onClick={() => onSelectConversation(conversation.id)}
-                  disabled={isSendingMessage}
-                >
-                  <span className="assistant-conversation-title">
-                    {conversation.title}
-                  </span>
-                  <span className="assistant-conversation-meta">
-                    <Clock3 aria-hidden size={13} />
-                    {formatShortDate(conversation.updated_at)}
-                    {conversation.status === "archived" ? (
-                      <span className="tag assistant-archived-tag">
-                        Archivada
-                      </span>
-                    ) : null}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
         </aside>
 
         <main className="assistant-thread">
@@ -1132,7 +1909,7 @@ export function AssistantPanel({
                       </div>
                       <div className="assistant-message-main">
                         <div className="assistant-message-meta">
-                          <span>{isAssistant ? "Bral" : "Tu"}</span>
+                          <span>{isAssistant ? "Anacleto" : "Tu"}</span>
                           <small>{formatDate(message.created_at)}</small>
                         </div>
                         <div className="assistant-message-bubble">
@@ -1173,7 +1950,7 @@ export function AssistantPanel({
                     </div>
                     <div className="assistant-message-main">
                       <div className="assistant-message-meta">
-                        <span>Bral</span>
+                        <span>Anacleto</span>
                         <small>Trabajando</small>
                       </div>
                       <div className="assistant-message-bubble">
@@ -1403,6 +2180,222 @@ export function AssistantPanel({
           ) : null}
         </aside>
       </div>
+
+      {conversationContextMenu ? (
+        <div
+          className="assistant-context-menu"
+          role="menu"
+          style={{
+            left: conversationContextMenu.x,
+            top: conversationContextMenu.y,
+          }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          {conversationContextMenu.type === "conversation" ? (
+            (() => {
+              const conversation = conversations.find(
+                (candidate) =>
+                  candidate.id === conversationContextMenu.conversationId,
+              );
+              if (!conversation) {
+                return null;
+              }
+              const currentFolderId = getConversationFolderId(conversation.id);
+              return (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      onSelectConversation(conversation.id);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <MessageSquarePlus aria-hidden size={15} />
+                    Abrir conversación
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closeConversationContextMenu();
+                      void renameConversationFromMenu(conversation.id);
+                    }}
+                  >
+                    <Pencil aria-hidden size={15} />
+                    Renombrar
+                  </button>
+                  <div className="assistant-context-menu-section">
+                    <p>Mover a carpeta</p>
+                    {conversationFolders.map((folder) => (
+                      <button
+                        key={folder.id}
+                        type="button"
+                        role="menuitem"
+                        className={
+                          currentFolderId === folder.id ? "selected" : undefined
+                        }
+                        onClick={() => {
+                          moveConversationToFolder(conversation.id, folder.id);
+                          closeConversationContextMenu();
+                        }}
+                      >
+                        <Folder aria-hidden size={15} />
+                        {folder.name}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={
+                        currentFolderId === UNCATEGORIZED_FOLDER_ID
+                          ? "selected"
+                          : undefined
+                      }
+                      onClick={() => {
+                        moveConversationToFolder(
+                          conversation.id,
+                          UNCATEGORIZED_FOLDER_ID,
+                        );
+                        closeConversationContextMenu();
+                      }}
+                    >
+                      <Inbox aria-hidden size={15} />
+                      Sin carpeta
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closeConversationContextMenu();
+                      createFolderForConversation(conversation.id);
+                    }}
+                  >
+                    <FolderPlus aria-hidden size={15} />
+                    Nueva carpeta con este chat
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      copyConversationLink(conversation.id);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <Copy aria-hidden size={15} />
+                    Copiar enlace
+                  </button>
+                  {conversation.status === "archived" ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        onRestoreConversation(conversation.id);
+                        closeConversationContextMenu();
+                      }}
+                    >
+                      <ArchiveRestore aria-hidden size={15} />
+                      Restaurar
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            "Archivar esta conversación? Dejará de aparecer en la lista.",
+                          )
+                        ) {
+                          onArchiveConversation(conversation.id);
+                        }
+                        closeConversationContextMenu();
+                      }}
+                    >
+                      <Archive aria-hidden size={15} />
+                      Archivar
+                    </button>
+                  )}
+                </>
+              );
+            })()
+          ) : (
+            (() => {
+              const folder =
+                conversationContextMenu.folderId === UNCATEGORIZED_FOLDER_ID
+                  ? { id: UNCATEGORIZED_FOLDER_ID, name: "Sin carpeta" }
+                  : conversationFolders.find(
+                      (candidate) =>
+                        candidate.id === conversationContextMenu.folderId,
+                    );
+              if (!folder) {
+                return null;
+              }
+              const isUncategorized = folder.id === UNCATEGORIZED_FOLDER_ID;
+              return (
+                <>
+                  <div className="assistant-context-menu-title">
+                    <Folder aria-hidden size={15} />
+                    {folder.name}
+                  </div>
+                  {!isUncategorized ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closeConversationContextMenu();
+                        renameFolderFromMenu(folder.id);
+                      }}
+                    >
+                      <Pencil aria-hidden size={15} />
+                      Renombrar carpeta
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      emptyFolder(folder.id);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <Inbox aria-hidden size={15} />
+                    Vaciar carpeta
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      archiveFolderConversations(folder.id);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <Archive aria-hidden size={15} />
+                    Archivar conversaciones
+                  </button>
+                  {!isUncategorized ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      onClick={() => {
+                        closeConversationContextMenu();
+                        deleteFolder(folder.id);
+                      }}
+                    >
+                      <XCircle aria-hidden size={15} />
+                      Eliminar carpeta
+                    </button>
+                  ) : null}
+                </>
+              );
+            })()
+          )}
+        </div>
+      ) : null}
     </section>
   );
 }

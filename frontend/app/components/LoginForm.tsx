@@ -37,7 +37,7 @@ export function LoginForm({
               <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
             </svg>
           </span>
-          <span className="login-brand-name">Bral</span>
+          <span className="login-brand-name">Anacleto</span>
         </div>
         <p className="eyebrow">Plataforma privada municipal</p>
         <h1>Iniciar sesión</h1>

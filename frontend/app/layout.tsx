@@ -23,7 +23,7 @@ const ibmPlexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Bral",
+  title: "Anacleto",
   description: "Plataforma privada para asistencia municipal y administrativa",
 };
 
