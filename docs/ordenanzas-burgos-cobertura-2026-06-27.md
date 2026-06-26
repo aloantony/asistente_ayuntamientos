@@ -87,7 +87,7 @@ Se ejecutaron búsquedas internas sobre chunks aprobados y listos:
 | `vertidos de aguas residuales Quemada` | Quemada — vertidos de aguas residuales |
 | `conservación de caminos rurales Estépar` | Estépar — conservación de caminos rurales |
 
-Observación: Miranda de Ebro queda cargado y aprobado, pero el smoke genérico `IBI ordenanzas fiscales Miranda de Ebro` no devuelve Miranda como top con el embedding local determinista actual. Conviene usar filtro por municipio/materia o mejorar el ranking antes de depender de esa consulta para demo.
+Observación corregida: Miranda de Ebro queda cargado y aprobado. El smoke genérico `IBI ordenanzas fiscales Miranda de Ebro` no devolvía Miranda como top con el embedding local determinista; al aplicar filtros estructurados `municipality_name=Miranda de Ebro` y `topic=ordenanzas fiscales`, la búsqueda devuelve el documento de Miranda. La demo debe pasar municipio/materia como filtros cuando el usuario los mencione.
 
 ## Smoke real del conector BOPBUR
 
