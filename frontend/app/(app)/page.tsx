@@ -53,16 +53,11 @@ function StarIcon() {
   return (
     <svg
       aria-hidden="true"
-      fill="none"
       height="18"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.6"
       viewBox="0 0 24 24"
       width="18"
     >
-      <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
+      <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />
     </svg>
   );
 }

@@ -25,6 +25,11 @@ const ibmPlexMono = IBM_Plex_Mono({
 export const metadata: Metadata = {
   title: "Anacleto",
   description: "Plataforma privada para asistencia municipal y administrativa",
+  icons: {
+    icon: "/anacleto-logo.svg",
+    shortcut: "/anacleto-logo.svg",
+    apple: "/anacleto-logo.svg",
+  },
 };
 
 // Aplica el tema guardado (o la preferencia del sistema) antes de pintar, para

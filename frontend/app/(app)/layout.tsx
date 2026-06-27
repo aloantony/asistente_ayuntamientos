@@ -6,7 +6,6 @@ import {
   useCallback,
   useEffect,
   useState,
-  type FormEvent,
   type ReactNode,
 } from "react";
 import { userHasPermission } from "../components/types";
@@ -65,8 +64,8 @@ function NavIcon({ name }: { name: NavIconName }) {
       );
     case "anacleto":
       return (
-        <svg {...common}>
-          <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
+        <svg aria-hidden="true" height="17" viewBox="0 0 24 24" width="17">
+          <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />
         </svg>
       );
     case "admin":
@@ -149,7 +148,6 @@ export default function AppLayout({
   const pathname = usePathname();
   const { user, isLoadingSession, logout } = useSession();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [topbarAsk, setTopbarAsk] = useState("");
   const [requirementsTotal, setRequirementsTotal] = useState<number | null>(
     null,
   );
@@ -299,32 +297,12 @@ export default function AppLayout({
     return item.exact ? pathname === item.href : pathname.startsWith(item.href);
   }
 
-  function handleTopbarAsk(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const query = topbarAsk.trim();
-    router.push(
-      query ? `/asistente?q=${encodeURIComponent(query)}` : "/asistente",
-    );
-    setTopbarAsk("");
-  }
-
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
         <div className="app-brand">
           <span className="app-brand-star" aria-hidden="true">
-            <svg
-              fill="none"
-              height="18"
-              stroke="currentColor"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth="1.7"
-              viewBox="0 0 24 24"
-              width="18"
-            >
-              <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
-            </svg>
+            <img alt="" src="/anacleto-logo.svg" />
           </span>
           <span className="app-brand-name" title={brandName}>
             {brandName}
@@ -420,30 +398,6 @@ export default function AppLayout({
       </aside>
       <div className="app-main">
         <header className="app-topbar">
-          {canUseAssistant ? (
-            <form className="app-topbar-search" onSubmit={handleTopbarAsk}>
-              <svg
-                aria-hidden="true"
-                fill="none"
-                height="15"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="1.8"
-                viewBox="0 0 24 24"
-                width="15"
-              >
-                <circle cx="11" cy="11" r="7" />
-                <path d="m21 21-4.3-4.3" />
-              </svg>
-              <input
-                aria-label="Buscar o preguntar a Anacleto"
-                onChange={(event) => setTopbarAsk(event.target.value)}
-                placeholder="Buscar o preguntar a Anacleto…"
-                value={topbarAsk}
-              />
-            </form>
-          ) : null}
           <div className="app-topbar-actions">
             <button
               aria-pressed={dark}
@@ -491,18 +445,8 @@ export default function AppLayout({
                 title="Abrir asistente"
                 type="button"
               >
-                <svg
-                  aria-hidden="true"
-                  fill="none"
-                  height="15"
-                  stroke="currentColor"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="1.7"
-                  viewBox="0 0 24 24"
-                  width="15"
-                >
-                  <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
+                <svg aria-hidden="true" height="15" viewBox="0 0 24 24" width="15">
+                  <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />
                 </svg>
               </button>
             ) : null}
@@ -517,7 +461,15 @@ export default function AppLayout({
             </button>
           </div>
         </header>
-        <main className="app-content">{children}</main>
+        <main
+          className={
+            pathname === "/asistente"
+              ? "app-content app-content-assistant"
+              : "app-content"
+          }
+        >
+          {children}
+        </main>
       </div>
     </div>
   );

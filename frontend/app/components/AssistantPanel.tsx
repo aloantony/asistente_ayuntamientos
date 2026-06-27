@@ -1,34 +1,17 @@
 import {
-  Archive,
-  ArchiveRestore,
-  Bot,
   Brain,
   CheckCircle2,
-  ChevronDown,
   CircleAlert,
   Clock3,
-  Copy,
   Database,
   FileText,
-  Folder,
-  FolderPlus,
   Globe2,
   GripVertical,
   Hammer,
   Inbox,
   Loader2,
-  MessageSquarePlus,
-  Mic,
-  MicOff,
-  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
-  Pencil,
-  RotateCcw,
-  Search,
-  Send,
-  ShieldCheck,
-  Sparkles,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -43,20 +26,13 @@ import {
   useState,
 } from "react";
 import {
-  ASSISTANT_MEMORY_CATEGORY_LABELS,
-  ASSISTANT_MEMORY_SENSITIVITY_LABELS,
   formatAssistantTool,
   type AssistantAction,
   type AssistantConversation,
   type AssistantConversationDetail,
   type AssistantConversationFolder,
-  type AssistantMemoryCategory,
-  type AssistantMemoryEntry,
-  type AssistantMemorySensitivity,
-  type AssistantMemoryStatus,
   type AssistantStatus,
   type User,
-  userHasPermission,
 } from "./types";
 
 // Minimal local typings for the Web Speech API; the DOM lib does not ship
@@ -106,7 +82,6 @@ type AssistantPanelProps = {
   conversations: AssistantConversation[];
   conversationFolders: AssistantConversationFolder[];
   currentUser: User;
-  memoryEntries: AssistantMemoryEntry[];
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
   isLoadingAssistant: boolean;
@@ -130,24 +105,6 @@ type AssistantPanelProps = {
   onRenameConversationFolder: (folderId: number, name: string) => Promise<void>;
   onDeleteConversationFolder: (folderId: number) => Promise<void>;
   onIncludeArchivedConversationsChange: (includeArchived: boolean) => void;
-  onUpdateMemoryEntry: (
-    entryId: number,
-    updates: {
-      category?: AssistantMemoryCategory;
-      content?: string;
-      status?: AssistantMemoryStatus;
-      sensitivity?: AssistantMemorySensitivity;
-      review_notes?: string;
-    },
-  ) => void;
-};
-
-type Capability = {
-  id: string;
-  label: string;
-  detail: string;
-  enabled: boolean;
-  icon: LucideIcon;
 };
 
 type ParsedActionResult = {
@@ -175,18 +132,6 @@ type ConversationContextMenu =
   | { type: "folder"; folderId: ConversationFolderId; x: number; y: number }
   | null;
 
-const REQUIREMENT_PERMISSIONS = [
-  "requirements.view",
-  "requirements.create",
-  "requirements.edit",
-];
-
-const MEMORY_PERMISSIONS = [
-  "assistant.memory.propose",
-  "assistant.memory.view",
-  "assistant.memory.review",
-];
-
 // Sugerencias rápidas del compositor: sólo prerrellenan el borrador, no envían.
 const SUGGESTED_PROMPTS = [
   "Preparar un resumen ejecutivo",
@@ -197,6 +142,35 @@ const SUGGESTED_PROMPTS = [
 const UNCATEGORIZED_FOLDER_ID = "sin-carpeta";
 function normalizeFolderName(value: string) {
   return value.trim().replace(/\s+/g, " ");
+}
+
+type AssistantSymbolName =
+  | "archive"
+  | "conversation-list-close"
+  | "conversation-list-open"
+  | "copy"
+  | "folder"
+  | "mark"
+  | "mic"
+  | "more"
+  | "new-chat"
+  | "rename"
+  | "restore"
+  | "search"
+  | "send";
+
+function AssistantSymbolIcon({
+  name,
+  size = 16,
+}: {
+  name: AssistantSymbolName;
+  size?: number;
+}) {
+  return (
+    <svg aria-hidden="true" height={size} viewBox="0 0 24 24" width={size}>
+      <use href={`/icons/assistant-symbols.svg#icon-assistant-${name}`} />
+    </svg>
+  );
 }
 
 function daysBetweenNow(value: string) {
@@ -211,25 +185,25 @@ function buildRecentConversationGroups(
   conversations: AssistantConversation[],
 ): ConversationGroup[] {
   const groups: ConversationGroup[] = [
+    { id: "archived", label: "Archivadas", conversations: [] },
     { id: "today", label: "Hoy", conversations: [] },
     { id: "week", label: "Últimos 7 días", conversations: [] },
     { id: "older", label: "Anteriores", conversations: [] },
-    { id: "archived", label: "Archivadas", conversations: [] },
   ];
 
   for (const conversation of conversations) {
     if (conversation.status === "archived") {
-      groups[3].conversations.push(conversation);
+      groups[0].conversations.push(conversation);
       continue;
     }
 
     const ageInDays = daysBetweenNow(conversation.updated_at);
     if (ageInDays < 1) {
-      groups[0].conversations.push(conversation);
-    } else if (ageInDays < 7) {
       groups[1].conversations.push(conversation);
-    } else {
+    } else if (ageInDays < 7) {
       groups[2].conversations.push(conversation);
+    } else {
+      groups[3].conversations.push(conversation);
     }
   }
 
@@ -274,66 +248,6 @@ function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null 
       | undefined) ??
     null
   );
-}
-
-function userHasAnyPermission(user: User, permissions: string[]) {
-  return permissions.some((permission) => userHasPermission(user, permission));
-}
-
-function buildCapabilities(
-  currentUser: User,
-  assistantStatus: AssistantStatus | null,
-): Capability[] {
-  const runtimeHealthy =
-    assistantStatus?.enabled && assistantStatus.runtime_healthy !== false;
-
-  return [
-    {
-      id: "chat",
-      label: "Conversacion",
-      detail: assistantStatus?.enabled ? "Disponible" : "Sin configurar",
-      enabled: Boolean(assistantStatus?.enabled),
-      icon: Bot,
-    },
-    {
-      id: "requirements",
-      label: "Necesidades",
-      detail: userHasAnyPermission(currentUser, REQUIREMENT_PERMISSIONS)
-        ? "Lectura y borradores"
-        : "Sin permiso",
-      enabled: userHasAnyPermission(currentUser, REQUIREMENT_PERMISSIONS),
-      icon: FileText,
-    },
-    {
-      id: "web",
-      label: "Web",
-      detail: userHasPermission(currentUser, "assistant.web.search")
-        ? "Busqueda controlada"
-        : "Sin permiso",
-      enabled: userHasPermission(currentUser, "assistant.web.search"),
-      icon: Globe2,
-    },
-    {
-      id: "memory",
-      label: "Memoria",
-      detail: userHasAnyPermission(currentUser, MEMORY_PERMISSIONS)
-        ? "Revision gobernada"
-        : "Sin permiso",
-      enabled: userHasAnyPermission(currentUser, MEMORY_PERMISSIONS),
-      icon: Brain,
-    },
-    {
-      id: "runtime",
-      label: assistantStatus?.runtime ?? "Runtime",
-      detail: !assistantStatus
-        ? "Pendiente"
-        : runtimeHealthy
-          ? assistantStatus.model
-          : "Revisar",
-      enabled: Boolean(runtimeHealthy),
-      icon: ShieldCheck,
-    },
-  ];
 }
 
 function formatDate(value: string) {
@@ -443,47 +357,6 @@ function actionDetailText(action: AssistantAction) {
   return `Input\n${input}\n\nResultado\n${result}`;
 }
 
-function CapabilityStrip({
-  capabilities,
-}: {
-  capabilities: Capability[];
-}) {
-  const enabledCount = capabilities.filter((capability) => capability.enabled).length;
-
-  return (
-    <details className="assistant-capabilities-panel">
-      <summary>
-        <span>Capacidades</span>
-        <small>
-          {enabledCount} de {capabilities.length} disponibles
-        </small>
-        <ChevronDown aria-hidden size={15} />
-      </summary>
-      <div className="assistant-capabilities" aria-label="Capacidades del asistente">
-        {capabilities.map((capability) => {
-          const Icon = capability.icon;
-          return (
-            <div
-              className={
-                capability.enabled
-                  ? "assistant-capability enabled"
-                  : "assistant-capability"
-              }
-              key={capability.id}
-            >
-              <Icon aria-hidden size={15} />
-              <div>
-                <span>{capability.label}</span>
-                <small>{capability.detail}</small>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </details>
-  );
-}
-
 function ActionTimeline({
   actions,
   toolLabels,
@@ -558,153 +431,11 @@ function ActionTimeline({
   );
 }
 
-function MemoryReviewPanel({
-  entries,
-  isSendingMessage,
-  onUpdateMemoryEntry,
-}: {
-  entries: AssistantMemoryEntry[];
-  isSendingMessage: boolean;
-  onUpdateMemoryEntry: AssistantPanelProps["onUpdateMemoryEntry"];
-}) {
-  function handleMemoryEdit(
-    event: FormEvent<HTMLFormElement>,
-    entryId: number,
-  ) {
-    event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    onUpdateMemoryEntry(entryId, {
-      category: formData.get("category") as AssistantMemoryCategory,
-      content: String(formData.get("content") ?? ""),
-      sensitivity: formData.get("sensitivity") as AssistantMemorySensitivity,
-      review_notes: String(formData.get("review_notes") ?? ""),
-    });
-  }
-
-  function handleMemoryStatus(
-    event: MouseEvent<HTMLButtonElement>,
-    entryId: number,
-    status: AssistantMemoryStatus,
-  ) {
-    const form = event.currentTarget.form;
-    if (!form) {
-      onUpdateMemoryEntry(entryId, { status });
-      return;
-    }
-
-    const formData = new FormData(form);
-    onUpdateMemoryEntry(entryId, {
-      category: formData.get("category") as AssistantMemoryCategory,
-      content: String(formData.get("content") ?? ""),
-      sensitivity: formData.get("sensitivity") as AssistantMemorySensitivity,
-      review_notes: String(formData.get("review_notes") ?? ""),
-      status,
-    });
-  }
-
-  if (entries.length === 0) {
-    return <p className="muted">Sin propuestas pendientes.</p>;
-  }
-
-  return (
-    <div className="assistant-memory-list">
-      {entries.map((entry) => (
-        <form
-          className="assistant-memory-item"
-          key={entry.id}
-          onSubmit={(event) => handleMemoryEdit(event, entry.id)}
-        >
-          <textarea
-            name="content"
-            defaultValue={entry.content}
-            rows={4}
-            disabled={isSendingMessage}
-          />
-          <div className="assistant-memory-fields">
-            <label>
-              Tipo
-              <select
-                name="category"
-                defaultValue={entry.category}
-                disabled={isSendingMessage}
-              >
-                {Object.entries(ASSISTANT_MEMORY_CATEGORY_LABELS).map(
-                  ([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ),
-                )}
-              </select>
-            </label>
-            <label>
-              Sensibilidad
-              <select
-                name="sensitivity"
-                defaultValue={entry.sensitivity}
-                disabled={isSendingMessage}
-              >
-                {Object.entries(ASSISTANT_MEMORY_SENSITIVITY_LABELS).map(
-                  ([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ),
-                )}
-              </select>
-            </label>
-          </div>
-          <input
-            name="review_notes"
-            placeholder="Nota de revision"
-            disabled={isSendingMessage}
-          />
-          <div className="assistant-memory-actions">
-            <button type="submit" disabled={isSendingMessage}>
-              Guardar
-            </button>
-            <button
-              type="button"
-              disabled={isSendingMessage}
-              onClick={(event) =>
-                handleMemoryStatus(event, entry.id, "approved")
-              }
-            >
-              Aprobar
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={isSendingMessage}
-              onClick={(event) =>
-                handleMemoryStatus(event, entry.id, "rejected")
-              }
-            >
-              Rechazar
-            </button>
-            <button
-              className="danger-button"
-              type="button"
-              disabled={isSendingMessage}
-              onClick={(event) =>
-                handleMemoryStatus(event, entry.id, "blocked")
-              }
-            >
-              Bloquear
-            </button>
-          </div>
-        </form>
-      ))}
-    </div>
-  );
-}
-
 export function AssistantPanel({
   assistantStatus,
   conversations,
   conversationFolders,
   currentUser,
-  memoryEntries,
   selectedConversation,
   draftMessage,
   isLoadingAssistant,
@@ -723,7 +454,6 @@ export function AssistantPanel({
   onRenameConversationFolder,
   onDeleteConversationFolder,
   onIncludeArchivedConversationsChange,
-  onUpdateMemoryEntry,
 }: AssistantPanelProps) {
   const assistantDisabled = assistantStatus !== null && !assistantStatus.enabled;
   const runtimeHealthFailed =
@@ -733,10 +463,6 @@ export function AssistantPanel({
   const selectedIsArchived = selectedConversation?.status === "archived";
   const composerDisabled =
     isSendingMessage || assistantDisabled || Boolean(selectedIsArchived);
-  const capabilities = useMemo(
-    () => buildCapabilities(currentUser, assistantStatus),
-    [assistantStatus, currentUser],
-  );
   const toolLabels = useMemo(
     () =>
       Object.fromEntries(
@@ -761,6 +487,10 @@ export function AssistantPanel({
       ) as Record<number, ConversationFolderId>,
     [conversations],
   );
+  const conversationFolderById = useMemo(
+    () => new Map(conversationFolders.map((folder) => [folder.id, folder])),
+    [conversationFolders],
+  );
   const [draggedConversationId, setDraggedConversationId] = useState<
     number | null
   >(null);
@@ -771,17 +501,10 @@ export function AssistantPanel({
   const [lastCreatedFolderId, setLastCreatedFolderId] = useState<ConversationFolderId | null>(
     null,
   );
-  const [isMemoryOpen, setIsMemoryOpen] = useState(memoryEntries.length > 0);
-  const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
-  const [editingConversationTitleId, setEditingConversationTitleId] =
-    useState<number | null>(null);
-  const [conversationTitleDraft, setConversationTitleDraft] = useState("");
-  const [isRenamingConversation, setIsRenamingConversation] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const filteredConversations = useMemo(() => {
@@ -816,12 +539,6 @@ export function AssistantPanel({
   }, [draftMessage]);
 
   useEffect(() => {
-    if (memoryEntries.length > 0) {
-      setIsMemoryOpen(true);
-    }
-  }, [memoryEntries.length]);
-
-  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [selectedConversation?.messages.length, isSendingMessage]);
 
@@ -854,25 +571,6 @@ export function AssistantPanel({
       window.removeEventListener("scroll", closeMenu, true);
     };
   }, [conversationContextMenu]);
-
-  useEffect(() => {
-    if (!selectedConversation) {
-      setEditingConversationTitleId(null);
-      setConversationTitleDraft("");
-      return;
-    }
-
-    if (editingConversationTitleId !== selectedConversation.id) {
-      setConversationTitleDraft(selectedConversation.title);
-    }
-  }, [editingConversationTitleId, selectedConversation]);
-
-  useEffect(() => {
-    if (editingConversationTitleId !== null) {
-      titleInputRef.current?.focus({ preventScroll: true });
-      titleInputRef.current?.select();
-    }
-  }, [editingConversationTitleId]);
 
   useEffect(() => {
     if (!selectedConversation || composerDisabled) {
@@ -1065,9 +763,13 @@ export function AssistantPanel({
     folderId: ConversationFolderId,
   ) {
     await handleConversationFolderChange(conversationId, folderId);
-    setConversationListMode("folders");
   }
 
+  function findConversationFolderByName(name: string) {
+    return conversationFolders.find(
+      (folder) => folder.name.toLowerCase() === name.toLowerCase(),
+    );
+  }
 
   async function renameConversationFromMenu(conversationId: number) {
     const conversation = conversations.find(
@@ -1102,15 +804,13 @@ export function AssistantPanel({
       return;
     }
 
-    const existing = conversationFolders.find(
-      (folder) => folder.name.toLowerCase() === name.toLowerCase(),
-    );
+    const existing = findConversationFolderByName(name);
     const folder = existing ?? (await onCreateConversationFolder(name));
     if (!folder) {
       return;
     }
     const folderId = folder.id;
-    await void moveConversationToFolder(conversationId, folderId);
+    await moveConversationToFolder(conversationId, folderId);
     setLastCreatedFolderId(folderId);
     window.setTimeout(() => setLastCreatedFolderId(null), 1200);
   }
@@ -1237,7 +937,9 @@ export function AssistantPanel({
 
     const folderName = normalizeFolderName(targetConversation.title).slice(0, 40);
     const nextFolderName = folderName || "Nueva carpeta";
-    const folder = await onCreateConversationFolder(nextFolderName);
+    const folder =
+      findConversationFolderByName(nextFolderName) ??
+      (await onCreateConversationFolder(nextFolderName));
     if (!folder) {
       return;
     }
@@ -1247,7 +949,6 @@ export function AssistantPanel({
       onAssignConversationFolder(sourceConversation.id, folderId),
       onAssignConversationFolder(targetConversation.id, folderId),
     ]);
-    setConversationListMode("folders");
     setLastCreatedFolderId(folderId);
     window.setTimeout(() => setLastCreatedFolderId(null), 1200);
   }
@@ -1286,6 +987,10 @@ export function AssistantPanel({
   ) {
     event.preventDefault();
     event.stopPropagation();
+    if (conversationListMode !== "folders") {
+      handleConversationDragEnd();
+      return;
+    }
     const conversationId = draggedConversationId;
     handleConversationDragEnd();
     if (conversationId === null) {
@@ -1324,55 +1029,6 @@ export function AssistantPanel({
     void createFolderFromConversationPair(sourceConversationId, targetConversationId);
   }
 
-  function startTitleEdit() {
-    if (!selectedConversation || isRenamingConversation) {
-      return;
-    }
-    setConversationTitleDraft(selectedConversation.title);
-    setEditingConversationTitleId(selectedConversation.id);
-  }
-
-  function cancelTitleEdit() {
-    setEditingConversationTitleId(null);
-    setConversationTitleDraft(selectedConversation?.title ?? "");
-  }
-
-  async function submitTitleEdit() {
-    if (!selectedConversation || isRenamingConversation) {
-      return;
-    }
-
-    const nextTitle = conversationTitleDraft.trim();
-    if (!nextTitle) {
-      cancelTitleEdit();
-      return;
-    }
-    if (nextTitle === selectedConversation.title) {
-      setEditingConversationTitleId(null);
-      return;
-    }
-
-    setIsRenamingConversation(true);
-    try {
-      await onRenameConversation(selectedConversation.id, nextTitle);
-      setEditingConversationTitleId(null);
-    } catch {
-      titleInputRef.current?.focus({ preventScroll: true });
-    } finally {
-      setIsRenamingConversation(false);
-    }
-  }
-
-  function handleTitleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void submitTitleEdit();
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      cancelTitleEdit();
-    }
-  }
-
   function handleCopyMessage(messageId: number, content: string) {
     if (!navigator.clipboard) {
       return;
@@ -1390,40 +1046,8 @@ export function AssistantPanel({
       .catch(() => undefined);
   }
 
-  // Estado de la barra de privacidad: refleja la salud real del runtime.
-  const anacletoStatusLabel = assistantDisabled
-    ? "Sin configurar"
-    : runtimeHealthFailed
-      ? "Revisar"
-      : "En línea";
-  const ConversationToggleIcon = isConversationListOpen
-    ? PanelLeftClose
-    : PanelLeftOpen;
-
   return (
     <section className="panel assistant-agent-panel">
-      <div className="assistant-agent-header">
-        <div className="assistant-agent-title">
-          <p className="eyebrow">Asistente</p>
-          <h2>Agente municipal</h2>
-          <p className="muted">
-            Conversa con Anacleto para consultar, estructurar trabajo y preparar
-            borradores supervisados.
-          </p>
-        </div>
-        <button
-          className="secondary-button assistant-new-chat"
-          type="button"
-          onClick={onStartConversation}
-          disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
-        >
-          <MessageSquarePlus aria-hidden size={17} />
-          <span>Nueva conversacion</span>
-        </button>
-      </div>
-
-      <CapabilityStrip capabilities={capabilities} />
-
       {assistantError ? (
         <div className="assistant-alert error-message">
           <CircleAlert aria-hidden size={18} />
@@ -1441,71 +1065,75 @@ export function AssistantPanel({
       {runtimeHealthFailed ? (
         <div className="assistant-alert muted">
           <CircleAlert aria-hidden size={18} />
-          <span>Hermes Agent esta configurado, pero su API no responde.</span>
+          <span>El asistente no responde ahora mismo.</span>
         </div>
       ) : null}
-
-      <div className="assistant-banner">
-        <span className="assistant-banner-icon">
-          <ShieldCheck aria-hidden size={15} />
-        </span>
-        <p>
-          <strong>Privacy/AI Gateway activo.</strong> Los datos se
-          pseudonimizan antes de cualquier llamada externa. La IA asiste, no
-          decide.
-        </p>
-        <span
-          className={
-            anacletoStatusLabel === "En línea"
-              ? "assistant-banner-status online"
-              : "assistant-banner-status"
-          }
-        >
-          {anacletoStatusLabel}
-        </span>
-      </div>
 
       <div
         className={[
           "assistant-agent-grid",
-          isDetailsPanelOpen ? "details-open" : "",
           isConversationListOpen ? "" : "conversations-collapsed",
         ]
           .filter(Boolean)
           .join(" ")}
       >
-        <aside
-          className={
-            isConversationListOpen
-              ? "assistant-conversations"
-              : "assistant-conversations collapsed"
-          }
-        >
-          <button
-            className="assistant-conversations-toggle"
-            type="button"
-            onClick={() => setIsConversationListOpen((open) => !open)}
-            aria-expanded={isConversationListOpen}
-            aria-label={
-              isConversationListOpen
-                ? "Plegar lista de chats"
-                : "Desplegar lista de chats"
-            }
-            title={
-              isConversationListOpen
-                ? "Plegar lista de chats"
-                : "Desplegar lista de chats"
-            }
-          >
-            <ConversationToggleIcon aria-hidden size={18} strokeWidth={1.8} />
-            <span>Chats</span>
-          </button>
+        {!isConversationListOpen ? (
+          <div className="assistant-floating-actions">
+            <button
+              className="assistant-conversations-toggle assistant-conversations-toggle-floating"
+              type="button"
+              onClick={() => setIsConversationListOpen(true)}
+              aria-expanded={false}
+              aria-label="Desplegar lista de chats"
+              title="Desplegar lista de chats"
+            >
+              <PanelLeftOpen aria-hidden size={18} />
+              <span>Chats</span>
+            </button>
+            <button
+              className="secondary-button assistant-new-chat assistant-new-chat-floating"
+              type="button"
+              onClick={onStartConversation}
+              disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
+              aria-label="Nueva conversación"
+              title="Nueva conversación"
+            >
+              <AssistantSymbolIcon name="new-chat" size={17} />
+              <span>Nueva conversacion</span>
+            </button>
+          </div>
+        ) : null}
 
-          {isConversationListOpen ? (
-            <>
-              <div className="assistant-list-tools">
+        {isConversationListOpen ? (
+        <aside className="assistant-conversations">
+          <div className="assistant-conversations-head">
+            <button
+              className="assistant-conversations-toggle"
+              type="button"
+              onClick={() => setIsConversationListOpen(false)}
+              aria-expanded={true}
+              aria-label="Plegar lista de chats"
+              title="Plegar lista de chats"
+            >
+              <PanelLeftClose aria-hidden size={18} />
+              <span>Chats</span>
+            </button>
+            <button
+              className="secondary-button assistant-new-chat assistant-new-chat-compact"
+              type="button"
+              onClick={onStartConversation}
+              disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
+              aria-label="Nueva conversación"
+              title="Nueva conversación"
+            >
+              <AssistantSymbolIcon name="new-chat" size={17} />
+              <span>Nueva conversacion</span>
+            </button>
+          </div>
+
+          <div className="assistant-list-tools">
                 <div className="assistant-search">
-                  <Search aria-hidden size={16} />
+                  <AssistantSymbolIcon name="search" size={16} />
                   <input
                     aria-label="Buscar conversaciones"
                     value={conversationFilter}
@@ -1537,7 +1165,7 @@ export function AssistantPanel({
                     disabled={isLoadingAssistant}
                   >
                     {conversationListMode === "folders" ? (
-                      <Folder aria-hidden size={13} />
+                      <AssistantSymbolIcon name="folder" size={13} />
                     ) : (
                       <Clock3 aria-hidden size={13} />
                     )}
@@ -1558,7 +1186,7 @@ export function AssistantPanel({
                     }
                     disabled={isLoadingAssistant || isSendingMessage}
                   >
-                    <Archive aria-hidden size={13} />
+                    <AssistantSymbolIcon name="archive" size={13} />
                     Archivadas
                   </button>
                 </div>
@@ -1584,8 +1212,9 @@ export function AssistantPanel({
                     conversationDragTarget?.type === "folder" &&
                     conversationDragTarget.id === group.id;
                   const wasJustCreated = lastCreatedFolderId === group.id;
-                  const FolderIcon =
-                    group.id === UNCATEGORIZED_FOLDER_ID ? Inbox : Folder;
+                  const isFolderView = conversationListMode === "folders";
+                  const folderGroupId = group.id as ConversationFolderId;
+                  const groupIcon = isFolderView ? "folder" : null;
 
                   return (
                     <details
@@ -1598,28 +1227,31 @@ export function AssistantPanel({
                         .join(" ")}
                       key={group.id}
                       open
-                      onDragOver={(event) =>
-                        handleConversationDragOverFolder(
-                          event,
-                          group.id as ConversationFolderId,
-                        )
+                      onDragOver={
+                        isFolderView
+                          ? (event) =>
+                              handleConversationDragOverFolder(event, folderGroupId)
+                          : undefined
                       }
-                      onDrop={(event) =>
-                        handleConversationDropOnFolder(
-                          event,
-                          group.id as ConversationFolderId,
-                        )
+                      onDrop={
+                        isFolderView
+                          ? (event) =>
+                              handleConversationDropOnFolder(event, folderGroupId)
+                          : undefined
                       }
                     >
                       <summary
-                        onContextMenu={(event) =>
-                          openFolderContextMenu(
-                            event,
-                            group.id as ConversationFolderId,
-                          )
+                        onContextMenu={
+                          isFolderView
+                            ? (event) => openFolderContextMenu(event, folderGroupId)
+                            : undefined
                         }
                       >
-                        <FolderIcon aria-hidden size={14} />
+                        {groupIcon ? (
+                          <AssistantSymbolIcon name={groupIcon} size={14} />
+                        ) : (
+                          <Clock3 aria-hidden size={14} />
+                        )}
                         <span>{group.label}</span>
                         <small>{group.conversations.length}</small>
                       </summary>
@@ -1632,9 +1264,10 @@ export function AssistantPanel({
                           const folderId =
                             conversationFolderMap[conversation.id] ??
                             UNCATEGORIZED_FOLDER_ID;
-                          const folder = conversationFolders.find(
-                            (candidate) => candidate.id === folderId,
-                          );
+                          const folder =
+                            typeof folderId === "number"
+                              ? conversationFolderById.get(folderId)
+                              : undefined;
 
                           return (
                             <li key={conversation.id}>
@@ -1694,10 +1327,13 @@ export function AssistantPanel({
                                           Archivada
                                         </span>
                                       ) : null}
-                                      {conversationListMode === "folders" && folder ? (
-                                        <span className="assistant-folder-pill">
-                                          <Folder aria-hidden size={11} />
-                                          {folder.name}
+                                      {folder ? (
+                                        <span
+                                          className="assistant-folder-pill"
+                                          title={`Carpeta: ${folder.name}`}
+                                        >
+                                          <AssistantSymbolIcon name="folder" size={11} />
+                                          <span>{folder.name}</span>
                                         </span>
                                       ) : null}
                                     </span>
@@ -1716,11 +1352,11 @@ export function AssistantPanel({
                                     )
                                   }
                                 >
-                                  <MoreHorizontal aria-hidden size={15} />
+                                  <AssistantSymbolIcon name="more" size={15} />
                                 </button>
                                 {conversationListMode === "folders" ? (
                                   <span className="assistant-drop-hint">
-                                    <FolderPlus aria-hidden size={14} />
+                                    <AssistantSymbolIcon name="folder" size={14} />
                                     Suelta para agrupar
                                   </span>
                                 ) : null}
@@ -1733,50 +1369,23 @@ export function AssistantPanel({
                   );
                 })}
               </div>
-            </>
-          ) : null}
         </aside>
+        ) : null}
 
         <main
-          className={
-            selectedConversation
-              ? "assistant-thread"
-              : "assistant-thread assistant-thread-empty"
-          }
+          className={[
+            "assistant-thread",
+            selectedConversation ? "" : "assistant-thread-empty",
+            selectedConversation?.messages.length === 0
+              ? "assistant-thread-new"
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
         >
           {selectedConversation ? (
             <>
-              <div className="assistant-thread-header">
-                <div className="assistant-thread-title-block">
-                  {editingConversationTitleId === selectedConversation.id ? (
-                    <input
-                      ref={titleInputRef}
-                      aria-label="Nombre de la conversación"
-                      className="assistant-thread-title-input"
-                      value={conversationTitleDraft}
-                      maxLength={255}
-                      disabled={isRenamingConversation}
-                      onBlur={() => void submitTitleEdit()}
-                      onChange={(event) =>
-                        setConversationTitleDraft(event.target.value)
-                      }
-                      onKeyDown={handleTitleKeyDown}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      className="assistant-thread-title-button"
-                      onClick={startTitleEdit}
-                      title="Renombrar conversación"
-                    >
-                      <span>{selectedConversation.title}</span>
-                      <small>Editar nombre</small>
-                    </button>
-                  )}
-                  {selectedIsArchived ? (
-                    <span className="assistant-thread-status">Archivada</span>
-                  ) : null}
-                </div>
+              <div className="assistant-thread-actions">
                 {selectedIsArchived ? (
                   <button
                     className="secondary-button assistant-thread-icon-button"
@@ -1788,7 +1397,7 @@ export function AssistantPanel({
                       onRestoreConversation(selectedConversation.id)
                     }
                   >
-                    <ArchiveRestore aria-hidden size={16} />
+                    <AssistantSymbolIcon name="restore" size={16} />
                   </button>
                 ) : (
                   <button
@@ -1807,7 +1416,7 @@ export function AssistantPanel({
                       }
                     }}
                   >
-                    <Archive aria-hidden size={16} />
+                    <AssistantSymbolIcon name="archive" size={16} />
                   </button>
                 )}
               </div>
@@ -1815,7 +1424,7 @@ export function AssistantPanel({
               <div className="assistant-messages">
                 {selectedConversation.messages.length === 0 ? (
                   <div className="assistant-empty-thread">
-                    <Sparkles aria-hidden size={22} />
+                    <AssistantSymbolIcon name="mark" size={22} />
                     <p>Escribe el primer mensaje para empezar a trabajar.</p>
                   </div>
                 ) : null}
@@ -1828,7 +1437,7 @@ export function AssistantPanel({
                     >
                       <div className="assistant-message-avatar">
                         {isAssistant ? (
-                          <Sparkles aria-hidden size={16} />
+                          <AssistantSymbolIcon name="mark" size={16} />
                         ) : (
                           <span>{currentUser.full_name.slice(0, 1)}</span>
                         )}
@@ -1843,10 +1452,14 @@ export function AssistantPanel({
                             {message.content}
                           </p>
                         </div>
-                        <ActionTimeline
-                          actions={message.actions}
-                          toolLabels={toolLabels}
-                        />
+                        {message.actions.some((action) => action.tool === "web_search") ? (
+                          <ActionTimeline
+                            actions={message.actions.filter(
+                              (action) => action.tool === "web_search",
+                            )}
+                            toolLabels={toolLabels}
+                          />
+                        ) : null}
                         {isAssistant && message.content.trim().length > 0 ? (
                           <div className="assistant-message-actions">
                             <button
@@ -1856,7 +1469,7 @@ export function AssistantPanel({
                                 handleCopyMessage(message.id, message.content)
                               }
                             >
-                              <Copy aria-hidden size={13} />
+                              <AssistantSymbolIcon name="copy" size={13} />
                               <span>
                                 {copiedMessageId === message.id
                                   ? "Copiado"
@@ -1881,8 +1494,7 @@ export function AssistantPanel({
                       </div>
                       <div className="assistant-message-bubble">
                         <p className="assistant-message-content muted">
-                          Analizando la conversacion y herramientas
-                          disponibles...
+                          Preparando respuesta...
                         </p>
                       </div>
                     </div>
@@ -1930,10 +1542,7 @@ export function AssistantPanel({
                     disabled={composerDisabled}
                   />
                   <div className="assistant-composer-foot">
-                    <div className="assistant-composer-context">
-                      <ShieldCheck aria-hidden size={13} />
-                      <span>Contexto pseudonimizado · la IA asiste, no decide</span>
-                    </div>
+                    <div className="assistant-composer-context" aria-hidden="true" />
                     <div className="assistant-composer-actions">
                       <button
                         type="button"
@@ -1955,9 +1564,9 @@ export function AssistantPanel({
                         }
                       >
                         {isListening ? (
-                          <MicOff aria-hidden size={18} />
+                          <AssistantSymbolIcon name="mic" size={18} />
                         ) : (
-                          <Mic aria-hidden size={18} />
+                          <AssistantSymbolIcon name="mic" size={18} />
                         )}
                       </button>
                       <button
@@ -1966,7 +1575,7 @@ export function AssistantPanel({
                           composerDisabled || draftMessage.trim().length === 0
                         }
                       >
-                        <Send aria-hidden size={17} />
+                        <AssistantSymbolIcon name="send" size={17} />
                         <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
                       </button>
                     </div>
@@ -1982,7 +1591,7 @@ export function AssistantPanel({
             </>
           ) : (
             <div className="assistant-no-selection">
-              <Bot aria-hidden size={28} />
+              <AssistantSymbolIcon name="mark" size={28} />
               <h3>
                 {isLoadingAssistant
                   ? "Cargando conversaciones"
@@ -2000,113 +1609,13 @@ export function AssistantPanel({
                   isLoadingAssistant || isSendingMessage || assistantDisabled
                 }
               >
-                <MessageSquarePlus aria-hidden size={17} />
+                <AssistantSymbolIcon name="new-chat" size={17} />
                 <span>Nueva conversacion</span>
               </button>
             </div>
           )}
         </main>
 
-        <aside className="assistant-side-panel">
-          <button
-            className="assistant-details-toggle"
-            type="button"
-            onClick={() => setIsDetailsPanelOpen((open) => !open)}
-            aria-expanded={isDetailsPanelOpen}
-            aria-label={
-              isDetailsPanelOpen
-                ? "Ocultar detalles del asistente"
-                : "Mostrar detalles del asistente"
-            }
-            title={
-              isDetailsPanelOpen
-                ? "Ocultar detalles del asistente"
-                : "Mostrar detalles del asistente"
-            }
-          >
-            <ShieldCheck aria-hidden size={17} />
-            <span>Detalles</span>
-            {memoryEntries.length > 0 ? (
-              <small>{memoryEntries.length}</small>
-            ) : null}
-          </button>
-
-          {isDetailsPanelOpen ? (
-            <div className="assistant-side-content">
-              <section className="assistant-side-section">
-                <div className="assistant-side-heading">
-                  <ShieldCheck aria-hidden size={17} />
-                  <h3>Estado</h3>
-                </div>
-                <dl className="assistant-runtime-list">
-                  <div>
-                    <dt>Runtime</dt>
-                    <dd>{assistantStatus?.runtime ?? "Pendiente"}</dd>
-                  </div>
-                  <div>
-                    <dt>Modelo</dt>
-                    <dd>{assistantStatus?.model ?? "Pendiente"}</dd>
-                  </div>
-                  <div>
-                    <dt>Salud</dt>
-                    <dd>
-                      {!assistantStatus
-                        ? "Pendiente"
-                        : assistantStatus.runtime_healthy === false
-                          ? "Revisar"
-                          : "Operativo"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Planner</dt>
-                    <dd>
-                      {!assistantStatus
-                        ? "Pendiente"
-                        : assistantStatus.planner.enabled
-                          ? assistantStatus.planner.model
-                          : "Desactivado"}
-                    </dd>
-                  </div>
-                </dl>
-              </section>
-
-              <section className="assistant-side-section">
-                <button
-                  className="assistant-memory-toggle"
-                  type="button"
-                  onClick={() => setIsMemoryOpen((open) => !open)}
-                  aria-expanded={isMemoryOpen}
-                >
-                  <span>
-                    <Brain aria-hidden size={17} />
-                    Memoria pendiente
-                  </span>
-                  <span className="tag">{memoryEntries.length}</span>
-                  <ChevronDown aria-hidden size={16} />
-                </button>
-                {isMemoryOpen ? (
-                  <MemoryReviewPanel
-                    entries={memoryEntries}
-                    isSendingMessage={isSendingMessage}
-                    onUpdateMemoryEntry={onUpdateMemoryEntry}
-                  />
-                ) : null}
-              </section>
-
-              <section className="assistant-side-section">
-                <div className="assistant-side-heading">
-                  <RotateCcw aria-hidden size={17} />
-                  <h3>Actividad</h3>
-                </div>
-                <p className="muted">
-                  {selectedConversation
-                    ? `${selectedConversation.messages.length} mensajes`
-                    : "Sin conversacion abierta"}
-                </p>
-              </section>
-            </div>
-          ) : null}
-        </aside>
       </div>
 
       {conversationContextMenu ? (
@@ -2140,7 +1649,7 @@ export function AssistantPanel({
                       closeConversationContextMenu();
                     }}
                   >
-                    <MessageSquarePlus aria-hidden size={15} />
+                    <AssistantSymbolIcon name="new-chat" size={15} />
                     Abrir conversación
                   </button>
                   <button
@@ -2151,7 +1660,7 @@ export function AssistantPanel({
                       void renameConversationFromMenu(conversation.id);
                     }}
                   >
-                    <Pencil aria-hidden size={15} />
+                    <AssistantSymbolIcon name="rename" size={15} />
                     Renombrar
                   </button>
                   <div className="assistant-context-menu-section">
@@ -2169,7 +1678,7 @@ export function AssistantPanel({
                           closeConversationContextMenu();
                         }}
                       >
-                        <Folder aria-hidden size={15} />
+                        <AssistantSymbolIcon name="folder" size={15} />
                         {folder.name}
                       </button>
                     ))}
@@ -2201,7 +1710,7 @@ export function AssistantPanel({
                       createFolderForConversation(conversation.id);
                     }}
                   >
-                    <FolderPlus aria-hidden size={15} />
+                    <AssistantSymbolIcon name="folder" size={15} />
                     Nueva carpeta con este chat
                   </button>
                   <button
@@ -2212,7 +1721,7 @@ export function AssistantPanel({
                       closeConversationContextMenu();
                     }}
                   >
-                    <Copy aria-hidden size={15} />
+                    <AssistantSymbolIcon name="copy" size={15} />
                     Copiar enlace
                   </button>
                   {conversation.status === "archived" ? (
@@ -2224,7 +1733,7 @@ export function AssistantPanel({
                         closeConversationContextMenu();
                       }}
                     >
-                      <ArchiveRestore aria-hidden size={15} />
+                      <AssistantSymbolIcon name="restore" size={15} />
                       Restaurar
                     </button>
                   ) : (
@@ -2243,7 +1752,7 @@ export function AssistantPanel({
                         closeConversationContextMenu();
                       }}
                     >
-                      <Archive aria-hidden size={15} />
+                      <AssistantSymbolIcon name="archive" size={15} />
                       Archivar
                     </button>
                   )}
@@ -2267,7 +1776,7 @@ export function AssistantPanel({
               return (
                 <>
                   <div className="assistant-context-menu-title">
-                    <Folder aria-hidden size={15} />
+                    <AssistantSymbolIcon name="folder" size={15} />
                     {folder.name}
                   </div>
                   {!isUncategorized ? (
@@ -2279,7 +1788,7 @@ export function AssistantPanel({
                         renameFolderFromMenu(folderId);
                       }}
                     >
-                      <Pencil aria-hidden size={15} />
+                      <AssistantSymbolIcon name="rename" size={15} />
                       Renombrar carpeta
                     </button>
                   ) : null}
@@ -2302,7 +1811,7 @@ export function AssistantPanel({
                       closeConversationContextMenu();
                     }}
                   >
-                    <Archive aria-hidden size={15} />
+                    <AssistantSymbolIcon name="archive" size={15} />
                     Archivar conversaciones
                   </button>
                   {!isUncategorized ? (
