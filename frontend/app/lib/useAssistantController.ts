@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import type {
   AssistantConversation,
   AssistantConversationDetail,
+  AssistantConversationFolder,
   AssistantMemoryCategory,
   AssistantMemoryEntry,
   AssistantMemorySensitivity,
@@ -29,6 +30,7 @@ function toSummary(detail: AssistantConversationDetail): AssistantConversation {
     id: detail.id,
     title: detail.title,
     status: detail.status,
+    folder_id: detail.folder_id,
     created_at: detail.created_at,
     updated_at: detail.updated_at,
   };
@@ -44,6 +46,9 @@ export function useAssistantController({
   const [conversations, setConversations] = useState<AssistantConversation[]>(
     [],
   );
+  const [conversationFolders, setConversationFolders] = useState<
+    AssistantConversationFolder[]
+  >([]);
   const [memoryEntries, setMemoryEntries] = useState<AssistantMemoryEntry[]>(
     [],
   );
@@ -69,6 +74,7 @@ export function useAssistantController({
   function clearAssistantState() {
     setAssistantStatus(null);
     setConversations([]);
+    setConversationFolders([]);
     setMemoryEntries([]);
     applySelectedConversation(null);
     setDraftMessage("");
@@ -89,7 +95,8 @@ export function useAssistantController({
       const conversationsPath = includeArchived
         ? "/assistant/conversations?include_archived=true"
         : "/assistant/conversations";
-      const [status, conversationList, pendingMemory] = await Promise.all([
+      const [status, conversationList, conversationFoldersList, pendingMemory] =
+        await Promise.all([
         adminRequest<AssistantStatus>(
           "/assistant/status",
           token,
@@ -100,6 +107,11 @@ export function useAssistantController({
           token,
           "No se pudieron cargar las conversaciones.",
         ),
+        adminRequest<AssistantConversationFolder[]>(
+          "/assistant/conversation-folders",
+          token,
+          "No se pudieron cargar las carpetas.",
+        ).catch(() => []),
         adminRequest<AssistantMemoryEntry[]>(
           "/assistant/memory?status=proposed",
           token,
@@ -108,6 +120,7 @@ export function useAssistantController({
       ]);
       setAssistantStatus(status);
       setConversations(conversationList);
+      setConversationFolders(conversationFoldersList);
       setMemoryEntries(pendingMemory);
     } catch (requestError) {
       handleRequestError(
@@ -324,6 +337,39 @@ export function useAssistantController({
     }
   }
 
+  async function renameConversation(conversationId: number, title: string) {
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle) {
+      return;
+    }
+    setAssistantError("");
+
+    try {
+      const detail = await adminRequest<AssistantConversationDetail>(
+        `/assistant/conversations/${conversationId}`,
+        getStoredToken(),
+        "No se pudo renombrar la conversación.",
+        { method: "PATCH", body: JSON.stringify({ title: normalizedTitle }) },
+      );
+
+      setConversations((existing) =>
+        existing.map((conversation) =>
+          conversation.id === detail.id ? toSummary(detail) : conversation,
+        ),
+      );
+      setSelectedConversation((current) =>
+        current && current.id === detail.id ? detail : current,
+      );
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo renombrar la conversación.",
+      );
+      throw requestError;
+    }
+  }
+
   async function loadMemoryEntries(status: AssistantMemoryStatus = "proposed") {
     setAssistantError("");
 
@@ -339,6 +385,120 @@ export function useAssistantController({
         requestError,
         setAssistantError,
         "No se pudieron cargar las propuestas de memoria.",
+      );
+    }
+  }
+
+  async function assignConversationFolder(
+    conversationId: number,
+    folderId: number | null,
+  ) {
+    setAssistantError("");
+    try {
+      const detail = await adminRequest<AssistantConversationDetail>(
+        `/assistant/conversations/${conversationId}`,
+        getStoredToken(),
+        "No se pudo mover la conversación.",
+        { method: "PATCH", body: JSON.stringify({ folder_id: folderId }) },
+      );
+      setConversations((existing) =>
+        existing.map((conversation) =>
+          conversation.id === detail.id ? toSummary(detail) : conversation,
+        ),
+      );
+      setSelectedConversation((current) =>
+        current && current.id === detail.id ? detail : current,
+      );
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo mover la conversación.",
+      );
+    }
+  }
+
+  async function createConversationFolder(name: string) {
+    const normalizedName = name.trim();
+    if (!normalizedName) {
+      return null;
+    }
+    setAssistantError("");
+    try {
+      const folder = await adminRequest<AssistantConversationFolder>(
+        "/assistant/conversation-folders",
+        getStoredToken(),
+        "No se pudo crear la carpeta.",
+        { method: "POST", body: JSON.stringify({ name: normalizedName }) },
+      );
+      setConversationFolders((existing) => [...existing, folder]);
+      return folder;
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo crear la carpeta.",
+      );
+      return null;
+    }
+  }
+
+  async function renameConversationFolder(folderId: number, name: string) {
+    const normalizedName = name.trim();
+    if (!normalizedName) {
+      return;
+    }
+    setAssistantError("");
+    try {
+      const folder = await adminRequest<AssistantConversationFolder>(
+        `/assistant/conversation-folders/${folderId}`,
+        getStoredToken(),
+        "No se pudo renombrar la carpeta.",
+        { method: "PATCH", body: JSON.stringify({ name: normalizedName }) },
+      );
+      setConversationFolders((existing) =>
+        existing.map((candidate) =>
+          candidate.id === folder.id ? folder : candidate,
+        ),
+      );
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo renombrar la carpeta.",
+      );
+    }
+  }
+
+  async function deleteConversationFolder(folderId: number) {
+    setAssistantError("");
+    try {
+      await adminRequest<void>(
+        `/assistant/conversation-folders/${folderId}`,
+        getStoredToken(),
+        "No se pudo eliminar la carpeta.",
+        { method: "DELETE" },
+      );
+      setConversationFolders((existing) =>
+        existing.filter((folder) => folder.id !== folderId),
+      );
+      setConversations((existing) =>
+        existing.map((conversation) =>
+          conversation.folder_id === folderId
+            ? { ...conversation, folder_id: null }
+            : conversation,
+        ),
+      );
+      setSelectedConversation((current) =>
+        current && current.folder_id === folderId
+          ? { ...current, folder_id: null }
+          : current,
+      );
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo eliminar la carpeta.",
       );
     }
   }
@@ -375,6 +535,7 @@ export function useAssistantController({
   return {
     assistantStatus,
     conversations,
+    conversationFolders,
     memoryEntries,
     selectedConversation,
     draftMessage,
@@ -392,6 +553,11 @@ export function useAssistantController({
     sendMessage,
     archiveConversation,
     restoreConversation,
+    renameConversation,
+    assignConversationFolder,
+    createConversationFolder,
+    renameConversationFolder,
+    deleteConversationFolder,
     updateMemoryEntry,
     clearAssistantState,
   };

@@ -35,6 +35,29 @@ function AsistentePageInner() {
   // pedir la conversación anterior aunque otra petición siga en vuelo.
   const lastRequestedIdRef = useRef<number | null>(null);
 
+  // El panel de inicio (y la barra superior) abren el asistente con el texto ya
+  // escrito vía ?q=. Se vuelca una sola vez en el borrador y se limpia el
+  // parámetro de la URL para que no reaparezca al navegar atrás/adelante.
+  const seededQueryRef = useRef(false);
+  useEffect(() => {
+    if (seededQueryRef.current) {
+      return;
+    }
+    const seededQuery = searchParams.get("q");
+    if (!seededQuery) {
+      return;
+    }
+    seededQueryRef.current = true;
+    assistantController.setDraftMessage(seededQuery);
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("q");
+    const rest = params.toString();
+    router.replace(rest ? `/asistente?${rest}` : "/asistente", {
+      scroll: false,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   useEffect(() => {
     if (!canUseAssistant) {
       return;
@@ -111,12 +134,12 @@ function AsistentePageInner() {
   }
 
   return (
-    <div className="workspace assistant-workspace">
+    <div className="assistant-page-shell">
       <AssistantPanel
         assistantStatus={assistantController.assistantStatus}
         conversations={assistantController.conversations}
+        conversationFolders={assistantController.conversationFolders}
         currentUser={user}
-        memoryEntries={assistantController.memoryEntries}
         selectedConversation={assistantController.selectedConversation}
         draftMessage={assistantController.draftMessage}
         isLoadingAssistant={assistantController.isLoadingAssistant}
@@ -131,7 +154,11 @@ function AsistentePageInner() {
         onSendMessage={assistantController.sendMessage}
         onArchiveConversation={assistantController.archiveConversation}
         onRestoreConversation={assistantController.restoreConversation}
-        onUpdateMemoryEntry={assistantController.updateMemoryEntry}
+        onRenameConversation={assistantController.renameConversation}
+        onAssignConversationFolder={assistantController.assignConversationFolder}
+        onCreateConversationFolder={assistantController.createConversationFolder}
+        onRenameConversationFolder={assistantController.renameConversationFolder}
+        onDeleteConversationFolder={assistantController.deleteConversationFolder}
         onIncludeArchivedConversationsChange={
           assistantController.toggleIncludeArchivedConversations
         }

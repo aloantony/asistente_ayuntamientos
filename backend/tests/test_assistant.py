@@ -94,6 +94,100 @@ def test_assistant_requires_permission(client, make_user):
     assert response.json()["detail"] == "Permission required: assistant.use"
 
 
+def test_conversation_folders_are_private_and_persisted(
+    client,
+    assistant_user,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user, _ = assistant_user
+    other_user = make_user(full_name="Otra Alcaldesa")
+    grant_permissions(other_user, make_organization(), ["assistant.use"])
+
+    folder_response = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Seguimiento político"},
+        headers=headers_for(user),
+    )
+    assert folder_response.status_code == 201
+    folder = folder_response.json()
+    assert folder["name"] == "Seguimiento político"
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={"title": "Licencias urbanísticas"},
+        headers=headers_for(user),
+    ).json()
+    assigned = client.patch(
+        f"/assistant/conversations/{conversation['id']}",
+        json={"folder_id": folder["id"]},
+        headers=headers_for(user),
+    )
+
+    assert assigned.status_code == 200
+    assert assigned.json()["folder_id"] == folder["id"]
+    listed = client.get("/assistant/conversations", headers=headers_for(user)).json()
+    assert listed[0]["folder_id"] == folder["id"]
+
+    other_folders = client.get(
+        "/assistant/conversation-folders",
+        headers=headers_for(other_user),
+    )
+    assert other_folders.status_code == 200
+    assert other_folders.json() == []
+
+
+def test_conversation_folder_delete_unassigns_conversations(client, assistant_user):
+    user, _ = assistant_user
+    folder = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Borradores"},
+        headers=headers_for(user),
+    ).json()
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    client.patch(
+        f"/assistant/conversations/{conversation['id']}",
+        json={"folder_id": folder["id"]},
+        headers=headers_for(user),
+    )
+
+    response = client.delete(
+        f"/assistant/conversation-folders/{folder['id']}",
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 204
+    refreshed = client.get(
+        f"/assistant/conversations/{conversation['id']}",
+        headers=headers_for(user),
+    ).json()
+    assert refreshed["folder_id"] is None
+
+
+def test_conversation_folder_duplicate_name_returns_conflict(client, assistant_user):
+    user, _ = assistant_user
+    first = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Borradores"},
+        headers=headers_for(user),
+    )
+    assert first.status_code == 201
+
+    duplicate = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Borradores"},
+        headers=headers_for(user),
+    )
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "Assistant conversation folder already exists"
+
+
 def test_status_reports_disabled_gateway(
     client,
     assistant_user,
@@ -267,6 +361,8 @@ def test_consultation_prompt_lists_read_tools(db, assistant_user):
     assert "- get_requirement" in prompt
     assert "- create_requirement" not in prompt
     assert "No digas que no tienes una herramienta" in prompt
+    assert "no respondas como si solo pudieras consultar" in prompt
+    assert "crear o actualizar necesidades/requisitos como borrador" in prompt
 
 
 def test_requirements_intake_prompt_lists_write_tools(db, assistant_user):
@@ -345,6 +441,63 @@ def test_short_followup_keeps_previous_agent():
     assert decision.agent.key == "consultation"
     assert decision.routing["source"] == "shortcut"
     assert decision.routing["fallback_reason"] == "short_followup_previous_agent"
+
+
+def test_global_capability_question_returns_product_capabilities_without_gateway(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "hola, qué puedes hacer?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "global_capabilities"
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "solo consultar" not in normalized_content
+    assert "crear o actualizar necesidades/requisitos como borrador" in normalized_content
+    assert "no apruebo trámites" in normalized_content
+    assert gateway.calls == []
+
+
+def test_classify_turn_intent_maps_common_direct_requests():
+    assert assistant_service.classify_turn_intent(
+        "hola, qué puedes hacer?"
+    ) == assistant_service.TurnIntent("global_capabilities", "global_capabilities")
+    assert assistant_service.classify_turn_intent(
+        "Qué necesidades tenemos registradas?"
+    ) == assistant_service.TurnIntent(
+        "read_requirements",
+        "direct_list_requirements",
+        use_needs=True,
+    )
+    assert assistant_service.classify_turn_intent(
+        "crea otra necesidad"
+    ) == assistant_service.TurnIntent(
+        "create_requirement",
+        "direct_create_requirement",
+    )
+    assert assistant_service.classify_turn_intent(
+        "crea un requisito de prueba"
+    ) == assistant_service.TurnIntent(
+        "create_test_requirement",
+        "direct_create_test_requirement",
+    )
 
 
 def test_invalid_planner_fallback_routes_new_need_to_requirements_intake(monkeypatch):
@@ -559,6 +712,7 @@ def test_direct_list_requirements_handles_default_empty_result(
     assistant_message = second.json()["messages"][-1]
     assert assistant_message["agent_key"] == "consultation"
     assert assistant_message["routing"]["source"] == "deterministic"
+    assert first.json()["messages"][1]["routing"]["intent"] == "read_requirements"
     assert assistant_message["content"] == (
         f"No hay requisitos visibles registrados en {organization.name}."
     )
@@ -1218,7 +1372,7 @@ def test_confirming_pending_work_creates_need_without_reparsing_assistant_text(
     assert gateway.calls == []
 
 
-def test_direct_create_capability_embedded_default_starts_intake(
+def test_create_capability_question_answers_without_starting_intake(
     client,
     make_user,
     make_organization,
@@ -1249,18 +1403,14 @@ def test_direct_create_capability_embedded_default_starts_intake(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["agent_key"] == "requirements_intake"
     assert assistant_message["routing"]["source"] == "deterministic"
-    assert (
-        assistant_message["routing"]["reason"]
-        == "direct_create_requirement_capability_needs_content"
-    )
+    assert assistant_message["routing"]["reason"] == "global_capabilities"
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
     assert assistant_message["actions"] == []
-    assert assistant_message["content"].startswith(
-        "Claro. La creo en Default organization."
-    )
-    assert "Título breve" in assistant_message["content"]
-    assert "problema o necesidad" in assistant_message["content"]
+    normalized_content = assistant_message["content"].lower()
+    assert "claro. la creo" not in normalized_content
+    assert "título breve" not in normalized_content
+    assert "crear o actualizar necesidades/requisitos como borrador" in normalized_content
     assert gateway.calls == []
 
 
@@ -1305,16 +1455,15 @@ def test_direct_create_agent_reference_switches_to_intake_without_internal_copy(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["agent_key"] == "requirements_intake"
     assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "global_capabilities"
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
     assert assistant_message["actions"] == []
     normalized_content = assistant_message["content"].lower()
     assert "solo lectura" not in normalized_content
     assert "copia" not in normalized_content
     assert "agente" not in normalized_content
-    assert assistant_message["content"].startswith(
-        "Claro. La creo en Default organization."
-    )
+    assert "crear o actualizar necesidades/requisitos como borrador" in normalized_content
     assert gateway.calls == []
 
 

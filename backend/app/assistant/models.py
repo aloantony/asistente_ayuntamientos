@@ -6,6 +6,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -56,16 +57,57 @@ class AssistantConversation(TimestampMixin, Base):
         index=True,
         nullable=True,
     )
+    folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assistant_conversation_folders.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
     # JSON-encoded private assistant state for deterministic follow-ups such
     # as selected organization and pending confirmations.
     state: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_by: Mapped["User"] = relationship("User")
+    folder: Mapped["AssistantConversationFolder | None"] = relationship(
+        "AssistantConversationFolder",
+        back_populates="conversations",
+    )
     messages: Mapped[list["AssistantMessage"]] = relationship(
         "AssistantMessage",
         back_populates="conversation",
         cascade="all, delete-orphan",
         order_by="AssistantMessage.id",
+    )
+
+
+class AssistantConversationFolder(TimestampMixin, Base):
+    __tablename__ = "assistant_conversation_folders"
+    __table_args__ = (
+        UniqueConstraint(
+            "created_by_id",
+            "name",
+            name="uq_assistant_conversation_folders_user_name",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_by_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+
+    created_by: Mapped["User"] = relationship("User")
+    conversations: Mapped[list[AssistantConversation]] = relationship(
+        "AssistantConversation",
+        back_populates="folder",
+        passive_deletes=True,
     )
 
 

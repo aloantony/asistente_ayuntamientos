@@ -3,12 +3,14 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.assistant.agents import get_allowed_agents
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
 from app.assistant.models import (
     AssistantConversation,
+    AssistantConversationFolder,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
@@ -16,6 +18,9 @@ from app.assistant.models import (
 from app.assistant.schemas import (
     AssistantConversationCreate,
     AssistantConversationDetail,
+    AssistantConversationFolderCreate,
+    AssistantConversationFolderRead,
+    AssistantConversationFolderUpdate,
     AssistantConversationRead,
     AssistantConversationUpdate,
     AssistantMemoryEntryRead,
@@ -296,6 +301,104 @@ def update_transversal_feature_adoption(
     return get_existing_transversal_feature_adoption(db, adoption_id)
 
 
+@router.get(
+    "/conversation-folders",
+    response_model=list[AssistantConversationFolderRead],
+)
+def list_conversation_folders(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> list[AssistantConversationFolder]:
+    require_assistant_use(db, current_user)
+    return list(
+        db.scalars(
+            select(AssistantConversationFolder)
+            .where(AssistantConversationFolder.created_by_id == current_user.id)
+            .order_by(
+                AssistantConversationFolder.sort_order,
+                AssistantConversationFolder.name,
+                AssistantConversationFolder.id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/conversation-folders",
+    response_model=AssistantConversationFolderRead,
+    status_code=http_status.HTTP_201_CREATED,
+)
+def create_conversation_folder(
+    payload: AssistantConversationFolderCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AssistantConversationFolder:
+    require_assistant_use(db, current_user)
+    ensure_conversation_folder_name_available(db, current_user, payload.name)
+    folder = AssistantConversationFolder(
+        name=payload.name,
+        sort_order=payload.sort_order,
+        created_by_id=current_user.id,
+    )
+    db.add(folder)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise_conversation_folder_name_conflict()
+    return get_own_conversation_folder(db, current_user, folder.id)
+
+
+@router.patch(
+    "/conversation-folders/{folder_id}",
+    response_model=AssistantConversationFolderRead,
+)
+def update_conversation_folder(
+    folder_id: int,
+    payload: AssistantConversationFolderUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AssistantConversationFolder:
+    require_assistant_use(db, current_user)
+    folder = get_own_conversation_folder(db, current_user, folder_id)
+    updates = payload.model_dump(exclude_unset=True)
+    if "name" in updates and updates["name"] is not None:
+        ensure_conversation_folder_name_available(
+            db,
+            current_user,
+            updates["name"],
+            exclude_folder_id=folder_id,
+        )
+        folder.name = updates["name"]
+    if "sort_order" in updates and updates["sort_order"] is not None:
+        folder.sort_order = updates["sort_order"]
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise_conversation_folder_name_conflict()
+    return get_own_conversation_folder(db, current_user, folder_id)
+
+
+@router.delete(
+    "/conversation-folders/{folder_id}",
+    status_code=http_status.HTTP_204_NO_CONTENT,
+)
+def delete_conversation_folder(
+    folder_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> None:
+    require_assistant_use(db, current_user)
+    folder = get_own_conversation_folder(db, current_user, folder_id)
+    db.query(AssistantConversation).filter(
+        AssistantConversation.created_by_id == current_user.id,
+        AssistantConversation.folder_id == folder.id,
+    ).update({AssistantConversation.folder_id: None}, synchronize_session=False)
+    db.delete(folder)
+    db.commit()
+
+
 @router.get("/conversations", response_model=list[AssistantConversationRead])
 def list_conversations(
     db: Annotated[Session, Depends(get_db)],
@@ -363,9 +466,17 @@ def update_conversation(
     conversation = get_own_conversation(db, current_user, conversation_id)
 
     updates = payload.model_dump(exclude_unset=True)
-    for field, value in updates.items():
-        if value is not None:
-            setattr(conversation, field, value)
+    if "title" in updates and updates["title"] is not None:
+        conversation.title = updates["title"]
+    if "status" in updates and updates["status"] is not None:
+        conversation.status = updates["status"]
+    if "folder_id" in updates:
+        folder_id = updates["folder_id"]
+        if folder_id is None:
+            conversation.folder_id = None
+        else:
+            folder = get_own_conversation_folder(db, current_user, folder_id)
+            conversation.folder_id = folder.id
 
     db.commit()
     return get_own_conversation(db, current_user, conversation_id)
@@ -436,6 +547,47 @@ def get_own_conversation(
         )
 
     return conversation
+
+
+def get_own_conversation_folder(
+    db: Session,
+    current_user: User,
+    folder_id: int,
+) -> AssistantConversationFolder:
+    folder = db.scalar(
+        select(AssistantConversationFolder)
+        .where(AssistantConversationFolder.id == folder_id)
+        .execution_options(populate_existing=True)
+    )
+    if folder is None or folder.created_by_id != current_user.id:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Conversation folder not found",
+        )
+    return folder
+
+
+def raise_conversation_folder_name_conflict() -> None:
+    raise HTTPException(
+        status_code=http_status.HTTP_409_CONFLICT,
+        detail="Assistant conversation folder already exists",
+    )
+
+
+def ensure_conversation_folder_name_available(
+    db: Session,
+    current_user: User,
+    name: str,
+    exclude_folder_id: int | None = None,
+) -> None:
+    query = select(AssistantConversationFolder).where(
+        AssistantConversationFolder.created_by_id == current_user.id,
+        AssistantConversationFolder.name == name,
+    )
+    if exclude_folder_id is not None:
+        query = query.where(AssistantConversationFolder.id != exclude_folder_id)
+    if db.scalar(query) is not None:
+        raise_conversation_folder_name_conflict()
 
 
 def get_memory_permission_organization_ids(

@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="318" height="318" viewBox="3 5 318 318" role="img" aria-labelledby="title desc">
+  <title id="title">Logo en verde turquesa recortado al círculo</title>
+  <desc id="desc">Emblema geométrico tipo A en verde turquesa con aro blanco, recortado para mostrar solo el círculo sobre fondo transparente.</desc>
+  <defs>
+    <radialGradient id="bgGrad" cx="50%" cy="48%" r="72%">
+      <stop offset="0" stop-color="#101112"/>
+      <stop offset="0.72" stop-color="#151719"/>
+      <stop offset="1" stop-color="#1f2226"/>
+    </radialGradient>
+
+    <linearGradient id="turquoiseMain" x1="161" y1="66" x2="102" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6FFFE2"/>
+      <stop offset="0.32" stop-color="#3CAF8C"/>
+      <stop offset="0.68" stop-color="#10B89D"/>
+      <stop offset="1" stop-color="#008874"/>
+    </linearGradient>
+
+    <linearGradient id="turquoiseShade" x1="224" y1="103" x2="107" y2="231" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#58EED1" stop-opacity="0.78"/>
+      <stop offset="0.48" stop-color="#3CAF8C" stop-opacity="0"/>
+      <stop offset="1" stop-color="#006F62" stop-opacity="0.32"/>
+    </linearGradient>
+
+    <filter id="softGlow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="0.55" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.235  0 0 0 0 0.686  0 0 0 0 0.549  0 0 0 0.52 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <clipPath id="circleClip">
+      <circle cx="162" cy="164" r="156"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#circleClip)">
+    <circle cx="162" cy="164" r="156" fill="url(#bgGrad)"/>
+  </g>
+  <circle cx="162" cy="164" r="156" fill="none" stroke="#F5F6F6" stroke-width="4.5"/>
+
+  <g filter="url(#softGlow)">
+    <path fill="url(#turquoiseMain)" fill-rule="evenodd" d="
+      M 264 232
+      C 257 221 249 207 238 191
+      C 225 171 209 149 196 130
+      C 187 116 180 103 176 96
+      L 162 66
+      L 152 88
+      C 145 102 136 119 126 136
+      C 111 161 92 188 74 207
+      C 68 216 63 225 60 233
+      C 72 230 84 225 96 220
+      C 120 209 143 190 164 165
+      C 180 181 198 198 219 213
+      C 232 222 247 228 264 232
+      Z
+
+      M 162 100
+      C 168 112 174 123 175 129
+      C 173 137 164 151 153 163
+      C 134 183 111 201 88 211
+      C 100 195 113 179 126 161
+      C 139 143 151 119 162 100
+      Z
+
+      M 181 137
+      C 193 157 211 183 230 203
+      C 209 194 190 179 171 160
+      C 174 152 178 144 181 137
+      Z
+    "/>
+    <path fill="url(#turquoiseShade)" fill-rule="evenodd" opacity="0.65" d="
+      M 264 232
+      C 257 221 249 207 238 191
+      C 225 171 209 149 196 130
+      C 187 116 180 103 176 96
+      L 162 66
+      L 152 88
+      C 145 102 136 119 126 136
+      C 111 161 92 188 74 207
+      C 68 216 63 225 60 233
+      C 72 230 84 225 96 220
+      C 120 209 143 190 164 165
+      C 180 181 198 198 219 213
+      C 232 222 247 228 264 232
+      Z
+
+      M 162 100
+      C 168 112 174 123 175 129
+      C 173 137 164 151 153 163
+      C 134 183 111 201 88 211
+      C 100 195 113 179 126 161
+      C 139 143 151 119 162 100
+      Z
+
+      M 181 137
+      C 193 157 211 183 230 203
+      C 209 194 190 179 171 160
+      C 174 152 178 144 181 137
+      Z
+    "/>
+  </g>
+</svg>

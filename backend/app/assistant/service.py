@@ -5,6 +5,7 @@ import logging
 import re
 import unicodedata
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -45,6 +46,26 @@ ERROR_REPLY = (
     "Ha habido un problema al contactar con el servicio de IA. Tu mensaje "
     "queda guardado; inténtalo de nuevo en unos minutos."
 )
+GLOBAL_CAPABILITIES_REPLY = (
+    "Puedo ayudarte a consultar información visible de la plataforma, como "
+    "organizaciones, proyectos, necesidades/requisitos y funcionalidades "
+    "transversales. También puedo ayudarte a convertir una conversación en "
+    "trabajo estructurado: crear o actualizar necesidades/requisitos como "
+    "borrador, añadir aclaraciones y preparar propuestas supervisadas cuando "
+    "tus permisos lo permitan. Si me pides buscar información pública actual, "
+    "puedo hacerlo sin enviar datos internos.\n\n"
+    "No apruebo trámites ni valido decisiones oficiales: dejo el trabajo "
+    "preparado para revisión humana."
+)
+GLOBAL_CAPABILITIES_READ_ONLY_REPLY = (
+    "Puedo ayudarte a consultar información visible de la plataforma, como "
+    "organizaciones, proyectos, necesidades/requisitos y funcionalidades "
+    "transversales. También puedo ayudarte a estructurar una necesidad para que "
+    "quede clara antes de revisarla con alguien con permisos de creación. Si me "
+    "pides buscar información pública actual, puedo hacerlo sin enviar datos "
+    "internos.\n\n"
+    "No apruebo trámites ni valido decisiones oficiales."
+)
 
 COMMON_SYSTEM_PROMPT = """Eres el asistente municipal de Asistente Ayuntamientos, una plataforma de gestión para ayuntamientos pequeños y medianos.
 
@@ -57,6 +78,7 @@ Reglas comunes:
 - No digas que no tienes una herramienta si aparece en HERRAMIENTAS DISPONIBLES PARA ESTE AGENTE. En ese caso, úsala o explica el error concreto que devuelva.
 - Si una herramienta devuelve un error de permisos, explícalo con claridad y no insistas.
 - No tomas decisiones legales ni administrativas. Ayudas a consultar, capturar, estructurar y proponer; las revisiones y aprobaciones las hacen personas.
+- Si el usuario pregunta en general qué puedes hacer, no respondas como si solo pudieras consultar: explica que puedes consultar información visible, crear o actualizar necesidades/requisitos como borrador cuando el usuario aporte título/problema/organización, proponer memoria o funcionalidades transversales supervisadas cuando proceda y buscar información pública actual si lo pide expresamente. Aclara que no apruebas ni validas oficialmente nada.
 """
 
 TOKEN_PATTERN = re.compile(r"[a-záéíóúüñ0-9]+", re.IGNORECASE)
@@ -130,6 +152,13 @@ TEST_REQUIREMENT_DRAFT = {
         "actualizarse o enviarse más adelante."
     ),
 }
+
+
+@dataclass(frozen=True)
+class TurnIntent:
+    kind: str
+    reason: str
+    use_needs: bool = False
 
 
 def build_tool_prompt_block(agent_tools: list[ToolSpec]) -> str:
@@ -420,14 +449,18 @@ def direct_routing(
     agent: AgentSpec,
     conversation: AssistantConversation,
     reason: str,
+    intent: str | None = None,
 ) -> dict:
-    return {
+    routing = {
         "candidates": [candidate.key for candidate in allowed_agents],
         "chosen": agent.key,
         "source": "deterministic",
         "previous_agent_key": get_previous_agent_key(conversation),
         "reason": reason,
     }
+    if intent is not None:
+        routing["intent"] = intent
+    return routing
 
 
 def persist_assistant_message(
@@ -672,29 +705,6 @@ def is_create_another_requirement_request(text: str) -> bool:
         has_create
         and mentions_need_or_requirement(normalized)
         and any(word in normalized for word in {"otro", "otra"})
-    )
-
-
-def is_create_requirement_capability_question(text: str) -> bool:
-    normalized = normalize_text(text)
-    if not mentions_need_or_requirement(normalized):
-        return False
-    has_create = any(word in normalized for word in {"crea", "crear", "creame"})
-    if not has_create:
-        return False
-    return any(
-        phrase in normalized
-        for phrase in {
-            "puedes",
-            "puede",
-            "podrias",
-            "podria",
-            "se puede",
-            "desde aqui",
-            "llamar al agente",
-            "cambiar al agente",
-            "pasar al agente",
-        }
     )
 
 
@@ -1097,6 +1107,7 @@ def handle_direct_list_requirements(
     *,
     reason: str,
     use_needs: bool = False,
+    intent: str | None = None,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, "consultation")
     if agent is None:
@@ -1131,7 +1142,7 @@ def handle_direct_list_requirements(
         content=reply,
         actions=[action],
         agent=agent,
-        routing=direct_routing(allowed_agents, agent, conversation, reason),
+        routing=direct_routing(allowed_agents, agent, conversation, reason, intent),
         state=state,
     )
 
@@ -1257,6 +1268,7 @@ def handle_direct_create_requirement(
     draft: dict,
     *,
     reason: str,
+    intent: str | None = None,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, "requirements_intake")
     if agent is None:
@@ -1281,6 +1293,7 @@ def handle_direct_create_requirement(
             agent_key="requirements_intake",
             content=requirement_content_prompt(organization, draft),
             reason="direct_create_requirement_needs_content",
+            intent=intent,
         )
 
     record_selected_organization(state, organization)
@@ -1385,7 +1398,7 @@ def handle_direct_create_requirement(
         content=content,
         actions=actions,
         agent=agent,
-        routing=direct_routing(allowed_agents, agent, conversation, reason),
+        routing=direct_routing(allowed_agents, agent, conversation, reason, intent),
         state=state,
     )
 
@@ -1399,6 +1412,7 @@ def persist_direct_prompt(
     agent_key: str,
     content: str,
     reason: str,
+    intent: str | None = None,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, agent_key)
     if agent is None:
@@ -1409,8 +1423,114 @@ def persist_direct_prompt(
         content=content,
         actions=[],
         agent=agent,
-        routing=direct_routing(allowed_agents, agent, conversation, reason),
+        routing=direct_routing(allowed_agents, agent, conversation, reason, intent),
         state=state,
+    )
+
+
+def capability_agent_key(allowed_agents: list[AgentSpec]) -> str:
+    if allowed_agent_by_key(allowed_agents, "requirements_intake") is not None:
+        return "requirements_intake"
+    if allowed_agent_by_key(allowed_agents, "consultation") is not None:
+        return "consultation"
+    return allowed_agents[0].key
+
+
+def user_can_create_requirements(
+    db: Session,
+    current_user: User,
+    organizations: list[Organization],
+) -> bool:
+    return current_user.is_superuser or any(
+        has_permission(
+            current_user,
+            "requirements.create",
+            db,
+            organization_id=organization.id,
+        )
+        for organization in organizations
+    )
+
+
+def is_global_capability_question(text: str) -> bool:
+    normalized = normalize_text(text)
+    if any(
+        phrase in normalized
+        for phrase in {
+            "que puedes hacer",
+            "que puede hacer",
+            "para que sirves",
+            "en que ayudas",
+        }
+    ):
+        return True
+    asks_capability = any(
+        phrase in normalized
+        for phrase in {
+            "puedes",
+            "puede",
+            "podrias",
+            "podria",
+            "se puede",
+            "no puedes",
+            "no podeis",
+        }
+    )
+    mentions_create_work = any(
+        word in normalized
+        for word in {
+            "crear",
+            "crea",
+            "registrar",
+            "guardar",
+            "actualizar",
+            "modificar",
+        }
+    ) and mentions_need_or_requirement(normalized)
+    return asks_capability and mentions_create_work
+
+
+def classify_turn_intent(text: str) -> TurnIntent:
+    if is_global_capability_question(text):
+        return TurnIntent("global_capabilities", "global_capabilities")
+    if is_list_requirements_request(text):
+        return TurnIntent(
+            "read_requirements",
+            "direct_list_requirements",
+            use_needs=uses_need_language(text),
+        )
+    if is_create_another_requirement_request(text):
+        return TurnIntent("create_requirement", "direct_create_requirement")
+    if is_create_test_requirement_request(text):
+        return TurnIntent(
+            "create_test_requirement",
+            "direct_create_test_requirement",
+        )
+    return TurnIntent("unknown", "unclassified")
+
+
+def handle_global_capabilities_question(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    organizations: list[Organization],
+) -> AssistantMessage | None:
+    content = (
+        GLOBAL_CAPABILITIES_REPLY
+        if user_can_create_requirements(db, current_user, organizations)
+        else GLOBAL_CAPABILITIES_READ_ONLY_REPLY
+    )
+    return persist_direct_prompt(
+        db,
+        conversation,
+        allowed_agents,
+        state,
+        agent_key=capability_agent_key(allowed_agents),
+        content=content,
+        reason="global_capabilities",
+        intent="global_capabilities",
     )
 
 
@@ -1426,6 +1546,7 @@ def handle_direct_create_requirement_intent(
     draft: dict,
     *,
     reason: str,
+    intent: str = "create_requirement",
 ) -> AssistantMessage | None:
     if selected_organization is None:
         set_pending_action(
@@ -1443,6 +1564,7 @@ def handle_direct_create_requirement_intent(
             agent_key="requirements_intake",
             content=create_requirement_organization_prompt(organizations),
             reason=f"{reason}_needs_organization",
+            intent=intent,
         )
 
     record_selected_organization(state, selected_organization)
@@ -1457,6 +1579,7 @@ def handle_direct_create_requirement_intent(
             selected_organization,
             draft,
             reason=f"{reason}_complete",
+            intent=intent,
         )
 
     set_pending_action(
@@ -1475,6 +1598,7 @@ def handle_direct_create_requirement_intent(
         agent_key="requirements_intake",
         content=requirement_content_prompt(selected_organization, draft),
         reason=f"{reason}_needs_content",
+        intent=intent,
     )
 
 
@@ -1508,6 +1632,17 @@ def try_handle_direct_turn(
     if not isinstance(pending_work, dict):
         pending_work = None
     parsed_draft = extract_requirement_draft_from_text(user_text)
+    turn_intent = classify_turn_intent(user_text)
+
+    if turn_intent.kind == "global_capabilities":
+        return handle_global_capabilities_question(
+            db,
+            current_user,
+            conversation,
+            allowed_agents,
+            state,
+            organizations,
+        )
 
     if ambiguous_organizations:
         set_pending_action(
@@ -1863,8 +1998,7 @@ def try_handle_direct_turn(
             reason="direct_create_requirement_content_followup",
         )
 
-    if is_list_requirements_request(user_text):
-        use_needs = uses_need_language(user_text)
+    if turn_intent.kind == "read_requirements":
         if selected_organization is not None:
             return handle_direct_list_requirements(
                 db,
@@ -1874,12 +2008,13 @@ def try_handle_direct_turn(
                 allowed_agents,
                 state,
                 selected_organization,
-                reason="direct_list_requirements",
-                use_needs=use_needs,
+                reason=turn_intent.reason,
+                use_needs=turn_intent.use_needs,
+                intent=turn_intent.kind,
             )
         set_pending_action(
             state,
-            {"type": "list_requirements", "use_needs": use_needs},
+            {"type": "list_requirements", "use_needs": turn_intent.use_needs},
         )
         return persist_direct_prompt(
             db,
@@ -1889,9 +2024,10 @@ def try_handle_direct_turn(
             agent_key="consultation",
             content=organization_prompt(organizations, "list_requirements"),
             reason="direct_list_requirements_needs_organization",
+            intent=turn_intent.kind,
         )
 
-    if is_create_requirement_capability_question(user_text):
+    if turn_intent.kind == "create_requirement":
         return handle_direct_create_requirement_intent(
             db,
             current_user,
@@ -1902,24 +2038,11 @@ def try_handle_direct_turn(
             organizations,
             selected_organization,
             parsed_draft,
-            reason="direct_create_requirement_capability",
+            reason=turn_intent.reason,
+            intent=turn_intent.kind,
         )
 
-    if is_create_another_requirement_request(user_text):
-        return handle_direct_create_requirement_intent(
-            db,
-            current_user,
-            conversation,
-            user_message,
-            allowed_agents,
-            state,
-            organizations,
-            selected_organization,
-            parsed_draft,
-            reason="direct_create_requirement",
-        )
-
-    if is_create_test_requirement_request(user_text):
+    if turn_intent.kind == "create_test_requirement":
         if selected_organization is None:
             set_pending_action(
                 state,

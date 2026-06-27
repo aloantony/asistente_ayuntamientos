@@ -1011,12 +1011,21 @@ export type AssistantConversation = {
   id: number;
   title: string;
   status: "active" | "archived";
+  folder_id: number | null;
   created_at: string;
   updated_at: string;
 };
 
 export type AssistantConversationDetail = AssistantConversation & {
   messages: AssistantMessage[];
+};
+
+export type AssistantConversationFolder = {
+  id: number;
+  name: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export const ASSISTANT_TOOL_LABELS: Record<string, string> = {

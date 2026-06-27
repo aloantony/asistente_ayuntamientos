@@ -2,14 +2,103 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import { userHasPermission } from "../components/types";
+import { fetchRequirementsTotal } from "../lib/fetchers";
 import {
   consumePendingLoginRedirect,
   shouldShowAdminPanel,
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
+
+// Iconos del menú lateral (trazo fino, coherentes con el resto del shell).
+type NavIconName =
+  | "home"
+  | "needs"
+  | "projects"
+  | "anacleto"
+  | "admin"
+  | "account";
+
+function NavIcon({ name }: { name: NavIconName }) {
+  const common = {
+    "aria-hidden": true,
+    fill: "none",
+    height: 17,
+    stroke: "currentColor",
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    strokeWidth: 1.6,
+    viewBox: "0 0 24 24",
+    width: 17,
+  };
+  switch (name) {
+    case "home":
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="7" height="7" rx="1.5" />
+          <rect x="14" y="3" width="7" height="7" rx="1.5" />
+          <rect x="3" y="14" width="7" height="7" rx="1.5" />
+          <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        </svg>
+      );
+    case "needs":
+      return (
+        <svg {...common}>
+          <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
+          <rect x="9" y="3" width="6" height="4" rx="1" />
+          <path d="m9 13 2 2 4-4" />
+        </svg>
+      );
+    case "projects":
+      return (
+        <svg {...common}>
+          <path d="M4 5h5l2 2.5h9A1.5 1.5 0 0 1 21 9v9.5A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5v-12A1.5 1.5 0 0 1 4 5Z" />
+        </svg>
+      );
+    case "anacleto":
+      return (
+        <svg aria-hidden="true" height="17" viewBox="0 0 24 24" width="17">
+          <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />
+        </svg>
+      );
+    case "admin":
+      return (
+        <svg {...common}>
+          <path d="M4 8h10M18 8h2M4 16h2M10 16h10" />
+          <circle cx="16" cy="8" r="2" />
+          <circle cx="8" cy="16" r="2" />
+        </svg>
+      );
+    case "account":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="8" r="3.5" />
+          <path d="M5 20c0-3.3 3.1-6 7-6s7 2.7 7 6" />
+        </svg>
+      );
+  }
+}
+
+type NavItem = {
+  href: string;
+  label: string;
+  icon: NavIconName;
+  // "Inicio" vive en "/", prefijo de todo lo demás: solo se marca activo con
+  // coincidencia exacta; el resto usa startsWith.
+  exact?: boolean;
+  // Conteo real opcional (null mientras carga / si falla → sin badge).
+  badge?: number | null;
+  beta?: boolean;
+};
+
+type NavGroup = { label: string; items: NavItem[] };
 
 // El tema (claro/oscuro) lo aplica el script anti-parpadeo del layout raíz
 // añadiendo la clase .dark a <html>; aquí sólo leemos ese estado tras montar
@@ -38,6 +127,18 @@ function useDarkMode() {
   return { dark, toggle };
 }
 
+function getUserInitials(fullName: string) {
+  const initials = fullName
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+
+  return initials || "U";
+}
+
 export default function AppLayout({
   children,
 }: Readonly<{
@@ -47,7 +148,31 @@ export default function AppLayout({
   const pathname = usePathname();
   const { user, isLoadingSession, logout } = useSession();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [requirementsTotal, setRequirementsTotal] = useState<number | null>(
+    null,
+  );
   const { dark, toggle: toggleTheme } = useDarkMode();
+
+  // Conteo real de necesidades para el badge del menú. El layout (app) no se
+  // desmonta al navegar entre secciones, así que se pide una sola vez por
+  // sesión. Si falla (o no hay permiso) simplemente no se muestra el badge.
+  useEffect(() => {
+    if (!user || !shouldShowRequirementsPanel(user)) {
+      return;
+    }
+    let isActive = true;
+    fetchRequirementsTotal()
+      .then((total) => {
+        if (isActive) {
+          setRequirementsTotal(total);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      isActive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   useEffect(() => {
     if (!isLoadingSession && !user) {
@@ -111,39 +236,77 @@ export default function AppLayout({
     return null;
   }
 
-  const navItems = [
-    ...(userHasPermission(user, "assistant.use")
-      ? [{ href: "/asistente", label: "Asistente" }]
+  const canUseAssistant = userHasPermission(user, "assistant.use");
+  const brandName =
+    user.organizations?.[0]?.municipality?.name ??
+    user.organizations?.[0]?.name ??
+    "Anacleto";
+  const userInitials = getUserInitials(user.full_name);
+
+  const navGroups: NavGroup[] = [
+    {
+      label: "Trabajo",
+      items: [
+        { href: "/", label: "Inicio", icon: "home", exact: true },
+        ...(shouldShowRequirementsPanel(user)
+          ? [
+              {
+                href: "/requisitos",
+                label: "Necesidades",
+                icon: "needs" as const,
+                badge: requirementsTotal,
+              },
+            ]
+          : []),
+        { href: "/proyectos", label: "Proyectos", icon: "projects" },
+      ],
+    },
+    ...(canUseAssistant
+      ? [
+          {
+            label: "Inteligencia",
+            items: [
+              {
+                href: "/asistente",
+                label: "Anacleto",
+                icon: "anacleto" as const,
+                beta: true,
+              },
+            ],
+          },
+        ]
       : []),
-    ...(shouldShowRequirementsPanel(user)
-      ? [{ href: "/requisitos", label: "Necesidades" }]
-      : []),
-    { href: "/proyectos", label: "Proyectos" },
-    ...(shouldShowAdminPanel(user)
-      ? [{ href: "/admin", label: "Administración" }]
-      : []),
-    { href: "/cuenta", label: "Mi cuenta" },
+    {
+      label: "Gestión",
+      items: [
+        ...(shouldShowAdminPanel(user)
+          ? [
+              {
+                href: "/admin",
+                label: "Administración",
+                icon: "admin" as const,
+              },
+            ]
+          : []),
+        { href: "/cuenta", label: "Mi cuenta", icon: "account" },
+      ],
+    },
   ];
+
+  function isActive(item: NavItem) {
+    return item.exact ? pathname === item.href : pathname.startsWith(item.href);
+  }
 
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
         <div className="app-brand">
           <span className="app-brand-star" aria-hidden="true">
-            <svg
-              fill="none"
-              height="18"
-              stroke="currentColor"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth="1.7"
-              viewBox="0 0 24 24"
-              width="18"
-            >
-              <path d="M12 3 L13.6 10.4 21 12 13.6 13.6 12 21 10.4 13.6 3 12 10.4 10.4 Z" />
-            </svg>
+            <img alt="" src="/anacleto-logo.svg" />
           </span>
-          <span className="app-brand-name">Asistente Bral</span>
+          <span className="app-brand-name" title={brandName}>
+            {brandName}
+          </span>
         </div>
         <button
           aria-expanded={isMenuOpen}
@@ -154,18 +317,32 @@ export default function AppLayout({
           Menú
         </button>
         <nav className={isMenuOpen ? "app-nav app-nav--open" : "app-nav"}>
-          {navItems.map((item) => (
-            <Link
-              className={pathname.startsWith(item.href) ? "active" : undefined}
-              href={item.href}
-              key={item.href}
-              // Cierra también al pulsar la sección ya activa, donde el
-              // pathname no cambia y el efecto de navegación no se dispara.
-              onClick={() => setIsMenuOpen(false)}
-            >
-              {item.label}
-            </Link>
-          ))}
+          {navGroups
+            .filter((group) => group.items.length > 0)
+            .map((group) => (
+              <div className="app-nav-group" key={group.label}>
+                <span className="app-nav-section">{group.label}</span>
+                {group.items.map((item) => (
+                  <Link
+                    className={`app-nav-link${isActive(item) ? " active" : ""}`}
+                    href={item.href}
+                    key={item.href}
+                    // Cierra también al pulsar la sección ya activa, donde el
+                    // pathname no cambia y el efecto de navegación no se dispara.
+                    onClick={() => setIsMenuOpen(false)}
+                  >
+                    <NavIcon name={item.icon} />
+                    <span className="app-nav-label">{item.label}</span>
+                    {item.beta ? (
+                      <span className="app-nav-beta">BETA</span>
+                    ) : null}
+                    {typeof item.badge === "number" ? (
+                      <span className="app-nav-badge">{item.badge}</span>
+                    ) : null}
+                  </Link>
+                ))}
+              </div>
+            ))}
         </nav>
         <div className="app-session">
           <button
@@ -219,7 +396,81 @@ export default function AppLayout({
           </button>
         </div>
       </aside>
-      <main className="app-content">{children}</main>
+      <div className="app-main">
+        <header className="app-topbar">
+          <div className="app-topbar-actions">
+            <button
+              aria-pressed={dark}
+              className="app-topbar-theme"
+              onClick={toggleTheme}
+              title="Cambiar tema"
+              type="button"
+            >
+              {dark ? (
+                <svg
+                  aria-hidden="true"
+                  fill="none"
+                  height="17"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="1.6"
+                  viewBox="0 0 24 24"
+                  width="17"
+                >
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                </svg>
+              ) : (
+                <svg
+                  aria-hidden="true"
+                  fill="none"
+                  height="17"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="1.6"
+                  viewBox="0 0 24 24"
+                  width="17"
+                >
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+              )}
+            </button>
+            {canUseAssistant ? (
+              <button
+                aria-label="Abrir asistente"
+                className="app-topbar-anacleto"
+                onClick={() => router.push("/asistente")}
+                title="Abrir asistente"
+                type="button"
+              >
+                <svg aria-hidden="true" height="15" viewBox="0 0 24 24" width="15">
+                  <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />
+                </svg>
+              </button>
+            ) : null}
+            <button
+              aria-label="Abrir mi cuenta"
+              className="app-topbar-user"
+              onClick={() => router.push("/cuenta")}
+              title={user.full_name}
+              type="button"
+            >
+              {userInitials}
+            </button>
+          </div>
+        </header>
+        <main
+          className={
+            pathname === "/asistente"
+              ? "app-content app-content-assistant"
+              : "app-content"
+          }
+        >
+          {children}
+        </main>
+      </div>
     </div>
   );
 }

@@ -1,29 +1,22 @@
 import {
-  Archive,
-  ArchiveRestore,
-  Bot,
   Brain,
   CheckCircle2,
-  ChevronDown,
   CircleAlert,
   Clock3,
   Database,
   FileText,
   Globe2,
+  GripVertical,
   Hammer,
+  Inbox,
   Loader2,
-  MessageSquarePlus,
-  Mic,
-  MicOff,
-  RotateCcw,
-  Search,
-  Send,
-  ShieldCheck,
-  Sparkles,
+  PanelLeftClose,
+  PanelLeftOpen,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
 import {
+  type DragEvent,
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent,
@@ -33,19 +26,13 @@ import {
   useState,
 } from "react";
 import {
-  ASSISTANT_MEMORY_CATEGORY_LABELS,
-  ASSISTANT_MEMORY_SENSITIVITY_LABELS,
   formatAssistantTool,
   type AssistantAction,
   type AssistantConversation,
   type AssistantConversationDetail,
-  type AssistantMemoryCategory,
-  type AssistantMemoryEntry,
-  type AssistantMemorySensitivity,
-  type AssistantMemoryStatus,
+  type AssistantConversationFolder,
   type AssistantStatus,
   type User,
-  userHasPermission,
 } from "./types";
 
 // Minimal local typings for the Web Speech API; the DOM lib does not ship
@@ -93,8 +80,8 @@ type SpeechRecognitionConstructor = (new () => SpeechRecognitionLike) & {
 type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
   conversations: AssistantConversation[];
+  conversationFolders: AssistantConversationFolder[];
   currentUser: User;
-  memoryEntries: AssistantMemoryEntry[];
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
   isLoadingAssistant: boolean;
@@ -107,25 +94,17 @@ type AssistantPanelProps = {
   onSendMessage: () => void;
   onArchiveConversation: (conversationId: number) => void;
   onRestoreConversation: (conversationId: number) => void;
+  onRenameConversation: (conversationId: number, title: string) => Promise<void>;
+  onAssignConversationFolder: (
+    conversationId: number,
+    folderId: number | null,
+  ) => Promise<void>;
+  onCreateConversationFolder: (
+    name: string,
+  ) => Promise<AssistantConversationFolder | null>;
+  onRenameConversationFolder: (folderId: number, name: string) => Promise<void>;
+  onDeleteConversationFolder: (folderId: number) => Promise<void>;
   onIncludeArchivedConversationsChange: (includeArchived: boolean) => void;
-  onUpdateMemoryEntry: (
-    entryId: number,
-    updates: {
-      category?: AssistantMemoryCategory;
-      content?: string;
-      status?: AssistantMemoryStatus;
-      sensitivity?: AssistantMemorySensitivity;
-      review_notes?: string;
-    },
-  ) => void;
-};
-
-type Capability = {
-  id: string;
-  label: string;
-  detail: string;
-  enabled: boolean;
-  icon: LucideIcon;
 };
 
 type ParsedActionResult = {
@@ -133,17 +112,127 @@ type ParsedActionResult = {
   text: string;
 };
 
-const REQUIREMENT_PERMISSIONS = [
-  "requirements.view",
-  "requirements.create",
-  "requirements.edit",
+type ConversationListMode = "recent" | "folders";
+
+type ConversationFolderId = number | typeof UNCATEGORIZED_FOLDER_ID;
+
+type ConversationGroup = {
+  id: ConversationFolderId | string;
+  label: string;
+  conversations: AssistantConversation[];
+};
+
+type ConversationDragTarget =
+  | { type: "conversation"; id: number }
+  | { type: "folder"; id: ConversationFolderId | string }
+  | null;
+
+type ConversationContextMenu =
+  | { type: "conversation"; conversationId: number; x: number; y: number }
+  | { type: "folder"; folderId: ConversationFolderId; x: number; y: number }
+  | null;
+
+// Sugerencias rápidas del compositor: sólo prerrellenan el borrador, no envían.
+const SUGGESTED_PROMPTS = [
+  "Preparar un resumen ejecutivo",
+  "Comparar dos ordenanzas",
+  "Ordenar mis notas de trabajo",
 ];
 
-const MEMORY_PERMISSIONS = [
-  "assistant.memory.propose",
-  "assistant.memory.view",
-  "assistant.memory.review",
-];
+const UNCATEGORIZED_FOLDER_ID = "sin-carpeta";
+function normalizeFolderName(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+type AssistantSymbolName =
+  | "archive"
+  | "conversation-list-close"
+  | "conversation-list-open"
+  | "copy"
+  | "folder"
+  | "mark"
+  | "mic"
+  | "more"
+  | "new-chat"
+  | "rename"
+  | "restore"
+  | "search"
+  | "send";
+
+function AssistantSymbolIcon({
+  name,
+  size = 16,
+}: {
+  name: AssistantSymbolName;
+  size?: number;
+}) {
+  return (
+    <svg aria-hidden="true" height={size} viewBox="0 0 24 24" width={size}>
+      <use href={`/icons/assistant-symbols.svg#icon-assistant-${name}`} />
+    </svg>
+  );
+}
+
+function daysBetweenNow(value: string) {
+  const updatedAt = new Date(value).getTime();
+  if (Number.isNaN(updatedAt)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return (Date.now() - updatedAt) / 86_400_000;
+}
+
+function buildRecentConversationGroups(
+  conversations: AssistantConversation[],
+): ConversationGroup[] {
+  const groups: ConversationGroup[] = [
+    { id: "archived", label: "Archivadas", conversations: [] },
+    { id: "today", label: "Hoy", conversations: [] },
+    { id: "week", label: "Últimos 7 días", conversations: [] },
+    { id: "older", label: "Anteriores", conversations: [] },
+  ];
+
+  for (const conversation of conversations) {
+    if (conversation.status === "archived") {
+      groups[0].conversations.push(conversation);
+      continue;
+    }
+
+    const ageInDays = daysBetweenNow(conversation.updated_at);
+    if (ageInDays < 1) {
+      groups[1].conversations.push(conversation);
+    } else if (ageInDays < 7) {
+      groups[2].conversations.push(conversation);
+    } else {
+      groups[3].conversations.push(conversation);
+    }
+  }
+
+  return groups.filter((group) => group.conversations.length > 0);
+}
+
+function buildFolderConversationGroups(
+  conversations: AssistantConversation[],
+  folders: AssistantConversationFolder[],
+  conversationFolderMap: Record<number, ConversationFolderId>,
+): ConversationGroup[] {
+  const groups: ConversationGroup[] = [
+    ...folders.map((folder) => ({
+      id: folder.id,
+      label: folder.name,
+      conversations: [] as AssistantConversation[],
+    })),
+    { id: UNCATEGORIZED_FOLDER_ID, label: "Sin carpeta", conversations: [] },
+  ];
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+
+  for (const conversation of conversations) {
+    const folderId = conversationFolderMap[conversation.id] ?? UNCATEGORIZED_FOLDER_ID;
+    const group = groupById.get(folderId) ?? groupById.get(UNCATEGORIZED_FOLDER_ID);
+    group?.conversations.push(conversation);
+  }
+
+  return groups.filter((group) => group.conversations.length > 0);
+}
 
 function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
   if (typeof window === "undefined") {
@@ -159,66 +248,6 @@ function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null 
       | undefined) ??
     null
   );
-}
-
-function userHasAnyPermission(user: User, permissions: string[]) {
-  return permissions.some((permission) => userHasPermission(user, permission));
-}
-
-function buildCapabilities(
-  currentUser: User,
-  assistantStatus: AssistantStatus | null,
-): Capability[] {
-  const runtimeHealthy =
-    assistantStatus?.enabled && assistantStatus.runtime_healthy !== false;
-
-  return [
-    {
-      id: "chat",
-      label: "Conversacion",
-      detail: assistantStatus?.enabled ? "Disponible" : "Sin configurar",
-      enabled: Boolean(assistantStatus?.enabled),
-      icon: Bot,
-    },
-    {
-      id: "requirements",
-      label: "Necesidades",
-      detail: userHasAnyPermission(currentUser, REQUIREMENT_PERMISSIONS)
-        ? "Lectura y borradores"
-        : "Sin permiso",
-      enabled: userHasAnyPermission(currentUser, REQUIREMENT_PERMISSIONS),
-      icon: FileText,
-    },
-    {
-      id: "web",
-      label: "Web",
-      detail: userHasPermission(currentUser, "assistant.web.search")
-        ? "Busqueda controlada"
-        : "Sin permiso",
-      enabled: userHasPermission(currentUser, "assistant.web.search"),
-      icon: Globe2,
-    },
-    {
-      id: "memory",
-      label: "Memoria",
-      detail: userHasAnyPermission(currentUser, MEMORY_PERMISSIONS)
-        ? "Revision gobernada"
-        : "Sin permiso",
-      enabled: userHasAnyPermission(currentUser, MEMORY_PERMISSIONS),
-      icon: Brain,
-    },
-    {
-      id: "runtime",
-      label: assistantStatus?.runtime ?? "Runtime",
-      detail: !assistantStatus
-        ? "Pendiente"
-        : runtimeHealthy
-          ? assistantStatus.model
-          : "Revisar",
-      enabled: Boolean(runtimeHealthy),
-      icon: ShieldCheck,
-    },
-  ];
 }
 
 function formatDate(value: string) {
@@ -328,47 +357,6 @@ function actionDetailText(action: AssistantAction) {
   return `Input\n${input}\n\nResultado\n${result}`;
 }
 
-function CapabilityStrip({
-  capabilities,
-}: {
-  capabilities: Capability[];
-}) {
-  const enabledCount = capabilities.filter((capability) => capability.enabled).length;
-
-  return (
-    <details className="assistant-capabilities-panel">
-      <summary>
-        <span>Capacidades</span>
-        <small>
-          {enabledCount} de {capabilities.length} disponibles
-        </small>
-        <ChevronDown aria-hidden size={15} />
-      </summary>
-      <div className="assistant-capabilities" aria-label="Capacidades del asistente">
-        {capabilities.map((capability) => {
-          const Icon = capability.icon;
-          return (
-            <div
-              className={
-                capability.enabled
-                  ? "assistant-capability enabled"
-                  : "assistant-capability"
-              }
-              key={capability.id}
-            >
-              <Icon aria-hidden size={15} />
-              <div>
-                <span>{capability.label}</span>
-                <small>{capability.detail}</small>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </details>
-  );
-}
-
 function ActionTimeline({
   actions,
   toolLabels,
@@ -443,152 +431,11 @@ function ActionTimeline({
   );
 }
 
-function MemoryReviewPanel({
-  entries,
-  isSendingMessage,
-  onUpdateMemoryEntry,
-}: {
-  entries: AssistantMemoryEntry[];
-  isSendingMessage: boolean;
-  onUpdateMemoryEntry: AssistantPanelProps["onUpdateMemoryEntry"];
-}) {
-  function handleMemoryEdit(
-    event: FormEvent<HTMLFormElement>,
-    entryId: number,
-  ) {
-    event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    onUpdateMemoryEntry(entryId, {
-      category: formData.get("category") as AssistantMemoryCategory,
-      content: String(formData.get("content") ?? ""),
-      sensitivity: formData.get("sensitivity") as AssistantMemorySensitivity,
-      review_notes: String(formData.get("review_notes") ?? ""),
-    });
-  }
-
-  function handleMemoryStatus(
-    event: MouseEvent<HTMLButtonElement>,
-    entryId: number,
-    status: AssistantMemoryStatus,
-  ) {
-    const form = event.currentTarget.form;
-    if (!form) {
-      onUpdateMemoryEntry(entryId, { status });
-      return;
-    }
-
-    const formData = new FormData(form);
-    onUpdateMemoryEntry(entryId, {
-      category: formData.get("category") as AssistantMemoryCategory,
-      content: String(formData.get("content") ?? ""),
-      sensitivity: formData.get("sensitivity") as AssistantMemorySensitivity,
-      review_notes: String(formData.get("review_notes") ?? ""),
-      status,
-    });
-  }
-
-  if (entries.length === 0) {
-    return <p className="muted">Sin propuestas pendientes.</p>;
-  }
-
-  return (
-    <div className="assistant-memory-list">
-      {entries.map((entry) => (
-        <form
-          className="assistant-memory-item"
-          key={entry.id}
-          onSubmit={(event) => handleMemoryEdit(event, entry.id)}
-        >
-          <textarea
-            name="content"
-            defaultValue={entry.content}
-            rows={4}
-            disabled={isSendingMessage}
-          />
-          <div className="assistant-memory-fields">
-            <label>
-              Tipo
-              <select
-                name="category"
-                defaultValue={entry.category}
-                disabled={isSendingMessage}
-              >
-                {Object.entries(ASSISTANT_MEMORY_CATEGORY_LABELS).map(
-                  ([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ),
-                )}
-              </select>
-            </label>
-            <label>
-              Sensibilidad
-              <select
-                name="sensitivity"
-                defaultValue={entry.sensitivity}
-                disabled={isSendingMessage}
-              >
-                {Object.entries(ASSISTANT_MEMORY_SENSITIVITY_LABELS).map(
-                  ([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ),
-                )}
-              </select>
-            </label>
-          </div>
-          <input
-            name="review_notes"
-            placeholder="Nota de revision"
-            disabled={isSendingMessage}
-          />
-          <div className="assistant-memory-actions">
-            <button type="submit" disabled={isSendingMessage}>
-              Guardar
-            </button>
-            <button
-              type="button"
-              disabled={isSendingMessage}
-              onClick={(event) =>
-                handleMemoryStatus(event, entry.id, "approved")
-              }
-            >
-              Aprobar
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={isSendingMessage}
-              onClick={(event) =>
-                handleMemoryStatus(event, entry.id, "rejected")
-              }
-            >
-              Rechazar
-            </button>
-            <button
-              className="danger-button"
-              type="button"
-              disabled={isSendingMessage}
-              onClick={(event) =>
-                handleMemoryStatus(event, entry.id, "blocked")
-              }
-            >
-              Bloquear
-            </button>
-          </div>
-        </form>
-      ))}
-    </div>
-  );
-}
-
 export function AssistantPanel({
   assistantStatus,
   conversations,
+  conversationFolders,
   currentUser,
-  memoryEntries,
   selectedConversation,
   draftMessage,
   isLoadingAssistant,
@@ -601,8 +448,12 @@ export function AssistantPanel({
   onSendMessage,
   onArchiveConversation,
   onRestoreConversation,
+  onRenameConversation,
+  onAssignConversationFolder,
+  onCreateConversationFolder,
+  onRenameConversationFolder,
+  onDeleteConversationFolder,
   onIncludeArchivedConversationsChange,
-  onUpdateMemoryEntry,
 }: AssistantPanelProps) {
   const assistantDisabled = assistantStatus !== null && !assistantStatus.enabled;
   const runtimeHealthFailed =
@@ -612,10 +463,6 @@ export function AssistantPanel({
   const selectedIsArchived = selectedConversation?.status === "archived";
   const composerDisabled =
     isSendingMessage || assistantDisabled || Boolean(selectedIsArchived);
-  const capabilities = useMemo(
-    () => buildCapabilities(currentUser, assistantStatus),
-    [assistantStatus, currentUser],
-  );
   const toolLabels = useMemo(
     () =>
       Object.fromEntries(
@@ -628,8 +475,33 @@ export function AssistantPanel({
   const [voiceError, setVoiceError] = useState("");
   const [speechSupported, setSpeechSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
-  const [isMemoryOpen, setIsMemoryOpen] = useState(memoryEntries.length > 0);
-  const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
+  const [isConversationListOpen, setIsConversationListOpen] = useState(true);
+  const [conversationListMode, setConversationListMode] =
+    useState<ConversationListMode>("recent");
+  const conversationFolderMap = useMemo(
+    () =>
+      Object.fromEntries(
+        conversations
+          .filter((conversation) => conversation.folder_id !== null)
+          .map((conversation) => [conversation.id, conversation.folder_id]),
+      ) as Record<number, ConversationFolderId>,
+    [conversations],
+  );
+  const conversationFolderById = useMemo(
+    () => new Map(conversationFolders.map((folder) => [folder.id, folder])),
+    [conversationFolders],
+  );
+  const [draggedConversationId, setDraggedConversationId] = useState<
+    number | null
+  >(null);
+  const [conversationDragTarget, setConversationDragTarget] =
+    useState<ConversationDragTarget>(null);
+  const [conversationContextMenu, setConversationContextMenu] =
+    useState<ConversationContextMenu>(null);
+  const [lastCreatedFolderId, setLastCreatedFolderId] = useState<ConversationFolderId | null>(
+    null,
+  );
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -645,19 +517,60 @@ export function AssistantPanel({
     );
   }, [conversationFilter, conversations]);
 
+  const conversationGroups = useMemo(() => {
+    if (conversationListMode === "folders") {
+      return buildFolderConversationGroups(
+        filteredConversations,
+        conversationFolders,
+        conversationFolderMap,
+      );
+    }
+
+    return buildRecentConversationGroups(filteredConversations);
+  }, [
+    conversationFolderMap,
+    conversationFolders,
+    conversationListMode,
+    filteredConversations,
+  ]);
+
   useEffect(() => {
     draftMessageRef.current = draftMessage;
   }, [draftMessage]);
 
   useEffect(() => {
-    if (memoryEntries.length > 0) {
-      setIsMemoryOpen(true);
-    }
-  }, [memoryEntries.length]);
-
-  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [selectedConversation?.messages.length, isSendingMessage]);
+
+  useEffect(() => {
+    if (!conversationContextMenu) {
+      return;
+    }
+
+    function closeMenu() {
+      setConversationContextMenu(null);
+    }
+
+    function handleMenuKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    }
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("contextmenu", closeMenu);
+    window.addEventListener("keydown", handleMenuKeyDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("contextmenu", closeMenu);
+      window.removeEventListener("keydown", handleMenuKeyDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [conversationContextMenu]);
 
   useEffect(() => {
     if (!selectedConversation || composerDisabled) {
@@ -796,30 +709,345 @@ export function AssistantPanel({
     onSendMessage();
   }
 
+  async function handleConversationFolderChange(
+    conversationId: number,
+    folderId: ConversationFolderId,
+  ) {
+    await onAssignConversationFolder(
+      conversationId,
+      folderId === UNCATEGORIZED_FOLDER_ID ? null : folderId,
+    );
+  }
+
+  function openConversationContextMenu(
+    event: MouseEvent<HTMLElement>,
+    conversationId: number,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setConversationContextMenu({
+      type: "conversation",
+      conversationId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function openFolderContextMenu(
+    event: MouseEvent<HTMLElement>,
+    folderId: ConversationFolderId,
+  ) {
+    if (conversationListMode !== "folders") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setConversationContextMenu({
+      type: "folder",
+      folderId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function closeConversationContextMenu() {
+    setConversationContextMenu(null);
+  }
+
+  function getConversationFolderId(conversationId: number) {
+    return conversationFolderMap[conversationId] ?? UNCATEGORIZED_FOLDER_ID;
+  }
+
+  async function moveConversationToFolder(
+    conversationId: number,
+    folderId: ConversationFolderId,
+  ) {
+    await handleConversationFolderChange(conversationId, folderId);
+  }
+
+  function findConversationFolderByName(name: string) {
+    return conversationFolders.find(
+      (folder) => folder.name.toLowerCase() === name.toLowerCase(),
+    );
+  }
+
+  async function renameConversationFromMenu(conversationId: number) {
+    const conversation = conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    if (!conversation) {
+      return;
+    }
+
+    const nextTitle = window.prompt("Nuevo nombre de la conversación", conversation.title);
+    const normalizedTitle = normalizeFolderName(nextTitle ?? "");
+    if (!normalizedTitle || normalizedTitle === conversation.title) {
+      return;
+    }
+
+    await onRenameConversation(conversationId, normalizedTitle);
+  }
+
+  async function createFolderForConversation(conversationId: number) {
+    const conversation = conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    if (!conversation) {
+      return;
+    }
+
+    const suggestedName = normalizeFolderName(conversation.title).slice(0, 40);
+    const name = normalizeFolderName(
+      window.prompt("Nombre de la nueva carpeta", suggestedName || "Nueva carpeta") ?? "",
+    );
+    if (!name) {
+      return;
+    }
+
+    const existing = findConversationFolderByName(name);
+    const folder = existing ?? (await onCreateConversationFolder(name));
+    if (!folder) {
+      return;
+    }
+    const folderId = folder.id;
+    await moveConversationToFolder(conversationId, folderId);
+    setLastCreatedFolderId(folderId);
+    window.setTimeout(() => setLastCreatedFolderId(null), 1200);
+  }
+
+  async function renameFolderFromMenu(folderId: ConversationFolderId) {
+    if (folderId === UNCATEGORIZED_FOLDER_ID) {
+      return;
+    }
+
+    const folder = conversationFolders.find((candidate) => candidate.id === folderId);
+    if (!folder) {
+      return;
+    }
+
+    const nextName = normalizeFolderName(
+      window.prompt("Nuevo nombre de la carpeta", folder.name) ?? "",
+    );
+    if (!nextName || nextName === folder.name) {
+      return;
+    }
+
+    const nameExists = conversationFolders.some(
+      (candidate) =>
+        candidate.id !== folderId &&
+        candidate.name.toLowerCase() === nextName.toLowerCase(),
+    );
+    if (nameExists) {
+      window.alert("Ya existe una carpeta con ese nombre.");
+      return;
+    }
+
+    await onRenameConversationFolder(folderId, nextName);
+  }
+
+  async function emptyFolder(folderId: ConversationFolderId) {
+    const conversationsInFolder = conversations.filter(
+      (conversation) => getConversationFolderId(conversation.id) === folderId,
+    );
+    await Promise.all(
+      conversationsInFolder.map((conversation) =>
+        onAssignConversationFolder(conversation.id, null),
+      ),
+    );
+  }
+
+  async function deleteFolder(folderId: ConversationFolderId) {
+    if (folderId === UNCATEGORIZED_FOLDER_ID) {
+      return;
+    }
+
+    const folder = conversationFolders.find((candidate) => candidate.id === folderId);
+    if (!folder) {
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Eliminar la carpeta "${folder.name}"? Las conversaciones quedarán en Sin carpeta.`,
+      )
+    ) {
+      return;
+    }
+
+    await onDeleteConversationFolder(folderId);
+  }
+
+  function archiveFolderConversations(folderId: ConversationFolderId) {
+    const conversationsInFolder = conversations.filter((conversation) => {
+      const assignedFolderId = getConversationFolderId(conversation.id);
+      return assignedFolderId === folderId && conversation.status !== "archived";
+    });
+    if (conversationsInFolder.length === 0) {
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Archivar ${conversationsInFolder.length} conversaciones de esta carpeta?`,
+      )
+    ) {
+      return;
+    }
+
+    for (const conversation of conversationsInFolder) {
+      onArchiveConversation(conversation.id);
+    }
+  }
+
+  function copyConversationLink(conversationId: number) {
+    if (!navigator.clipboard) {
+      return;
+    }
+
+    const url = new URL("/asistente", window.location.origin);
+    url.searchParams.set("c", String(conversationId));
+    void navigator.clipboard.writeText(url.toString());
+  }
+
+  async function createFolderFromConversationPair(
+    sourceConversationId: number,
+    targetConversationId: number,
+  ) {
+    if (sourceConversationId === targetConversationId) {
+      return;
+    }
+
+    const sourceConversation = conversations.find(
+      (conversation) => conversation.id === sourceConversationId,
+    );
+    const targetConversation = conversations.find(
+      (conversation) => conversation.id === targetConversationId,
+    );
+    if (!sourceConversation || !targetConversation) {
+      return;
+    }
+
+    const targetFolderId = conversationFolderMap[targetConversationId];
+    if (targetFolderId && targetFolderId !== UNCATEGORIZED_FOLDER_ID) {
+      void moveConversationToFolder(sourceConversationId, targetFolderId);
+      setLastCreatedFolderId(targetFolderId);
+      window.setTimeout(() => setLastCreatedFolderId(null), 1200);
+      return;
+    }
+
+    const folderName = normalizeFolderName(targetConversation.title).slice(0, 40);
+    const nextFolderName = folderName || "Nueva carpeta";
+    const folder =
+      findConversationFolderByName(nextFolderName) ??
+      (await onCreateConversationFolder(nextFolderName));
+    if (!folder) {
+      return;
+    }
+    const folderId = folder.id;
+
+    await Promise.all([
+      onAssignConversationFolder(sourceConversation.id, folderId),
+      onAssignConversationFolder(targetConversation.id, folderId),
+    ]);
+    setLastCreatedFolderId(folderId);
+    window.setTimeout(() => setLastCreatedFolderId(null), 1200);
+  }
+
+  function handleConversationDragStart(
+    event: DragEvent<HTMLDivElement>,
+    conversationId: number,
+  ) {
+    setDraggedConversationId(conversationId);
+    setConversationDragTarget(null);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(conversationId));
+  }
+
+  function handleConversationDragEnd() {
+    setDraggedConversationId(null);
+    setConversationDragTarget(null);
+  }
+
+  function handleConversationDragOverFolder(
+    event: DragEvent<HTMLElement>,
+    folderId: ConversationFolderId,
+  ) {
+    if (draggedConversationId === null || conversationListMode !== "folders") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setConversationDragTarget({ type: "folder", id: folderId });
+  }
+
+  function handleConversationDropOnFolder(
+    event: DragEvent<HTMLElement>,
+    folderId: ConversationFolderId,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (conversationListMode !== "folders") {
+      handleConversationDragEnd();
+      return;
+    }
+    const conversationId = draggedConversationId;
+    handleConversationDragEnd();
+    if (conversationId === null) {
+      return;
+    }
+    void moveConversationToFolder(conversationId, folderId);
+  }
+
+  function handleConversationDragOverConversation(
+    event: DragEvent<HTMLDivElement>,
+    targetConversationId: number,
+  ) {
+    if (
+      draggedConversationId === null ||
+      draggedConversationId === targetConversationId
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setConversationDragTarget({ type: "conversation", id: targetConversationId });
+  }
+
+  function handleConversationDropOnConversation(
+    event: DragEvent<HTMLDivElement>,
+    targetConversationId: number,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const sourceConversationId = draggedConversationId;
+    handleConversationDragEnd();
+    if (sourceConversationId === null) {
+      return;
+    }
+    void createFolderFromConversationPair(sourceConversationId, targetConversationId);
+  }
+
+  function handleCopyMessage(messageId: number, content: string) {
+    if (!navigator.clipboard) {
+      return;
+    }
+    navigator.clipboard
+      .writeText(content)
+      .then(() => {
+        setCopiedMessageId(messageId);
+        window.setTimeout(() => {
+          setCopiedMessageId((current) =>
+            current === messageId ? null : current,
+          );
+        }, 1500);
+      })
+      .catch(() => undefined);
+  }
+
   return (
     <section className="panel assistant-agent-panel">
-      <div className="assistant-agent-header">
-        <div className="assistant-agent-title">
-          <p className="eyebrow">Asistente</p>
-          <h2>Agente municipal</h2>
-          <p className="muted">
-            Conversacion, necesidades, memoria y busqueda web gobernadas por
-            permisos.
-          </p>
-        </div>
-        <button
-          className="secondary-button assistant-new-chat"
-          type="button"
-          onClick={onStartConversation}
-          disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
-        >
-          <MessageSquarePlus aria-hidden size={17} />
-          <span>Nueva conversacion</span>
-        </button>
-      </div>
-
-      <CapabilityStrip capabilities={capabilities} />
-
       {assistantError ? (
         <div className="assistant-alert error-message">
           <CircleAlert aria-hidden size={18} />
@@ -837,91 +1065,327 @@ export function AssistantPanel({
       {runtimeHealthFailed ? (
         <div className="assistant-alert muted">
           <CircleAlert aria-hidden size={18} />
-          <span>Hermes Agent esta configurado, pero su API no responde.</span>
+          <span>El asistente no responde ahora mismo.</span>
         </div>
       ) : null}
 
       <div
-        className={
-          isDetailsPanelOpen
-            ? "assistant-agent-grid details-open"
-            : "assistant-agent-grid"
-        }
+        className={[
+          "assistant-agent-grid",
+          isConversationListOpen ? "" : "conversations-collapsed",
+        ]
+          .filter(Boolean)
+          .join(" ")}
       >
+        {!isConversationListOpen ? (
+          <div className="assistant-floating-actions">
+            <button
+              className="assistant-conversations-toggle assistant-conversations-toggle-floating"
+              type="button"
+              onClick={() => setIsConversationListOpen(true)}
+              aria-expanded={false}
+              aria-label="Desplegar lista de chats"
+              title="Desplegar lista de chats"
+            >
+              <PanelLeftOpen aria-hidden size={18} />
+              <span>Chats</span>
+            </button>
+            <button
+              className="secondary-button assistant-new-chat assistant-new-chat-floating"
+              type="button"
+              onClick={onStartConversation}
+              disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
+              aria-label="Nueva conversación"
+              title="Nueva conversación"
+            >
+              <AssistantSymbolIcon name="new-chat" size={17} />
+              <span>Nueva conversacion</span>
+            </button>
+          </div>
+        ) : null}
+
+        {isConversationListOpen ? (
         <aside className="assistant-conversations">
-          <div className="assistant-list-tools">
-            <div className="assistant-search">
-              <Search aria-hidden size={16} />
-              <input
-                aria-label="Buscar conversaciones"
-                value={conversationFilter}
-                onChange={(event) => setConversationFilter(event.target.value)}
-                placeholder="Buscar"
-                disabled={isLoadingAssistant}
-              />
-            </div>
-            <label className="checkbox-label assistant-archived-toggle">
-              <input
-                checked={includeArchivedConversations}
-                onChange={(event) =>
-                  onIncludeArchivedConversationsChange(event.target.checked)
-                }
-                type="checkbox"
-                disabled={isLoadingAssistant || isSendingMessage}
-              />
-              Archivadas
-            </label>
+          <div className="assistant-conversations-head">
+            <button
+              className="assistant-conversations-toggle"
+              type="button"
+              onClick={() => setIsConversationListOpen(false)}
+              aria-expanded={true}
+              aria-label="Plegar lista de chats"
+              title="Plegar lista de chats"
+            >
+              <PanelLeftClose aria-hidden size={18} />
+              <span>Chats</span>
+            </button>
+            <button
+              className="secondary-button assistant-new-chat assistant-new-chat-compact"
+              type="button"
+              onClick={onStartConversation}
+              disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
+              aria-label="Nueva conversación"
+              title="Nueva conversación"
+            >
+              <AssistantSymbolIcon name="new-chat" size={17} />
+              <span>Nueva conversacion</span>
+            </button>
           </div>
 
-          {isLoadingAssistant ? (
-            <p className="muted assistant-empty-state">Cargando conversaciones...</p>
-          ) : null}
-          {!isLoadingAssistant && filteredConversations.length === 0 ? (
-            <p className="muted assistant-empty-state">
-              No hay conversaciones que mostrar.
-            </p>
-          ) : null}
-          <ul>
-            {filteredConversations.map((conversation) => (
-              <li key={conversation.id}>
-                <button
-                  type="button"
-                  className={
-                    selectedConversation?.id === conversation.id
-                      ? "assistant-conversation-item selected"
-                      : "assistant-conversation-item"
-                  }
-                  onClick={() => onSelectConversation(conversation.id)}
-                  disabled={isSendingMessage}
-                >
-                  <span className="assistant-conversation-title">
-                    {conversation.title}
-                  </span>
-                  <span className="assistant-conversation-meta">
-                    <Clock3 aria-hidden size={13} />
-                    {formatShortDate(conversation.updated_at)}
-                    {conversation.status === "archived" ? (
-                      <span className="tag assistant-archived-tag">
-                        Archivada
-                      </span>
-                    ) : null}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </aside>
+          <div className="assistant-list-tools">
+                <div className="assistant-search">
+                  <AssistantSymbolIcon name="search" size={16} />
+                  <input
+                    aria-label="Buscar conversaciones"
+                    value={conversationFilter}
+                    onChange={(event) => setConversationFilter(event.target.value)}
+                    placeholder="Buscar"
+                    disabled={isLoadingAssistant}
+                  />
+                </div>
+                <div className="assistant-list-options">
+                  <button
+                    className="assistant-list-mode-toggle"
+                    type="button"
+                    aria-pressed={conversationListMode === "folders"}
+                    aria-label={
+                      conversationListMode === "folders"
+                        ? "Cambiar a vista recientes"
+                        : "Cambiar a vista por carpetas"
+                    }
+                    title={
+                      conversationListMode === "folders"
+                        ? "Cambiar a vista recientes"
+                        : "Cambiar a vista por carpetas"
+                    }
+                    onClick={() =>
+                      setConversationListMode((mode) =>
+                        mode === "folders" ? "recent" : "folders",
+                      )
+                    }
+                    disabled={isLoadingAssistant}
+                  >
+                    {conversationListMode === "folders" ? (
+                      <AssistantSymbolIcon name="folder" size={13} />
+                    ) : (
+                      <Clock3 aria-hidden size={13} />
+                    )}
+                    <span>
+                      {conversationListMode === "folders"
+                        ? "Carpetas"
+                        : "Recientes"}
+                    </span>
+                  </button>
+                  <button
+                    className="assistant-archived-toggle"
+                    type="button"
+                    aria-pressed={includeArchivedConversations}
+                    onClick={() =>
+                      onIncludeArchivedConversationsChange(
+                        !includeArchivedConversations,
+                      )
+                    }
+                    disabled={isLoadingAssistant || isSendingMessage}
+                  >
+                    <AssistantSymbolIcon name="archive" size={13} />
+                    Archivadas
+                  </button>
+                </div>
+              </div>
 
-        <main className="assistant-thread">
+              {isLoadingAssistant ? (
+                <p className="muted assistant-empty-state">Cargando conversaciones...</p>
+              ) : null}
+              {!isLoadingAssistant && filteredConversations.length === 0 ? (
+                <p className="muted assistant-empty-state">
+                  No hay conversaciones que mostrar.
+                </p>
+              ) : null}
+              {conversationListMode === "folders" ? (
+                <p className="assistant-drag-helper">
+                  Arrastra un chat a una carpeta para moverlo, o encima de otro
+                  chat para crear una carpeta con ambos.
+                </p>
+              ) : null}
+              <div className="assistant-conversation-groups">
+                {conversationGroups.map((group) => {
+                  const isFolderDropTarget =
+                    conversationDragTarget?.type === "folder" &&
+                    conversationDragTarget.id === group.id;
+                  const wasJustCreated = lastCreatedFolderId === group.id;
+                  const isFolderView = conversationListMode === "folders";
+                  const folderGroupId = group.id as ConversationFolderId;
+                  const groupIcon = isFolderView ? "folder" : null;
+
+                  return (
+                    <details
+                      className={[
+                        "assistant-conversation-group",
+                        isFolderDropTarget ? "drop-target" : "",
+                        wasJustCreated ? "just-created" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      key={group.id}
+                      open
+                      onDragOver={
+                        isFolderView
+                          ? (event) =>
+                              handleConversationDragOverFolder(event, folderGroupId)
+                          : undefined
+                      }
+                      onDrop={
+                        isFolderView
+                          ? (event) =>
+                              handleConversationDropOnFolder(event, folderGroupId)
+                          : undefined
+                      }
+                    >
+                      <summary
+                        onContextMenu={
+                          isFolderView
+                            ? (event) => openFolderContextMenu(event, folderGroupId)
+                            : undefined
+                        }
+                      >
+                        {groupIcon ? (
+                          <AssistantSymbolIcon name={groupIcon} size={14} />
+                        ) : (
+                          <Clock3 aria-hidden size={14} />
+                        )}
+                        <span>{group.label}</span>
+                        <small>{group.conversations.length}</small>
+                      </summary>
+                      <ul>
+                        {group.conversations.map((conversation) => {
+                          const isConversationDropTarget =
+                            conversationDragTarget?.type === "conversation" &&
+                            conversationDragTarget.id === conversation.id;
+                          const isDragging = draggedConversationId === conversation.id;
+                          const folderId =
+                            conversationFolderMap[conversation.id] ??
+                            UNCATEGORIZED_FOLDER_ID;
+                          const folder =
+                            typeof folderId === "number"
+                              ? conversationFolderById.get(folderId)
+                              : undefined;
+
+                          return (
+                            <li key={conversation.id}>
+                              <div
+                                className={[
+                                  "assistant-conversation-row",
+                                  selectedConversation?.id === conversation.id
+                                    ? "selected"
+                                    : "",
+                                  isDragging ? "dragging" : "",
+                                  isConversationDropTarget ? "drop-target" : "",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
+                                draggable={!isSendingMessage}
+                                onDragStart={(event) =>
+                                  handleConversationDragStart(event, conversation.id)
+                                }
+                                onDragEnd={handleConversationDragEnd}
+                                onDragOver={(event) =>
+                                  handleConversationDragOverConversation(
+                                    event,
+                                    conversation.id,
+                                  )
+                                }
+                                onDrop={(event) =>
+                                  handleConversationDropOnConversation(
+                                    event,
+                                    conversation.id,
+                                  )
+                                }
+                                onContextMenu={(event) =>
+                                  openConversationContextMenu(
+                                    event,
+                                    conversation.id,
+                                  )
+                                }
+                              >
+                                <button
+                                  type="button"
+                                  className="assistant-conversation-item"
+                                  onClick={() => onSelectConversation(conversation.id)}
+                                  disabled={isSendingMessage}
+                                >
+                                  <span className="assistant-conversation-drag-handle">
+                                    <GripVertical aria-hidden size={14} />
+                                  </span>
+                                  <span className="assistant-conversation-copy">
+                                    <span className="assistant-conversation-title">
+                                      {conversation.title}
+                                    </span>
+                                    <span className="assistant-conversation-meta">
+                                      <Clock3 aria-hidden size={13} />
+                                      {formatShortDate(conversation.updated_at)}
+                                      {conversation.status === "archived" ? (
+                                        <span className="tag assistant-archived-tag">
+                                          Archivada
+                                        </span>
+                                      ) : null}
+                                      {folder ? (
+                                        <span
+                                          className="assistant-folder-pill"
+                                          title={`Carpeta: ${folder.name}`}
+                                        >
+                                          <AssistantSymbolIcon name="folder" size={11} />
+                                          <span>{folder.name}</span>
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="assistant-conversation-menu-button"
+                                  aria-label={`Acciones de ${conversation.title}`}
+                                  title="Acciones"
+                                  disabled={isSendingMessage}
+                                  onClick={(event) =>
+                                    openConversationContextMenu(
+                                      event,
+                                      conversation.id,
+                                    )
+                                  }
+                                >
+                                  <AssistantSymbolIcon name="more" size={15} />
+                                </button>
+                                {conversationListMode === "folders" ? (
+                                  <span className="assistant-drop-hint">
+                                    <AssistantSymbolIcon name="folder" size={14} />
+                                    Suelta para agrupar
+                                  </span>
+                                ) : null}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </details>
+                  );
+                })}
+              </div>
+        </aside>
+        ) : null}
+
+        <main
+          className={[
+            "assistant-thread",
+            selectedConversation ? "" : "assistant-thread-empty",
+            selectedConversation?.messages.length === 0
+              ? "assistant-thread-new"
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
           {selectedConversation ? (
             <>
-              <div className="assistant-thread-header">
-                <div>
-                  <h3>{selectedConversation.title}</h3>
-                  {selectedIsArchived ? (
-                    <span className="assistant-thread-status">Archivada</span>
-                  ) : null}
-                </div>
+              <div className="assistant-thread-actions">
                 {selectedIsArchived ? (
                   <button
                     className="secondary-button assistant-thread-icon-button"
@@ -933,7 +1397,7 @@ export function AssistantPanel({
                       onRestoreConversation(selectedConversation.id)
                     }
                   >
-                    <ArchiveRestore aria-hidden size={16} />
+                    <AssistantSymbolIcon name="restore" size={16} />
                   </button>
                 ) : (
                   <button
@@ -952,7 +1416,7 @@ export function AssistantPanel({
                       }
                     }}
                   >
-                    <Archive aria-hidden size={16} />
+                    <AssistantSymbolIcon name="archive" size={16} />
                   </button>
                 )}
               </div>
@@ -960,11 +1424,8 @@ export function AssistantPanel({
               <div className="assistant-messages">
                 {selectedConversation.messages.length === 0 ? (
                   <div className="assistant-empty-thread">
-                    <Sparkles aria-hidden size={22} />
-                    <p>
-                      Escribe el primer mensaje para iniciar la captura de
-                      necesidades.
-                    </p>
+                    <AssistantSymbolIcon name="mark" size={22} />
+                    <p>Escribe el primer mensaje para empezar a trabajar.</p>
                   </div>
                 ) : null}
                 {selectedConversation.messages.map((message) => {
@@ -976,23 +1437,47 @@ export function AssistantPanel({
                     >
                       <div className="assistant-message-avatar">
                         {isAssistant ? (
-                          <Bot aria-hidden size={17} />
+                          <AssistantSymbolIcon name="mark" size={16} />
                         ) : (
                           <span>{currentUser.full_name.slice(0, 1)}</span>
                         )}
                       </div>
                       <div className="assistant-message-main">
                         <div className="assistant-message-meta">
-                          <span>{isAssistant ? "Asistente" : "Tu"}</span>
+                          <span>{isAssistant ? "Anacleto" : "Tu"}</span>
                           <small>{formatDate(message.created_at)}</small>
                         </div>
-                        <p className="assistant-message-content">
-                          {message.content}
-                        </p>
-                        <ActionTimeline
-                          actions={message.actions}
-                          toolLabels={toolLabels}
-                        />
+                        <div className="assistant-message-bubble">
+                          <p className="assistant-message-content">
+                            {message.content}
+                          </p>
+                        </div>
+                        {message.actions.some((action) => action.tool === "web_search") ? (
+                          <ActionTimeline
+                            actions={message.actions.filter(
+                              (action) => action.tool === "web_search",
+                            )}
+                            toolLabels={toolLabels}
+                          />
+                        ) : null}
+                        {isAssistant && message.content.trim().length > 0 ? (
+                          <div className="assistant-message-actions">
+                            <button
+                              type="button"
+                              className="assistant-msg-action"
+                              onClick={() =>
+                                handleCopyMessage(message.id, message.content)
+                              }
+                            >
+                              <AssistantSymbolIcon name="copy" size={13} />
+                              <span>
+                                {copiedMessageId === message.id
+                                  ? "Copiado"
+                                  : "Copiar"}
+                              </span>
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </article>
                   );
@@ -1004,12 +1489,14 @@ export function AssistantPanel({
                     </div>
                     <div className="assistant-message-main">
                       <div className="assistant-message-meta">
-                        <span>Asistente</span>
+                        <span>Anacleto</span>
                         <small>Trabajando</small>
                       </div>
-                      <p className="assistant-message-content muted">
-                        Analizando la conversacion y herramientas disponibles...
-                      </p>
+                      <div className="assistant-message-bubble">
+                        <p className="assistant-message-content muted">
+                          Preparando respuesta...
+                        </p>
+                      </div>
                     </div>
                   </article>
                 ) : null}
@@ -1023,63 +1510,88 @@ export function AssistantPanel({
                 </p>
               ) : null}
 
-              <form className="assistant-composer" onSubmit={handleSubmit}>
-                <textarea
-                  ref={messageTextareaRef}
-                  value={draftMessage}
-                  onChange={(event) => onDraftMessageChange(event.target.value)}
-                  onKeyDown={handleComposerKeyDown}
-                  placeholder="Escribe tu mensaje..."
-                  rows={3}
-                  disabled={composerDisabled}
-                />
-                <div className="assistant-composer-actions">
-                  <button
-                    type="button"
-                    className={
-                      isListening ? "assistant-mic recording" : "assistant-mic"
-                    }
-                    aria-label={
-                      isListening ? "Detener dictado" : "Iniciar dictado"
-                    }
-                    aria-pressed={isListening}
-                    onClick={handleToggleListening}
-                    disabled={
-                      !speechSupported || composerDisabled
-                    }
-                    title={
-                      speechSupported
-                        ? "Dictado local en el dispositivo"
-                        : "Dictado local no disponible en este navegador"
-                    }
-                  >
-                    {isListening ? (
-                      <MicOff aria-hidden size={18} />
-                    ) : (
-                      <Mic aria-hidden size={18} />
-                    )}
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={
-                      composerDisabled || draftMessage.trim().length === 0
-                    }
-                  >
-                    <Send aria-hidden size={17} />
-                    <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
-                  </button>
-                </div>
-              </form>
+              <div className="assistant-composer-stack">
+                {!composerDisabled ? (
+                  <div className="assistant-chips">
+                    {SUGGESTED_PROMPTS.map((prompt) => (
+                      <button
+                        key={prompt}
+                        type="button"
+                        className="assistant-chip"
+                        onClick={() => {
+                          onDraftMessageChange(prompt);
+                          messageTextareaRef.current?.focus({
+                            preventScroll: true,
+                          });
+                        }}
+                      >
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
 
-              {voiceError ? (
-                <p className="error-message assistant-voice-error">
-                  {voiceError}
-                </p>
-              ) : null}
+                <form className="assistant-composer" onSubmit={handleSubmit}>
+                  <textarea
+                    ref={messageTextareaRef}
+                    value={draftMessage}
+                    onChange={(event) => onDraftMessageChange(event.target.value)}
+                    onKeyDown={handleComposerKeyDown}
+                    placeholder="Escribe tu consulta o pide un borrador…"
+                    rows={3}
+                    disabled={composerDisabled}
+                  />
+                  <div className="assistant-composer-foot">
+                    <div className="assistant-composer-context" aria-hidden="true" />
+                    <div className="assistant-composer-actions">
+                      <button
+                        type="button"
+                        className={
+                          isListening
+                            ? "assistant-mic recording"
+                            : "assistant-mic"
+                        }
+                        aria-label={
+                          isListening ? "Detener dictado" : "Iniciar dictado"
+                        }
+                        aria-pressed={isListening}
+                        onClick={handleToggleListening}
+                        disabled={!speechSupported || composerDisabled}
+                        title={
+                          speechSupported
+                            ? "Dictado local en el dispositivo"
+                            : "Dictado local no disponible en este navegador"
+                        }
+                      >
+                        {isListening ? (
+                          <AssistantSymbolIcon name="mic" size={18} />
+                        ) : (
+                          <AssistantSymbolIcon name="mic" size={18} />
+                        )}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={
+                          composerDisabled || draftMessage.trim().length === 0
+                        }
+                      >
+                        <AssistantSymbolIcon name="send" size={17} />
+                        <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
+                      </button>
+                    </div>
+                  </div>
+                </form>
+
+                {voiceError ? (
+                  <p className="error-message assistant-voice-error">
+                    {voiceError}
+                  </p>
+                ) : null}
+              </div>
             </>
           ) : (
             <div className="assistant-no-selection">
-              <Bot aria-hidden size={28} />
+              <AssistantSymbolIcon name="mark" size={28} />
               <h3>
                 {isLoadingAssistant
                   ? "Cargando conversaciones"
@@ -1097,114 +1609,231 @@ export function AssistantPanel({
                   isLoadingAssistant || isSendingMessage || assistantDisabled
                 }
               >
-                <MessageSquarePlus aria-hidden size={17} />
+                <AssistantSymbolIcon name="new-chat" size={17} />
                 <span>Nueva conversacion</span>
               </button>
             </div>
           )}
         </main>
 
-        <aside className="assistant-side-panel">
-          <button
-            className="assistant-details-toggle"
-            type="button"
-            onClick={() => setIsDetailsPanelOpen((open) => !open)}
-            aria-expanded={isDetailsPanelOpen}
-            aria-label={
-              isDetailsPanelOpen
-                ? "Ocultar detalles del asistente"
-                : "Mostrar detalles del asistente"
-            }
-            title={
-              isDetailsPanelOpen
-                ? "Ocultar detalles del asistente"
-                : "Mostrar detalles del asistente"
-            }
-          >
-            <ShieldCheck aria-hidden size={17} />
-            <span>Detalles</span>
-            {memoryEntries.length > 0 ? (
-              <small>{memoryEntries.length}</small>
-            ) : null}
-          </button>
-
-          {isDetailsPanelOpen ? (
-            <div className="assistant-side-content">
-              <section className="assistant-side-section">
-                <div className="assistant-side-heading">
-                  <ShieldCheck aria-hidden size={17} />
-                  <h3>Estado</h3>
-                </div>
-                <dl className="assistant-runtime-list">
-                  <div>
-                    <dt>Runtime</dt>
-                    <dd>{assistantStatus?.runtime ?? "Pendiente"}</dd>
-                  </div>
-                  <div>
-                    <dt>Modelo</dt>
-                    <dd>{assistantStatus?.model ?? "Pendiente"}</dd>
-                  </div>
-                  <div>
-                    <dt>Salud</dt>
-                    <dd>
-                      {!assistantStatus
-                        ? "Pendiente"
-                        : assistantStatus.runtime_healthy === false
-                          ? "Revisar"
-                          : "Operativo"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Planner</dt>
-                    <dd>
-                      {!assistantStatus
-                        ? "Pendiente"
-                        : assistantStatus.planner.enabled
-                          ? assistantStatus.planner.model
-                          : "Desactivado"}
-                    </dd>
-                  </div>
-                </dl>
-              </section>
-
-              <section className="assistant-side-section">
-                <button
-                  className="assistant-memory-toggle"
-                  type="button"
-                  onClick={() => setIsMemoryOpen((open) => !open)}
-                  aria-expanded={isMemoryOpen}
-                >
-                  <span>
-                    <Brain aria-hidden size={17} />
-                    Memoria pendiente
-                  </span>
-                  <span className="tag">{memoryEntries.length}</span>
-                  <ChevronDown aria-hidden size={16} />
-                </button>
-                {isMemoryOpen ? (
-                  <MemoryReviewPanel
-                    entries={memoryEntries}
-                    isSendingMessage={isSendingMessage}
-                    onUpdateMemoryEntry={onUpdateMemoryEntry}
-                  />
-                ) : null}
-              </section>
-
-              <section className="assistant-side-section">
-                <div className="assistant-side-heading">
-                  <RotateCcw aria-hidden size={17} />
-                  <h3>Actividad</h3>
-                </div>
-                <p className="muted">
-                  {selectedConversation
-                    ? `${selectedConversation.messages.length} mensajes`
-                    : "Sin conversacion abierta"}
-                </p>
-              </section>
-            </div>
-          ) : null}
-        </aside>
       </div>
+
+      {conversationContextMenu ? (
+        <div
+          className="assistant-context-menu"
+          role="menu"
+          style={{
+            left: conversationContextMenu.x,
+            top: conversationContextMenu.y,
+          }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          {conversationContextMenu.type === "conversation" ? (
+            (() => {
+              const conversation = conversations.find(
+                (candidate) =>
+                  candidate.id === conversationContextMenu.conversationId,
+              );
+              if (!conversation) {
+                return null;
+              }
+              const currentFolderId = getConversationFolderId(conversation.id);
+              return (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      onSelectConversation(conversation.id);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <AssistantSymbolIcon name="new-chat" size={15} />
+                    Abrir conversación
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closeConversationContextMenu();
+                      void renameConversationFromMenu(conversation.id);
+                    }}
+                  >
+                    <AssistantSymbolIcon name="rename" size={15} />
+                    Renombrar
+                  </button>
+                  <div className="assistant-context-menu-section">
+                    <p>Mover a carpeta</p>
+                    {conversationFolders.map((folder) => (
+                      <button
+                        key={folder.id}
+                        type="button"
+                        role="menuitem"
+                        className={
+                          currentFolderId === folder.id ? "selected" : undefined
+                        }
+                        onClick={() => {
+                          moveConversationToFolder(conversation.id, folder.id);
+                          closeConversationContextMenu();
+                        }}
+                      >
+                        <AssistantSymbolIcon name="folder" size={15} />
+                        {folder.name}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={
+                        currentFolderId === UNCATEGORIZED_FOLDER_ID
+                          ? "selected"
+                          : undefined
+                      }
+                      onClick={() => {
+                        moveConversationToFolder(
+                          conversation.id,
+                          UNCATEGORIZED_FOLDER_ID,
+                        );
+                        closeConversationContextMenu();
+                      }}
+                    >
+                      <Inbox aria-hidden size={15} />
+                      Sin carpeta
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closeConversationContextMenu();
+                      createFolderForConversation(conversation.id);
+                    }}
+                  >
+                    <AssistantSymbolIcon name="folder" size={15} />
+                    Nueva carpeta con este chat
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      copyConversationLink(conversation.id);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <AssistantSymbolIcon name="copy" size={15} />
+                    Copiar enlace
+                  </button>
+                  {conversation.status === "archived" ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        onRestoreConversation(conversation.id);
+                        closeConversationContextMenu();
+                      }}
+                    >
+                      <AssistantSymbolIcon name="restore" size={15} />
+                      Restaurar
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            "Archivar esta conversación? Dejará de aparecer en la lista.",
+                          )
+                        ) {
+                          onArchiveConversation(conversation.id);
+                        }
+                        closeConversationContextMenu();
+                      }}
+                    >
+                      <AssistantSymbolIcon name="archive" size={15} />
+                      Archivar
+                    </button>
+                  )}
+                </>
+              );
+            })()
+          ) : (
+            (() => {
+              const folder =
+                conversationContextMenu.folderId === UNCATEGORIZED_FOLDER_ID
+                  ? { id: UNCATEGORIZED_FOLDER_ID, name: "Sin carpeta" }
+                  : conversationFolders.find(
+                      (candidate) =>
+                        candidate.id === conversationContextMenu.folderId,
+                    );
+              if (!folder) {
+                return null;
+              }
+              const folderId = folder.id as ConversationFolderId;
+              const isUncategorized = folder.id === UNCATEGORIZED_FOLDER_ID;
+              return (
+                <>
+                  <div className="assistant-context-menu-title">
+                    <AssistantSymbolIcon name="folder" size={15} />
+                    {folder.name}
+                  </div>
+                  {!isUncategorized ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closeConversationContextMenu();
+                        renameFolderFromMenu(folderId);
+                      }}
+                    >
+                      <AssistantSymbolIcon name="rename" size={15} />
+                      Renombrar carpeta
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      emptyFolder(folderId);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <Inbox aria-hidden size={15} />
+                    Vaciar carpeta
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      archiveFolderConversations(folderId);
+                      closeConversationContextMenu();
+                    }}
+                  >
+                    <AssistantSymbolIcon name="archive" size={15} />
+                    Archivar conversaciones
+                  </button>
+                  {!isUncategorized ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      onClick={() => {
+                        closeConversationContextMenu();
+                        deleteFolder(folderId);
+                      }}
+                    >
+                      <XCircle aria-hidden size={15} />
+                      Eliminar carpeta
+                    </button>
+                  ) : null}
+                </>
+              );
+            })()
+          )}
+        </div>
+      ) : null}
     </section>
   );
 }
