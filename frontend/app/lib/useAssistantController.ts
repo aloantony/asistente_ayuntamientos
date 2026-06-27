@@ -111,7 +111,7 @@ export function useAssistantController({
           "/assistant/conversation-folders",
           token,
           "No se pudieron cargar las carpetas.",
-        ),
+        ).catch(() => []),
         adminRequest<AssistantMemoryEntry[]>(
           "/assistant/memory?status=proposed",
           token,

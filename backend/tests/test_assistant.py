@@ -169,6 +169,25 @@ def test_conversation_folder_delete_unassigns_conversations(client, assistant_us
     assert refreshed["folder_id"] is None
 
 
+def test_conversation_folder_duplicate_name_returns_conflict(client, assistant_user):
+    user, _ = assistant_user
+    first = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Borradores"},
+        headers=headers_for(user),
+    )
+    assert first.status_code == 201
+
+    duplicate = client.post(
+        "/assistant/conversation-folders",
+        json={"name": "Borradores"},
+        headers=headers_for(user),
+    )
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "Assistant conversation folder already exists"
+
+
 def test_status_reports_disabled_gateway(
     client,
     assistant_user,

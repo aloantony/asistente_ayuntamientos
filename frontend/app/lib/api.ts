@@ -173,6 +173,10 @@ function translateApiDetail(detail: string, fallback: string) {
       return "La conversación está archivada.";
     case "Conversation not found":
       return "No se encontró la conversación.";
+    case "Assistant conversation folder already exists":
+      return "Ya existe una carpeta con ese nombre.";
+    case "Conversation folder not found":
+      return "No se encontró la carpeta.";
     case "Assistant memory entry not found":
       return "No se encontró la entrada de memoria.";
     case "Transversal feature not found":
