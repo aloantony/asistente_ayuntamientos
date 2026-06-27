@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display: none;">
   <!--
     Assistant icon sprite.
-    Usage from React after loading /icons/assistant-symbols.svg:
-    <svg aria-hidden width="24" height="24"><use href="#icon-assistant-mark" /></svg>
+    Usage from React with the file served from Next public/:
+    <svg aria-hidden width="24" height="24"><use href="/icons/assistant-symbols.svg#icon-assistant-mark" /></svg>
 
     Visual constraints:
     - 24x24 symbols
