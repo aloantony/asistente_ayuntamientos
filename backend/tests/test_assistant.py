@@ -1853,35 +1853,7 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
             routing={"chosen": "consultation", "source": "test"},
         ),
     )
-    use_gateway(
-        FakeGateway(
-            [
-                fake_response(
-                    "tool_use",
-                    [
-                        tool_use_block(
-                            "toolu_ordinance",
-                            "semantic_search_ordinances",
-                            {
-                                "query": "Modificación del impuesto sobre bienes inmuebles y tasas municipales",
-                                "municipality_name": "Miranda de Ebro",
-                                "topic": "ordenanzas fiscales",
-                            },
-                        )
-                    ],
-                ),
-                fake_response(
-                    "end_turn",
-                    [
-                        text_block(
-                            "Miranda de Ebro tiene una modificación de varias "
-                            "ordenanzas fiscales publicada en BOPBUR."
-                        )
-                    ],
-                ),
-            ]
-        )
-    )
+    gateway = use_gateway(FakeGateway([]))
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1897,6 +1869,9 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
     assert assistant_message["agent_key"] == "consultation"
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "direct_ordinance_search"
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
     assert "Miranda de Ebro" in assistant_message["content"]
     action = assistant_message["actions"][0]
     assert action["tool"] == "semantic_search_ordinances"
@@ -1905,6 +1880,7 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert action["input"]["topic"] == "ordenanzas fiscales"
     assert '"municipality_name": "Miranda de Ebro"' in action["result"]
     assert '"topic": "ordenanzas fiscales"' in action["result"]
+    assert gateway.calls == []
 
 
 def test_ordinance_semantic_search_tool_filters_by_municipality_name_and_topic(

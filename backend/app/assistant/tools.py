@@ -771,9 +771,12 @@ def _semantic_search_ordinances(
         )
 
     scored: list[tuple[float, OrdinanceLegalChunk]] = []
+    structured_filter_applied = municipality_id is not None or bool(
+        municipality_name or topic
+    )
     for chunk in db.scalars(query.limit(500)):
         score = vector_similarity(query_vector, chunk.embedding)
-        if score <= 0:
+        if score <= 0 and not structured_filter_applied:
             continue
         scored.append((score, chunk))
     scored.sort(key=lambda item: item[0], reverse=True)
