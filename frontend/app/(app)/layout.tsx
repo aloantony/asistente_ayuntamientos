@@ -21,6 +21,7 @@ import {
 type NavIconName =
   | "home"
   | "needs"
+  | "map"
   | "projects"
   | "anacleto"
   | "admin"
@@ -60,6 +61,14 @@ function NavIcon({ name }: { name: NavIconName }) {
       return (
         <svg {...common}>
           <path d="M4 5h5l2 2.5h9A1.5 1.5 0 0 1 21 9v9.5A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5v-12A1.5 1.5 0 0 1 4 5Z" />
+        </svg>
+      );
+    case "map":
+      return (
+        <svg {...common}>
+          <path d="M9 18 3.5 21V6L9 3l6 3 5.5-3v15L15 21l-6-3Z" />
+          <path d="M9 3v15" />
+          <path d="M15 6v15" />
         </svg>
       );
     case "anacleto":
@@ -237,6 +246,8 @@ export default function AppLayout({
   }
 
   const canUseAssistant = userHasPermission(user, "assistant.use");
+  const canViewMap =
+    userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
   const brandName =
     user.organizations?.[0]?.municipality?.name ??
     user.organizations?.[0]?.name ??
@@ -257,6 +268,9 @@ export default function AppLayout({
                 badge: requirementsTotal,
               },
             ]
+          : []),
+        ...(canViewMap
+          ? [{ href: "/mapa", label: "Mapa", icon: "map" as const }]
           : []),
         { href: "/proyectos", label: "Proyectos", icon: "projects" },
       ],

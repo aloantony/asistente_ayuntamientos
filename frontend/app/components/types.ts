@@ -212,6 +212,41 @@ export type Role = {
   updated_at: string;
 };
 
+export type GeoEntityType = "requirement" | "project";
+export type GeoReviewStatus = "draft" | "proposed" | "reviewed" | "rejected";
+
+export type GeoLocation = {
+  id: number;
+  organization_id: number | null;
+  municipality_id: number | null;
+  label: string;
+  geometry_type: "point" | "line" | "polygon";
+  geometry_json: string;
+  latitude: number | null;
+  longitude: number | null;
+  address_text: string | null;
+  place_name: string | null;
+  cadastral_reference: string | null;
+  source: string;
+  confidence: number | null;
+  review_status: GeoReviewStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GeoMapItem = {
+  entity_type: GeoEntityType;
+  entity_id: number;
+  title: string;
+  subtitle: string | null;
+  status: string;
+  priority: string | null;
+  organization_id: number;
+  organization_name: string;
+  detail_path: string;
+  location: GeoLocation;
+};
+
 export type ProjectStatus = "active" | "paused" | "completed" | "archived";
 
 export type DocumentStatus = "active" | "archived";

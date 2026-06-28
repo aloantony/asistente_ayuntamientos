@@ -58,6 +58,12 @@ def test_list_permissions_returns_200_for_member_with_roles_manage(
     assert response.status_code == 200
     codes = {item["code"] for item in response.json()}
     assert set(INITIAL_PERMISSION_CODES) <= codes
+    assert {"map.view", "map.edit", "map.import", "map.manage"} <= codes
+
+
+def test_initial_permissions_include_map_permissions(db):
+    codes = {permission.code for permission in db.query(Permission).all()}
+    assert {"map.view", "map.edit", "map.import", "map.manage"} <= codes
 
 
 def test_list_roles_returns_403_without_roles_manage(client, make_user):

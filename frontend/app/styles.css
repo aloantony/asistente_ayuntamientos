@@ -1,3 +1,5 @@
+@import "leaflet/dist/leaflet.css";
+
 /*
  * Anacleto — hoja de estilos
  * Paleta cálida con modo claro (crema) y oscuro (carbón), sobre tokens CSS.
@@ -521,6 +523,256 @@ button:disabled {
   gap: 4px;
   border-top: 1px solid var(--border);
   padding-top: 14px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Mapa municipal
+ * ------------------------------------------------------------------------ */
+
+.map-workspace {
+  width: min(100%, 1280px);
+}
+
+.map-panel {
+  display: grid;
+  gap: 24px;
+}
+
+.map-panel-helper {
+  margin-top: 14px;
+}
+
+.map-count,
+.map-item-type {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.map-filters {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--surface-raised);
+}
+
+.map-archive-filter {
+  align-items: center;
+  min-height: 43px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.map-archive-filter input {
+  width: auto;
+}
+
+.map-content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 20px;
+  align-items: stretch;
+  min-height: 560px;
+}
+
+.map-main-column {
+  min-width: 0;
+}
+
+.municipal-map-shell,
+.map-empty-state,
+.map-detail-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-raised);
+}
+
+.municipal-map-shell {
+  position: relative;
+  min-height: 560px;
+  overflow: hidden;
+}
+
+.municipal-map-canvas {
+  position: absolute;
+  inset: 0;
+  min-height: 100%;
+  background: var(--surface-muted);
+}
+
+.municipal-map-marker {
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--surface-raised);
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 8px 18px rgb(0 0 0 / 24%);
+}
+
+.municipal-map-marker span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent-contrast);
+}
+
+.municipal-map-marker--project {
+  background: var(--text);
+}
+
+.municipal-map-marker--selected {
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--accent) 32%, transparent),
+    0 10px 22px rgb(0 0 0 / 30%);
+}
+
+.leaflet-container {
+  color: var(--text);
+  font: inherit;
+}
+
+.leaflet-control-attribution,
+.leaflet-control-zoom a,
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.leaflet-control-zoom a {
+  border-color: var(--border);
+}
+
+.leaflet-popup-content {
+  margin: 10px 12px;
+  line-height: 1.45;
+}
+
+.map-empty-state {
+  display: grid;
+  place-items: center;
+  min-height: 560px;
+  padding: 32px;
+  text-align: center;
+}
+
+.map-empty-state p,
+.map-empty-state span {
+  max-width: 420px;
+}
+
+.map-empty-state p {
+  margin: 0;
+  font-weight: 700;
+}
+
+.map-empty-state span {
+  color: var(--text-muted);
+}
+
+.map-detail-card {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  padding: 22px;
+}
+
+.map-detail-card h2 {
+  font-size: 24px;
+}
+
+.map-detail-card p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.map-detail-card dl {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.map-detail-card dl div {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.map-detail-link {
+  display: inline-flex;
+  justify-content: center;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 11px 18px;
+  border-radius: 9px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+.map-detail-placeholder {
+  display: grid;
+  gap: 12px;
+  color: var(--text-muted);
+}
+
+.map-detail-placeholder h2 {
+  color: var(--text);
+}
+
+.form-error {
+  margin: 0;
+  max-width: none;
+  border: 1px solid var(--text);
+  border-left: 4px solid var(--text);
+  border-radius: 9px;
+  padding: 10px 14px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+@media (max-width: 980px) {
+  .map-content-grid,
+  .map-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .map-content-grid {
+    min-height: 0;
+  }
+
+  .municipal-map-shell,
+  .map-empty-state {
+    min-height: 460px;
+  }
+}
+
+@media (max-width: 560px) {
+  .map-panel-header {
+    display: grid;
+  }
+
+  .municipal-map-shell,
+  .map-empty-state {
+    min-height: 360px;
+  }
 }
 
 /* ---------------------------------------------------------------------------
