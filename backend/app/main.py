@@ -14,6 +14,7 @@ from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
 from app.municipalities.routes import router as municipalities_router
 from app.ordinances.routes import router as ordinances_router
+from app.ordinances.seed import ensure_initial_official_legal_sources
 from app.organizations.routes import router as organizations_router
 from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
@@ -30,8 +31,14 @@ async def lifespan(app: FastAPI):
     try:
         with SessionLocal() as db:
             created_codes = ensure_initial_permissions(db)
+            created_source_domains = ensure_initial_official_legal_sources(db)
         if created_codes:
             logger.info("Seeded permissions: %s", ", ".join(created_codes))
+        if created_source_domains:
+            logger.info(
+                "Seeded official legal sources: %s",
+                ", ".join(created_source_domains),
+            )
     except SQLAlchemyError:
         logger.warning(
             "Could not seed permissions; run migrations and restart",

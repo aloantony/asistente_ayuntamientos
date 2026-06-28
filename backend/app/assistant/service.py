@@ -26,6 +26,7 @@ from app.assistant.models import (
 from app.assistant.planner import choose_agent
 from app.assistant.tools import ToolContext, ToolSpec, execute_tool
 from app.core.config import settings
+from app.municipalities.models import Municipality
 from app.organizations.access import get_accessible_organizations_query
 from app.organizations.models import Organization
 from app.rbac.permissions import has_permission
@@ -137,6 +138,25 @@ AFFIRMATIVE_TEXTS = {
     "vale",
 }
 NEGATIVE_TEXTS = {"no", "cancela", "cancelar", "mejor no"}
+ORDINANCE_TOPIC_MARKERS = {
+    "agua": "agua",
+    "saneamiento": "agua",
+    "ibi": "ordenanzas fiscales",
+    "impuesto sobre bienes inmuebles": "ordenanzas fiscales",
+    "impuestos": "ordenanzas fiscales",
+    "tasas": "ordenanzas fiscales",
+    "terrazas": "terrazas",
+    "hosteleria": "terrazas",
+    "hostelería": "terrazas",
+    "residuos": "residuos",
+    "basuras": "residuos",
+    "animales": "animales",
+    "caminos": "caminos",
+    "vertidos": "aguas residuales",
+    "aguas residuales": "aguas residuales",
+    "lenas": "montes",
+    "leñas": "montes",
+}
 TEST_REQUIREMENT_DRAFT = {
     "title": "Requisito de prueba",
     "summary": (
@@ -1018,6 +1038,128 @@ def execute_direct_tool(
     return action, result.content, result.ok
 
 
+def extract_ordinance_filters(db: Session, text: str) -> dict | None:
+    normalized = normalize_text(text)
+    if not normalized:
+        return None
+
+    municipality_name = None
+    municipalities = db.scalars(select(Municipality).order_by(Municipality.name)).all()
+    for municipality in municipalities:
+        candidate = normalize_text(municipality.name)
+        if candidate and candidate in normalized:
+            municipality_name = municipality.name
+            break
+
+    topic = None
+    for marker, mapped_topic in ORDINANCE_TOPIC_MARKERS.items():
+        if normalize_text(marker) in normalized:
+            topic = mapped_topic
+            break
+
+    mentions_ordinance = any(
+        marker in normalized
+        for marker in {
+            "dice",
+            "normativa",
+            "ordenanza",
+            "ordenanzas",
+            "reglamento",
+            "reglamentos",
+            "regula",
+            "regulan",
+        }
+    )
+    if not municipality_name and not topic:
+        return None
+    if not mentions_ordinance and not (municipality_name and topic):
+        return None
+
+    tool_input: dict[str, object] = {"query": text.strip()}
+    if municipality_name:
+        tool_input["municipality_name"] = municipality_name
+    if topic:
+        tool_input["topic"] = topic
+    return tool_input
+
+
+def ordinance_search_reply(result_content: str, *, ok: bool) -> str:
+    if not ok:
+        return f"No he podido consultar la base de ordenanzas: {result_content}"
+
+    payload = decode_tool_json(result_content)
+    if not isinstance(payload, dict):
+        return "La consulta de ordenanzas devolvió una respuesta inesperada."
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        municipality = payload.get("municipality_name")
+        topic = payload.get("topic")
+        scope = ""
+        if municipality and topic:
+            scope = f" para {municipality} sobre {topic}"
+        elif municipality:
+            scope = f" para {municipality}"
+        elif topic:
+            scope = f" sobre {topic}"
+        return (
+            f"No encuentro cobertura aprobada en la base de ordenanzas{scope}. "
+            "No debo inventar normativa si no hay un fragmento aprobado."
+        )
+
+    first = results[0]
+    municipality = first.get("municipality_name") or "el municipio"
+    title = first.get("title") or "la ordenanza encontrada"
+    citation = first.get("citation") or "fragmento citado"
+    source_url = first.get("source_url") or "fuente oficial no indicada"
+    text = str(first.get("text") or "").strip()
+    if len(text) > 700:
+        text = f"{text[:700].rstrip()}…"
+    return (
+        f"En {municipality}, he encontrado “{title}”.\n\n"
+        f"Cita: {citation}.\n"
+        f"Fragmento: {text}\n\n"
+        f"Fuente: {source_url}\n\n"
+        "Esto es recuperación sobre el corpus aprobado; no sustituye la revisión jurídica humana."
+    )
+
+
+def handle_direct_ordinance_search(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    user_message: AssistantMessage,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    tool_input: dict,
+) -> AssistantMessage | None:
+    agent = allowed_agent_by_key(allowed_agents, "consultation")
+    if agent is None or "semantic_search_ordinances" not in agent.tool_names:
+        return None
+    action, result_content, ok = execute_direct_tool(
+        db,
+        current_user,
+        user_message,
+        agent,
+        "semantic_search_ordinances",
+        tool_input,
+    )
+    return persist_assistant_message(
+        db,
+        conversation,
+        content=ordinance_search_reply(result_content, ok=ok),
+        actions=[action],
+        agent=agent,
+        routing=direct_routing(
+            allowed_agents,
+            agent,
+            conversation,
+            "direct_ordinance_search",
+            intent="read_ordinances",
+        ),
+        state=state,
+    )
+
+
 def decode_tool_json(content: str):
     try:
         return json.loads(content)
@@ -1643,6 +1785,20 @@ def try_handle_direct_turn(
             state,
             organizations,
         )
+
+    ordinance_tool_input = extract_ordinance_filters(db, user_text)
+    if ordinance_tool_input is not None:
+        direct_ordinance_message = handle_direct_ordinance_search(
+            db,
+            current_user,
+            conversation,
+            user_message,
+            allowed_agents,
+            state,
+            ordinance_tool_input,
+        )
+        if direct_ordinance_message is not None:
+            return direct_ordinance_message
 
     if ambiguous_organizations:
         set_pending_action(

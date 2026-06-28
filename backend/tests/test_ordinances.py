@@ -3,10 +3,13 @@ including the document-linking access rule."""
 
 import io
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.ordinances import import_service
+from app.ordinances.bop_burgos import parse_bop_burgos_search_results
+from app.ordinances.models import OfficialLegalSource, OrdinanceLegalChunk
+from app.ordinances.seed import ensure_initial_official_legal_sources
 from app.projects.models import Project, project_users
 from conftest import headers_for, unique_suffix
 
@@ -89,6 +92,25 @@ def upload_document(client, headers, project_id: int) -> dict:
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+BOP_BURGOS_SEARCH_HTML = """
+<div class="views-row views-row-1">
+  <div class="bopbur-top-boletin"><h1 class="title-numberdate">
+    <span class="title-number"><a href="/bopbur-2025-177">núm. 177</a></span>
+    <span class="title-date"><a href="/bopbur-2025-177">viernes, 19 de septiembre de 2025</a></span>
+  </h1></div>
+  <ul class="bopbur-categorias-anuncios"><li><h2>III. Administración Local</h2>
+    <ul><li><h3>Ayuntamiento de Hoyales de Roa</h3>
+      <ul><li id="bopbur-anuncio-202504362" class="bopbur-anuncio bopbur-anuncio-level-2">
+        <p>Aprobación definitiva de la modificación parcial de la ordenanza fiscal reguladora de la tasa por recogida de basuras domiciliarias o residuos sólidos urbanos</p>
+        <p>C.V.E.: BOPBUR-2025-04362 texto con ordenanza y basuras.</p>
+        <p class="bopbur-filefield-file"><a href="http://bopbur.diputaciondeburgos.es/sites/default/files/private/publicado/bopbur-2025-177/bopbur-2025-177-anuncio-202504362.pdf" type="application/pdf">Anuncio 202504362 (BOPBUR-2025-04362 - 116,65 KB)</a></p>
+      </li></ul>
+    </li></ul>
+  </li></ul>
+</div>
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +626,22 @@ def create_official_source(client, headers, **overrides) -> dict:
     return response.json()
 
 
+def test_seed_initial_official_sources_includes_bop_burgos(db):
+    created = ensure_initial_official_legal_sources(db)
+
+    source = db.scalar(
+        select(OfficialLegalSource).where(
+            OfficialLegalSource.domain == "bopbur.diputaciondeburgos.es"
+        )
+    )
+
+    assert "bopbur.diputaciondeburgos.es" in created
+    assert source is not None
+    assert source.name == "Boletín Oficial de la Provincia de Burgos"
+    assert source.source_type == "bop"
+    assert source.status == "active"
+
+
 def test_import_job_rejects_non_official_seed_url(
     client, make_user, make_organization, grant_permissions
 ):
@@ -728,3 +766,291 @@ def test_import_job_run_creates_pending_ordinance_and_review_report(
     )
     assert semantic.status_code == 200
     assert semantic.json()[0]["ordinance_id"] == item["ordinance_id"]
+
+    semantic_by_name_and_topic = client.get(
+        "/ordinances/semantic-search",
+        headers=headers,
+        params={
+            "q": "recogida de residuos",
+            "municipality_name": "Villa Importada",
+            "topic": "residuos",
+        },
+    )
+    assert semantic_by_name_and_topic.status_code == 200
+    assert semantic_by_name_and_topic.json()[0]["ordinance_id"] == item["ordinance_id"]
+
+
+def test_parse_bop_burgos_search_results_extracts_official_pdf_metadata():
+    results = parse_bop_burgos_search_results(BOP_BURGOS_SEARCH_HTML)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.entity == "Ayuntamiento de Hoyales de Roa"
+    assert result.bulletin_number == "núm. 177"
+    assert result.bulletin_date == "viernes, 19 de septiembre de 2025"
+    assert result.cve == "BOPBUR-2025-04362"
+    assert result.pdf_url.endswith("bopbur-2025-177-anuncio-202504362.pdf")
+    assert "recogida de basuras" in result.title
+
+
+def test_import_job_discovers_candidates_with_bop_burgos_connector(
+    db,
+    monkeypatch,
+    superuser,
+):
+    municipality_model = import_service.Municipality(
+        name="Hoyales de Roa",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    source = OfficialLegalSource(
+        name="Boletín Oficial de la Provincia de Burgos",
+        base_url="http://bopbur.diputaciondeburgos.es/",
+        domain="bopbur.diputaciondeburgos.es",
+        source_type="bop",
+    )
+    db.add_all([municipality_model, source])
+    db.commit()
+
+    job = import_service.OrdinanceImportJob(
+        title="Búsqueda BOPBUR",
+        topic="residuos",
+        search_query="basuras",
+        municipality_ids_json="[]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Fuente oficial BOPBUR.",
+        created_by_id=superuser.id,
+    )
+
+    def fake_search(query, *, limit):
+        assert "Hoyales de Roa" in query
+        assert limit > 0
+        return parse_bop_burgos_search_results(BOP_BURGOS_SEARCH_HTML)
+
+    monkeypatch.setattr(import_service, "search_bop_burgos_announcements", fake_search)
+
+    candidates = import_service._discover_candidates(job, [source], [municipality_model])
+
+    assert len(candidates) == 1
+    assert candidates[0].municipality_id == municipality_model.id
+    assert candidates[0].official_source_id == source.id
+    assert candidates[0].url.endswith("bopbur-2025-177-anuncio-202504362.pdf")
+
+
+def test_import_service_splits_chunks_by_articles():
+    chunks = import_service._split_chunks(
+        "Preámbulo de la ordenanza.\n\n"
+        "Artículo 1. Objeto. Regula la tasa de basuras.\n\n"
+        "Artículo 2. Personas obligadas. Define los sujetos pasivos.\n\n"
+        "Disposición final. Entrada en vigor."
+    )
+
+    assert len(chunks) == 3
+    assert chunks[0].startswith("Preámbulo")
+    assert "Artículo 1" in chunks[0]
+    assert chunks[1].startswith("Artículo 2")
+    assert chunks[2].startswith("Disposición final")
+
+
+def test_burgos_coverage_endpoint_reports_ready_municipalities(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    municipality = create_municipality(
+        client,
+        headers,
+        name="Hoyales de Roa",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    ordinance = create_ordinance(
+        client,
+        headers,
+        municipality["id"],
+        title="Ordenanza fiscal de basuras",
+        topic="residuos",
+        curation_status="approved",
+    )
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance["id"],
+            chunk_index=0,
+            heading="Artículo 1. Objeto",
+            citation="Artículo 1",
+            text="Artículo 1. Objeto. Regula la recogida de basuras.",
+            source_url="http://bopbur.diputaciondeburgos.es/demo.pdf",
+            source_locator="articulo-1",
+            review_status="approved",
+            embedding_model="local_hash",
+            embedding="[0.1, 0.2]",
+            embedding_status="ready",
+        )
+    )
+    db.commit()
+
+    response = client.get("/ordinances/coverage/burgos", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["province"] == "Burgos"
+    assert body["municipalities_ready_for_assistant"] == 1
+    assert body["chunks_ready"] == 1
+    assert body["import_failures_total"] == 0
+    assert body["import_failures"] == []
+    assert body["municipalities"][0]["ready_for_assistant"] is True
+
+
+def test_burgos_coverage_groups_duplicate_municipality_names(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    first = create_municipality(
+        client,
+        headers,
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    second = create_municipality(
+        client,
+        headers,
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    for municipality, title, index in (
+        (first, "Ordenanza de solares", 0),
+        (second, "Ordenanza de leñas", 1),
+    ):
+        ordinance = create_ordinance(
+            client,
+            headers,
+            municipality["id"],
+            title=title,
+            topic="servicios municipales",
+            curation_status="approved",
+        )
+        db.add(
+            OrdinanceLegalChunk(
+                ordinance_id=ordinance["id"],
+                chunk_index=0,
+                heading="Artículo 1. Objeto",
+                citation="Artículo 1",
+                text=f"Artículo 1. Objeto {index}.",
+                source_url="http://bopbur.diputaciondeburgos.es/demo.pdf",
+                source_locator=f"articulo-{index}",
+                review_status="approved",
+                embedding_model="local_hash",
+                embedding="[0.1, 0.2]",
+                embedding_status="ready",
+            )
+        )
+    db.commit()
+
+    response = client.get("/ordinances/coverage/burgos", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["municipalities_total"] == 1
+    assert body["ordinances_approved"] == 2
+    assert body["chunks_ready"] == 2
+    assert body["municipalities"][0]["municipality_id"] == first["id"]
+    assert body["municipalities"][0]["municipality_name"] == "Cascajares de la Sierra"
+    assert body["municipalities"][0]["ordinances_approved"] == 2
+
+
+def test_burgos_coverage_reports_failed_imports_requiring_manual_review(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    municipality = create_municipality(
+        client,
+        headers,
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    job = import_service.OrdinanceImportJob(
+        title="Fallo OCR BOPBUR",
+        municipality_ids_json="[]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Fuente oficial BOPBUR.",
+        created_by_id=superuser.id,
+    )
+    db.add(job)
+    db.flush()
+    db.add(
+        import_service.OrdinanceImportItem(
+            job_id=job.id,
+            municipality_id=municipality["id"],
+            source_url="http://bopbur.diputaciondeburgos.es/demo-escaneado.pdf",
+            status="failed",
+            error_message="El PDF no tiene texto extraíble; requiere OCR o revisión manual.",
+        )
+    )
+    db.commit()
+
+    response = client.get("/ordinances/coverage/burgos", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["import_failures_total"] == 1
+    assert body["import_failures"][0]["municipality_name"] == "Cascajares de la Sierra"
+    assert body["import_failures"][0]["requires_manual_review"] is True
+
+
+def test_retry_burgos_failed_embeddings_restores_ready_chunk(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    municipality = create_municipality(
+        client,
+        headers,
+        name="Belorado",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    ordinance = create_ordinance(
+        client,
+        headers,
+        municipality["id"],
+        title="Ordenanza fiscal de agua",
+        topic="agua",
+        curation_status="approved",
+    )
+    chunk = OrdinanceLegalChunk(
+        ordinance_id=ordinance["id"],
+        chunk_index=0,
+        heading="Artículo 1. Objeto",
+        citation="Artículo 1",
+        text="Artículo 1. Objeto. Regula el suministro de agua potable.",
+        source_url="http://bopbur.diputaciondeburgos.es/demo.pdf",
+        source_locator="articulo-1",
+        review_status="approved",
+        embedding_model="local_hash",
+        embedding=None,
+        embedding_status="failed",
+    )
+    db.add(chunk)
+    db.commit()
+
+    response = client.post("/ordinances/coverage/burgos/retry-embeddings", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["retried"] == 1
+    assert body["restored"] == 1
+    assert body["failed"] == 0
+    db.refresh(chunk)
+    assert chunk.embedding_status == "ready"
+    assert chunk.embedding is not None

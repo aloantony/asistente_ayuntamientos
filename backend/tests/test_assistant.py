@@ -20,6 +20,9 @@ from app.assistant.planner import choose_agent
 from app.assistant.routes import get_gateway
 from app.core.config import settings
 from app.main import app
+from app.municipalities.models import Municipality
+from app.ordinances.embeddings import embed_text
+from app.ordinances.models import Ordinance, OrdinanceLegalChunk
 from app.requirements.models import Requirement
 from conftest import headers_for
 
@@ -1826,6 +1829,321 @@ def test_agent_web_search_requires_permission(
     assert action["tool"] == "web_search"
     assert action["ok"] is False
     assert "assistant.web.search" in action["result"]
+
+
+def test_consultation_agent_can_search_approved_ordinance_chunks(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["ordinances.compare"])
+    municipality = Municipality(
+        name="Villarcayo",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza municipal de residuos",
+        topic="residuos",
+        ordinance_type="ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/residuos.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text("recogida de residuos")
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Artículo 1",
+            text="La recogida de residuos se realizará en los horarios establecidos.",
+            source_url=ordinance.source_url,
+            review_status="approved",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "recogida de residuos", "municipality_id": municipality.id},
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.content)
+    assert payload["query"] == "recogida de residuos"
+    assert payload["results"][0]["title"] == "Ordenanza municipal de residuos"
+    assert payload["results"][0]["municipality_name"] == "Villarcayo"
+    assert payload["results"][0]["citation"] == "Artículo 1"
+    assert payload["results"][0]["source_url"] == ordinance.source_url
+
+
+def test_agent_turn_searches_ordinances_with_structured_filters(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    municipality = Municipality(
+        name="Miranda de Ebro",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Modificación de varias ordenanzas fiscales",
+        topic="ordenanzas fiscales",
+        subtopic="IBI, impuestos y tasas municipales",
+        ordinance_type="tax_ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/miranda.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text(
+        "Modificación del impuesto sobre bienes inmuebles y tasas municipales."
+    )
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Artículo 1",
+            text="Modificación del impuesto sobre bienes inmuebles y tasas municipales.",
+            source_url=ordinance.source_url,
+            review_status="approved",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+
+    monkeypatch.setattr(
+        assistant_service,
+        "choose_agent",
+        lambda **kwargs: SimpleNamespace(
+            agent=AGENT_REGISTRY["consultation"],
+            routing={"chosen": "consultation", "source": "test"},
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Qué dice Miranda de Ebro sobre el IBI?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["agent_key"] == "consultation"
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "direct_ordinance_search"
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert "Miranda de Ebro" in assistant_message["content"]
+    action = assistant_message["actions"][0]
+    assert action["tool"] == "semantic_search_ordinances"
+    assert action["ok"] is True
+    assert action["input"]["municipality_name"] == "Miranda de Ebro"
+    assert action["input"]["topic"] == "ordenanzas fiscales"
+    assert '"municipality_name": "Miranda de Ebro"' in action["result"]
+    assert '"topic": "ordenanzas fiscales"' in action["result"]
+    assert gateway.calls == []
+
+
+def test_ordinance_semantic_search_tool_filters_by_municipality_name_and_topic(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["ordinances.compare"])
+    miranda = Municipality(
+        name="Miranda de Ebro",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    cascajares = Municipality(
+        name="Cascajares de la Sierra",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add_all([miranda, cascajares])
+    db.flush()
+    miranda_ordinance = Ordinance(
+        municipality_id=miranda.id,
+        title="Modificación de varias ordenanzas fiscales",
+        topic="ordenanzas fiscales",
+        subtopic="IBI, impuestos y tasas municipales",
+        ordinance_type="tax_ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/miranda.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    other_ordinance = Ordinance(
+        municipality_id=cascajares.id,
+        title="Ordenanza de leñas de hogar",
+        topic="montes municipales",
+        ordinance_type="ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/lenas.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add_all([miranda_ordinance, other_ordinance])
+    db.flush()
+    for ordinance, text in (
+        (
+            miranda_ordinance,
+            "Modificación del impuesto sobre bienes inmuebles y tasas municipales.",
+        ),
+        (other_ordinance, "Aprovechamiento de leñas de hogar en montes municipales."),
+    ):
+        embedding, model, status = embed_text(text)
+        db.add(
+            OrdinanceLegalChunk(
+                ordinance_id=ordinance.id,
+                chunk_index=0,
+                citation="Artículo 1",
+                text=text,
+                source_url=ordinance.source_url,
+                review_status="approved",
+                embedding=embedding,
+                embedding_model=model,
+                embedding_status=status,
+            )
+        )
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {
+            "query": "Modificación del impuesto sobre bienes inmuebles y tasas municipales",
+            "municipality_name": "Miranda de Ebro",
+            "topic": "ordenanzas fiscales",
+        },
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.content)
+    assert payload["municipality_name"] == "Miranda de Ebro"
+    assert payload["topic"] == "ordenanzas fiscales"
+    assert [row["municipality_name"] for row in payload["results"]] == [
+        "Miranda de Ebro"
+    ]
+    assert payload["results"][0]["topic"] == "ordenanzas fiscales"
+
+
+def test_ordinance_semantic_search_tool_requires_compare_permission(
+    db,
+    make_user,
+):
+    user = make_user()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "recogida de residuos"},
+    )
+
+    assert result.ok is False
+    assert "ordinances.compare" in result.content
+
+
+def test_ordinance_semantic_search_tool_returns_empty_without_approved_coverage(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["ordinances.compare"])
+    municipality = Municipality(
+        name="Municipio sin cobertura aprobada",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza pendiente de residuos",
+        topic="residuos",
+        ordinance_type="ordinance",
+        source_url="https://bopbur.diputaciondeburgos.es/anuncio/pendiente.pdf",
+        curation_status="pending_review",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text("recogida de residuos")
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Artículo pendiente",
+            text="La recogida de residuos está pendiente de revisión.",
+            source_url=ordinance.source_url,
+            review_status="pending_review",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "recogida de residuos", "municipality_id": municipality.id},
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.content)
+    assert payload["results"] == []
+
+
+def test_consultation_agent_exposes_ordinance_search_as_read_only_tool():
+    consultation = AGENT_REGISTRY["consultation"]
+
+    assert "semantic_search_ordinances" in consultation.tool_names
+    assert assistant_tools.TOOL_CATALOG["semantic_search_ordinances"].read_only
+    assert (
+        assistant_tools.TOOL_CATALOG["semantic_search_ordinances"].domain
+        == "ordinances"
+    )
 
 
 def test_web_search_tool_rejects_empty_query(

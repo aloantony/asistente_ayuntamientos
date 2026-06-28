@@ -17,6 +17,10 @@ from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_clien
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.municipalities.models import Municipality
+from app.ordinances.bop_burgos import (
+    BOP_BURGOS_DOMAIN,
+    search_bop_burgos_announcements,
+)
 from app.ordinances.embeddings import EmbeddingsUnavailableError, embed_text
 from app.ordinances.models import (
     OfficialLegalSource,
@@ -163,6 +167,17 @@ def _discover_candidates(
 ) -> list[SourceCandidate]:
     if not (job.search_query or job.topic) or not official_sources or not municipalities:
         return []
+    bop_burgos_sources = [
+        source
+        for source in official_sources
+        if source.domain.lower() == BOP_BURGOS_DOMAIN
+    ]
+    if bop_burgos_sources:
+        return _discover_bop_burgos_candidates(
+            job,
+            bop_burgos_sources[0],
+            municipalities,
+        )
     if not hermes_web_client.enabled:
         return []
 
@@ -191,6 +206,33 @@ def _discover_candidates(
                             title=_optional_text(result.get("title")),
                         )
                     )
+    return candidates
+
+
+def _discover_bop_burgos_candidates(
+    job: OrdinanceImportJob,
+    official_source: OfficialLegalSource,
+    municipalities: list[Municipality],
+) -> list[SourceCandidate]:
+    candidates: list[SourceCandidate] = []
+    query_base = " ".join(
+        part for part in [job.search_query, job.topic, job.subtopic, "ordenanza"] if part
+    )
+    for municipality in municipalities:
+        query = f"{query_base} {municipality.name}".strip()
+        announcements = search_bop_burgos_announcements(
+            query,
+            limit=settings.ordinance_import_search_limit,
+        )
+        for announcement in announcements:
+            candidates.append(
+                SourceCandidate(
+                    url=announcement.pdf_url,
+                    municipality_id=municipality.id,
+                    official_source_id=official_source.id,
+                    title=announcement.title,
+                )
+            )
     return candidates
 
 
@@ -536,6 +578,9 @@ def _estimate_confidence(
 
 
 def _split_chunks(text: str) -> list[str]:
+    article_chunks = _split_article_chunks(text)
+    if article_chunks:
+        return article_chunks
     paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
     chunks: list[str] = []
     current = ""
@@ -549,6 +594,50 @@ def _split_chunks(text: str) -> list[str]:
     if current:
         chunks.append(current)
     return chunks or [text[: settings.ordinance_chunk_chars]]
+
+
+def _split_article_chunks(text: str) -> list[str]:
+    marker = re.compile(
+        r"(?im)^(?=(art(?:í|i)culo\s+\d+[.º°]?|art\.\s*\d+[.º°]?|"
+        r"disposici(?:ó|o)n\s+(?:adicional|transitoria|final|derogatoria)|"
+        r"cap(?:í|i)tulo\s+[ivxlcdm\d]+|anexo\b))"
+    )
+    starts = [match.start() for match in marker.finditer(text)]
+    if len(starts) < 2:
+        return []
+    starts.append(len(text))
+    chunks: list[str] = []
+    preamble = text[: starts[0]].strip()
+    for index in range(len(starts) - 1):
+        chunk = text[starts[index] : starts[index + 1]].strip()
+        if index == 0 and preamble:
+            chunk = f"{preamble}\n\n{chunk}"
+        if chunk:
+            chunks.extend(_split_oversized_chunk(chunk))
+    return chunks
+
+
+def _split_oversized_chunk(text: str) -> list[str]:
+    if len(text) <= settings.ordinance_chunk_chars:
+        return [text]
+    paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
+    if len(paragraphs) <= 1:
+        return [
+            text[index : index + settings.ordinance_chunk_chars].strip()
+            for index in range(0, len(text), settings.ordinance_chunk_chars)
+        ]
+    chunks: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if len(current) + len(paragraph) + 2 <= settings.ordinance_chunk_chars:
+            current = f"{current}\n\n{paragraph}".strip()
+            continue
+        if current:
+            chunks.append(current)
+        current = paragraph
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _chunk_heading(text: str) -> str | None:

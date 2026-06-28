@@ -21,6 +21,10 @@ from app.db.session import get_db
 from app.documents.access import user_can_access_document
 from app.documents.models import Document
 from app.municipalities.models import Municipality
+from app.ordinances.bop_burgos import (
+    build_burgos_coverage_report,
+    retry_failed_burgos_embeddings,
+)
 from app.ordinances.embeddings import embed_text, vector_similarity
 from app.ordinances.import_service import run_import_job
 from app.ordinances.models import (
@@ -36,7 +40,9 @@ from app.ordinances.schemas import (
     OfficialLegalSourceRead,
     OfficialLegalSourceUpdate,
     OrdinanceComparisonRead,
+    OrdinanceCoverageRead,
     OrdinanceCreate,
+    OrdinanceEmbeddingRetryRead,
     OrdinanceImportEnqueueRead,
     OrdinanceImportItemRead,
     OrdinanceImportItemReviewUpdate,
@@ -141,6 +147,30 @@ def create_ordinance(
     db.commit()
 
     return get_existing_ordinance(db, ordinance.id)
+
+
+@router.get(
+    "/coverage/burgos",
+    response_model=OrdinanceCoverageRead,
+)
+def get_burgos_coverage(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.view")
+    return build_burgos_coverage_report(db)
+
+
+@router.post(
+    "/coverage/burgos/retry-embeddings",
+    response_model=OrdinanceEmbeddingRetryRead,
+)
+def retry_burgos_failed_embeddings(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    return retry_failed_burgos_embeddings(db)
 
 
 @router.get(
@@ -429,6 +459,8 @@ def semantic_search_ordinances(
     current_user: Annotated[User, Depends(get_current_user)],
     q: str,
     municipality_id: int | None = None,
+    municipality_name: str | None = None,
+    topic: str | None = None,
     include_pending: bool = False,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> list[dict]:
@@ -449,6 +481,15 @@ def semantic_search_ordinances(
     )
     if municipality_id is not None:
         query = query.where(Ordinance.municipality_id == municipality_id)
+    if municipality_name:
+        query = query.where(Municipality.name.ilike(municipality_name.strip()))
+    if topic:
+        topic_pattern = f"%{topic.strip()}%"
+        query = query.where(
+            (Ordinance.topic.ilike(topic_pattern))
+            | (Ordinance.subtopic.ilike(topic_pattern))
+            | (Ordinance.title.ilike(topic_pattern))
+        )
     if include_pending:
         query = query.where(Ordinance.curation_status != "rejected")
     else:
