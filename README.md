@@ -112,7 +112,7 @@ Controlled web search uses a second local Hermes API Server instance/profile, se
 
 Ordinance import jobs use Redis/RQ. `docker compose up -d --build` starts the `worker` service; jobs can also be run inline from the admin UI in development. Search/crawl is restricted to configured official legal source domains. Configure embeddings with `EMBEDDINGS_RUNTIME`, `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY` and `EMBEDDINGS_MODEL` when moving beyond local hash embeddings.
 
-Telegram is disabled by default. To enable it, set `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, then configure the Telegram Bot API webhook to point to `/telegram/webhook` with the same secret token.
+Telegram is disabled by default. To enable it, set `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, then configure the Telegram Bot API webhook to point to `/telegram/webhook` with the same secret token. Telegram text messages work without speech configuration. To accept Telegram voice notes and audio uploaded from the web app, enable transcription with `SPEECH_TRANSCRIPTION_RUNTIME=nvidia_nim`, set `NVIDIA_API_KEY`, and optionally override `NVIDIA_WHISPER_FUNCTION_ID`, `NVIDIA_RIVA_SERVER`, `SPEECH_TRANSCRIPTION_LANGUAGE_CODE` (`multi` by default) and `SPEECH_TRANSCRIPTION_MAX_BYTES`.
 
 Expected local split:
 

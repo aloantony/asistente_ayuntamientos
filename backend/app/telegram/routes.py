@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.assistant.gateway import gateway
 from app.assistant.models import AssistantConversation
 from app.assistant.service import run_agent_turn
+from app.assistant.speech import SpeechTranscriptionError, transcribe_audio_bytes
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
@@ -119,7 +120,8 @@ async def telegram_webhook(
     chat = message.get("chat")
     sender = message.get("from") or {}
     text = str(message.get("text") or "").strip()
-    if not isinstance(chat, dict) or not text:
+    voice = message.get("voice")
+    if not isinstance(chat, dict) or (not text and not isinstance(voice, dict)):
         return TelegramWebhookRead()
 
     chat_id = str(chat.get("id") or "")
@@ -157,6 +159,11 @@ async def telegram_webhook(
             "Tu usuario no tiene permiso para usar el asistente.",
         )
         return TelegramWebhookRead()
+
+    if not text and isinstance(voice, dict):
+        text = transcribe_telegram_voice(chat_id, voice)
+        if not text:
+            return TelegramWebhookRead()
 
     conversation = get_or_create_telegram_conversation(db, link.user, chat_id)
     reply = run_agent_turn(db, link.user, conversation, text, gateway)
@@ -290,6 +297,76 @@ def send_telegram_message(chat_id: str, text: str) -> None:
             return
     except (urlerror.HTTPError, urlerror.URLError, TimeoutError):
         logger.warning("Telegram sendMessage failed", exc_info=True)
+
+
+def transcribe_telegram_voice(chat_id: str, voice: dict[str, Any]) -> str | None:
+    file_id = str(voice.get("file_id") or "").strip()
+    file_size = voice.get("file_size")
+    if not file_id:
+        return None
+    if isinstance(file_size, int) and file_size > settings.speech_transcription_max_bytes:
+        send_telegram_message(
+            chat_id,
+            "El audio es demasiado grande para transcribirlo. Envíame una nota más corta o escríbelo en texto.",
+        )
+        return None
+    try:
+        audio = download_telegram_file(file_id)
+        if len(audio) > settings.speech_transcription_max_bytes:
+            send_telegram_message(
+                chat_id,
+                "El audio es demasiado grande para transcribirlo. Envíame una nota más corta o escríbelo en texto.",
+            )
+            return None
+        return transcribe_audio_bytes(
+            audio,
+            language_code=settings.speech_transcription_language_code,
+        ).strip()
+    except SpeechTranscriptionError:
+        logger.info("Telegram voice transcription unavailable", exc_info=True)
+    except (urlerror.HTTPError, urlerror.URLError, TimeoutError, ValueError):
+        logger.warning("Telegram voice download/transcription failed", exc_info=True)
+
+    send_telegram_message(
+        chat_id,
+        "Ahora mismo no puedo transcribir audios. Escribe el mensaje en texto y lo reviso.",
+    )
+    return None
+
+
+def download_telegram_file(file_id: str) -> bytes:
+    if not settings.telegram_bot_token:
+        raise ValueError("Telegram bot token is not configured")
+    file_path = get_telegram_file_path(file_id)
+    request = urlrequest.Request(
+        f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{file_path}",
+        method="GET",
+    )
+    with urlrequest.urlopen(request, timeout=30) as response:
+        return response.read(settings.speech_transcription_max_bytes + 1)
+
+
+def get_telegram_file_path(file_id: str) -> str:
+    if not settings.telegram_bot_token:
+        raise ValueError("Telegram bot token is not configured")
+    payload = {"file_id": file_id}
+    request = urlrequest.Request(
+        f"https://api.telegram.org/bot{settings.telegram_bot_token}/getFile",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlrequest.urlopen(request, timeout=10) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    if not body.get("ok"):
+        raise ValueError("Telegram getFile failed")
+    result = body.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("Telegram getFile returned no result")
+    file_path = str(result.get("file_path") or "").strip()
+    if not file_path:
+        raise ValueError("Telegram getFile returned no file_path")
+    return file_path
 
 
 def hash_code(code: str) -> str:

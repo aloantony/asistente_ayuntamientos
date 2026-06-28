@@ -27,6 +27,7 @@ def list_map_items(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     entity_type: Annotated[GeoEntityType | None, Query()] = None,
+    entity_id: Annotated[int | None, Query(ge=1)] = None,
     organization_id: int | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     include_archived: bool = False,
@@ -48,6 +49,8 @@ def list_map_items(
     )
     if entity_type is not None:
         query = query.where(EntityLocation.entity_type == entity_type)
+    if entity_id is not None:
+        query = query.where(EntityLocation.entity_id == entity_id)
     if organization_id is not None:
         query = query.where(GeoLocation.organization_id == organization_id)
 

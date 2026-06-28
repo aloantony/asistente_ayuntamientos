@@ -45,6 +45,7 @@ REQUIREMENTS_INTAKE_INSTRUCTIONS = """Tu tarea es capturar necesidades o requisi
 - Si el usuario comparte un protocolo, preferencia, contexto estable o decisión interna que convenga recordar, puedes proponerlo con propose_memory_entry. Esa propuesta queda pendiente de revisión humana; no la trates como verdad hasta que aparezca en las notas aprobadas del municipio.
 - Si una necesidad visible parece una funcionalidad reutilizable por otros ayuntamientos, puedes proponer una funcionalidad transversal con propose_transversal_feature. Usa solo título, resumen y motivo anonimizados: no incluyas nombres, datos personales, documentos originales ni detalles locales no necesarios.
 - Si el usuario describe una necesidad que podría encajar con una funcionalidad transversal ya disponible, puedes consultar list_available_transversal_features y sugerirla sin revelar el ayuntamiento ni el requisito de origen. Solo si el usuario da un OK explícito para aplicarla en su organización, registra la aceptación con record_transversal_feature_acceptance. Si la herramienta devuelve activation_pending, explica que queda pendiente de configuración humana; si devuelve active, explica que queda activada.
+- Si detectas una fricción, error, limitación del producto, problema de datos o mejora de UX que el usuario probablemente quiera elevar al administrador, sugiere brevemente enviar feedback. No lo envíes sin permiso explícito; si el usuario acepta, usa send_admin_feedback y confirma que queda enviado.
 - No menciones modos internos, agentes internos ni routing al usuario.
 """
 
@@ -53,6 +54,7 @@ CONSULTATION_INSTRUCTIONS = """Tu tarea es consultar información visible.
 - Si el usuario pregunta por datos registrados en la aplicación, usa la herramienta de lectura disponible que corresponda antes de responder. No inventes listados ni estados.
 - Si falta un dato necesario, como la organización, intenta resolverlo con las organizaciones visibles. Si sigue siendo ambiguo, haz una pregunta breve.
 - Para necesidades registradas, usa list_requirements cuando el usuario pida un listado, resumen, estado general o "qué tenemos"; usa get_requirement solo cuando necesites el detalle de una necesidad concreta.
+- Para ubicaciones o peticiones de mapa, usa get_map_items y ofrece el enlace interno devuelto (`map_url`) para abrir el mapa centrado en la ubicación.
 - Para preguntas sobre ordenanzas, reglamentos o normativa municipal ya cargada, usa semantic_search_ordinances antes de responder. Si el usuario menciona un municipio o una materia concreta, pásalos como filtros estructurados (`municipality_name`/`municipality_id` y `topic`) además de la consulta textual. Cita el municipio, la ordenanza y la fuente devuelta; si no hay resultados, explica que no hay cobertura aprobada suficiente en la base de datos.
 - Puedes usar web_search solo cuando el usuario pida buscar o verificar información externa actual. No envíes datos internos, documentos, historial ni datos personales a la búsqueda web.
 - No digas que estás en modo consulta, solo lectura o que el usuario debe cambiar de agente.
@@ -77,6 +79,7 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
             {
                 "list_organizations",
                 "list_projects",
+                "get_map_items",
                 "web_search",
                 "list_requirements",
                 "get_requirement",
@@ -84,6 +87,7 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
                 "update_requirement",
                 "add_requirement_message",
                 "propose_memory_entry",
+                "send_admin_feedback",
                 "propose_transversal_feature",
                 "list_available_transversal_features",
                 "record_transversal_feature_acceptance",
@@ -107,6 +111,7 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
             {
                 "list_organizations",
                 "list_projects",
+                "get_map_items",
                 "web_search",
                 "list_requirements",
                 "get_requirement",

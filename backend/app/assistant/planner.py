@@ -302,6 +302,16 @@ def _heuristic_agent(
     allowed_agents: list[AgentSpec],
 ) -> AgentSpec | None:
     normalized = user_text.strip().lower()
+    general_chat_markers = (
+        "hola",
+        "hol",
+        "hey",
+        "buenas",
+        "qué tal",
+        "que tal",
+        "probando",
+        "prueba",
+    )
     write_markers = (
         "crea",
         "crear",
@@ -319,6 +329,8 @@ def _heuristic_agent(
         "queremos que",
         "necesito que",
         "necesitamos que",
+        "necesito",
+        "necesitamos",
         "me gustaría que",
         "me gustaria que",
         "debería",
@@ -341,6 +353,8 @@ def _heuristic_agent(
         "registrados",
         "hay",
     )
+    if _contains_marker(normalized, general_chat_markers):
+        return _agent_by_key("consultation", allowed_agents)
     if _contains_marker(normalized, write_markers):
         return _agent_by_key("requirements_intake", allowed_agents)
     if _contains_marker(normalized, read_markers):
