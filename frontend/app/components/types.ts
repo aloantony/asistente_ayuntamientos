@@ -1066,6 +1066,7 @@ export type AssistantConversationFolder = {
 export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
   list_organizations: "Consultar organizaciones",
   list_projects: "Consultar proyectos",
+  get_map_items: "Consultar mapa",
   list_requirements: "Consultar necesidades",
   get_requirement: "Leer necesidad",
   create_requirement: "Crear necesidad",

@@ -25,6 +25,10 @@ type UseAssistantControllerArgs = {
   onRequirementsChanged?: () => void;
 };
 
+type AssistantAudioTranscription = {
+  text: string;
+};
+
 function toSummary(detail: AssistantConversationDetail): AssistantConversation {
   return {
     id: detail.id,
@@ -275,6 +279,18 @@ export function useAssistantController({
     } finally {
       setIsSendingMessage(false);
     }
+  }
+
+  async function transcribeAudio(audio: Blob) {
+    const formData = new FormData();
+    formData.append("file", audio, "anacleto-audio.webm");
+    const transcription = await adminRequest<AssistantAudioTranscription>(
+      "/assistant/audio-transcriptions",
+      getStoredToken(),
+      "No se pudo transcribir el audio.",
+      { method: "POST", body: formData },
+    );
+    return transcription.text;
   }
 
   async function archiveConversation(conversationId: number) {
@@ -551,6 +567,7 @@ export function useAssistantController({
     deselectConversation,
     startConversation,
     sendMessage,
+    transcribeAudio,
     archiveConversation,
     restoreConversation,
     renameConversation,

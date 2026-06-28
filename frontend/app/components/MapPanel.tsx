@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchGeoMapItems } from "../lib/geo";
 import { useSession } from "../lib/session";
@@ -33,7 +34,20 @@ function normalizeDetailPath(item: GeoMapItem) {
   return item.detail_path || "/proyectos";
 }
 
+function parseNumberParam(value: string | null) {
+  if (value === null || value.trim() === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseEntityTypeParam(value: string | null): GeoEntityType | null {
+  return value === "requirement" || value === "project" ? value : null;
+}
+
 export function MapPanel({ user }: MapPanelProps) {
+  const searchParams = useSearchParams();
   const { handleRequestError } = useSession();
   const [entityType, setEntityType] = useState<EntityTypeFilter>("all");
   const [status, setStatus] = useState("");
@@ -45,11 +59,32 @@ export function MapPanel({ user }: MapPanelProps) {
 
   const canViewMap =
     userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
+  const focusedEntityType = parseEntityTypeParam(searchParams.get("entity_type"));
+  const focusedEntityId = parseNumberParam(searchParams.get("entity_id"));
+  const focusedLatitude = parseNumberParam(searchParams.get("lat"));
+  const focusedLongitude = parseNumberParam(searchParams.get("lng"));
+  const focusedZoom = parseNumberParam(searchParams.get("zoom"));
+  const focusedItemKey =
+    focusedEntityType && focusedEntityId !== null
+      ? `${focusedEntityType}-${focusedEntityId}`
+      : null;
+  const explicitFocusLocation =
+    focusedLatitude !== null && focusedLongitude !== null
+      ? {
+          latitude: focusedLatitude,
+          longitude: focusedLongitude,
+          label: searchParams.get("label") || undefined,
+        }
+      : null;
 
   const queryParams = useMemo(() => {
     const params = new URLSearchParams();
     if (entityType !== "all") {
       params.set("entity_type", entityType);
+    }
+    if (focusedEntityType && focusedEntityId !== null) {
+      params.set("entity_type", focusedEntityType);
+      params.set("entity_id", String(focusedEntityId));
     }
     if (status.trim()) {
       params.set("status", status.trim());
@@ -59,7 +94,7 @@ export function MapPanel({ user }: MapPanelProps) {
     }
     params.set("limit", "500");
     return params;
-  }, [entityType, includeArchived, status]);
+  }, [entityType, focusedEntityId, focusedEntityType, includeArchived, status]);
 
   useEffect(() => {
     if (!canViewMap) {
@@ -77,6 +112,9 @@ export function MapPanel({ user }: MapPanelProps) {
         }
         setItems(mapItems);
         setSelectedItem((current) => {
+          if (focusedItemKey) {
+            return mapItems.find((item) => getItemKey(item) === focusedItemKey) ?? null;
+          }
           if (!current) {
             return null;
           }
@@ -101,11 +139,25 @@ export function MapPanel({ user }: MapPanelProps) {
     return () => {
       isActive = false;
     };
-  }, [canViewMap, handleRequestError, queryParams]);
+  }, [canViewMap, focusedItemKey, handleRequestError, queryParams]);
 
   const handleSelectItem = useCallback((item: GeoMapItem) => {
     setSelectedItem(item);
   }, []);
+  const selectedFocusLocation = selectedItem
+    ? (() => {
+        const latitude = selectedItem.location.latitude;
+        const longitude = selectedItem.location.longitude;
+        if (latitude === null || longitude === null) {
+          return null;
+        }
+        return {
+          latitude,
+          longitude,
+          label: selectedItem.location.label,
+        };
+      })()
+    : null;
 
   if (!canViewMap) {
     return (
@@ -167,8 +219,12 @@ export function MapPanel({ user }: MapPanelProps) {
 
       <div className="map-content-grid">
         <div className="map-main-column">
-          {items.length > 0 ? (
+          {items.length > 0 || explicitFocusLocation ? (
             <MunicipalMap
+              focusLocation={
+                explicitFocusLocation ?? selectedFocusLocation
+              }
+              initialZoom={focusedZoom}
               items={items}
               onSelectItem={handleSelectItem}
               selectedItemId={selectedItem ? getItemKey(selectedItem) : null}

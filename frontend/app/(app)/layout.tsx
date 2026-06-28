@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { userHasPermission } from "../components/types";
+import { userHasPermission, type User } from "../components/types";
 import { fetchRequirementsTotal } from "../lib/fetchers";
 import {
   consumePendingLoginRedirect,
@@ -16,6 +16,25 @@ import {
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
+
+const ONBOARDING_STORAGE_PREFIX = "anacleto:onboarding:v1";
+
+function getMunicipalBrandName(user: User) {
+  const organization = user.organizations?.[0];
+  const municipalityName = organization?.municipality?.name?.trim();
+
+  if (municipalityName) {
+    return municipalityName;
+  }
+
+  const organizationName = organization?.name?.trim();
+
+  if (organizationName) {
+    return organizationName.replace(/^Ayuntamiento\s+de\s+/i, "");
+  }
+
+  return "Anacleto";
+}
 
 // Iconos del menú lateral (trazo fino, coherentes con el resto del shell).
 type NavIconName =
@@ -148,6 +167,10 @@ function getUserInitials(fullName: string) {
   return initials || "U";
 }
 
+function getOnboardingStorageKey(userId: number) {
+  return `${ONBOARDING_STORAGE_PREFIX}:${userId}`;
+}
+
 export default function AppLayout({
   children,
 }: Readonly<{
@@ -160,6 +183,7 @@ export default function AppLayout({
   const [requirementsTotal, setRequirementsTotal] = useState<number | null>(
     null,
   );
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const { dark, toggle: toggleTheme } = useDarkMode();
 
   // Conteo real de necesidades para el badge del menú. El layout (app) no se
@@ -205,6 +229,23 @@ export default function AppLayout({
     }
   }, [isLoadingSession, user, router]);
 
+  useEffect(() => {
+    if (!user) {
+      setShowOnboarding(false);
+      return;
+    }
+
+    try {
+      setShowOnboarding(
+        window.localStorage.getItem(getOnboardingStorageKey(user.id)) !== "seen",
+      );
+    } catch {
+      // Si el navegador bloquea localStorage, mostramos la ayuda sólo en esta
+      // sesión; nunca debe impedir usar la aplicación.
+      setShowOnboarding(true);
+    }
+  }, [user]);
+
   // Close the mobile menu after navigating to another section.
   useEffect(() => {
     setIsMenuOpen(false);
@@ -228,6 +269,24 @@ export default function AppLayout({
     };
   }, [isMenuOpen]);
 
+  useEffect(() => {
+    if (!showOnboarding) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        dismissOnboarding();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showOnboarding]);
+
   if (isLoadingSession) {
     return (
       <main className="page">
@@ -248,10 +307,7 @@ export default function AppLayout({
   const canUseAssistant = userHasPermission(user, "assistant.use");
   const canViewMap =
     userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
-  const brandName =
-    user.organizations?.[0]?.municipality?.name ??
-    user.organizations?.[0]?.name ??
-    "Anacleto";
+  const brandName = getMunicipalBrandName(user);
   const userInitials = getUserInitials(user.full_name);
 
   const navGroups: NavGroup[] = [
@@ -311,6 +367,32 @@ export default function AppLayout({
     return item.exact ? pathname === item.href : pathname.startsWith(item.href);
   }
 
+  function dismissOnboarding() {
+    setShowOnboarding(false);
+    if (!user) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(getOnboardingStorageKey(user.id), "seen");
+    } catch {
+      // El cierre visual basta si no se puede persistir la preferencia.
+    }
+  }
+
+  function handleThemeToggle() {
+    toggleTheme();
+    if (showOnboarding) {
+      dismissOnboarding();
+    }
+  }
+
+  const themeToggleLabel = dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro";
+
+  const contentClassName =
+    pathname === "/asistente"
+      ? "app-content app-content-assistant"
+      : "app-content app-content-wide";
+
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
@@ -361,8 +443,10 @@ export default function AppLayout({
         <div className="app-session">
           <button
             aria-pressed={dark}
+            aria-label={themeToggleLabel}
             className="app-theme-toggle"
-            onClick={toggleTheme}
+            onClick={handleThemeToggle}
+            title={themeToggleLabel}
             type="button"
           >
             {dark ? (
@@ -411,13 +495,15 @@ export default function AppLayout({
         </div>
       </aside>
       <div className="app-main">
-        <header className="app-topbar">
+        <header className={showOnboarding ? "app-topbar onboarding-active" : "app-topbar"}>
           <div className="app-topbar-actions">
             <button
+              aria-describedby={showOnboarding ? "app-onboarding-popover" : undefined}
+              aria-label={themeToggleLabel}
               aria-pressed={dark}
               className="app-topbar-theme"
-              onClick={toggleTheme}
-              title="Cambiar tema"
+              onClick={handleThemeToggle}
+              title={themeToggleLabel}
               type="button"
             >
               {dark ? (
@@ -474,14 +560,47 @@ export default function AppLayout({
               {userInitials}
             </button>
           </div>
+          {showOnboarding ? (
+            <div
+              aria-labelledby="app-onboarding-title"
+              className="app-onboarding-layer"
+              id="app-onboarding-popover"
+              role="dialog"
+            >
+              <button
+                aria-label="Cerrar ayuda inicial"
+                className="app-onboarding-scrim"
+                onClick={dismissOnboarding}
+                type="button"
+              />
+              <section className="app-onboarding-note app-onboarding-note-theme">
+                <p className="eyebrow">Tema</p>
+                <h2 id="app-onboarding-title">Claro u oscuro</h2>
+                <p>Cambia el modo visual desde este icono. Lo recordaremos en este navegador.</p>
+                <button className="accent-button" onClick={handleThemeToggle} type="button">
+                  Probar ahora
+                </button>
+              </section>
+              <section className="app-onboarding-note app-onboarding-note-assistant">
+                <p className="eyebrow">Anacleto</p>
+                <p>Acceso rápido al asistente municipal.</p>
+              </section>
+              <section className="app-onboarding-note app-onboarding-note-account">
+                <p className="eyebrow">Cuenta</p>
+                <p>Tu perfil, organización y permisos están aquí.</p>
+              </section>
+              <button
+                aria-label="Cerrar ayuda inicial"
+                className="app-onboarding-close"
+                onClick={dismissOnboarding}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
         </header>
-        <main
-          className={
-            pathname === "/asistente"
-              ? "app-content app-content-assistant"
-              : "app-content"
-          }
-        >
+        <main className={contentClassName}>
           {children}
         </main>
       </div>

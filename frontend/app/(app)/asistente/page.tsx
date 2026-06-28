@@ -152,6 +152,7 @@ function AsistentePageInner() {
         onSelectConversation={handleSelectConversation}
         onStartConversation={assistantController.startConversation}
         onSendMessage={assistantController.sendMessage}
+        onTranscribeAudio={assistantController.transcribeAudio}
         onArchiveConversation={assistantController.archiveConversation}
         onRestoreConversation={assistantController.restoreConversation}
         onRenameConversation={assistantController.renameConversation}

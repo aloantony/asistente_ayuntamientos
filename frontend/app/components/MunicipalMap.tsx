@@ -5,6 +5,12 @@ import type { GeoMapItem } from "./types";
 
 type MunicipalMapProps = {
   items: GeoMapItem[];
+  focusLocation?: {
+    latitude: number;
+    longitude: number;
+    label?: string;
+  } | null;
+  initialZoom?: number | null;
   selectedItemId?: string | null;
   onSelectItem: (item: GeoMapItem) => void;
 };
@@ -45,6 +51,8 @@ function escapeHtml(value: string) {
 }
 
 export function MunicipalMap({
+  focusLocation,
+  initialZoom,
   items,
   selectedItemId,
   onSelectItem,
@@ -68,9 +76,13 @@ export function MunicipalMap({
       const pointItems = items.filter(isPointItem);
       map = L.map(containerRef.current, {
         center: FALLBACK_CENTER,
+        preferCanvas: true,
         scrollWheelZoom: true,
         zoom: FALLBACK_ZOOM,
+        zoomControl: false,
       });
+
+      L.control.zoom({ position: "bottomleft" }).addTo(map);
 
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution:
@@ -92,9 +104,9 @@ export function MunicipalMap({
           icon: L.divIcon({
             className: markerClassName(item, selectedItemId),
             html: `<span aria-hidden="true"></span>`,
-            iconAnchor: [10, 10],
-            iconSize: [20, 20],
-            popupAnchor: [0, -10],
+            iconAnchor: [14, 14],
+            iconSize: [28, 28],
+            popupAnchor: [0, -14],
           }),
           title: item.title,
         }).addTo(map!);
@@ -108,8 +120,26 @@ export function MunicipalMap({
         bounds.extend(coordinates);
       });
 
-      if (pointItems.length > 0 && bounds.isValid()) {
-        map.fitBounds(bounds.pad(0.18), { maxZoom: 15 });
+      if (focusLocation) {
+        const focusCoordinates: [number, number] = [
+          focusLocation.latitude,
+          focusLocation.longitude,
+        ];
+        L.circleMarker(focusCoordinates, {
+          className: "municipal-map-focus-ring",
+          color: "transparent",
+          fillColor: "transparent",
+          radius: 22,
+          weight: 0,
+        })
+          .addTo(map)
+          .bindPopup(escapeHtml(focusLocation.label || "Ubicación indicada"));
+        bounds.extend(focusCoordinates);
+        map.setView(focusCoordinates, initialZoom ?? 16);
+      } else if (pointItems.length === 1 && bounds.isValid()) {
+        map.setView(bounds.getCenter(), initialZoom ?? 16);
+      } else if (pointItems.length > 0 && bounds.isValid()) {
+        map.fitBounds(bounds.pad(0.18), { maxZoom: initialZoom ?? 15 });
       }
     }
 
@@ -119,7 +149,7 @@ export function MunicipalMap({
       isActive = false;
       map?.remove();
     };
-  }, [items, onSelectItem, selectedItemId]);
+  }, [focusLocation, initialZoom, items, onSelectItem, selectedItemId]);
 
   return (
     <div className="municipal-map-shell">

@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
+import {
+  IBM_Plex_Mono,
+  IBM_Plex_Sans,
+  Libre_Baskerville,
+} from "next/font/google";
 import { SessionProvider } from "./lib/session";
 import "./styles.css";
 
@@ -19,6 +23,13 @@ const ibmPlexMono = IBM_Plex_Mono({
   subsets: ["latin"],
   weight: ["400", "500", "600"],
   variable: "--font-ibm-plex-mono",
+  display: "swap",
+});
+
+const libreBaskerville = Libre_Baskerville({
+  subsets: ["latin"],
+  weight: ["400", "700"],
+  variable: "--font-libre-baskerville",
   display: "swap",
 });
 
@@ -44,7 +55,7 @@ export default function RootLayout({
   return (
     <html
       lang="es"
-      className={`${ibmPlexSans.variable} ${ibmPlexMono.variable}`}
+      className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${libreBaskerville.variable}`}
       suppressHydrationWarning
     >
       <body>
