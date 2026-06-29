@@ -861,6 +861,18 @@ def test_classify_turn_intent_maps_common_direct_requests():
         "capture_requirement",
         "direct_capture_requirement",
     )
+    assert assistant_service.classify_turn_intent(
+        "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
+    ) == assistant_service.TurnIntent(
+        "read_ordinances",
+        "direct_ordinance_search",
+    )
+    assert assistant_service.classify_turn_intent(
+        "Pues la necesidad que tengo identificada es que ahora mismo querría desarrollar algo que me permita controlar a todos los trabajadores que hay en el ayuntamiento"
+    ) == assistant_service.TurnIntent(
+        "capture_requirement",
+        "direct_capture_requirement",
+    )
 
 
 def test_invalid_planner_fallback_routes_new_need_to_requirements_intake(monkeypatch):
@@ -1736,6 +1748,131 @@ def test_confirming_pending_work_creates_need_without_reparsing_assistant_text(
     assert gateway.calls == []
 
 
+def test_natural_confirmation_of_pending_work_creates_need(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.create", "requirements.view"],
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation_response = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    )
+    conversation = conversation_response.json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "selected_organization_id": organization.id,
+            "pending_work": {
+                "type": "create_requirement",
+                "status": "awaiting_confirmation",
+                "organization_id": organization.id,
+                "draft": {
+                    "title": "Control de personal municipal",
+                    "problem": "Tener fichas de trabajadores con labores, competencias, diagrama de actividad, calendarios de trabajo y prioridades.",
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+    db.commit()
+
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "Te confirmo que quiero que registres esa, la que hemos comentado antes, la que por título tenía control de personal municipal."
+        },
+        headers=headers_for(user),
+    )
+
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "pending_work_create_requirement_confirmed"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Control de personal municipal")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert gateway.calls == []
+
+
+def test_failed_requirement_create_keeps_retry_state_with_draft(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(user, organization, ["assistant.use", "requirements.view"])
+    gateway = use_gateway(FakeGateway([]))
+    conversation_response = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    )
+    conversation = conversation_response.json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {"selected_organization_id": organization.id},
+        ensure_ascii=False,
+    )
+    db.add(
+        AssistantMessage(
+            conversation_id=stored_conversation.id,
+            role="assistant",
+            agent_key="requirements_intake",
+            content="Para empezar necesito dos datos: título de la necesidad y problema que queréis resolver.",
+        )
+    )
+    db.commit()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "El título sería control de personal municipal y el problema que quiero resolver es tener una ficha de cada trabajador municipal."
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"][-1]["tool"] == "create_requirement"
+    assert assistant_message["actions"][-1]["ok"] is False
+    db.expire_all()
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    state = json.loads(updated_conversation.state or "{}")
+    assert state["pending_action"] == {
+        "type": "create_requirement_retry",
+        "organization_id": organization.id,
+        "draft": {
+            "title": "control de personal municipal",
+            "problem": "que quiero resolver es tener una ficha de cada trabajador municipal.",
+        },
+    }
+    assert gateway.calls == []
+
+
 def test_create_capability_question_answers_without_starting_intake(
     client,
     make_user,
@@ -2335,6 +2472,118 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert action["input"]["topic"] == "ordenanzas fiscales"
     assert '"municipality_name": "Miranda de Ebro"' in action["result"]
     assert '"topic": "ordenanzas fiscales"' in action["result"]
+    assert gateway.calls == []
+
+
+def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "semantic_search_ordinances"
+    ]
+    assert assistant_message["actions"][0]["input"]["municipality_name"] == "Fuentelcésped"
+    assert "necesidades visibles" not in assistant_message["content"].lower()
+    assert gateway.calls == []
+
+
+def test_semantic_planner_ordinance_intent_executes_grounded_action(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    gateway = use_gateway(FakeGateway([]))
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_ordinances",
+            action="semantic_search_ordinances",
+            query="normas comparables para adaptar al municipio",
+            target={"municipality_name": "Fuentelcésped"},
+            confidence=0.92,
+            source="planner",
+        ),
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Qué normas de otros pueblos me sirven para adaptar las de aquí?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "semantic_search_ordinances"
+    ]
+    assert assistant_message["actions"][0]["input"] == {
+        "query": "normas comparables para adaptar al municipio",
+        "municipality_name": "Fuentelcésped",
+    }
     assert gateway.calls == []
 
 

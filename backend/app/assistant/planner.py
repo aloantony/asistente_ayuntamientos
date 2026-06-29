@@ -40,11 +40,60 @@ Reglas:
 - Si hay duda, elige requirements_intake.
 """
 
+SEMANTIC_PLANNER_SYSTEM_PROMPT = """Eres el planificador semántico interno del asistente municipal.
+
+Tu tarea no es responder al usuario, sino convertir el último mensaje en una
+intención estructurada que el backend pueda validar y ejecutar. No llames
+herramientas de producto. Devuelve siempre una llamada a plan_turn.
+
+Reglas:
+- Si el usuario pide comparar, consultar o adaptar ordenanzas, normas o
+  reglamentos municipales, usa intent=read_ordinances y action=semantic_search_ordinances.
+- Si el usuario pide ver necesidades/requisitos ya registrados, usa intent=read_requirements.
+- Si el usuario describe una nueva necesidad o algo que quiere desarrollar,
+  usa intent=create_requirement, pero no inventes campos que no estén claros.
+- Si confirma un borrador pendiente, usa intent=confirm_pending_work.
+- Si pide reintentar una acción pendiente o fallida, usa intent=retry_pending_action.
+- Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
+- Si no hay intención de producto clara, usa intent=unknown y action=none.
+
+El backend decide permisos, visibilidad, duplicados y ejecución real.
+"""
+
 
 @dataclass(frozen=True)
 class RoutingDecision:
     agent: AgentSpec
     routing: dict
+
+
+@dataclass(frozen=True)
+class SemanticTurnPlan:
+    intent: str
+    action: str = "none"
+    query: str | None = None
+    target: dict | None = None
+    draft: dict | None = None
+    reference: str | None = None
+    confidence: float = 0.0
+    source: str = "planner"
+
+    def as_routing_payload(self) -> dict:
+        payload: dict[str, object] = {
+            "intent": self.intent,
+            "action": self.action,
+            "confidence": self.confidence,
+            "source": self.source,
+        }
+        if self.query:
+            payload["query"] = self.query
+        if isinstance(self.target, dict) and self.target:
+            payload["target"] = self.target
+        if isinstance(self.draft, dict) and self.draft:
+            payload["draft"] = self.draft
+        if self.reference:
+            payload["reference"] = self.reference
+        return payload
 
 
 def planner_enabled() -> bool:
@@ -60,6 +109,25 @@ def planner_healthy() -> bool | None:
     if not hermes_agent_enabled():
         return False
     return hermes_agent_healthy(timeout=settings.hermes_agent_health_timeout_seconds)
+
+
+def plan_turn(
+    *,
+    conversation: AssistantConversation,
+    user_text: str,
+    context: dict | None = None,
+) -> SemanticTurnPlan | None:
+    if not planner_enabled():
+        return None
+    try:
+        return _plan_with_hermes(
+            conversation=conversation,
+            user_text=user_text,
+            context=context or {},
+        )
+    except AssistantUnavailableError:
+        logger.warning("Hermes semantic planner failed; continuing without plan")
+        return None
 
 
 def choose_agent(
@@ -148,6 +216,115 @@ def choose_agent(
         source="router",
         reason=None,
         previous_agent_key=previous_agent_key,
+    )
+
+
+def _plan_with_hermes(
+    *,
+    conversation: AssistantConversation,
+    user_text: str,
+    context: dict,
+) -> SemanticTurnPlan | None:
+    plan_tool = {
+        "name": "plan_turn",
+        "description": "Devuelve la intención estructurada del siguiente turno.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": [
+                        "global_capabilities",
+                        "read_ordinances",
+                        "read_requirements",
+                        "create_requirement",
+                        "confirm_pending_work",
+                        "retry_pending_action",
+                        "suggest_admin_feedback",
+                        "unknown",
+                    ],
+                },
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "semantic_search_ordinances",
+                        "list_requirements",
+                        "create_requirement",
+                        "confirm_pending_work",
+                        "retry_pending_action",
+                        "send_admin_feedback",
+                    ],
+                },
+                "query": {"type": "string"},
+                "target": {"type": "object"},
+                "draft": {"type": "object"},
+                "reference": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["intent", "action", "confidence"],
+        },
+    }
+    messages = [
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "recent_history": _recent_history(conversation),
+                    "conversation_context": context,
+                    "new_user_message": user_text,
+                },
+                ensure_ascii=False,
+            ),
+        }
+    ]
+    completion = complete_hermes_agent(
+        system=SEMANTIC_PLANNER_SYSTEM_PROMPT,
+        messages=messages,
+        tools=[plan_tool],
+        model=settings.assistant_planner_model,
+        max_tokens=settings.assistant_planner_max_tokens,
+        timeout=settings.assistant_planner_timeout_seconds,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "plan_turn"},
+        },
+        log_context="assistant_semantic_planner",
+    )
+
+    for block in completion.content:
+        if isinstance(block, AIToolUseBlock) and block.name == "plan_turn":
+            return _semantic_plan_from_payload(block.input)
+    for block in completion.content:
+        if isinstance(block, AITextBlock):
+            parsed = _extract_json(block.text)
+            if parsed is not None:
+                return _semantic_plan_from_payload(parsed)
+    return None
+
+
+def _semantic_plan_from_payload(payload: object) -> SemanticTurnPlan | None:
+    if not isinstance(payload, dict):
+        return None
+    intent = str(payload.get("intent") or "unknown").strip() or "unknown"
+    action = str(payload.get("action") or "none").strip() or "none"
+    try:
+        confidence = float(payload.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else None
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else None
+    query = payload.get("query")
+    reference = payload.get("reference")
+    return SemanticTurnPlan(
+        intent=intent,
+        action=action,
+        query=str(query).strip() if query else None,
+        target=target,
+        draft=draft,
+        reference=str(reference).strip() if reference else None,
+        confidence=confidence,
+        source="planner",
     )
 
 

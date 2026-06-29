@@ -23,7 +23,7 @@ from app.assistant.models import (
     AssistantMemoryEntry,
     AssistantMessage,
 )
-from app.assistant.planner import choose_agent
+from app.assistant.planner import SemanticTurnPlan, choose_agent, plan_turn
 from app.assistant.tools import ToolContext, ToolSpec, execute_tool
 from app.core.config import settings
 from app.municipalities.models import Municipality
@@ -513,6 +513,7 @@ def direct_routing(
     conversation: AssistantConversation,
     reason: str,
     intent: str | None = None,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> dict:
     routing = {
         "candidates": [candidate.key for candidate in allowed_agents],
@@ -523,6 +524,8 @@ def direct_routing(
     }
     if intent is not None:
         routing["intent"] = intent
+    if semantic_plan is not None:
+        routing["semantic_plan"] = semantic_plan.as_routing_payload()
     return routing
 
 
@@ -666,6 +669,12 @@ def accepts_proposed_requirement_draft(text: str) -> bool:
             "me parece bien",
             "correcto",
             "perfecto",
+            "te confirmo",
+            "confirmo que",
+            "quiero que registres",
+            "registra esa",
+            "registrar esa",
+            "guarda esa",
         }
     )
 
@@ -777,8 +786,11 @@ def is_retry_request(text: str) -> bool:
         phrase in normalized
         for phrase in {
             "intentalo",
+            "intentarlo",
             "intenta de nuevo",
             "prueba otra vez",
+            "volver a intentarlo",
+            "vuelve a intentarlo",
             "adelante",
         }
     )
@@ -818,13 +830,27 @@ def is_list_requirements_request(text: str) -> bool:
     normalized = normalize_text(text)
     if not mentions_need_or_requirement(normalized):
         return False
+    tokens = set(TOKEN_PATTERN.findall(normalized))
+    if any(
+        phrase in normalized
+        for phrase in {
+            "que necesidades hay",
+            "qué necesidades hay",
+            "que requisitos hay",
+            "qué requisitos hay",
+            "necesidades registradas",
+            "requisitos registrados",
+            "necesidades visibles",
+            "requisitos visibles",
+        }
+    ):
+        return True
     return any(
-        word in normalized
+        word in tokens
         for word in {
             "consulta",
             "consultar",
             "existen",
-            "hay",
             "lista",
             "listar",
             "registrada",
@@ -833,6 +859,21 @@ def is_list_requirements_request(text: str) -> bool:
             "registrados",
             "tenemos",
             "ver",
+        }
+    )
+
+
+def is_ordinance_request(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in {
+            "ordenanza",
+            "ordenanzas",
+            "reglamento",
+            "reglamentos",
         }
     )
 
@@ -948,6 +989,9 @@ def is_requirement_capture_request(text: str) -> bool:
             "quiero decirte",
             "me gustaria",
             "me gustaría",
+            "querria",
+            "querría",
+            "tengo identificada",
             "quiero que",
             "queremos que",
             "necesito que",
@@ -1354,7 +1398,27 @@ def execute_direct_tool(
     return action, result.content, result.ok
 
 
-def extract_ordinance_filters(db: Session, text: str) -> dict | None:
+def organization_municipality_name(organization: Organization | None) -> str | None:
+    if organization is None:
+        return None
+    if organization.municipality is not None:
+        return organization.municipality.name
+    normalized_prefix = "ayuntamiento de "
+    if normalize_text(organization.name).startswith(normalized_prefix.strip()):
+        return re.sub(
+            r"^\s*ayuntamiento\s+de\s+",
+            "",
+            organization.name,
+            flags=re.IGNORECASE,
+        ).strip()
+    return organization.name
+
+
+def extract_ordinance_filters(
+    db: Session,
+    text: str,
+    organization: Organization | None = None,
+) -> dict | None:
     normalized = normalize_text(text)
     if not normalized:
         return None
@@ -1366,6 +1430,11 @@ def extract_ordinance_filters(db: Session, text: str) -> dict | None:
         if candidate and candidate in normalized:
             municipality_name = municipality.name
             break
+    if municipality_name is None and any(
+        phrase in normalized
+        for phrase in {"mi municipio", "mi ayuntamiento", "nuestro municipio"}
+    ):
+        municipality_name = organization_municipality_name(organization)
 
     topic = None
     for marker, mapped_topic in ORDINANCE_TOPIC_MARKERS.items():
@@ -1377,7 +1446,6 @@ def extract_ordinance_filters(db: Session, text: str) -> dict | None:
         marker in normalized
         for marker in {
             "dice",
-            "normativa",
             "ordenanza",
             "ordenanzas",
             "reglamento",
@@ -1386,9 +1454,9 @@ def extract_ordinance_filters(db: Session, text: str) -> dict | None:
             "regulan",
         }
     )
-    if not municipality_name and not topic:
-        return None
     if not mentions_ordinance and not (municipality_name and topic):
+        return None
+    if not mentions_ordinance and not municipality_name and not topic:
         return None
 
     tool_input: dict[str, object] = {"query": text.strip()}
@@ -1396,6 +1464,37 @@ def extract_ordinance_filters(db: Session, text: str) -> dict | None:
         tool_input["municipality_name"] = municipality_name
     if topic:
         tool_input["topic"] = topic
+    return tool_input
+
+
+def semantic_plan_ordinance_input(
+    plan: SemanticTurnPlan,
+    user_text: str,
+    organization: Organization | None,
+) -> dict | None:
+    if plan.intent != "read_ordinances":
+        return None
+    if plan.action not in {"semantic_search_ordinances", "none"}:
+        return None
+    if plan.confidence < 0.5:
+        return None
+
+    tool_input: dict[str, object] = {"query": plan.query or user_text.strip()}
+    target = plan.target if isinstance(plan.target, dict) else {}
+    municipality_name = target.get("municipality_name") or target.get("municipality")
+    if isinstance(municipality_name, str) and municipality_name.strip():
+        tool_input["municipality_name"] = municipality_name.strip()
+    elif any(
+        marker in normalize_text(user_text)
+        for marker in {"aqui", "aquí", "mi municipio", "mi ayuntamiento"}
+    ):
+        inferred = organization_municipality_name(organization)
+        if inferred:
+            tool_input["municipality_name"] = inferred
+
+    topic = target.get("topic")
+    if isinstance(topic, str) and topic.strip():
+        tool_input["topic"] = topic.strip()
     return tool_input
 
 
@@ -1502,6 +1601,7 @@ def handle_action_policy(
     policy: ActionPolicy,
     tool_input: dict,
     reply_builder,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, policy.agent_key)
     if agent is None or policy.tool_name not in agent.tool_names:
@@ -1549,6 +1649,7 @@ def handle_action_policy(
             conversation,
             policy.reason,
             intent=policy.intent,
+            semantic_plan=semantic_plan,
         ),
         state=state,
     )
@@ -1584,6 +1685,7 @@ def handle_direct_ordinance_search(
     allowed_agents: list[AgentSpec],
     state: dict,
     tool_input: dict,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     return handle_action_policy(
         db,
@@ -1595,6 +1697,7 @@ def handle_direct_ordinance_search(
         ACTION_POLICIES["read_ordinances"],
         tool_input,
         ordinance_search_reply,
+        semantic_plan=semantic_plan,
     )
 
 
@@ -2067,6 +2170,14 @@ def handle_direct_create_requirement(
                         f"“{created.get('title')}” en {organization.name}."
                     )
                 else:
+                    set_pending_action(
+                        state,
+                        {
+                            "type": "create_requirement_retry",
+                            "organization_id": organization.id,
+                            "draft": {"title": title, "problem": problem},
+                        },
+                    )
                     state["last_direct_action"] = {
                         "type": "create_requirement",
                         "organization_id": organization.id,
@@ -2178,10 +2289,14 @@ def is_global_capability_question(text: str) -> bool:
 def classify_turn_intent(text: str) -> TurnIntent:
     if is_global_capability_question(text):
         return TurnIntent("global_capabilities", "global_capabilities")
+    if is_ordinance_request(text):
+        return TurnIntent("read_ordinances", "direct_ordinance_search")
     if is_requirement_capture_intro(text):
         return TurnIntent("capture_requirement_intro", "direct_capture_requirement_intro")
     if is_map_items_request(text):
         return TurnIntent("read_map_items", "direct_map_items")
+    if is_requirement_capture_request(text):
+        return TurnIntent("capture_requirement", "direct_capture_requirement")
     if is_list_requirements_request(text):
         return TurnIntent(
             "read_requirements",
@@ -2195,8 +2310,6 @@ def classify_turn_intent(text: str) -> TurnIntent:
             "create_test_requirement",
             "direct_create_test_requirement",
         )
-    if is_requirement_capture_request(text):
-        return TurnIntent("capture_requirement", "direct_capture_requirement")
     return TurnIntent("unknown", "unclassified")
 
 
@@ -2324,6 +2437,20 @@ def try_handle_direct_turn(
         pending_work = None
     parsed_draft = extract_requirement_draft_from_text(user_text)
     turn_intent = classify_turn_intent(user_text)
+    semantic_plan = plan_turn(
+        conversation=conversation,
+        user_text=user_text,
+        context={
+            "selected_organization_id": selected_organization.id
+            if selected_organization is not None
+            else None,
+            "selected_organization_name": selected_organization.name
+            if selected_organization is not None
+            else None,
+            "pending_action": pending_action,
+            "pending_work": pending_work,
+        },
+    )
 
     if pending_action is not None and pending_type == "send_admin_feedback":
         agent = allowed_agent_by_key(allowed_agents, "requirements_intake")
@@ -2381,7 +2508,27 @@ def try_handle_direct_turn(
             organizations,
         )
 
-    ordinance_tool_input = extract_ordinance_filters(db, user_text)
+    if semantic_plan is not None:
+        planned_ordinance_input = semantic_plan_ordinance_input(
+            semantic_plan,
+            user_text,
+            selected_organization,
+        )
+        if planned_ordinance_input is not None:
+            planned_ordinance_message = handle_direct_ordinance_search(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                planned_ordinance_input,
+                semantic_plan=semantic_plan,
+            )
+            if planned_ordinance_message is not None:
+                return planned_ordinance_message
+
+    ordinance_tool_input = extract_ordinance_filters(db, user_text, selected_organization)
     if ordinance_tool_input is not None:
         direct_ordinance_message = handle_direct_ordinance_search(
             db,
@@ -2424,9 +2571,14 @@ def try_handle_direct_turn(
             or organization_by_id(organizations, pending_work.get("organization_id"))
             or selected_organization
         )
-        draft = merge_requirement_draft(pending_work.get("draft"), parsed_draft)
+        accepts_pending_work = accepts_proposed_requirement_draft(user_text)
+        draft = (
+            dict(pending_work.get("draft") or {})
+            if accepts_pending_work
+            else merge_requirement_draft(pending_work.get("draft"), parsed_draft)
+        )
         if organization is not None and (
-            accepts_proposed_requirement_draft(user_text)
+            accepts_pending_work
             or requirement_draft_is_complete(parsed_draft)
         ):
             set_pending_work(state, None)
