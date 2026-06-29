@@ -1,3 +1,6 @@
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -90,3 +93,130 @@ def test_telegram_webhook_rejects_invalid_secret(client, monkeypatch):
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid Telegram webhook secret"
+
+
+def test_telegram_webhook_transcribes_voice_message_for_linked_user(
+    client,
+    db,
+    monkeypatch,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    monkeypatch.setattr(settings, "telegram_enabled", True)
+    monkeypatch.setattr(settings, "telegram_bot_token", "telegram-token")
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
+    monkeypatch.setattr(settings, "speech_transcription_runtime", "nvidia_nim")
+
+    sent_messages = []
+    monkeypatch.setattr(
+        telegram_routes,
+        "send_telegram_message",
+        lambda chat_id, text: sent_messages.append((chat_id, text)),
+    )
+    monkeypatch.setattr(
+        telegram_routes,
+        "download_telegram_file",
+        lambda file_id: b"telegram-audio-bytes",
+    )
+    monkeypatch.setattr(
+        telegram_routes,
+        "transcribe_audio_bytes",
+        lambda audio, language_code=None: "Necesito revisar la ordenanza de terrazas",
+    )
+
+    user = make_user()
+    grant_permissions(user, make_organization(), ["assistant.use"])
+    db.add(
+        TelegramUserLink(
+            user_id=user.id,
+            telegram_chat_id="12345",
+            telegram_user_id="67890",
+            telegram_username="alcaldia",
+            status="active",
+            linked_at=datetime.now(UTC),
+        )
+    )
+    db.commit()
+
+    agent_inputs = []
+
+    def fake_run_agent_turn(db_session, user_arg, conversation, content, agent_gateway):
+        agent_inputs.append(content)
+        return SimpleNamespace(content="Respuesta desde Anacleto")
+
+    monkeypatch.setattr(telegram_routes, "run_agent_turn", fake_run_agent_turn)
+
+    response = client.post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+        json={
+            "message": {
+                "chat": {"id": 12345},
+                "from": {"id": 67890, "username": "alcaldia"},
+                "voice": {"file_id": "voice-file-id", "duration": 4},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert agent_inputs == ["Necesito revisar la ordenanza de terrazas"]
+    assert sent_messages == [("12345", "Respuesta desde Anacleto")]
+
+
+def test_telegram_webhook_reports_voice_transcription_unavailable(
+    client,
+    db,
+    monkeypatch,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    monkeypatch.setattr(settings, "telegram_enabled", True)
+    monkeypatch.setattr(settings, "telegram_bot_token", "telegram-token")
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
+    monkeypatch.setattr(settings, "speech_transcription_runtime", "disabled")
+
+    sent_messages = []
+    monkeypatch.setattr(
+        telegram_routes,
+        "send_telegram_message",
+        lambda chat_id, text: sent_messages.append((chat_id, text)),
+    )
+    monkeypatch.setattr(
+        telegram_routes,
+        "run_agent_turn",
+        lambda *_: (_ for _ in ()).throw(AssertionError("agent should not run")),
+    )
+
+    user = make_user()
+    grant_permissions(user, make_organization(), ["assistant.use"])
+    db.add(
+        TelegramUserLink(
+            user_id=user.id,
+            telegram_chat_id="12345",
+            status="active",
+            linked_at=datetime.now(UTC),
+        )
+    )
+    db.commit()
+
+    response = client.post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+        json={
+            "message": {
+                "chat": {"id": 12345},
+                "from": {"id": 67890},
+                "voice": {"file_id": "voice-file-id", "duration": 4},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert sent_messages == [
+        (
+            "12345",
+            "Ahora mismo no puedo transcribir audios. Escribe el mensaje en texto y lo reviso.",
+        )
+    ]

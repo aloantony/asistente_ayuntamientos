@@ -10,6 +10,7 @@ import {
   Hammer,
   Inbox,
   Loader2,
+  MapPin,
   PanelLeftClose,
   PanelLeftOpen,
   XCircle,
@@ -35,48 +36,6 @@ import {
   type User,
 } from "./types";
 
-// Minimal local typings for the Web Speech API; the DOM lib does not ship
-// them and we do not want an extra dependency just for dictation.
-type SpeechRecognitionAlternativeLike = {
-  transcript: string;
-};
-
-type SpeechRecognitionResultLike = {
-  isFinal: boolean;
-  0: SpeechRecognitionAlternativeLike;
-};
-
-type SpeechRecognitionEventLike = {
-  resultIndex: number;
-  results: {
-    length: number;
-    [index: number]: SpeechRecognitionResultLike;
-  };
-};
-
-type SpeechRecognitionErrorEventLike = {
-  error: string;
-};
-
-type SpeechRecognitionLike = {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  processLocally?: boolean;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-};
-
-type SpeechRecognitionConstructor = (new () => SpeechRecognitionLike) & {
-  available?: (options: {
-    langs: string[];
-    processLocally: boolean;
-  }) => Promise<string>;
-};
-
 type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
   conversations: AssistantConversation[];
@@ -92,6 +51,7 @@ type AssistantPanelProps = {
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
   onSendMessage: () => void;
+  onTranscribeAudio: (audio: Blob) => Promise<string>;
   onArchiveConversation: (conversationId: number) => void;
   onRestoreConversation: (conversationId: number) => void;
   onRenameConversation: (conversationId: number, title: string) => Promise<void>;
@@ -139,9 +99,64 @@ const SUGGESTED_PROMPTS = [
   "Ordenar mis notas de trabajo",
 ];
 
+const EMPTY_THREAD_MESSAGES = [
+  {
+    title: "Empecemos con calma",
+    body:
+      "Escribe tu consulta o tus notas. Anacleto te ayudará a ordenarlas y convertirlas en un trabajo claro.",
+  },
+  {
+    title: "Cuéntame qué necesitas",
+    body:
+      "Puedes escribirlo como lo dirías en una reunión. Después lo convertimos juntos en una explicación ordenada.",
+  },
+  {
+    title: "Pongamos orden a las ideas",
+    body:
+      "Trae una duda, un documento o unas notas sueltas. Anacleto te ayudará a preparar el siguiente paso.",
+  },
+  {
+    title: "Vamos paso a paso",
+    body:
+      "No hace falta redactarlo perfecto. Empieza con lo importante y el asistente te ayudará a darle forma.",
+  },
+  {
+    title: "Un buen comienzo basta",
+    body:
+      "Escribe una frase, una preocupación o una tarea pendiente. A partir de ahí podremos aclararla y trabajarla.",
+  },
+];
+
+const NO_SELECTION_MESSAGES = [
+  {
+    title: "Elige una conversación",
+    body:
+      "También puedes empezar una nueva y contar, con tus propias palabras, qué necesitas revisar, preparar o recordar.",
+  },
+  {
+    title: "Tu mesa de trabajo está lista",
+    body:
+      "Abre una conversación anterior o crea una nueva para seguir trabajando con tranquilidad.",
+  },
+  {
+    title: "Aquí puedes retomar el hilo",
+    body:
+      "Selecciona una conversación de la lista o empieza una nueva consulta cuando quieras.",
+  },
+];
+
 const UNCATEGORIZED_FOLDER_ID = "sin-carpeta";
 function normalizeFolderName(value: string) {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function stableMessageIndex(seed: number | string, length: number) {
+  const text = String(seed);
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) % length;
+  }
+  return hash;
 }
 
 type AssistantSymbolName =
@@ -234,22 +249,6 @@ function buildFolderConversationGroups(
   return groups.filter((group) => group.conversations.length > 0);
 }
 
-function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  return (
-    ((window as any).SpeechRecognition as
-      | SpeechRecognitionConstructor
-      | undefined) ??
-    ((window as any).webkitSpeechRecognition as
-      | SpeechRecognitionConstructor
-      | undefined) ??
-    null
-  );
-}
-
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("es-ES", {
     day: "2-digit",
@@ -275,6 +274,9 @@ function parseActionResult(result: string): ParsedActionResult {
 }
 
 function getActionIcon(tool: string): LucideIcon {
+  if (tool === "get_map_items") {
+    return MapPin;
+  }
   if (tool === "web_search") {
     return Globe2;
   }
@@ -345,6 +347,61 @@ function getWebResults(action: AssistantAction) {
       publishedAt: result.published_at ? String(result.published_at) : "",
     }))
     .filter((result) => result.url);
+}
+
+function getMapActionItems(actions: AssistantAction[]) {
+  return actions.flatMap((action) => {
+    if (action.tool !== "get_map_items" || !action.ok) {
+      return [];
+    }
+    const parsed = parseActionResult(action.result);
+    if (
+      !parsed.data ||
+      typeof parsed.data !== "object" ||
+      !("results" in parsed.data) ||
+      !Array.isArray((parsed.data as { results?: unknown }).results)
+    ) {
+      return [];
+    }
+    return (parsed.data as { results: unknown[] }).results
+      .filter((item): item is Record<string, unknown> => {
+        return Boolean(
+          item &&
+            typeof item === "object" &&
+            "map_url" in item &&
+            item.map_url,
+        );
+      })
+      .map((item) => ({
+        title: String(item.title ?? "Ubicación"),
+        label:
+          item.location && typeof item.location === "object"
+            ? String((item.location as { label?: unknown }).label ?? "Mapa municipal")
+            : "Mapa municipal",
+        url: String(item.map_url),
+      }));
+  });
+}
+
+function AssistantMapActions({ actions }: { actions: AssistantAction[] }) {
+  const mapItems = getMapActionItems(actions);
+  if (mapItems.length === 0) {
+    return null;
+  }
+  return (
+    <div className="assistant-map-actions" aria-label="Acciones de mapa">
+      {mapItems.slice(0, 3).map((item) => (
+        <a className="assistant-map-action-card" href={item.url} key={item.url}>
+          <MapPin aria-hidden size={16} />
+          <span>
+            <strong>{item.title}</strong>
+            <small>{item.label}</small>
+          </span>
+          <em>Ver en mapa</em>
+        </a>
+      ))}
+    </div>
+  );
 }
 
 function actionDetailText(action: AssistantAction) {
@@ -446,6 +503,7 @@ export function AssistantPanel({
   onSelectConversation,
   onStartConversation,
   onSendMessage,
+  onTranscribeAudio,
   onArchiveConversation,
   onRestoreConversation,
   onRenameConversation,
@@ -463,6 +521,26 @@ export function AssistantPanel({
   const selectedIsArchived = selectedConversation?.status === "archived";
   const composerDisabled =
     isSendingMessage || assistantDisabled || Boolean(selectedIsArchived);
+  const emptyThreadMessage = useMemo(
+    () =>
+      EMPTY_THREAD_MESSAGES[
+        stableMessageIndex(
+          selectedConversation?.id ?? "sin-conversacion",
+          EMPTY_THREAD_MESSAGES.length,
+        )
+      ],
+    [selectedConversation?.id],
+  );
+  const noSelectionMessage = useMemo(
+    () =>
+      NO_SELECTION_MESSAGES[
+        stableMessageIndex(
+          currentUser.id,
+          NO_SELECTION_MESSAGES.length,
+        )
+      ],
+    [currentUser.id],
+  );
   const toolLabels = useMemo(
     () =>
       Object.fromEntries(
@@ -470,8 +548,9 @@ export function AssistantPanel({
       ),
     [assistantStatus],
   );
-
+  const [inlineTitleValue, setInlineTitleValue] = useState("");
   const [isListening, setIsListening] = useState(false);
+  const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
   const [voiceError, setVoiceError] = useState("");
   const [speechSupported, setSpeechSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
@@ -502,7 +581,9 @@ export function AssistantPanel({
     null,
   );
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -581,111 +662,111 @@ export function AssistantPanel({
   }, [selectedConversation?.id, composerDisabled]);
 
   useEffect(() => {
-    const SpeechRecognitionImpl = getSpeechRecognitionConstructor();
-    if (!SpeechRecognitionImpl || typeof SpeechRecognitionImpl.available !== "function") {
-      setSpeechSupported(false);
-      return;
-    }
-
-    let isActive = true;
-    SpeechRecognitionImpl.available({ langs: ["es-ES"], processLocally: true })
-      .then((availability) => {
-        if (isActive) {
-          setSpeechSupported(availability !== "unavailable");
-        }
-      })
-      .catch(() => {
-        if (isActive) {
-          setSpeechSupported(false);
-        }
-      });
-
-    return () => {
-      isActive = false;
-    };
+    setSpeechSupported(
+      typeof navigator !== "undefined" &&
+        Boolean(navigator.mediaDevices?.getUserMedia) &&
+        typeof MediaRecorder !== "undefined",
+    );
   }, []);
 
-  function detachRecognition() {
-    const recognition = recognitionRef.current;
-    recognitionRef.current = null;
-    if (recognition) {
-      recognition.onresult = null;
-      recognition.onerror = null;
-      recognition.onend = null;
-      recognition.stop();
-    }
+  function releaseAudioStream() {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
   }
 
   function stopListening() {
-    detachRecognition();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+      return;
+    }
+    mediaRecorderRef.current = null;
+    releaseAudioStream();
     setIsListening(false);
   }
 
   useEffect(() => {
     return () => {
-      detachRecognition();
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      releaseAudioStream();
     };
   }, []);
 
-  function startListening() {
-    const SpeechRecognitionImpl = getSpeechRecognitionConstructor();
-    if (!SpeechRecognitionImpl || recognitionRef.current) {
+  async function appendTranscribedAudio(audio: Blob) {
+    if (audio.size === 0) {
+      return;
+    }
+    setIsTranscribingVoice(true);
+    try {
+      const transcript = (await onTranscribeAudio(audio)).trim();
+      if (!transcript) {
+        setVoiceError("No he detectado texto en el audio. Prueba con una nota un poco más clara.");
+        return;
+      }
+      const currentDraft = draftMessageRef.current;
+      onDraftMessageChange(
+        currentDraft ? `${currentDraft} ${transcript}` : transcript,
+      );
+      messageTextareaRef.current?.focus({ preventScroll: true });
+    } catch (error) {
+      setVoiceError(
+        error instanceof Error
+          ? error.message
+          : "No se pudo transcribir el audio. Inténtalo de nuevo.",
+      );
+    } finally {
+      setIsTranscribingVoice(false);
+    }
+  }
+
+  async function startListening() {
+    if (!speechSupported || mediaRecorderRef.current) {
       return;
     }
 
     setVoiceError("");
 
-    const recognition = new SpeechRecognitionImpl();
-    recognition.lang = "es-ES";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.processLocally = true;
-    recognition.onresult = (event) => {
-      let transcript = "";
-      for (
-        let index = event.resultIndex;
-        index < event.results.length;
-        index += 1
-      ) {
-        const result = event.results[index];
-        if (result.isFinal) {
-          transcript += result[0].transcript;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
         }
-      }
-
-      const chunk = transcript.trim();
-      if (!chunk) {
-        return;
-      }
-
-      const currentDraft = draftMessageRef.current;
-      onDraftMessageChange(currentDraft ? `${currentDraft} ${chunk}` : chunk);
-    };
-    recognition.onerror = (event) => {
-      stopListening();
-      if (event.error !== "aborted") {
-        setVoiceError(
-          "No se pudo usar el dictado por voz. Revisa los permisos del microfono.",
-        );
-      }
-    };
-    recognition.onend = () => {
-      if (recognitionRef.current === recognition) {
-        recognitionRef.current = null;
+      };
+      recorder.onstop = () => {
+        const audio = new Blob(audioChunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
+        audioChunksRef.current = [];
+        mediaRecorderRef.current = null;
+        releaseAudioStream();
         setIsListening(false);
-      }
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
-    setIsListening(true);
+        void appendTranscribedAudio(audio);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsListening(true);
+    } catch {
+      releaseAudioStream();
+      mediaRecorderRef.current = null;
+      setIsListening(false);
+      setVoiceError(
+        "No se pudo usar el microfono. Revisa los permisos del navegador.",
+      );
+    }
   }
 
   function handleToggleListening() {
     if (isListening) {
       stopListening();
     } else {
-      startListening();
+      void startListening();
     }
   }
 
@@ -1424,8 +1505,8 @@ export function AssistantPanel({
               <div className="assistant-messages">
                 {selectedConversation.messages.length === 0 ? (
                   <div className="assistant-empty-thread">
-                    <AssistantSymbolIcon name="mark" size={22} />
-                    <p>Escribe el primer mensaje para empezar a trabajar.</p>
+                    <h3>{emptyThreadMessage.title}</h3>
+                    <p>{emptyThreadMessage.body}</p>
                   </div>
                 ) : null}
                 {selectedConversation.messages.map((message) => {
@@ -1452,6 +1533,7 @@ export function AssistantPanel({
                             {message.content}
                           </p>
                         </div>
+                        <AssistantMapActions actions={message.actions} />
                         {message.actions.some((action) => action.tool === "web_search") ? (
                           <ActionTimeline
                             actions={message.actions.filter(
@@ -1485,17 +1567,19 @@ export function AssistantPanel({
                 {isSendingMessage ? (
                   <article className="assistant-message assistant working">
                     <div className="assistant-message-avatar">
-                      <Loader2 aria-hidden size={17} />
+                      <AssistantSymbolIcon name="mark" size={16} />
                     </div>
                     <div className="assistant-message-main">
-                      <div className="assistant-message-meta">
-                        <span>Anacleto</span>
-                        <small>Trabajando</small>
-                      </div>
-                      <div className="assistant-message-bubble">
-                        <p className="assistant-message-content muted">
-                          Preparando respuesta...
-                        </p>
+                      <div
+                        className="assistant-message-bubble assistant-typing-bubble"
+                        aria-label="Anacleto está respondiendo"
+                        role="status"
+                      >
+                        <span className="assistant-typing-indicator" aria-hidden="true">
+                          <span />
+                          <span />
+                          <span />
+                        </span>
                       </div>
                     </div>
                   </article>
@@ -1552,18 +1636,22 @@ export function AssistantPanel({
                             : "assistant-mic"
                         }
                         aria-label={
-                          isListening ? "Detener dictado" : "Iniciar dictado"
+                          isListening ? "Detener grabación" : "Grabar audio"
                         }
                         aria-pressed={isListening}
                         onClick={handleToggleListening}
-                        disabled={!speechSupported || composerDisabled}
+                        disabled={
+                          !speechSupported || composerDisabled || isTranscribingVoice
+                        }
                         title={
                           speechSupported
-                            ? "Dictado local en el dispositivo"
-                            : "Dictado local no disponible en este navegador"
+                            ? "Grabar audio y transcribirlo con Anacleto"
+                            : "Grabación de audio no disponible en este navegador"
                         }
                       >
-                        {isListening ? (
+                        {isTranscribingVoice ? (
+                          <Loader2 aria-hidden size={18} />
+                        ) : isListening ? (
                           <AssistantSymbolIcon name="mic" size={18} />
                         ) : (
                           <AssistantSymbolIcon name="mic" size={18} />
@@ -1591,16 +1679,15 @@ export function AssistantPanel({
             </>
           ) : (
             <div className="assistant-no-selection">
-              <AssistantSymbolIcon name="mark" size={28} />
               <h3>
                 {isLoadingAssistant
                   ? "Cargando conversaciones"
-                  : "Selecciona una conversacion"}
+                  : noSelectionMessage.title}
               </h3>
               <p className="muted">
                 {isLoadingAssistant
                   ? "Estamos preparando el historial y el estado del asistente."
-                  : "Tambien puedes crear una nueva para empezar desde cero."}
+                  : noSelectionMessage.body}
               </p>
               <button
                 type="button"

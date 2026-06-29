@@ -44,6 +44,16 @@ TransversalFeatureAdoptionStatus = Literal[
     "rejected",
     "paused",
 ]
+AdminFeedbackCategory = Literal[
+    "bug",
+    "improvement",
+    "missing_capability",
+    "data_issue",
+    "ux",
+    "other",
+]
+AdminFeedbackStatus = Literal["submitted", "reviewed", "dismissed", "archived"]
+AdminFeedbackPriority = Literal["low", "medium", "high", "urgent"]
 
 
 class AssistantStatusRead(BaseModel):
@@ -54,6 +64,10 @@ class AssistantStatusRead(BaseModel):
     planner: "AssistantPlannerStatusRead"
     agents: list["AssistantAgentRead"] = []
     tools: list["AssistantToolRead"] = []
+
+
+class AssistantAudioTranscriptionRead(BaseModel):
+    text: str
 
 
 class AssistantPlannerStatusRead(BaseModel):
@@ -209,6 +223,36 @@ class AssistantMemoryEntryUpdate(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=1000)
     status: MemoryStatus | None = None
     sensitivity: MemorySensitivity | None = None
+    review_notes: str | None = Field(default=None, max_length=2000)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantAdminFeedbackRead(BaseModel):
+    id: int
+    organization_id: int | None
+    category: AdminFeedbackCategory
+    title: str
+    description: str
+    priority: AdminFeedbackPriority
+    status: AdminFeedbackStatus
+    source_conversation_id: int | None
+    source_message_id: int | None
+    submitted_by_id: int | None
+    reviewed_by_id: int | None
+    review_notes: str | None
+    reviewed_at: datetime | None
+    submitted_by: AssistantMemoryUserSummary | None
+    reviewed_by: AssistantMemoryUserSummary | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AssistantAdminFeedbackUpdate(BaseModel):
+    status: AdminFeedbackStatus | None = None
+    priority: AdminFeedbackPriority | None = None
     review_notes: str | None = Field(default=None, max_length=2000)
 
     model_config = ConfigDict(str_strip_whitespace=True)

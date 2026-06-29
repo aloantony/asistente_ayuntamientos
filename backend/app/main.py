@@ -12,6 +12,7 @@ from app.assistant.routes import router as assistant_router
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
+from app.geo.routes import router as geo_router
 from app.municipalities.routes import router as municipalities_router
 from app.ordinances.routes import router as ordinances_router
 from app.ordinances.seed import ensure_initial_official_legal_sources
@@ -71,5 +72,6 @@ app.include_router(admin_router)
 app.include_router(projects_router)
 app.include_router(documents_router)
 app.include_router(requirements_router)
+app.include_router(geo_router)
 app.include_router(assistant_router)
 app.include_router(telegram_router)

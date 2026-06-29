@@ -10,8 +10,38 @@ export class ApiRequestError extends Error {
   }
 }
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const CONFIGURED_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+
+function isLoopbackHostname(hostname: string) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function isLoopbackApiBaseUrl(value: string) {
+  try {
+    return isLoopbackHostname(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeApiBaseUrl(value: string) {
+  const trimmed = value.trim().replace(/\/$/, "");
+  if (!trimmed) {
+    return "";
+  }
+
+  // NEXT_PUBLIC_API_BASE_URL is baked into the Next.js bundle at build time.
+  // Local builds commonly set it to localhost, but a browser opening a public
+  // tunnel would then call its *own* localhost and fail with "Failed to fetch".
+  // In that public-origin case, fall back to same-origin relative API routes.
+  if (typeof window !== "undefined" && isLoopbackApiBaseUrl(trimmed)) {
+    return isLoopbackHostname(window.location.hostname) ? trimmed : "";
+  }
+
+  return trimmed;
+}
+
+export const API_BASE_URL = normalizeApiBaseUrl(CONFIGURED_API_BASE_URL);
 
 function translateProviderError(detail: string) {
   const normalized = detail.toLowerCase();

@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
+import {
+  IBM_Plex_Mono,
+  IBM_Plex_Sans,
+  Libre_Baskerville,
+} from "next/font/google";
 import { SessionProvider } from "./lib/session";
 import "./styles.css";
 
@@ -22,13 +26,20 @@ const ibmPlexMono = IBM_Plex_Mono({
   display: "swap",
 });
 
+const libreBaskerville = Libre_Baskerville({
+  subsets: ["latin"],
+  weight: ["400", "700"],
+  variable: "--font-libre-baskerville",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "Anacleto",
   description: "Plataforma privada para asistencia municipal y administrativa",
   icons: {
-    icon: "/anacleto-logo.svg",
-    shortcut: "/anacleto-logo.svg",
-    apple: "/anacleto-logo.svg",
+    icon: "/brand/logo-principal.svg",
+    shortcut: "/brand/logo-principal.svg",
+    apple: "/brand/logo-principal.svg",
   },
 };
 
@@ -44,7 +55,7 @@ export default function RootLayout({
   return (
     <html
       lang="es"
-      className={`${ibmPlexSans.variable} ${ibmPlexMono.variable}`}
+      className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${libreBaskerville.variable}`}
       suppressHydrationWarning
     >
       <body>

@@ -21,12 +21,12 @@ export function LoginForm({
 }: LoginFormProps) {
   return (
     <main className="page">
-      <section className="panel">
+      <section className="panel login-panel">
         <div className="login-brand">
           <span className="app-brand-star" aria-hidden="true">
-            <img alt="" src="/anacleto-logo.svg" />
+            <img alt="" src="/brand/logo-principal.svg" />
           </span>
-          <span className="login-brand-name">Anacleto</span>
+          <span className="login-brand-name">Asistente Anacleto</span>
         </div>
         <p className="eyebrow">Plataforma privada municipal</p>
         <h1>Iniciar sesión</h1>

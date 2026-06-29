@@ -6,12 +6,14 @@ user could do through the API. Human-supervision principle: the agent creates
 requirements as drafts (or moves them to 'submitted'); review states stay
 human-only.
 """
-
 import json
+import re
+import unicodedata
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import re
+from urllib.parse import quote
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -20,10 +22,17 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
 from app.assistant.models import (
+    AssistantAdminFeedback,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
 )
+from app.geo.access import (
+    get_visible_entity,
+    has_any_map_view_permission,
+    has_map_view_permission,
+)
+from app.geo.models import EntityLocation, GeoLocation
 from app.municipalities.models import Municipality
 from app.organizations.access import (
     get_accessible_organizations_query,
@@ -65,12 +74,21 @@ VALID_TRANSVERSAL_FEATURE_CATEGORIES = {
     "citizen_service",
     "other",
 }
+VALID_ADMIN_FEEDBACK_CATEGORIES = {
+    "bug",
+    "improvement",
+    "missing_capability",
+    "data_issue",
+    "ux",
+    "other",
+}
 MAX_WEB_QUERY_CHARS = 400
 MAX_WEB_RESULTS = 5
 MAX_ORDINANCE_QUERY_CHARS = 400
 MAX_ORDINANCE_RESULTS = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
+MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
 PERSONAL_DATA_PATTERN = re.compile(
     r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
     re.IGNORECASE,
@@ -165,6 +183,38 @@ _TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "get_map_items",
+        "description": (
+            "Consulta ubicaciones visibles del mapa municipal para necesidades "
+            "o proyectos. Úsala cuando el usuario pida ver algo en el mapa, "
+            "pregunte dónde está un proyecto/necesidad o necesites preparar un "
+            "enlace al mapa centrado en una ubicación. Devuelve coordenadas y "
+            "una map_url interna para abrir /mapa con foco y zoom."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["requirement", "project"],
+                    "description": "Tipo de entidad a buscar (opcional)",
+                },
+                "entity_id": {
+                    "type": "integer",
+                    "description": "ID concreto de la necesidad o proyecto (opcional)",
+                },
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Filtrar por organización (opcional)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Número de ubicaciones, máximo 10",
+                },
+            },
+        },
+    },
+    {
         "name": "web_search",
         "description": (
             "Busca información pública actual en internet usando una instancia "
@@ -186,6 +236,51 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "send_admin_feedback",
+        "description": (
+            "Envía al administrador feedback explícito del usuario sobre la "
+            "plataforma o el asistente: errores, fricciones, capacidades que "
+            "faltan, problemas de datos o mejoras de UX. Úsala solo después de "
+            "que el usuario acepte enviarlo; antes puedes sugerirlo en lenguaje "
+            "natural. Resume el problema sin datos personales innecesarios."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "bug",
+                        "improvement",
+                        "missing_capability",
+                        "data_issue",
+                        "ux",
+                        "other",
+                    ],
+                    "description": "Tipo de feedback",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Título breve para el administrador",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Descripción accionable del feedback",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                    "description": "Prioridad estimada",
+                },
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización relacionada, si procede",
+                },
+            },
+            "required": ["category", "title", "description"],
         },
     },
     {
@@ -629,6 +724,111 @@ def _list_projects(
     ]
 
 
+def _build_map_url(
+    *,
+    entity_type: str,
+    entity_id: int,
+    latitude: float | None,
+    longitude: float | None,
+    label: str,
+) -> str:
+    params = [
+        f"entity_type={entity_type}",
+        f"entity_id={entity_id}",
+        "zoom=17",
+    ]
+    if latitude is not None and longitude is not None:
+        params.extend(
+            [
+                f"lat={latitude}",
+                f"lng={longitude}",
+                f"label={quote(label)}",
+            ]
+        )
+    return "/mapa?" + "&".join(params)
+
+
+def _get_map_items(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    if not has_any_map_view_permission(db, current_user):
+        raise HTTPException(status_code=403, detail="Permission required: map.view")
+
+    limit = int(tool_input.get("limit") or 5)
+    if limit < 1:
+        raise ValueError("limit debe ser mayor o igual que 1")
+    limit = min(limit, 10)
+
+    entity_type = tool_input.get("entity_type")
+    if entity_type is not None and entity_type not in {"requirement", "project"}:
+        raise ValueError("entity_type debe ser 'requirement' o 'project'")
+    entity_id = tool_input.get("entity_id")
+    organization_id = tool_input.get("organization_id")
+
+    query = (
+        select(EntityLocation)
+        .join(EntityLocation.location)
+        .where(GeoLocation.review_status != "rejected")
+        .order_by(EntityLocation.id.desc())
+        .limit(100)
+    )
+    if entity_type is not None:
+        query = query.where(EntityLocation.entity_type == entity_type)
+    if entity_id is not None:
+        query = query.where(EntityLocation.entity_id == int(entity_id))
+    if organization_id is not None:
+        query = query.where(GeoLocation.organization_id == int(organization_id))
+
+    results: list[dict] = []
+    for attachment in db.scalars(query):
+        visible = get_visible_entity(
+            db,
+            current_user,
+            attachment.entity_type,
+            attachment.entity_id,
+        )
+        if visible is None:
+            continue
+        if organization_id is not None and visible.organization_id != int(organization_id):
+            continue
+        if not has_map_view_permission(db, current_user, visible.organization_id):
+            continue
+        location = attachment.location
+        results.append(
+            {
+                "entity_type": visible.entity_type,
+                "entity_id": attachment.entity_id,
+                "title": visible.title,
+                "subtitle": visible.subtitle,
+                "status": visible.status,
+                "organization_id": visible.organization_id,
+                "organization_name": visible.organization_name,
+                "detail_path": visible.detail_path,
+                "location": {
+                    "id": location.id,
+                    "label": location.label,
+                    "latitude": location.latitude,
+                    "longitude": location.longitude,
+                    "review_status": location.review_status,
+                },
+                "map_url": _build_map_url(
+                    entity_type=visible.entity_type,
+                    entity_id=attachment.entity_id,
+                    latitude=location.latitude,
+                    longitude=location.longitude,
+                    label=location.label,
+                ),
+            }
+        )
+        if len(results) >= limit:
+            break
+
+    return {"limit": limit, "results": results}
+
+
 def _list_requirements(
     db: Session,
     current_user: User,
@@ -984,6 +1184,67 @@ def _propose_memory_entry(
     }
 
 
+def _send_admin_feedback(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    organization_id = tool_input.get("organization_id")
+    if organization_id is not None:
+        organization_id = int(organization_id)
+        ensure_organization_exists(db, organization_id)
+        if not has_permission(
+            current_user,
+            "assistant.use",
+            db,
+            organization_id=organization_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Permission required: assistant.use",
+            )
+
+    category = str(tool_input["category"]).strip()
+    if category not in VALID_ADMIN_FEEDBACK_CATEGORIES:
+        raise ValueError(f"category inválida: {category}")
+
+    title = _clean_transversal_text("title", tool_input["title"], 255)
+    description = str(tool_input["description"]).strip()
+    if not description:
+        raise ValueError("description no puede estar vacío")
+    if len(description) > MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS:
+        raise ValueError(
+            "description no puede superar "
+            f"{MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS} caracteres"
+        )
+
+    priority = str(tool_input.get("priority") or "medium").strip()
+    if priority not in VALID_PRIORITIES:
+        raise ValueError(f"priority inválida: {priority}")
+
+    feedback = AssistantAdminFeedback(
+        organization_id=organization_id,
+        category=category,
+        title=title,
+        description=description,
+        priority=priority,
+        status="submitted",
+        source_conversation_id=context.conversation_id,
+        source_message_id=context.user_message_id,
+        submitted_by_id=current_user.id,
+    )
+    db.add(feedback)
+    db.commit()
+    return {
+        "id": feedback.id,
+        "status": feedback.status,
+        "category": feedback.category,
+        "priority": feedback.priority,
+        "organization_id": feedback.organization_id,
+    }
+
+
 def _clean_transversal_text(name: str, value: object, max_chars: int) -> str:
     text = str(value).strip()
     if not text:
@@ -1191,6 +1452,7 @@ def _record_transversal_feature_acceptance(
 _EXECUTORS = {
     "list_organizations": _list_organizations,
     "list_projects": _list_projects,
+    "get_map_items": _get_map_items,
     "web_search": _web_search,
     "semantic_search_ordinances": _semantic_search_ordinances,
     "list_requirements": _list_requirements,
@@ -1199,6 +1461,7 @@ _EXECUTORS = {
     "update_requirement": _update_requirement,
     "add_requirement_message": _add_requirement_message,
     "propose_memory_entry": _propose_memory_entry,
+    "send_admin_feedback": _send_admin_feedback,
     "propose_transversal_feature": _propose_transversal_feature,
     "list_available_transversal_features": _list_available_transversal_features,
     "record_transversal_feature_acceptance": _record_transversal_feature_acceptance,
@@ -1214,6 +1477,12 @@ _TOOL_METADATA: dict[str, dict] = {
         "label": "Consultar proyectos",
         "read_only": True,
         "domain": "projects",
+    },
+    "get_map_items": {
+        "label": "Consultar mapa",
+        "read_only": True,
+        "domain": "map",
+        "required_permission": "map.view",
     },
     "web_search": {
         "label": "Buscar en web",
@@ -1257,6 +1526,11 @@ _TOOL_METADATA: dict[str, dict] = {
         "read_only": False,
         "domain": "memory",
         "required_permission": "assistant.memory.propose",
+    },
+    "send_admin_feedback": {
+        "label": "Enviar feedback al admin",
+        "read_only": False,
+        "domain": "feedback",
     },
     "propose_transversal_feature": {
         "label": "Proponer funcionalidad transversal",

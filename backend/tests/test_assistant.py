@@ -10,6 +10,7 @@ from app.assistant import service as assistant_service
 from app.assistant.agents import AGENT_REGISTRY, get_agent_tools
 from app.assistant.gateway import _from_openai_response, _hermes_agent_url
 from app.assistant.models import (
+    AssistantAdminFeedback,
     AssistantConversation,
     AssistantMemoryEntry,
     AssistantMessage,
@@ -23,6 +24,7 @@ from app.main import app
 from app.municipalities.models import Municipality
 from app.ordinances.embeddings import embed_text
 from app.ordinances.models import Ordinance, OrdinanceLegalChunk
+from app.projects.models import Project
 from app.requirements.models import Requirement
 from conftest import headers_for
 
@@ -191,6 +193,89 @@ def test_conversation_folder_duplicate_name_returns_conflict(client, assistant_u
     assert duplicate.json()["detail"] == "Assistant conversation folder already exists"
 
 
+def test_assistant_suggests_and_sends_admin_feedback(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    suggestion = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "El chat falla cuando intento enviar feedback"},
+        headers=headers_for(user),
+    )
+
+    assert suggestion.status_code == 200
+    suggestion_message = suggestion.json()["messages"][-1]
+    assert suggestion_message["routing"]["intent"] == "suggest_admin_feedback"
+    assert suggestion_message["actions"] == []
+    assert "administrador" in suggestion_message["content"].lower()
+    assert "esto parece feedback útil" not in suggestion_message["content"].lower()
+    assert db.scalar(select(func.count()).select_from(AssistantAdminFeedback)) == 0
+
+    confirmation = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
+
+    assert confirmation.status_code == 200
+    confirmation_message = confirmation.json()["messages"][-1]
+    assert confirmation_message["actions"][0]["tool"] == "send_admin_feedback"
+    assert "enviado el feedback" in confirmation_message["content"].lower()
+    feedback = db.scalar(select(AssistantAdminFeedback))
+    assert feedback is not None
+    assert feedback.organization_id == organization.id
+    assert feedback.status == "submitted"
+    assert feedback.category == "bug"
+    assert feedback.submitted_by_id == user.id
+    assert gateway.calls == []
+
+
+def test_superuser_can_list_and_review_admin_feedback(
+    client,
+    assistant_user,
+    db,
+    superuser,
+):
+    user, organization = assistant_user
+    feedback = AssistantAdminFeedback(
+        organization_id=organization.id,
+        category="ux",
+        title="Mensaje confuso",
+        description="El asistente debería sugerir enviar feedback.",
+        priority="medium",
+        submitted_by_id=user.id,
+    )
+    db.add(feedback)
+    db.commit()
+
+    listed = client.get("/assistant/admin-feedback", headers=headers_for(superuser))
+
+    assert listed.status_code == 200
+    assert listed.json()[0]["title"] == "Mensaje confuso"
+
+    reviewed = client.patch(
+        f"/assistant/admin-feedback/{feedback.id}",
+        json={"status": "reviewed", "review_notes": "Visto"},
+        headers=headers_for(superuser),
+    )
+
+    assert reviewed.status_code == 200
+    body = reviewed.json()
+    assert body["status"] == "reviewed"
+    assert body["review_notes"] == "Visto"
+    assert body["reviewed_by_id"] == superuser.id
+
+
 def test_status_reports_disabled_gateway(
     client,
     assistant_user,
@@ -213,6 +298,63 @@ def test_status_reports_disabled_gateway(
         "consultation",
     }
     assert "create_requirement" in {tool["name"] for tool in body["tools"]}
+
+
+def test_transcribe_audio_requires_assistant_permission(client, make_user):
+    user = make_user()
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        headers=headers_for(user),
+        files={"file": ("voice.ogg", b"audio", "audio/ogg")},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: assistant.use"
+
+
+def test_transcribe_audio_returns_text_for_assistant_user(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+
+    from app.assistant import routes as assistant_routes
+
+    monkeypatch.setattr(
+        assistant_routes,
+        "transcribe_audio_bytes",
+        lambda audio, language_code=None: "Necesito preparar un informe",
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        headers=headers_for(user),
+        files={"file": ("voice.ogg", b"audio", "audio/ogg")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "Necesito preparar un informe"}
+
+
+def test_prepare_audio_for_riva_transcodes_browser_webm(monkeypatch):
+    from app.assistant import speech
+
+    calls = []
+
+    def fake_run(command, input, capture_output, check):
+        calls.append(command)
+        return SimpleNamespace(stdout=b"wav-pcm")
+
+    monkeypatch.setattr(speech.subprocess, "run", fake_run)
+
+    audio, encoding, sample_rate = speech.prepare_audio_for_riva(b"\x1a\x45\xdf\xa3webm")
+
+    assert audio == b"wav-pcm"
+    assert encoding == speech.riva_audio_encoding("LINEAR_PCM")
+    assert sample_rate == 16000
+    assert calls[0][:2] == ["ffmpeg", "-hide_banner"]
 
 
 def test_status_reports_hermes_agent_runtime(
@@ -446,6 +588,30 @@ def test_short_followup_keeps_previous_agent():
     assert decision.routing["fallback_reason"] == "short_followup_previous_agent"
 
 
+def test_greeting_new_chat_routes_to_general_consultation():
+    conversation = SimpleNamespace(messages=[])
+
+    decision = choose_agent(
+        conversation=conversation,  # type: ignore[arg-type]
+        user_text="hola",
+        allowed_agents=list(AGENT_REGISTRY.values()),
+    )
+
+    assert decision.agent.key == "consultation"
+
+
+def test_new_need_language_still_routes_to_requirements_intake():
+    conversation = SimpleNamespace(messages=[])
+
+    decision = choose_agent(
+        conversation=conversation,  # type: ignore[arg-type]
+        user_text="Necesitamos gestionar citas previas",
+        allowed_agents=list(AGENT_REGISTRY.values()),
+    )
+
+    assert decision.agent.key == "requirements_intake"
+
+
 def test_global_capability_question_returns_product_capabilities_without_gateway(
     client,
     assistant_user,
@@ -478,6 +644,188 @@ def test_global_capability_question_returns_product_capabilities_without_gateway
     assert gateway.calls == []
 
 
+def test_map_location_question_executes_map_tool_without_gateway(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Mapa")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "map.view", "map.edit", "projects.view_all"],
+    )
+    project = Project(
+        organization_id=organization.id,
+        name="Demo mapa municipal",
+        description="Proyecto con ubicación de prueba",
+        status="active",
+    )
+    db.add(project)
+    db.commit()
+    assert client.post(
+        "/geo/entity-locations",
+        json={
+            "entity_type": "project",
+            "entity_id": project.id,
+            "role": "primary",
+            "location": {
+                "label": "Plaza Mayor de Fuentelcésped",
+                "latitude": 41.5917,
+                "longitude": -3.6404,
+            },
+        },
+        headers=headers_for(user),
+    ).status_code == 201
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Hay algún proyecto con ubicación en el mapa?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "action_policy_read_map_items"
+    assert assistant_message["routing"]["intent"] == "read_map_items"
+    assert assistant_message["actions"][0]["tool"] == "get_map_items"
+    assert assistant_message["actions"][0]["ok"] is True
+    assert assistant_message["actions"][0]["input"]["entity_type"] == "project"
+    action_result = json.loads(assistant_message["actions"][0]["result"])
+    assert action_result["results"][0]["map_url"].startswith(
+        "/mapa?entity_type=project"
+    )
+    assert "Demo mapa municipal" in assistant_message["content"]
+    assert "/mapa?entity_type=project" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_read_intents_are_backed_by_action_policies():
+    expected = {
+        "read_map_items": ("consultation", "get_map_items"),
+        "read_requirements": ("consultation", "list_requirements"),
+        "read_ordinances": ("consultation", "semantic_search_ordinances"),
+    }
+
+    for intent, (agent_key, tool_name) in expected.items():
+        policy = assistant_service.ACTION_POLICIES[intent]
+        assert policy.intent == intent
+        assert policy.agent_key == agent_key
+        assert policy.tool_name == tool_name
+        assert policy.reason == f"action_policy_{intent}"
+
+
+def test_requirement_capture_executes_duplicate_check_after_chat_intro(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Mapa municipal",
+        summary="Mostrar tareas y ubicaciones pendientes en el mapa.",
+        status="draft",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    intro = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": (
+                "Vamos a hacer como que soy el alcalde y quiero contarte un "
+                "nuevo requisito."
+            )
+        },
+        headers=headers_for(user),
+    )
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": (
+                "En el mapa quiero que al alguacil se le pongan todas las cosas "
+                "que puede tener pendientes o incluso que él pueda registrar cosas."
+            )
+        },
+        headers=headers_for(user),
+    )
+
+    assert intro.status_code == 200
+    intro_message = intro.json()["messages"][-1]
+    assert intro_message["routing"]["intent"] == "capture_requirement_intro"
+    assert intro_message["actions"] == []
+    assert "cuéntame la idea" in intro_message["content"].lower()
+    assert "he comprobado" not in intro_message["content"].lower()
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["intent"] == "capture_requirement"
+    assert assistant_message["actions"][0]["tool"] == "list_requirements"
+    assert assistant_message["actions"][0]["ok"] is True
+    normalized_content = assistant_message["content"].lower()
+    assert "he comprobado" in normalized_content
+    assert "mapa municipal" in normalized_content
+    assert "alguacil" in normalized_content
+    assert gateway.calls == []
+
+
+def test_requirement_capture_without_matches_does_not_announce_empty_check(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "quiero contarte un nuevo requisito"},
+        headers=headers_for(user),
+    )
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "Me gustaría que en la app se pudieran gestionar llaves municipales"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"][0]["tool"] == "list_requirements"
+    normalized_content = assistant_message["content"].lower()
+    assert "he comprobado" not in normalized_content
+    assert "0 en total" not in normalized_content
+    assert "lo trabajamos como una idea nueva" in normalized_content
+    assert gateway.calls == []
+
+
 def test_classify_turn_intent_maps_common_direct_requests():
     assert assistant_service.classify_turn_intent(
         "hola, qué puedes hacer?"
@@ -500,6 +848,30 @@ def test_classify_turn_intent_maps_common_direct_requests():
     ) == assistant_service.TurnIntent(
         "create_test_requirement",
         "direct_create_test_requirement",
+    )
+    assert assistant_service.classify_turn_intent(
+        "Vamos a hacer una prueba, como que soy el alcalde y quiero contarte un nuevo requisito"
+    ) == assistant_service.TurnIntent(
+        "capture_requirement_intro",
+        "direct_capture_requirement_intro",
+    )
+    assert assistant_service.classify_turn_intent(
+        "En el mapa quiero que el alguacil pueda registrar cosas"
+    ) == assistant_service.TurnIntent(
+        "capture_requirement",
+        "direct_capture_requirement",
+    )
+    assert assistant_service.classify_turn_intent(
+        "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
+    ) == assistant_service.TurnIntent(
+        "read_ordinances",
+        "direct_ordinance_search",
+    )
+    assert assistant_service.classify_turn_intent(
+        "Pues la necesidad que tengo identificada es que ahora mismo querría desarrollar algo que me permita controlar a todos los trabajadores que hay en el ayuntamiento"
+    ) == assistant_service.TurnIntent(
+        "capture_requirement",
+        "direct_capture_requirement",
     )
 
 
@@ -715,6 +1087,7 @@ def test_direct_list_requirements_handles_default_empty_result(
     assistant_message = second.json()["messages"][-1]
     assert assistant_message["agent_key"] == "consultation"
     assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "action_policy_read_requirements"
     assert first.json()["messages"][1]["routing"]["intent"] == "read_requirements"
     assert assistant_message["content"] == (
         f"No hay requisitos visibles registrados en {organization.name}."
@@ -1375,6 +1748,131 @@ def test_confirming_pending_work_creates_need_without_reparsing_assistant_text(
     assert gateway.calls == []
 
 
+def test_natural_confirmation_of_pending_work_creates_need(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.create", "requirements.view"],
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation_response = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    )
+    conversation = conversation_response.json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "selected_organization_id": organization.id,
+            "pending_work": {
+                "type": "create_requirement",
+                "status": "awaiting_confirmation",
+                "organization_id": organization.id,
+                "draft": {
+                    "title": "Control de personal municipal",
+                    "problem": "Tener fichas de trabajadores con labores, competencias, diagrama de actividad, calendarios de trabajo y prioridades.",
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+    db.commit()
+
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "Te confirmo que quiero que registres esa, la que hemos comentado antes, la que por título tenía control de personal municipal."
+        },
+        headers=headers_for(user),
+    )
+
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "pending_work_create_requirement_confirmed"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Control de personal municipal")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert gateway.calls == []
+
+
+def test_failed_requirement_create_keeps_retry_state_with_draft(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(user, organization, ["assistant.use", "requirements.view"])
+    gateway = use_gateway(FakeGateway([]))
+    conversation_response = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    )
+    conversation = conversation_response.json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {"selected_organization_id": organization.id},
+        ensure_ascii=False,
+    )
+    db.add(
+        AssistantMessage(
+            conversation_id=stored_conversation.id,
+            role="assistant",
+            agent_key="requirements_intake",
+            content="Para empezar necesito dos datos: título de la necesidad y problema que queréis resolver.",
+        )
+    )
+    db.commit()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "El título sería control de personal municipal y el problema que quiero resolver es tener una ficha de cada trabajador municipal."
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"][-1]["tool"] == "create_requirement"
+    assert assistant_message["actions"][-1]["ok"] is False
+    db.expire_all()
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    state = json.loads(updated_conversation.state or "{}")
+    assert state["pending_action"] == {
+        "type": "create_requirement_retry",
+        "organization_id": organization.id,
+        "draft": {
+            "title": "control de personal municipal",
+            "problem": "que quiero resolver es tener una ficha de cada trabajador municipal.",
+        },
+    }
+    assert gateway.calls == []
+
+
 def test_create_capability_question_answers_without_starting_intake(
     client,
     make_user,
@@ -1964,7 +2462,7 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assistant_message = response.json()["messages"][-1]
     assert assistant_message["agent_key"] == "consultation"
     assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["reason"] == "direct_ordinance_search"
+    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
     assert assistant_message["routing"]["intent"] == "read_ordinances"
     assert "Miranda de Ebro" in assistant_message["content"]
     action = assistant_message["actions"][0]
@@ -1974,6 +2472,118 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert action["input"]["topic"] == "ordenanzas fiscales"
     assert '"municipality_name": "Miranda de Ebro"' in action["result"]
     assert '"topic": "ordenanzas fiscales"' in action["result"]
+    assert gateway.calls == []
+
+
+def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Test")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "semantic_search_ordinances"
+    ]
+    assert assistant_message["actions"][0]["input"]["municipality_name"] == "Fuentelcésped"
+    assert "necesidades visibles" not in assistant_message["content"].lower()
+    assert gateway.calls == []
+
+
+def test_semantic_planner_ordinance_intent_executes_grounded_action(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    gateway = use_gateway(FakeGateway([]))
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_ordinances",
+            action="semantic_search_ordinances",
+            query="normas comparables para adaptar al municipio",
+            target={"municipality_name": "Fuentelcésped"},
+            confidence=0.92,
+            source="planner",
+        ),
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Qué normas de otros pueblos me sirven para adaptar las de aquí?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "semantic_search_ordinances"
+    ]
+    assert assistant_message["actions"][0]["input"] == {
+        "query": "normas comparables para adaptar al municipio",
+        "municipality_name": "Fuentelcésped",
+    }
     assert gateway.calls == []
 
 
