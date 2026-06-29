@@ -329,9 +329,6 @@ function RequisitosPageInner() {
         includeArchivedRequirements={
           requirementsController.includeArchivedRequirements
         }
-        newRequirement={requirementsController.newRequirement}
-        requirementFormError={requirementsController.requirementFormError}
-        isCreatingRequirement={requirementsController.isCreatingRequirement}
         requirementEdit={requirementsController.requirementEdit}
         requirementEditError={requirementsController.requirementEditError}
         isUpdatingRequirement={requirementsController.isUpdatingRequirement}
@@ -351,7 +348,6 @@ function RequisitosPageInner() {
         onSelectRequirement={handleSelectRequirement}
         onRequirementPrevPage={handlePrevPage}
         onRequirementNextPage={handleNextPage}
-        onUpdateNewRequirement={requirementsController.updateNewRequirement}
         onUpdateRequirementEdit={requirementsController.updateRequirementEdit}
         onFilterOrganizationIdChange={
           requirementsController.setFilterOrganizationId
@@ -367,7 +363,6 @@ function RequisitosPageInner() {
         onNewRequirementMessageTypeChange={
           requirementsController.setNewRequirementMessageType
         }
-        onCreateRequirement={requirementsController.handleCreateRequirement}
         onUpdateRequirement={requirementsController.handleUpdateRequirement}
         onChangeRequirementStatus={
           requirementsController.handleChangeRequirementStatus

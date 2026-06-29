@@ -13,6 +13,13 @@ type MunicipalMapProps = {
   initialZoom?: number | null;
   selectedItemId?: string | null;
   onSelectItem: (item: GeoMapItem) => void;
+  onMapContextMenu?: (payload: {
+    latitude: number;
+    longitude: number;
+    zoom: number;
+    x: number;
+    y: number;
+  }) => void;
 };
 
 const FALLBACK_CENTER: [number, number] = [42.3439, -3.6969];
@@ -55,6 +62,7 @@ export function MunicipalMap({
   initialZoom,
   items,
   selectedItemId,
+  onMapContextMenu,
   onSelectItem,
 }: MunicipalMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -83,6 +91,17 @@ export function MunicipalMap({
       });
 
       L.control.zoom({ position: "bottomleft" }).addTo(map);
+
+      map.on("contextmenu", (event) => {
+        const originalEvent = event.originalEvent as MouseEvent;
+        onMapContextMenu?.({
+          latitude: event.latlng.lat,
+          longitude: event.latlng.lng,
+          zoom: map?.getZoom() ?? FALLBACK_ZOOM,
+          x: originalEvent.clientX,
+          y: originalEvent.clientY,
+        });
+      });
 
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution:
@@ -149,7 +168,14 @@ export function MunicipalMap({
       isActive = false;
       map?.remove();
     };
-  }, [focusLocation, initialZoom, items, onSelectItem, selectedItemId]);
+  }, [
+    focusLocation,
+    initialZoom,
+    items,
+    onMapContextMenu,
+    onSelectItem,
+    selectedItemId,
+  ]);
 
   return (
     <div className="municipal-map-shell">

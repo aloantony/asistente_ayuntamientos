@@ -17,6 +17,8 @@ import {
 } from "../lib/permissions";
 import {
   hasAnyPermission,
+  shouldShowAdminPanel,
+  shouldShowProjectsPanel,
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
@@ -45,7 +47,7 @@ function firstNameOf(fullName: string) {
 const ANACLETO_SUGGESTIONS = [
   "Ayúdame a redactar una necesidad nueva a partir de mis notas.",
   "Compara dos ordenanzas de municipios distintos.",
-  "Localiza los documentos de un proyecto.",
+  "Ayúdame a concretar una mejora que quiero implementar.",
 ];
 
 // Iconos del panel: pequeños trazos coherentes con el resto del shell.
@@ -177,12 +179,14 @@ export default function HomePage() {
   const [error, setError] = useState("");
 
   const canUseAssistant = Boolean(user && userHasPermission(user, "assistant.use"));
+  const canSeeAdmin = Boolean(user && shouldShowAdminPanel(user));
+  const canSeeProjects = Boolean(user && shouldShowProjectsPanel(user));
   const canSeeRequirements = Boolean(user && shouldShowRequirementsPanel(user));
   const canSeeMunicipalities = Boolean(
-    user && hasAnyPermission(user, MUNICIPALITY_PERMISSIONS),
+    user && canSeeAdmin && hasAnyPermission(user, MUNICIPALITY_PERMISSIONS),
   );
   const canSeeOrdinances = Boolean(
-    user && hasAnyPermission(user, ORDINANCE_PERMISSIONS),
+    user && canSeeAdmin && hasAnyPermission(user, ORDINANCE_PERMISSIONS),
   );
 
   useEffect(() => {
@@ -196,24 +200,30 @@ export default function HomePage() {
 
     // Solo se piden los conteos que el usuario puede ver (cada endpoint exige
     // su permiso); así el panel nunca provoca un 403 ni inventa cifras.
-    const tasks: Promise<unknown>[] = [
-      fetchProjects()
-        .then((data) => {
-          if (isActive) {
-            setProjects(data);
-          }
-        })
-        .catch((loadError) => {
-          if (isActive) {
-            setProjects(null);
-            handleRequestError(
-              loadError,
-              setError,
-              "No se pudo cargar el panel de inicio.",
-            );
-          }
-        }),
-    ];
+    const tasks: Promise<unknown>[] = [];
+
+    if (canSeeProjects) {
+      tasks.push(
+        fetchProjects()
+          .then((data) => {
+            if (isActive) {
+              setProjects(data);
+            }
+          })
+          .catch((loadError) => {
+            if (isActive) {
+              setProjects(null);
+              handleRequestError(
+                loadError,
+                setError,
+                "No se pudo cargar el panel de inicio.",
+              );
+            }
+          }),
+      );
+    } else {
+      setProjects(null);
+    }
 
     if (canSeeRequirements) {
       tasks.push(
@@ -274,16 +284,17 @@ export default function HomePage() {
     const activeProjects = projects
       ? projects.filter((project) => project.status === "active").length
       : null;
-    const cards: StatCard[] = [
-      {
+    const cards: StatCard[] = [];
+    if (canSeeProjects) {
+      cards.push({
         key: "projects",
         label: "Proyectos",
         href: "/proyectos",
         icon: "projects",
         value: projects ? projects.length : null,
         hint: activeProjects !== null ? `${activeProjects} activos` : undefined,
-      },
-    ];
+      });
+    }
     if (canSeeRequirements) {
       cards.push({
         key: "requirements",
@@ -314,6 +325,7 @@ export default function HomePage() {
     return cards;
   }, [
     projects,
+    canSeeProjects,
     canSeeRequirements,
     requirementsTotal,
     canSeeMunicipalities,
@@ -365,7 +377,7 @@ export default function HomePage() {
           <input
             aria-label="Preguntar a Anacleto"
             onChange={(event) => setAskText(event.target.value)}
-            placeholder="Pregúntale a Anacleto sobre tus proyectos, necesidades u ordenanzas…"
+            placeholder="Cuéntale a Anacleto qué quieres mejorar o implementar…"
             value={askText}
           />
           <button className="accent-button" type="submit">
@@ -395,6 +407,7 @@ export default function HomePage() {
       ) : null}
 
       <div className="dashboard-cols">
+        {canSeeProjects ? (
         <section className="dashboard-recent">
           <div className="dashboard-section-head">
             <h3>Proyectos recientes</h3>
@@ -426,6 +439,7 @@ export default function HomePage() {
             </p>
           )}
         </section>
+        ) : null}
 
         <aside className="dashboard-anacleto">
           <div className="dashboard-anacleto-head">

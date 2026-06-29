@@ -1,19 +1,23 @@
 import { userHasPermission, type User } from "../../components/types";
-import {
-  MUNICIPALITY_PERMISSIONS,
-  ORDINANCE_PERMISSIONS,
-} from "../../lib/permissions";
 
 export function canUseMunicipalitiesSection(user: User) {
-  return MUNICIPALITY_PERMISSIONS.some((permissionCode) =>
-    userHasPermission(user, permissionCode),
-  );
+  return [
+    "municipalities.create",
+    "municipalities.edit",
+    "municipalities.archive",
+    "municipalities.manage",
+  ].some((permissionCode) => userHasPermission(user, permissionCode));
 }
 
 export function canUseOrdinancesSection(user: User) {
-  return ORDINANCE_PERMISSIONS.some((permissionCode) =>
-    userHasPermission(user, permissionCode),
-  );
+  return [
+    "ordinances.create",
+    "ordinances.edit",
+    "ordinances.archive",
+    "ordinances.import",
+    "ordinances.review",
+    "ordinances.manage",
+  ].some((permissionCode) => userHasPermission(user, permissionCode));
 }
 
 // Permisos que exige el backend para LISTAR (GET de colección): un usuario

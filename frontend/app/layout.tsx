@@ -37,9 +37,9 @@ export const metadata: Metadata = {
   title: "Anacleto",
   description: "Plataforma privada para asistencia municipal y administrativa",
   icons: {
-    icon: "/anacleto-logo.svg",
-    shortcut: "/anacleto-logo.svg",
-    apple: "/anacleto-logo.svg",
+    icon: "/brand/logo-principal.svg",
+    shortcut: "/brand/logo-principal.svg",
+    apple: "/brand/logo-principal.svg",
   },
 };
 

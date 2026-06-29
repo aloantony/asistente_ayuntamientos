@@ -53,9 +53,6 @@ type RequirementsPanelProps = {
   filterProjectId: string;
   filterStatus: string;
   includeArchivedRequirements: boolean;
-  newRequirement: RequirementFormState;
-  requirementFormError: string;
-  isCreatingRequirement: boolean;
   requirementEdit: RequirementEditState | null;
   requirementEditError: string;
   isUpdatingRequirement: boolean;
@@ -67,7 +64,6 @@ type RequirementsPanelProps = {
   onSelectRequirement: (requirementId: number) => void;
   onRequirementPrevPage: () => void;
   onRequirementNextPage: () => void;
-  onUpdateNewRequirement: (updates: Partial<RequirementFormState>) => void;
   onUpdateRequirementEdit: (updates: Partial<RequirementEditState>) => void;
   onFilterOrganizationIdChange: (organizationId: string) => void;
   onFilterProjectIdChange: (projectId: string) => void;
@@ -75,7 +71,6 @@ type RequirementsPanelProps = {
   onIncludeArchivedRequirementsChange: (includeArchived: boolean) => void;
   onNewRequirementMessageBodyChange: (body: string) => void;
   onNewRequirementMessageTypeChange: (messageType: RequirementMessageType) => void;
-  onCreateRequirement: (event: FormEvent<HTMLFormElement>) => void;
   onUpdateRequirement: () => void;
   onChangeRequirementStatus: (status: RequirementStatus) => void;
   onCreateRequirementMessage: (event: FormEvent<HTMLFormElement>) => void;
@@ -145,9 +140,6 @@ export function RequirementsPanel({
   filterProjectId,
   filterStatus,
   includeArchivedRequirements,
-  newRequirement,
-  requirementFormError,
-  isCreatingRequirement,
   requirementEdit,
   requirementEditError,
   isUpdatingRequirement,
@@ -159,7 +151,6 @@ export function RequirementsPanel({
   onSelectRequirement,
   onRequirementPrevPage,
   onRequirementNextPage,
-  onUpdateNewRequirement,
   onUpdateRequirementEdit,
   onFilterOrganizationIdChange,
   onFilterProjectIdChange,
@@ -167,14 +158,10 @@ export function RequirementsPanel({
   onIncludeArchivedRequirementsChange,
   onNewRequirementMessageBodyChange,
   onNewRequirementMessageTypeChange,
-  onCreateRequirement,
   onUpdateRequirement,
   onChangeRequirementStatus,
   onCreateRequirementMessage,
 }: RequirementsPanelProps) {
-  const canCreateRequirements =
-    userHasPermission(user, "requirements.create") ||
-    userHasPermission(user, "requirements.manage");
   const canEditRequirements =
     userHasPermission(user, "requirements.edit") ||
     userHasPermission(user, "requirements.manage");
@@ -185,10 +172,6 @@ export function RequirementsPanel({
     userHasPermission(user, "requirements.archive") ||
     userHasPermission(user, "requirements.manage");
   const filterProjects = getProjectsForOrganization(projects, filterOrganizationId);
-  const newRequirementProjects = getProjectsForOrganization(
-    projects,
-    newRequirement.organization_id,
-  );
   const editRequirementProjects = selectedRequirement
     ? getProjectsForOrganization(projects, String(selectedRequirement.organization_id))
     : projects;
@@ -626,121 +609,6 @@ export function RequirementsPanel({
         </div>
       </div>
 
-      {canCreateRequirements ? (
-        <div className="admin-section">
-          <form className="admin-form" onSubmit={onCreateRequirement}>
-            <h3>Nueva necesidad</h3>
-            <div className="form-grid">
-              <label>
-                Organización
-                <select
-                  value={newRequirement.organization_id}
-                  onChange={(event) =>
-                    onUpdateNewRequirement({
-                      organization_id: event.target.value,
-                      project_id: "",
-                    })
-                  }
-                  required
-                >
-                  <option value="">Selecciona una organización</option>
-                  {organizations.map((organization) => (
-                    <option key={organization.id} value={organization.id}>
-                      {formatOrganizationOption(organization)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Proyecto
-                <select
-                  value={newRequirement.project_id}
-                  onChange={(event) =>
-                    onUpdateNewRequirement({ project_id: event.target.value })
-                  }
-                >
-                  <option value="">Sin proyecto</option>
-                  {newRequirementProjects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Título
-                <input
-                  value={newRequirement.title}
-                  onChange={(event) =>
-                    onUpdateNewRequirement({ title: event.target.value })
-                  }
-                  required
-                  type="text"
-                />
-              </label>
-              <label>
-                Prioridad
-                <select
-                  value={newRequirement.priority}
-                  onChange={(event) =>
-                    onUpdateNewRequirement({
-                      priority:
-                        event.target.value as RequirementFormState["priority"],
-                    })
-                  }
-                >
-                  {REQUIREMENT_PRIORITIES.map((priority) => (
-                    <option key={priority} value={priority}>
-                      {formatRequirementPriority(priority)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Origen
-                <select
-                  value={newRequirement.source_type}
-                  onChange={(event) =>
-                    onUpdateNewRequirement({
-                      source_type:
-                        event.target.value as RequirementFormState["source_type"],
-                    })
-                  }
-                >
-                  {REQUIREMENT_SOURCE_TYPES.map((sourceType) => (
-                    <option key={sourceType} value={sourceType}>
-                      {formatRequirementSourceType(sourceType)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {requirementTextFields.map((field) => (
-                <label key={field.key}>
-                  {field.label}
-                  <textarea
-                    value={newRequirement[field.key]}
-                    onChange={(event) =>
-                      onUpdateNewRequirement({
-                        [field.key]: event.target.value,
-                      })
-                    }
-                    rows={field.rows ?? 2}
-                  />
-                  {field.helper ? (
-                    <span className="field-helper">{field.helper}</span>
-                  ) : null}
-                </label>
-              ))}
-            </div>
-            {requirementFormError ? (
-              <p className="error-message">{requirementFormError}</p>
-            ) : null}
-            <button type="submit" disabled={isCreatingRequirement}>
-              {isCreatingRequirement ? "Creando..." : "Crear necesidad"}
-            </button>
-          </form>
-        </div>
-      ) : null}
     </section>
   );
 }

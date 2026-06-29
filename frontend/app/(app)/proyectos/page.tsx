@@ -13,7 +13,7 @@ import {
   fetchAdminUsers,
   fetchOrganizations,
 } from "../../lib/fetchers";
-import { useSession } from "../../lib/session";
+import { shouldShowProjectsPanel, useSession } from "../../lib/session";
 import { useProjectsController } from "../../lib/useProjectsController";
 
 export default function ProyectosPage() {
@@ -30,7 +30,7 @@ export default function ProyectosPage() {
   );
 
   useEffect(() => {
-    if (!user) {
+    if (!user || !shouldShowProjectsPanel(user)) {
       return;
     }
 
@@ -39,7 +39,7 @@ export default function ProyectosPage() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (!user) {
+    if (!user || !shouldShowProjectsPanel(user)) {
       return;
     }
 
@@ -87,6 +87,16 @@ export default function ProyectosPage() {
 
   if (!user) {
     return null;
+  }
+
+  if (!shouldShowProjectsPanel(user)) {
+    return (
+      <section className="panel">
+        <p className="eyebrow">Proyectos</p>
+        <h2>Acceso restringido</h2>
+        <p className="muted">Esta sección no está disponible para esta cuenta.</p>
+      </section>
+    );
   }
 
   return (

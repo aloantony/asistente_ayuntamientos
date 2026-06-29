@@ -13,11 +13,21 @@ import { fetchRequirementsTotal } from "../lib/fetchers";
 import {
   consumePendingLoginRedirect,
   shouldShowAdminPanel,
+  shouldShowProjectsPanel,
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
 
 const ONBOARDING_STORAGE_PREFIX = "anacleto:onboarding:v1";
+
+type OnboardingStepId = "theme" | "assistant" | "account";
+
+type OnboardingStep = {
+  id: OnboardingStepId;
+  eyebrow: string;
+  title: string;
+  body: string;
+};
 
 function getMunicipalBrandName(user: User) {
   const organization = user.organizations?.[0];
@@ -184,6 +194,7 @@ export default function AppLayout({
     null,
   );
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [activeOnboardingIndex, setActiveOnboardingIndex] = useState(0);
   const { dark, toggle: toggleTheme } = useDarkMode();
 
   // Conteo real de necesidades para el badge del menú. El layout (app) no se
@@ -239,10 +250,12 @@ export default function AppLayout({
       setShowOnboarding(
         window.localStorage.getItem(getOnboardingStorageKey(user.id)) !== "seen",
       );
+      setActiveOnboardingIndex(0);
     } catch {
       // Si el navegador bloquea localStorage, mostramos la ayuda sólo en esta
       // sesión; nunca debe impedir usar la aplicación.
       setShowOnboarding(true);
+      setActiveOnboardingIndex(0);
     }
   }, [user]);
 
@@ -305,10 +318,42 @@ export default function AppLayout({
   }
 
   const canUseAssistant = userHasPermission(user, "assistant.use");
+  const canViewProjects = shouldShowProjectsPanel(user);
   const canViewMap =
     userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
   const brandName = getMunicipalBrandName(user);
   const userInitials = getUserInitials(user.full_name);
+
+  const onboardingSteps: OnboardingStep[] = [
+    {
+      id: "theme",
+      eyebrow: "Tema",
+      title: "Claro u oscuro",
+      body: "Cambia el modo visual desde este icono. Lo recordaremos en este navegador.",
+    },
+    ...(canUseAssistant
+      ? [
+          {
+            id: "assistant" as const,
+            eyebrow: "Anacleto",
+            title: "Asistente municipal",
+            body: "Abre el chat para consultar información visible, organizar trabajo o preparar borradores supervisados.",
+          },
+        ]
+      : []),
+    {
+      id: "account",
+      eyebrow: "Cuenta",
+      title: "Tu perfil",
+      body: "Revisa aquí tus datos, organización y permisos dentro del ayuntamiento.",
+    },
+  ];
+
+  const safeOnboardingIndex = Math.min(
+    activeOnboardingIndex,
+    onboardingSteps.length - 1,
+  );
+  const activeOnboardingStep = onboardingSteps[safeOnboardingIndex];
 
   const navGroups: NavGroup[] = [
     {
@@ -328,7 +373,9 @@ export default function AppLayout({
         ...(canViewMap
           ? [{ href: "/mapa", label: "Mapa", icon: "map" as const }]
           : []),
-        { href: "/proyectos", label: "Proyectos", icon: "projects" },
+        ...(canViewProjects
+          ? [{ href: "/proyectos", label: "Proyectos", icon: "projects" as const }]
+          : []),
       ],
     },
     ...(canUseAssistant
@@ -369,6 +416,7 @@ export default function AppLayout({
 
   function dismissOnboarding() {
     setShowOnboarding(false);
+    setActiveOnboardingIndex(0);
     if (!user) {
       return;
     }
@@ -381,9 +429,16 @@ export default function AppLayout({
 
   function handleThemeToggle() {
     toggleTheme();
-    if (showOnboarding) {
-      dismissOnboarding();
-    }
+  }
+
+  function goToPreviousOnboardingStep() {
+    setActiveOnboardingIndex((index) => Math.max(0, index - 1));
+  }
+
+  function goToNextOnboardingStep() {
+    setActiveOnboardingIndex((index) =>
+      Math.min(onboardingSteps.length - 1, index + 1),
+    );
   }
 
   const themeToggleLabel = dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro";
@@ -398,7 +453,7 @@ export default function AppLayout({
       <aside className="app-sidebar">
         <div className="app-brand">
           <span className="app-brand-star" aria-hidden="true">
-            <img alt="" src="/anacleto-logo.svg" />
+            <img alt="" src="/brand/logo-principal.svg" />
           </span>
           <span className="app-brand-name" title={brandName}>
             {brandName}
@@ -495,10 +550,20 @@ export default function AppLayout({
         </div>
       </aside>
       <div className="app-main">
-        <header className={showOnboarding ? "app-topbar onboarding-active" : "app-topbar"}>
+        <header
+          className={
+            showOnboarding
+              ? `app-topbar onboarding-active onboarding-step-${activeOnboardingStep.id}`
+              : "app-topbar"
+          }
+        >
           <div className="app-topbar-actions">
             <button
-              aria-describedby={showOnboarding ? "app-onboarding-popover" : undefined}
+              aria-describedby={
+                showOnboarding && activeOnboardingStep.id === "theme"
+                  ? "app-onboarding-popover"
+                  : undefined
+              }
               aria-label={themeToggleLabel}
               aria-pressed={dark}
               className="app-topbar-theme"
@@ -539,6 +604,11 @@ export default function AppLayout({
             </button>
             {canUseAssistant ? (
               <button
+                aria-describedby={
+                  showOnboarding && activeOnboardingStep.id === "assistant"
+                    ? "app-onboarding-popover"
+                    : undefined
+                }
                 aria-label="Abrir asistente"
                 className="app-topbar-anacleto"
                 onClick={() => router.push("/asistente")}
@@ -551,6 +621,11 @@ export default function AppLayout({
               </button>
             ) : null}
             <button
+              aria-describedby={
+                showOnboarding && activeOnboardingStep.id === "account"
+                  ? "app-onboarding-popover"
+                  : undefined
+              }
               aria-label="Abrir mi cuenta"
               className="app-topbar-user"
               onClick={() => router.push("/cuenta")}
@@ -573,30 +648,42 @@ export default function AppLayout({
                 onClick={dismissOnboarding}
                 type="button"
               />
-              <section className="app-onboarding-note app-onboarding-note-theme">
-                <p className="eyebrow">Tema</p>
-                <h2 id="app-onboarding-title">Claro u oscuro</h2>
-                <p>Cambia el modo visual desde este icono. Lo recordaremos en este navegador.</p>
-                <button className="accent-button" onClick={handleThemeToggle} type="button">
-                  Probar ahora
+              <section
+                className={`app-onboarding-note app-onboarding-note-${activeOnboardingStep.id}`}
+              >
+                <p className="eyebrow">{activeOnboardingStep.eyebrow}</p>
+                <h2 id="app-onboarding-title">{activeOnboardingStep.title}</h2>
+                <p>{activeOnboardingStep.body}</p>
+                {activeOnboardingStep.id === "theme" ? (
+                  <button className="accent-button" onClick={handleThemeToggle} type="button">
+                    Probar ahora
+                  </button>
+                ) : null}
+                <div className="app-onboarding-controls" aria-label="Pasos de la ayuda inicial">
+                  <button
+                    className="secondary-button"
+                    disabled={safeOnboardingIndex === 0}
+                    onClick={goToPreviousOnboardingStep}
+                    type="button"
+                  >
+                    Anterior
+                  </button>
+                  <span aria-live="polite">
+                    {safeOnboardingIndex + 1}/{onboardingSteps.length}
+                  </span>
+                  <button
+                    className="secondary-button"
+                    disabled={safeOnboardingIndex === onboardingSteps.length - 1}
+                    onClick={goToNextOnboardingStep}
+                    type="button"
+                  >
+                    Siguiente
+                  </button>
+                </div>
+                <button className="app-onboarding-dismiss" onClick={dismissOnboarding} type="button">
+                  Cerrar ayuda
                 </button>
               </section>
-              <section className="app-onboarding-note app-onboarding-note-assistant">
-                <p className="eyebrow">Anacleto</p>
-                <p>Acceso rápido al asistente municipal.</p>
-              </section>
-              <section className="app-onboarding-note app-onboarding-note-account">
-                <p className="eyebrow">Cuenta</p>
-                <p>Tu perfil, organización y permisos están aquí.</p>
-              </section>
-              <button
-                aria-label="Cerrar ayuda inicial"
-                className="app-onboarding-close"
-                onClick={dismissOnboarding}
-                type="button"
-              >
-                ×
-              </button>
             </div>
           ) : null}
         </header>

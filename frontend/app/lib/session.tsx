@@ -18,7 +18,7 @@ import {
   getErrorMessage,
   isAuthError,
 } from "./api";
-import { ADMIN_PANEL_PERMISSIONS } from "./permissions";
+import { ADMIN_PANEL_PERMISSIONS, PROJECT_PERMISSIONS } from "./permissions";
 
 export const REQUIREMENT_PERMISSIONS = [
   "requirements.view",
@@ -43,6 +43,10 @@ export function shouldShowRequirementsPanel(user: User) {
   return hasAnyPermission(user, REQUIREMENT_PERMISSIONS);
 }
 
+export function shouldShowProjectsPanel(user: User) {
+  return hasAnyPermission(user, PROJECT_PERMISSIONS);
+}
+
 // Sección de aterrizaje según los permisos del usuario; la usan el login
 // (para llegar en un solo salto) y la página raíz "/" como respaldo.
 export function getDefaultRouteForUser(user: User) {
@@ -52,7 +56,10 @@ export function getDefaultRouteForUser(user: User) {
   if (shouldShowRequirementsPanel(user)) {
     return "/requisitos";
   }
-  return "/proyectos";
+  if (shouldShowProjectsPanel(user)) {
+    return "/proyectos";
+  }
+  return "/cuenta";
 }
 
 // Valida que ?next sea una ruta interna ("/algo") para evitar redirecciones

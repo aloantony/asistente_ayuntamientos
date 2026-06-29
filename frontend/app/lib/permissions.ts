@@ -21,13 +21,33 @@ export const ORDINANCE_PERMISSIONS = [
   "ordinances.manage",
 ];
 
-// Cualquier permiso que abre alguna sección de /admin: las mismas listas con
-// las que getAdminNavItems decide qué pestañas se muestran.
-export const ADMIN_PANEL_PERMISSIONS = [
+export const PROJECT_PERMISSIONS = [
+  "projects.view_all",
+  "projects.create",
+  "projects.edit",
+  "projects.archive",
+  "projects.manage_members",
+  "projects.manage",
+];
+
+export const ADMIN_MANAGEMENT_PERMISSIONS = [
   "users.manage",
   "groups.manage",
   "organizations.manage",
   "roles.manage",
-  ...MUNICIPALITY_PERMISSIONS,
-  ...ORDINANCE_PERMISSIONS,
+  "municipalities.create",
+  "municipalities.edit",
+  "municipalities.archive",
+  "municipalities.manage",
+  "ordinances.create",
+  "ordinances.edit",
+  "ordinances.archive",
+  "ordinances.import",
+  "ordinances.review",
+  "ordinances.manage",
 ];
+
+// Cualquier permiso que abre alguna sección de /admin. Los permisos de solo
+// consulta (por ejemplo ordinances.view/compare del alcalde piloto) no deben
+// mostrar el área de administración.
+export const ADMIN_PANEL_PERMISSIONS = ADMIN_MANAGEMENT_PERMISSIONS;
