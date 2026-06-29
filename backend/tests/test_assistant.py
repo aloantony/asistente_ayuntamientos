@@ -240,6 +240,78 @@ def test_assistant_suggests_and_sends_admin_feedback(
     assert gateway.calls == []
 
 
+def test_feedback_can_be_explained_and_converted_to_requirement(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    suggestion = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Me gustaría que el asistente me pueda responder por voz también."},
+        headers=headers_for(user),
+    )
+    assert suggestion.status_code == 200
+    suggestion_message = suggestion.json()["messages"][-1]
+    assert suggestion_message["routing"]["intent"] == "suggest_admin_feedback"
+    assert suggestion_message["actions"] == []
+
+    confirmation = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
+    assert confirmation.status_code == 200
+    confirmation_message = confirmation.json()["messages"][-1]
+    assert confirmation_message["actions"][0]["tool"] == "send_admin_feedback"
+    feedback = db.scalar(select(AssistantAdminFeedback))
+    assert feedback is not None
+    assert feedback.title == "Me gustaría que el asistente me pueda responder por voz también"
+
+    where = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "dónde puede consultar el administrador esto?"},
+        headers=headers_for(user),
+    )
+    assert where.status_code == 200
+    where_message = where.json()["messages"][-1]
+    where_content = where_message["content"].lower()
+    assert where_message["actions"] == []
+    assert where_message["routing"]["reason"] == "direct_admin_feedback_location"
+    assert "feedback interno" in where_content
+    assert "superusuarios" in where_content
+    assert "no tengo una herramienta" not in where_content
+    assert "no puedo confirmar" not in where_content
+
+    create = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "créalo como necesidad"},
+        headers=headers_for(user),
+    )
+    assert create.status_code == 200
+    create_message = create.json()["messages"][-1]
+    assert [action["tool"] for action in create_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    assert create_message["routing"]["reason"] == "direct_feedback_to_requirement"
+    assert "borrador" in create_message["content"].lower()
+    assert "no puedo crear" not in create_message["content"].lower()
+    requirement = db.scalar(select(Requirement).where(Requirement.organization_id == organization.id))
+    assert requirement is not None
+    assert requirement.title == "Respuesta por voz del asistente"
+    assert "responder también por voz" in requirement.problem.lower()
+    assert gateway.calls == []
+
+
 def test_superuser_can_list_and_review_admin_feedback(
     client,
     assistant_user,
@@ -367,6 +439,7 @@ def test_status_reports_hermes_agent_runtime(
     monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
     monkeypatch.setattr(settings, "hermes_agent_model", "hermes-agent-test")
     monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
+    monkeypatch.setattr(settings, "hermes_agent_api_key", None)
     use_gateway(FakeGateway([], runtime_healthy=True))
 
     response = client.get("/assistant/status", headers=headers_for(user))
@@ -377,7 +450,21 @@ def test_status_reports_hermes_agent_runtime(
     assert body["runtime"] == "hermes_agent"
     assert body["model"] == "hermes-agent-test"
     assert body["runtime_healthy"] is True
-    assert body["planner"]["runtime"] == "disabled"
+    assert body["planner"]["runtime"] == "hermes_agent"
+    assert body["planner"]["enabled"] is False
+    assert body["planner"]["runtime_healthy"] is False
+
+
+def test_hermes_runtime_forces_semantic_planner_when_legacy_env_disables_it(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
+    monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
+    monkeypatch.setattr(settings, "hermes_agent_api_key", "test-key")
+    monkeypatch.setattr(settings, "environment", "development")
+
+    assert assistant_planner.effective_planner_runtime() == "hermes_agent"
+    assert assistant_planner.planner_enabled() is True
 
 
 def test_hermes_agent_urls_support_v1_base_url(monkeypatch):

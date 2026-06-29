@@ -42,7 +42,11 @@ from app.assistant.schemas import (
 )
 from app.assistant.service import run_agent_turn
 from app.assistant.speech import SpeechTranscriptionError, transcribe_audio_bytes
-from app.assistant.planner import planner_enabled, planner_healthy
+from app.assistant.planner import (
+    effective_planner_runtime,
+    planner_enabled,
+    planner_healthy,
+)
 from app.assistant.tools import get_tool_metadata
 from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
@@ -75,6 +79,7 @@ def get_assistant_status(
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
 ) -> AssistantStatusRead:
     require_assistant_use(db, current_user)
+    planner_runtime = effective_planner_runtime()
     planner_is_enabled = planner_enabled()
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
@@ -86,10 +91,10 @@ def get_assistant_status(
         ),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
         planner={
-            "runtime": settings.assistant_planner_runtime,
+            "runtime": planner_runtime,
             "enabled": planner_is_enabled,
             "model": settings.assistant_planner_model
-            if settings.assistant_planner_runtime == "hermes_agent"
+            if planner_runtime == "hermes_agent"
             else None,
             "runtime_healthy": planner_healthy(),
         },

@@ -780,6 +780,87 @@ def build_admin_feedback_suggestion_reply(text: str, tool_input: dict) -> str:
     return variants[index]
 
 
+def is_admin_feedback_location_question(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    asks_location = any(
+        phrase in normalized
+        for phrase in {
+            "donde",
+            "dónde",
+            "donde puede consultar",
+            "dónde puede consultar",
+            "donde lo ve",
+            "dónde lo ve",
+            "donde se consulta",
+            "dónde se consulta",
+        }
+    )
+    mentions_admin_or_feedback = any(
+        marker in normalized
+        for marker in {
+            "administrador",
+            "admin",
+            "feedback",
+            "esto",
+            "lo",
+        }
+    )
+    return asks_location and mentions_admin_or_feedback
+
+
+def admin_feedback_location_reply(feedback: dict) -> str:
+    feedback_id = feedback.get("id")
+    suffix = f" con id #{feedback_id}" if feedback_id else ""
+    return (
+        f"Queda registrado como feedback interno{suffix}. Lo pueden revisar los "
+        "superusuarios desde la cola interna de feedback de administración. "
+        "Ahora mismo no hay una pantalla visible específica en el panel para "
+        "usuarios normales; si queréis verlo en UI, falta añadir esa vista de "
+        "administración."
+    )
+
+
+def is_convert_feedback_to_requirement_request(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    return any(
+        phrase in normalized
+        for phrase in {
+            "crealo como necesidad",
+            "créalo como necesidad",
+            "crear como necesidad",
+            "registralo como necesidad",
+            "regístralo como necesidad",
+            "hazlo necesidad",
+            "como necesidad",
+        }
+    )
+
+
+def feedback_requirement_draft(feedback: dict) -> dict:
+    title = str(feedback.get("title") or "").strip(" .")
+    description = str(feedback.get("description") or title).strip()
+    normalized = normalize_text(f"{title} {description}")
+    if "voz" in normalized and (
+        "responder" in normalized or "respuesta" in normalized
+    ):
+        return {
+            "title": "Respuesta por voz del asistente",
+            "problem": (
+                "El asistente responde actualmente por texto, pero el usuario "
+                "ha solicitado que pueda responder también por voz para hacer "
+                "la interacción más natural y accesible."
+            ),
+        }
+    return {
+        "title": title[:120] or "Necesidad detectada desde feedback",
+        "problem": description,
+    }
+
+
 def is_retry_request(text: str) -> bool:
     normalized = normalize_text(text)
     return any(
@@ -2466,6 +2547,17 @@ def try_handle_direct_turn(
                     tool_input,
                 )
                 set_pending_action(state, None)
+                feedback_result = decode_tool_json(result_content)
+                if ok and isinstance(feedback_result, dict):
+                    state["last_admin_feedback"] = {
+                        "id": feedback_result.get("id"),
+                        "status": feedback_result.get("status"),
+                        "organization_id": feedback_result.get("organization_id"),
+                        "category": tool_input.get("category"),
+                        "title": tool_input.get("title"),
+                        "description": tool_input.get("description"),
+                        "priority": tool_input.get("priority"),
+                    }
                 content = (
                     "Listo, he enviado el feedback al administrador para que lo revise."
                     if ok
@@ -2496,6 +2588,43 @@ def try_handle_direct_turn(
                 agent_key="requirements_intake",
                 content="De acuerdo, no envío ese feedback al administrador.",
                 reason="pending_admin_feedback_cancelled",
+            )
+
+    last_admin_feedback = state.get("last_admin_feedback")
+    if not isinstance(last_admin_feedback, dict):
+        last_admin_feedback = None
+
+    if last_admin_feedback is not None and is_admin_feedback_location_question(user_text):
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="requirements_intake",
+            content=admin_feedback_location_reply(last_admin_feedback),
+            reason="direct_admin_feedback_location",
+            intent="explain_admin_feedback_location",
+        )
+
+    if last_admin_feedback is not None and is_convert_feedback_to_requirement_request(user_text):
+        organization = (
+            resolved_organization
+            or organization_by_id(organizations, last_admin_feedback.get("organization_id"))
+            or selected_organization
+        )
+        if organization is not None:
+            record_selected_organization(state, organization)
+            return handle_direct_create_requirement(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                organization,
+                feedback_requirement_draft(last_admin_feedback),
+                reason="direct_feedback_to_requirement",
+                intent="create_requirement",
             )
 
     if turn_intent.kind == "global_capabilities":

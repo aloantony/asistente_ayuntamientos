@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     assistant_model: str = "claude-opus-4-8"
     assistant_max_tokens: int = 16000
     assistant_max_tool_iterations: int = 8
-    assistant_planner_runtime: str = "disabled"
+    assistant_planner_runtime: str = "hermes_agent"
     assistant_planner_model: str = "hermes-agent"
     assistant_planner_max_tokens: int = 256
     assistant_planner_timeout_seconds: float = 30.0

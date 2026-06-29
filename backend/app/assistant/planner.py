@@ -53,6 +53,9 @@ Reglas:
 - Si el usuario describe una nueva necesidad o algo que quiere desarrollar,
   usa intent=create_requirement, pero no inventes campos que no estén claros.
 - Si confirma un borrador pendiente, usa intent=confirm_pending_work.
+- Si pide convertir el feedback o la mejora anterior en necesidad, usa
+  intent=convert_feedback_to_requirement, action=create_requirement y
+  reference=last_admin_feedback.
 - Si pide reintentar una acción pendiente o fallida, usa intent=retry_pending_action.
 - Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
 - Si no hay intención de producto clara, usa intent=unknown y action=none.
@@ -96,15 +99,27 @@ class SemanticTurnPlan:
         return payload
 
 
+def effective_planner_runtime() -> str:
+    """Return the planner runtime the assistant must use for this deployment.
+
+    Older local `.env` files may still carry `ASSISTANT_PLANNER_RUNTIME=disabled`.
+    For the Hermes-backed assistant runtime, the semantic planner is no longer an
+    optional layer: without it Anacleto falls back to rigid shortcuts and feels
+    like a scripted automaton even when the underlying model is strong.
+    """
+    if settings.assistant_planner_runtime == "hermes_agent":
+        return "hermes_agent"
+    if settings.assistant_runtime == "hermes_agent":
+        return "hermes_agent"
+    return "disabled"
+
+
 def planner_enabled() -> bool:
-    return (
-        settings.assistant_planner_runtime == "hermes_agent"
-        and hermes_agent_enabled()
-    )
+    return effective_planner_runtime() == "hermes_agent" and hermes_agent_enabled()
 
 
 def planner_healthy() -> bool | None:
-    if settings.assistant_planner_runtime != "hermes_agent":
+    if effective_planner_runtime() != "hermes_agent":
         return None
     if not hermes_agent_enabled():
         return False
@@ -239,6 +254,7 @@ def _plan_with_hermes(
                         "read_requirements",
                         "create_requirement",
                         "confirm_pending_work",
+                        "convert_feedback_to_requirement",
                         "retry_pending_action",
                         "suggest_admin_feedback",
                         "unknown",
