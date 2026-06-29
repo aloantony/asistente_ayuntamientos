@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.admin.routes import router as admin_router
+from app.agent_office.routes import router as agent_office_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.assistant.routes import router as assistant_router
@@ -27,8 +28,6 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Seed the permission catalog idempotently; skip when migrations have not
-    # been applied yet so a fresh container can still boot and run alembic.
     try:
         with SessionLocal() as db:
             created_codes = ensure_initial_permissions(db)
@@ -48,30 +47,30 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    lifespan=lifespan,
-)
+app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
+    allow_headers=["Authorization", "Content-Type", "X-Bootstrap-Admin-Token"],
     expose_headers=["X-Total-Count"],
 )
 
-app.include_router(auth_router)
-app.include_router(health_router)
-app.include_router(municipalities_router)
-app.include_router(ordinances_router)
-app.include_router(organizations_router)
-app.include_router(admin_router)
-app.include_router(projects_router)
-app.include_router(documents_router)
-app.include_router(requirements_router)
-app.include_router(geo_router)
-app.include_router(assistant_router)
-app.include_router(telegram_router)
+for app_router in (
+    auth_router,
+    health_router,
+    municipalities_router,
+    ordinances_router,
+    organizations_router,
+    admin_router,
+    projects_router,
+    documents_router,
+    requirements_router,
+    geo_router,
+    assistant_router,
+    agent_office_router,
+    telegram_router,
+):
+    app.include_router(app_router)
