@@ -1029,18 +1029,13 @@ def is_ordinance_capability_question(text: str) -> bool:
     asks_for_search = any(
         marker in normalized
         for marker in {
-            "adaptar",
-            "adecuada",
             "buscar",
             "busca",
-            "comparar",
             "consulta",
             "consultar",
-            "contrastar",
             "que dice",
             "qué dice",
             "sobre",
-            "verificar",
         }
     )
     if asks_for_search:

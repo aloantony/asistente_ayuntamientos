@@ -1913,8 +1913,8 @@ def test_classify_turn_intent_maps_common_direct_requests():
     assert assistant_service.classify_turn_intent(
         "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
     ) == assistant_service.TurnIntent(
-        "read_ordinances",
-        "direct_ordinance_search",
+        "global_capabilities",
+        "ordinance_capabilities",
     )
     assert assistant_service.classify_turn_intent(
         "Pues la necesidad que tengo identificada es que ahora mismo querría desarrollar algo que me permita controlar a todos los trabajadores que hay en el ayuntamiento"
@@ -4110,7 +4110,7 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert gateway.calls == []
 
 
-def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
+def test_ordinance_comparison_capability_question_answers_without_corpus_search(
     client,
     db,
     make_user,
@@ -4125,6 +4125,34 @@ def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
         autonomous_community="Castilla y León",
     )
     db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza fiscal IVTM - Fuentelcésped",
+        topic="ordenanzas fiscales",
+        ordinance_type="tax_ordinance",
+        source_url="https://example.test/ivtm.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text(
+        "Ordenanza fiscal IVTM Fuentelcésped BOP 19 agosto 2004"
+    )
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Fragmento 1",
+            text="B. O. DE BURGOS 19 AGOSTO 2004 — NUM. 158 PAG. 15",
+            source_url=ordinance.source_url,
+            review_status="approved",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
     db.commit()
     organization = make_organization(
         name="Ayuntamiento de Fuentelcésped",
@@ -4148,13 +4176,15 @@ def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
-    assert assistant_message["routing"]["intent"] == "read_ordinances"
-    assert [action["tool"] for action in assistant_message["actions"]] == [
-        "semantic_search_ordinances"
-    ]
-    assert assistant_message["actions"][0]["input"]["municipality_name"] == "Fuentelcésped"
-    assert "necesidades visibles" not in assistant_message["content"].lower()
+    assert assistant_message["routing"]["reason"] == "ordinance_capabilities"
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "contrastar" in normalized_content
+    assert "municipio" in normalized_content
+    assert "materia" in normalized_content
+    assert "fuentelcésped" not in normalized_content
+    assert "fragmento 1" not in normalized_content
     assert gateway.calls == []
 
 
