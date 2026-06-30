@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
+from app.agent_office.models import AgentOfficeTask
 from app.assistant import planner as assistant_planner
 from app.assistant import tools as assistant_tools
 from app.assistant import service as assistant_service
@@ -17,7 +18,7 @@ from app.assistant.models import (
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
 )
-from app.assistant.planner import choose_agent
+from app.assistant.planner import SemanticTurnPlan, choose_agent
 from app.assistant.routes import get_gateway
 from app.core.config import settings
 from app.main import app
@@ -312,6 +313,199 @@ def test_feedback_can_be_explained_and_converted_to_requirement(
     assert gateway.calls == []
 
 
+def test_semantic_planner_suggests_admin_feedback_without_keyword_markers(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="suggest_admin_feedback",
+            action="send_admin_feedback",
+            target={"organization_id": organization.id},
+            draft={
+                "category": "ux",
+                "title": "Flujo de pantalla confuso",
+                "description": "La pantalla de revisión no deja claro cuál es el siguiente paso.",
+                "priority": "medium",
+            },
+            confidence=0.92,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    suggestion = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "La pantalla de revisión no deja claro cuál es el siguiente paso."},
+        headers=headers_for(user),
+    )
+
+    assert suggestion.status_code == 200
+    suggestion_message = suggestion.json()["messages"][-1]
+    assert suggestion_message["actions"] == []
+    assert suggestion_message["routing"]["reason"] == "action_policy_suggest_admin_feedback"
+    assert suggestion_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert "administra" in suggestion_message["content"].lower()
+    assert db.scalar(select(func.count()).select_from(AssistantAdminFeedback)) == 0
+
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"] == {
+        "type": "send_admin_feedback",
+        "tool_input": {
+            "category": "ux",
+            "title": "Flujo de pantalla confuso",
+            "description": "La pantalla de revisión no deja claro cuál es el siguiente paso.",
+            "priority": "medium",
+            "organization_id": organization.id,
+        },
+    }
+    assert gateway.calls == []
+
+
+def test_semantic_planner_confirms_pending_admin_feedback_without_phrase_match(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="suggest_admin_feedback",
+            action="send_admin_feedback",
+            confidence=0.96,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "pending_action": {
+                "type": "send_admin_feedback",
+                "tool_input": {
+                    "category": "bug",
+                    "title": "Error al cargar",
+                    "description": "La pantalla queda cargando indefinidamente.",
+                    "priority": "high",
+                    "organization_id": organization.id,
+                },
+            }
+        },
+        ensure_ascii=False,
+    )
+    db.add(stored_conversation)
+    db.commit()
+
+    confirmation = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "proceda con ello"},
+        headers=headers_for(user),
+    )
+
+    assert confirmation.status_code == 200
+    confirmation_message = confirmation.json()["messages"][-1]
+    assert confirmation_message["routing"]["reason"] == "action_policy_suggest_admin_feedback"
+    assert confirmation_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert confirmation_message["actions"][0]["tool"] == "send_admin_feedback"
+    feedback = db.scalar(select(AssistantAdminFeedback))
+    assert feedback is not None
+    assert feedback.organization_id == organization.id
+    assert feedback.category == "bug"
+    assert feedback.status == "submitted"
+    db.expire_all()
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    assert "pending_action" not in json.loads(updated_conversation.state or "{}")
+    assert gateway.calls == []
+
+
+def test_semantic_planner_cancels_pending_action_without_phrase_match(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="cancel_pending_action",
+            action="cancel_pending_action",
+            confidence=0.93,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "pending_action": {
+                "type": "send_admin_feedback",
+                "tool_input": {
+                    "category": "ux",
+                    "title": "Pantalla confusa",
+                    "description": "La pantalla no explica el siguiente paso.",
+                    "priority": "medium",
+                    "organization_id": organization.id,
+                },
+            }
+        },
+        ensure_ascii=False,
+    )
+    db.add(stored_conversation)
+    db.commit()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "déjalo sin efecto"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_cancel_pending_action"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"] == []
+    assert db.scalar(select(func.count()).select_from(AssistantAdminFeedback)) == 0
+    db.expire_all()
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    assert "pending_action" not in json.loads(updated_conversation.state or "{}")
+    assert gateway.calls == []
+
+
 def test_superuser_can_list_and_review_admin_feedback(
     client,
     assistant_user,
@@ -346,6 +540,208 @@ def test_superuser_can_list_and_review_admin_feedback(
     assert body["status"] == "reviewed"
     assert body["review_notes"] == "Visto"
     assert body["reviewed_by_id"] == superuser.id
+
+
+def test_assistant_can_create_supervised_agent_office_task(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    organization = make_organization("Ayuntamiento Oficina")
+    user = make_user(full_name="Alcaldesa Oficina")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "agent_office.create"],
+    )
+    monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "office_1",
+                            "create_agent_office_task",
+                            {
+                                "organization_id": organization.id,
+                                "title": "Revisión supervisada",
+                                "description": "Preparar una revisión supervisada para mañana.",
+                                "department": "front_desk",
+                                "requested_action": "triage",
+                                "priority": "medium",
+                                "approval_policy": "before_execution",
+                                "requires_human_approval": True,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He dejado creada una tarea supervisada para revisión.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "Necesito que prepares una tarea supervisada para revisar este asunto mañana."
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"][0]["tool"] == "create_agent_office_task"
+    assert assistant_message["actions"][0]["ok"] is True
+    assert "agente de" not in assistant_message["content"].lower()
+
+    action_result = json.loads(assistant_message["actions"][0]["result"])
+    task = db.get(AgentOfficeTask, action_result["id"])
+    assert task is not None
+    assert task.organization_id == organization.id
+    assert task.department == "front_desk"
+    assert task.requested_action == "triage"
+    assert task.status == "pending_approval"
+    assert task.requires_human_approval is True
+    assert task.source_conversation_id == conversation["id"]
+    assert task.source_message_id is not None
+    assert gateway.calls[0]["tools"]
+
+
+def test_semantic_plan_can_create_supervised_agent_office_task_without_gateway(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    organization = make_organization("Ayuntamiento Planificado")
+    user = make_user(full_name="Alcaldesa Planificada")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "agent_office.create"],
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: SemanticTurnPlan(
+            intent="delegate_agent_office",
+            action="create_agent_office_task",
+            confidence=0.92,
+            target={
+                "organization_id": organization.id,
+                "title": "Revisión semántica supervisada",
+                "description": "Preparar una revisión desde el plan semántico.",
+                "department": "front_desk",
+                "requested_action": "triage",
+                "priority": "medium",
+                "approval_policy": "before_execution",
+                "requires_human_approval": True,
+            },
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Prepara esto como tarea supervisada para revisarlo mañana."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "delegate_agent_office"
+    assert assistant_message["routing"]["semantic_plan"]["action"] == "create_agent_office_task"
+    assert assistant_message["actions"][0]["tool"] == "create_agent_office_task"
+    assert assistant_message["actions"][0]["ok"] is True
+    assert "tarea supervisada" in assistant_message["content"].lower()
+    assert "agente de" not in assistant_message["content"].lower()
+    assert gateway.calls == []
+
+    task = db.get(
+        AgentOfficeTask,
+        json.loads(assistant_message["actions"][0]["result"])["id"],
+    )
+    assert task is not None
+    assert task.source_conversation_id == conversation["id"]
+    assert task.source_message_id is not None
+    assert task.status == "pending_approval"
+
+
+def test_semantic_plan_rejects_agent_office_action_when_intent_mismatches(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    organization = make_organization("Ayuntamiento Acción Mutante")
+    user = make_user(full_name="Alcaldesa Acción Mutante")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "agent_office.create"],
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: SemanticTurnPlan(
+            intent="read_requirements",
+            action="create_agent_office_task",
+            confidence=0.92,
+            target={
+                "organization_id": organization.id,
+                "title": "No debe crearse",
+                "description": "Plan con intención incompatible.",
+                "requested_action": "triage",
+            },
+        ),
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [fake_response("end_turn", [text_block("No ejecuto esa acción directa.")])]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta esto, pero el plan viene mal formado."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"] == []
+    assert db.scalar(select(func.count()).select_from(AgentOfficeTask)) == 0
+    assert gateway.calls
 
 
 def test_status_reports_disabled_gateway(
@@ -439,7 +835,6 @@ def test_status_reports_hermes_agent_runtime(
     monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
     monkeypatch.setattr(settings, "hermes_agent_model", "hermes-agent-test")
     monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
-    monkeypatch.setattr(settings, "hermes_agent_api_key", None)
     use_gateway(FakeGateway([], runtime_healthy=True))
 
     response = client.get("/assistant/status", headers=headers_for(user))
@@ -451,20 +846,7 @@ def test_status_reports_hermes_agent_runtime(
     assert body["model"] == "hermes-agent-test"
     assert body["runtime_healthy"] is True
     assert body["planner"]["runtime"] == "hermes_agent"
-    assert body["planner"]["enabled"] is False
-    assert body["planner"]["runtime_healthy"] is False
-
-
-def test_hermes_runtime_forces_semantic_planner_when_legacy_env_disables_it(
-    monkeypatch,
-):
-    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
-    monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
-    monkeypatch.setattr(settings, "hermes_agent_api_key", "test-key")
-    monkeypatch.setattr(settings, "environment", "development")
-
-    assert assistant_planner.effective_planner_runtime() == "hermes_agent"
-    assert assistant_planner.planner_enabled() is True
+    assert body["planner"]["model"] == settings.assistant_planner_model
 
 
 def test_hermes_agent_urls_support_v1_base_url(monkeypatch):
@@ -731,6 +1113,46 @@ def test_global_capability_question_returns_product_capabilities_without_gateway
     assert gateway.calls == []
 
 
+def test_semantic_planner_global_capabilities_uses_plan_without_gateway(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="global_capabilities",
+            action="none",
+            confidence=0.9,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Explícame el alcance útil del producto."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "global_capabilities"
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"] == []
+    assert "crear o actualizar necesidades/requisitos como borrador" in assistant_message["content"].lower()
+    assert gateway.calls == []
+
+
 def test_map_location_question_executes_map_tool_without_gateway(
     client,
     db,
@@ -798,11 +1220,134 @@ def test_map_location_question_executes_map_tool_without_gateway(
     assert gateway.calls == []
 
 
+def test_semantic_planner_map_intent_executes_action_policy(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcaldesa Mapa Semántico")
+    organization = make_organization(name="Ayuntamiento Mapa Semántico")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "map.view", "map.edit", "projects.view_all"],
+    )
+    project = Project(
+        organization_id=organization.id,
+        name="Plan de accesibilidad",
+        description="Proyecto con ubicación desde plan semántico",
+        status="active",
+    )
+    db.add(project)
+    db.commit()
+    assert client.post(
+        "/geo/entity-locations",
+        json={
+            "entity_type": "project",
+            "entity_id": project.id,
+            "role": "primary",
+            "location": {
+                "label": "Casa consistorial",
+                "latitude": 41.5917,
+                "longitude": -3.6404,
+            },
+        },
+        headers=headers_for(user),
+    ).status_code == 201
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_map_items",
+            action="get_map_items",
+            target={"organization_id": organization.id, "entity_type": "project"},
+            confidence=0.93,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Enséñame lo geolocalizado."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_read_map_items"
+    assert assistant_message["routing"]["intent"] == "read_map_items"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    action = assistant_message["actions"][0]
+    assert action["tool"] == "get_map_items"
+    assert action["input"] == {
+        "organization_id": organization.id,
+        "entity_type": "project",
+        "limit": 5,
+    }
+    assert "Plan de accesibilidad" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_semantic_planner_map_intent_ignores_invalid_limit(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcaldesa Límite Mapa")
+    organization = make_organization(name="Ayuntamiento Límite Mapa")
+    grant_permissions(user, organization, ["assistant.use", "map.view"])
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_map_items",
+            action="get_map_items",
+            target={"organization_id": organization.id, "limit": "cinco"},
+            confidence=0.93,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Enséñame el mapa con un límite raro."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_read_map_items"
+    assert assistant_message["actions"][0]["tool"] == "get_map_items"
+    assert assistant_message["actions"][0]["input"]["limit"] == 5
+    assert gateway.calls == []
+
+
 def test_read_intents_are_backed_by_action_policies():
     expected = {
         "read_map_items": ("consultation", "get_map_items"),
         "read_requirements": ("consultation", "list_requirements"),
         "read_ordinances": ("consultation", "semantic_search_ordinances"),
+        "capture_requirement": ("requirements_intake", "list_requirements"),
     }
 
     for intent, (agent_key, tool_name) in expected.items():
@@ -877,6 +1422,173 @@ def test_requirement_capture_executes_duplicate_check_after_chat_intro(
     assert gateway.calls == []
 
 
+def test_register_need_request_prompts_for_content_without_duplicate_check(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="control de personal municipal",
+        summary=(
+            "Me gustaría ir desarrollando una ficha de cada trabajador municipal "
+            "con sus labores y calendarios."
+        ),
+        status="draft",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    gateway = use_gateway(
+        FakeGateway([fake_response("end_turn", [text_block("Hola, hacemos una prueba.")])])
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    intro = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "prueba"},
+        headers=headers_for(user),
+    )
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "me gustaría registrar una necesidad"},
+        headers=headers_for(user),
+    )
+
+    assert intro.status_code == 200
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "capture_requirement_intro"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "cuéntame la idea" in normalized_content
+    assert "he comprobado" not in normalized_content
+    assert "control de personal municipal" not in normalized_content
+    assert len(gateway.calls) == 1
+
+
+def test_semantic_planner_capture_requirement_runs_duplicate_check_without_legacy_intro(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Mapa municipal",
+        summary="Mostrar tareas y ubicaciones pendientes en el mapa.",
+        status="draft",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="capture_requirement",
+            action="list_requirements",
+            target={"organization_id": organization.id},
+            query=(
+                "En el mapa quiero que al alguacil se le pongan todas las cosas "
+                "que puede tener pendientes."
+            ),
+            confidence=0.91,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": (
+                "Quiero explorar una idea: en el mapa quiero que al alguacil "
+                "se le pongan todas las cosas pendientes."
+            )
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_capture_requirement"
+    assert assistant_message["routing"]["intent"] == "capture_requirement"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"][0]["tool"] == "list_requirements"
+    normalized_content = assistant_message["content"].lower()
+    assert "he comprobado" in normalized_content
+    assert "mapa municipal" in normalized_content
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "capture_requirement_followup"
+    assert state["pending_action"]["candidate_requirement_ids"] == [requirement.id]
+    assert gateway.calls == []
+
+
+def test_semantic_planner_capture_requirement_intro_prompts_without_gateway(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="capture_requirement_intro",
+            action="none",
+            confidence=0.9,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Quiero contarte un nuevo requisito para trabajarlo."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_capture_requirement_intro"
+    assert assistant_message["routing"]["intent"] == "capture_requirement_intro"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"] == []
+    assert "cuéntame la idea" in assistant_message["content"].lower()
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"] == {"type": "capture_requirement_intro"}
+    assert gateway.calls == []
+
+
 def test_requirement_capture_without_matches_does_not_announce_empty_check(
     client,
     assistant_user,
@@ -943,6 +1655,12 @@ def test_classify_turn_intent_maps_common_direct_requests():
         "direct_capture_requirement_intro",
     )
     assert assistant_service.classify_turn_intent(
+        "me gustaría registrar una necesidad"
+    ) == assistant_service.TurnIntent(
+        "capture_requirement_intro",
+        "direct_capture_requirement_intro",
+    )
+    assert assistant_service.classify_turn_intent(
         "En el mapa quiero que el alguacil pueda registrar cosas"
     ) == assistant_service.TurnIntent(
         "capture_requirement",
@@ -959,6 +1677,27 @@ def test_classify_turn_intent_maps_common_direct_requests():
     ) == assistant_service.TurnIntent(
         "capture_requirement",
         "direct_capture_requirement",
+    )
+
+
+def test_requirement_candidate_matches_ignores_generic_capture_words():
+    requirements = [
+        {
+            "id": 12,
+            "title": "control de personal municipal",
+            "summary": (
+                "Me gustaría ir desarrollando una ficha de cada trabajador municipal "
+                "con sus labores."
+            ),
+        }
+    ]
+
+    assert (
+        assistant_service.requirement_candidate_matches(
+            requirements,
+            "me gustaría registrar una necesidad",
+        )
+        == []
     )
 
 
@@ -1184,6 +1923,296 @@ def test_direct_list_requirements_handles_default_empty_result(
     assert action["ok"] is True
     assert action["input"] == {"organization_id": organization.id}
     assert json.loads(action["result"]) == []
+    assert gateway.calls == []
+
+
+def test_semantic_planner_requirements_intent_executes_action_policy(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Revisión de licencias",
+        summary="Ordenar expedientes pendientes antes del pleno.",
+        status="draft",
+        priority="high",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_requirements",
+            action="list_requirements",
+            target={"organization_id": organization.id},
+            confidence=0.94,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Dame una foto rápida del trabajo abierto."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_read_requirements"
+    assert assistant_message["routing"]["intent"] == "read_requirements"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    action = assistant_message["actions"][0]
+    assert action["tool"] == "list_requirements"
+    assert action["input"] == {"organization_id": organization.id}
+    assert "Revisión de licencias" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_semantic_planner_create_requirement_executes_grounded_draft(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="create_requirement",
+            action="create_requirement",
+            target={"organization_id": organization.id},
+            draft={
+                "title": "Inventario de caminos rurales",
+                "problem": "El ayuntamiento necesita registrar el estado de los caminos rurales.",
+            },
+            confidence=0.95,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Apunta esto como trabajo nuevo municipal."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_create_requirement"
+    assert assistant_message["routing"]["intent"] == "create_requirement"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Inventario de caminos rurales")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert requirement.problem == "El ayuntamiento necesita registrar el estado de los caminos rurales."
+    assert requirement.status == "draft"
+    assert f"borrador #{requirement.id}" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_semantic_planner_create_requirement_overrides_legacy_capability_classifier(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="create_requirement",
+            action="create_requirement",
+            target={"organization_id": organization.id},
+            draft={
+                "title": "Portal de reservas municipales",
+                "problem": "El ayuntamiento necesita que los vecinos reserven espacios municipales.",
+            },
+            confidence=0.96,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Puedes crear un requisito para esto: portal de reservas municipales?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_create_requirement"
+    assert assistant_message["routing"]["semantic_plan"]["intent"] == "create_requirement"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Portal de reservas municipales")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert gateway.calls == []
+
+
+def test_semantic_planner_create_requirement_missing_fields_persists_pending_action(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="create_requirement",
+            action="create_requirement",
+            target={"organization_id": organization.id},
+            draft={"title": "Control de llaves municipales"},
+            confidence=0.93,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Guárdame esta idea para trabajarla."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"] == []
+    assert assistant_message["routing"]["reason"] == "action_policy_create_requirement_needs_content"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert "Control de llaves municipales" in assistant_message["content"]
+    assert "problema" in assistant_message["content"].lower()
+
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"] == {
+        "type": "create_requirement_content",
+        "organization_id": organization.id,
+        "draft": {"title": "Control de llaves municipales"},
+    }
+    assert gateway.calls == []
+
+
+def test_semantic_planner_create_requirement_followup_merges_pending_draft(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+
+    def planned_turn(**kwargs):
+        text = kwargs["user_text"]
+        if "título" in text.lower():
+            return assistant_planner.SemanticTurnPlan(
+                intent="create_requirement",
+                action="create_requirement",
+                target={"organization_id": organization.id},
+                draft={"title": "Control de llaves municipales"},
+                confidence=0.93,
+                source="planner",
+            )
+        return assistant_planner.SemanticTurnPlan(
+            intent="create_requirement",
+            action="create_requirement",
+            target={"organization_id": organization.id},
+            draft={
+                "problem": "No hay un registro común de quién tiene cada copia."
+            },
+            confidence=0.93,
+            source="planner",
+        )
+
+    monkeypatch.setattr(assistant_service, "plan_turn", planned_turn)
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    first = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "El título sería Control de llaves municipales."},
+        headers=headers_for(user),
+    )
+    second = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "El problema es que no hay un registro común de quién tiene cada copia."
+        },
+        headers=headers_for(user),
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assistant_message = second.json()["messages"][-1]
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Control de llaves municipales")
+    )
+    assert requirement is not None
+    assert requirement.problem == "No hay un registro común de quién tiene cada copia."
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert "pending_action" not in state
     assert gateway.calls == []
 
 
@@ -1835,6 +2864,87 @@ def test_confirming_pending_work_creates_need_without_reparsing_assistant_text(
     assert gateway.calls == []
 
 
+def test_semantic_planner_confirm_pending_work_creates_need_without_phrase_match(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento Confirmación Semántica")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.create", "requirements.view"],
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="confirm_pending_work",
+            action="confirm_pending_work",
+            confidence=0.96,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation_response = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    )
+    conversation = conversation_response.json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "selected_organization_id": organization.id,
+            "pending_work": {
+                "type": "create_requirement",
+                "status": "awaiting_confirmation",
+                "organization_id": organization.id,
+                "draft": {
+                    "title": "Inventario de señales viarias",
+                    "problem": "Centralizar las señales viarias pendientes de revisión.",
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+    db.add(stored_conversation)
+    db.commit()
+
+    created = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "proceda conforme a lo previsto"},
+        headers=headers_for(user),
+    )
+
+    assert created.status_code == 200
+    assistant_message = created.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_confirm_pending_work"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Inventario de señales viarias")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert "señales viarias" in requirement.problem
+    db.expire_all()
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    updated_state = json.loads(updated_conversation.state or "{}")
+    assert "pending_work" not in updated_state
+    assert gateway.calls == []
+
+
 def test_natural_confirmation_of_pending_work_creates_need(
     client,
     db,
@@ -1957,6 +3067,83 @@ def test_failed_requirement_create_keeps_retry_state_with_draft(
             "problem": "que quiero resolver es tener una ficha de cada trabajador municipal.",
         },
     }
+    assert gateway.calls == []
+
+
+def test_semantic_planner_retries_pending_create_requirement_without_phrase_match(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento Reintento Semántico")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.view", "requirements.create"],
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="retry_pending_action",
+            action="retry_pending_action",
+            confidence=0.94,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "selected_organization_id": organization.id,
+            "pending_action": {
+                "type": "create_requirement_retry",
+                "organization_id": organization.id,
+                "draft": {
+                    "title": "Control de personal municipal",
+                    "problem": "Tener una ficha de cada trabajador municipal.",
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+    db.add(stored_conversation)
+    db.commit()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "proceda de nuevo con lo anterior"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_retry_pending_action"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Control de personal municipal")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    db.expire_all()
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    assert "pending_action" not in json.loads(updated_conversation.state or "{}")
     assert gateway.calls == []
 
 
@@ -2672,6 +3859,56 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
         "municipality_name": "Fuentelcésped",
     }
     assert gateway.calls == []
+
+
+def test_semantic_planner_unknown_vetoes_keyword_ordinance_route(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcaldesa Sin Ruta")
+    organization = make_organization(name="Ayuntamiento Sin Ruta")
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="unknown",
+            action="none",
+            confidence=0.91,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Lo reviso contigo sin ejecutar una búsqueda normativa.")],
+                )
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "La palabra ordenanza aparece aquí, pero no es una consulta."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == "Lo reviso contigo sin ejecutar una búsqueda normativa."
+    assert assistant_message["actions"] == []
+    assert len(gateway.calls) == 1
 
 
 def test_ordinance_semantic_search_tool_filters_by_municipality_name_and_topic(

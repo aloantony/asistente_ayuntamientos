@@ -53,6 +53,11 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "assistant.memory.view": "Ver memoria aprobada del asistente",
     "assistant.memory.review": "Revisar memoria propuesta del asistente",
     "assistant.web.search": "Buscar en la web desde el asistente",
+    "agent_office.view": "Ver oficina de agentes",
+    "agent_office.create": "Crear tareas de la oficina de agentes",
+    "agent_office.approve": "Aprobar tareas de la oficina de agentes",
+    "agent_office.execute": "Ejecutar tareas de la oficina de agentes",
+    "agent_office.manage": "Gestionar oficina de agentes",
 }
 
 INITIAL_PERMISSION_CODES = tuple(INITIAL_PERMISSION_DEFINITIONS.keys())

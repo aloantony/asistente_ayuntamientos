@@ -47,16 +47,25 @@ intención estructurada que el backend pueda validar y ejecutar. No llames
 herramientas de producto. Devuelve siempre una llamada a plan_turn.
 
 Reglas:
-- Si el usuario pide comparar, consultar o adaptar ordenanzas, normas o
-  reglamentos municipales, usa intent=read_ordinances y action=semantic_search_ordinances.
+- Si pide comparar o consultar ordenanzas/reglamentos/normativa municipal, usa
+  intent=read_ordinances y action=semantic_search_ordinances.
+- Si pide consultar elementos geolocalizados del mapa municipal, usa
+  intent=read_map_items y action=get_map_items.
 - Si el usuario pide ver necesidades/requisitos ya registrados, usa intent=read_requirements.
-- Si el usuario describe una nueva necesidad o algo que quiere desarrollar,
+- Si el usuario pide empezar a contar una necesidad/requisito pero aún no aporta contenido concreto, usa intent=capture_requirement_intro y action=none.
+- Si el usuario quiere explorar, explicar o aterrizar una necesidad antes de guardarla, usa intent=capture_requirement y action=list_requirements para comprobar posibles duplicados/contexto.
+- Si el usuario describe una nueva necesidad o algo que quiere desarrollar y aporta campos suficientes para borrador,
   usa intent=create_requirement, pero no inventes campos que no estén claros.
 - Si confirma un borrador pendiente, usa intent=confirm_pending_work.
 - Si pide convertir el feedback o la mejora anterior en necesidad, usa
   intent=convert_feedback_to_requirement, action=create_requirement y
   reference=last_admin_feedback.
 - Si pide reintentar una acción pendiente o fallida, usa intent=retry_pending_action.
+- Si cancela, descarta o deja sin efecto una acción pendiente, usa intent=cancel_pending_action y action=cancel_pending_action.
+- Si pide preparar, encargar o dejar para revisión una tarea supervisada o
+  diferida, usa intent=delegate_agent_office y action=create_agent_office_task.
+- Si describe un fallo, fricción, problema de datos o mejora de la plataforma/asistente que conviene elevar al administrador, usa intent=suggest_admin_feedback y action=send_admin_feedback; incluye draft con category, title, description y priority si están claros.
+- Si hay pending_action de send_admin_feedback y el usuario confirma enviarlo, usa intent=suggest_admin_feedback y action=send_admin_feedback.
 - Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
 - Si no hay intención de producto clara, usa intent=unknown y action=none.
 
@@ -77,6 +86,7 @@ class SemanticTurnPlan:
     query: str | None = None
     target: dict | None = None
     draft: dict | None = None
+    delegation: dict | None = None
     reference: str | None = None
     confidence: float = 0.0
     source: str = "planner"
@@ -94,6 +104,8 @@ class SemanticTurnPlan:
             payload["target"] = self.target
         if isinstance(self.draft, dict) and self.draft:
             payload["draft"] = self.draft
+        if isinstance(self.delegation, dict) and self.delegation:
+            payload["delegation"] = self.delegation
         if self.reference:
             payload["reference"] = self.reference
         return payload
@@ -251,11 +263,16 @@ def _plan_with_hermes(
                     "enum": [
                         "global_capabilities",
                         "read_ordinances",
+                        "read_map_items",
                         "read_requirements",
+                        "capture_requirement_intro",
+                        "capture_requirement",
                         "create_requirement",
                         "confirm_pending_work",
                         "convert_feedback_to_requirement",
                         "retry_pending_action",
+                        "cancel_pending_action",
+                        "delegate_agent_office",
                         "suggest_admin_feedback",
                         "unknown",
                     ],
@@ -265,16 +282,20 @@ def _plan_with_hermes(
                     "enum": [
                         "none",
                         "semantic_search_ordinances",
+                        "get_map_items",
                         "list_requirements",
                         "create_requirement",
                         "confirm_pending_work",
                         "retry_pending_action",
+                        "cancel_pending_action",
+                        "create_agent_office_task",
                         "send_admin_feedback",
                     ],
                 },
                 "query": {"type": "string"},
                 "target": {"type": "object"},
                 "draft": {"type": "object"},
+                "delegation": {"type": "object"},
                 "reference": {"type": "string"},
                 "confidence": {"type": "number"},
             },
@@ -330,6 +351,7 @@ def _semantic_plan_from_payload(payload: object) -> SemanticTurnPlan | None:
         confidence = 0.0
     target = payload.get("target") if isinstance(payload.get("target"), dict) else None
     draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else None
+    delegation = payload.get("delegation") if isinstance(payload.get("delegation"), dict) else None
     query = payload.get("query")
     reference = payload.get("reference")
     return SemanticTurnPlan(
@@ -338,6 +360,7 @@ def _semantic_plan_from_payload(payload: object) -> SemanticTurnPlan | None:
         query=str(query).strip() if query else None,
         target=target,
         draft=draft,
+        delegation=delegation,
         reference=str(reference).strip() if reference else None,
         confidence=confidence,
         source="planner",
