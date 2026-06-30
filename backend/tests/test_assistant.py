@@ -962,6 +962,15 @@ def test_classify_turn_intent_maps_common_direct_requests():
     )
 
 
+def test_normative_choice_detection_is_token_aware():
+    assert assistant_service.is_normative_choice_request(
+        "Contrasta normativas de distintos municipios"
+    )
+    assert not assistant_service.is_normative_choice_request(
+        "Analiza el comportamiento normal de la plataforma"
+    )
+
+
 def test_invalid_planner_fallback_routes_new_need_to_requirements_intake(monkeypatch):
     conversation = SimpleNamespace(
         messages=[
@@ -2562,7 +2571,7 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert gateway.calls == []
 
 
-def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
+def test_broad_ordinance_question_asks_preference_before_searching(
     client,
     db,
     make_user,
@@ -2583,7 +2592,16 @@ def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
         municipality_id=municipality.id,
     )
     grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Dime qué materia o municipios quieres comparar.")],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -2600,17 +2618,192 @@ def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert assistant_message["routing"]["reason"] == "ordinance_action_needs_choice"
     assert assistant_message["routing"]["intent"] == "read_ordinances"
-    assert [action["tool"] for action in assistant_message["actions"]] == [
+    assert assistant_message["actions"] == []
+    assert assistant_message["content"] == "Dime qué materia o municipios quieres comparar."
+    assert "necesidades visibles" not in assistant_message["content"].lower()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "ordinance_action_choice"
+    assert state["pending_action"]["tool_input"]["municipality_name"] == "Fuentelcésped"
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["tools"] == []
+
+    followup = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Prefiero comparar por residuos."},
+        headers=headers_for(user),
+    )
+
+    assert followup.status_code == 200
+    followup_message = followup.json()["messages"][-1]
+    assert followup_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert [action["tool"] for action in followup_message["actions"]] == [
         "semantic_search_ordinances"
     ]
-    assert assistant_message["actions"][0]["input"]["municipality_name"] == "Fuentelcésped"
-    assert "necesidades visibles" not in assistant_message["content"].lower()
-    assert gateway.calls == []
+    followup_input = followup_message["actions"][0]["input"]
+    assert followup_input["municipality_name"] == "Fuentelcésped"
+    assert followup_input["topic"] == "residuos"
+    assert followup_input["query"] == "Prefiero comparar por residuos."
+    assert "Preferencia del usuario" not in followup_input["query"]
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    updated_state = json.loads(updated_conversation.state or "{}")
+    assert "pending_action" not in updated_state
+    assert len(gateway.calls) == 1
 
 
-def test_semantic_planner_ordinance_intent_executes_grounded_action(
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Comparar dos ordenanzas",
+        "quiero comparar dos ordenanzas",
+        "Analiza dos ordenanzas",
+        "Contrasta normativas de distintos municipios",
+    ],
+)
+def test_broad_ordinance_comparison_request_does_not_search_globally_when_planner_missing(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+    content,
+):
+    user = make_user(full_name="Alcalde Comparador")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    monkeypatch.setattr(assistant_service, "plan_turn", lambda **kwargs: None)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Indica las dos ordenanzas o la materia a comparar.")],
+                )
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": content},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "ordinance_action_needs_choice"
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert assistant_message["actions"] == []
+    assert assistant_message["content"] == "Indica las dos ordenanzas o la materia a comparar."
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "ordinance_action_choice"
+    assert state["pending_action"]["tool_input"]["municipality_name"] == "Fuentelcésped"
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["tools"] == []
+
+
+def test_semantic_planner_broad_ordinance_intent_asks_choice_before_action(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Dime la materia o municipios de referencia.")],
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_ordinances",
+            action="none",
+            query="normas comparables para adaptar al municipio",
+            target={"municipality_name": "Fuentelcésped"},
+            confidence=0.92,
+            source="planner",
+        ),
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Qué normas de otros pueblos me sirven para adaptar las de aquí?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert assistant_message["routing"]["reason"] == "ordinance_action_needs_choice"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["routing"]["semantic_plan"]["action"] == "none"
+    assert assistant_message["actions"] == []
+    assert assistant_message["content"] == "Dime la materia o municipios de referencia."
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "ordinance_action_choice"
+    assert state["pending_action"]["tool_input"] == {
+        "query": "normas comparables para adaptar al municipio",
+        "municipality_name": "Fuentelcésped",
+    }
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["tools"] == []
+
+
+def test_semantic_planner_specific_ordinance_intent_executes_grounded_action(
     client,
     db,
     make_user,
@@ -2639,8 +2832,8 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
         lambda **kwargs: assistant_planner.SemanticTurnPlan(
             intent="read_ordinances",
             action="semantic_search_ordinances",
-            query="normas comparables para adaptar al municipio",
-            target={"municipality_name": "Fuentelcésped"},
+            query="ordenanzas de residuos de Fuentelcésped",
+            target={"municipality_name": "Fuentelcésped", "topic": "residuos"},
             confidence=0.92,
             source="planner",
         ),
@@ -2653,9 +2846,7 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
 
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={
-            "content": "¿Qué normas de otros pueblos me sirven para adaptar las de aquí?"
-        },
+        json={"content": "Busca ordenanzas de residuos de aquí."},
         headers=headers_for(user),
     )
 
@@ -2668,8 +2859,9 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
         "semantic_search_ordinances"
     ]
     assert assistant_message["actions"][0]["input"] == {
-        "query": "normas comparables para adaptar al municipio",
+        "query": "ordenanzas de residuos de Fuentelcésped",
         "municipality_name": "Fuentelcésped",
+        "topic": "residuos",
     }
     assert gateway.calls == []
 
