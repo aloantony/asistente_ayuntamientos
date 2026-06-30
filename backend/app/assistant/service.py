@@ -67,6 +67,15 @@ GLOBAL_CAPABILITIES_READ_ONLY_REPLY = (
     "internos.\n\n"
     "No apruebo trámites ni valido decisiones oficiales."
 )
+ORDINANCE_CAPABILITIES_REPLY = (
+    "Sí. Puedo consultar el corpus interno de ordenanzas y reglamentos "
+    "municipales ya cargados y aprobados, citando fragmentos y fuente cuando "
+    "haya cobertura suficiente.\n\n"
+    "Para buscar bien, dime un municipio y una materia concreta, por ejemplo "
+    "tasas, terrazas, residuos, agua, caminos o animales. Si quieres comparar "
+    "municipios, también puedo ayudarte a contrastar los resultados, siempre "
+    "como apoyo y no como revisión jurídica oficial."
+)
 
 COMMON_SYSTEM_PROMPT = """Eres el asistente municipal de Asistente Ayuntamientos, una plataforma de gestión para ayuntamientos pequeños y medianos.
 
@@ -969,6 +978,51 @@ def is_ordinance_request(text: str) -> bool:
             "reglamento",
             "reglamentos",
         }
+    )
+
+
+def is_ordinance_capability_question(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized or not is_ordinance_request(text):
+        return False
+    asks_availability = any(
+        marker in normalized
+        for marker in {
+            "cuentas con",
+            "cuenta con",
+            "dispone",
+            "dispones",
+            "existen",
+            "hay",
+            "teneis",
+            "tenéis",
+            "tenemos",
+            "tienes",
+        }
+    )
+    if not asks_availability:
+        return False
+    asks_for_search = any(
+        marker in normalized
+        for marker in {
+            "adaptar",
+            "adecuada",
+            "buscar",
+            "busca",
+            "comparar",
+            "consulta",
+            "consultar",
+            "contrastar",
+            "que dice",
+            "qué dice",
+            "sobre",
+            "verificar",
+        }
+    )
+    if asks_for_search:
+        return False
+    return not any(
+        normalize_text(marker) in normalized for marker in ORDINANCE_TOPIC_MARKERS
     )
 
 
@@ -2733,6 +2787,8 @@ def is_global_capability_question(text: str) -> bool:
 def classify_turn_intent(text: str) -> TurnIntent:
     if is_global_capability_question(text):
         return TurnIntent("global_capabilities", "global_capabilities")
+    if is_ordinance_capability_question(text):
+        return TurnIntent("global_capabilities", "ordinance_capabilities")
     if is_ordinance_request(text):
         return TurnIntent("read_ordinances", "direct_ordinance_search")
     if is_requirement_capture_intro(text):
@@ -3228,6 +3284,23 @@ def try_handle_direct_turn(
                 reason="direct_feedback_to_requirement",
                 intent="create_requirement",
             )
+
+    if is_ordinance_capability_question(user_text):
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key=(
+                "consultation"
+                if allowed_agent_by_key(allowed_agents, "consultation") is not None
+                else capability_agent_key(allowed_agents)
+            ),
+            content=ORDINANCE_CAPABILITIES_REPLY,
+            reason="ordinance_capabilities",
+            intent="global_capabilities",
+            semantic_plan=semantic_plan,
+        )
 
     if turn_intent.kind == "global_capabilities" and not semantic_plan_blocks_legacy_routes(
         semantic_plan

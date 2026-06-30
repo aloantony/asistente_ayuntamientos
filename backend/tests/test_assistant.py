@@ -1113,6 +1113,77 @@ def test_global_capability_question_returns_product_capabilities_without_gateway
     assert gateway.calls == []
 
 
+def test_ordinance_availability_question_answers_without_corpus_search(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcaldesa Ordenanzas")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    municipality = Municipality(
+        name="Sasamón",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza reguladora de barracas",
+        topic="ordenanzas municipales",
+        ordinance_type="ordinance",
+        source_url="https://example.test/sasamon.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text("ordenanzas municipales Sasamón barracas")
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Fragmento 22",
+            text="Las disposiciones de esta ordenanza son de aplicación en Sasamón.",
+            source_url=ordinance.source_url,
+            review_status="approved",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "dispones de ordenanzas municipales?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "ordinance_capabilities"
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "ordenanzas" in normalized_content
+    assert "municipio" in normalized_content
+    assert "materia" in normalized_content
+    assert "sasamón" not in normalized_content
+    assert "fragmento 22" not in normalized_content
+    assert gateway.calls == []
+
+
 def test_semantic_planner_global_capabilities_uses_plan_without_gateway(
     client,
     assistant_user,
