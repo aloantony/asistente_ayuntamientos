@@ -1113,13 +1113,23 @@ def test_global_capability_question_returns_product_capabilities_without_gateway
     assert gateway.calls == []
 
 
-def test_ordinance_availability_question_answers_without_corpus_search(
+@pytest.mark.parametrize(
+    "content",
+    [
+        "dispones de ordenanzas municipales?",
+        "tienes ordenanzas municipales?",
+        "hay ordenanzas municipales?",
+        "cuentas con reglamentos municipales?",
+    ],
+)
+def test_ordinance_availability_variants_answer_without_corpus_search(
     client,
     db,
     make_user,
     make_organization,
     grant_permissions,
     use_gateway,
+    content,
 ):
     user = make_user(full_name="Alcaldesa Ordenanzas")
     organization = make_organization(name="Ayuntamiento de Fuentelcésped")
@@ -1166,7 +1176,7 @@ def test_ordinance_availability_question_answers_without_corpus_search(
 
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "dispones de ordenanzas municipales?"},
+        json={"content": content},
         headers=headers_for(user),
     )
 
@@ -1181,6 +1191,69 @@ def test_ordinance_availability_question_answers_without_corpus_search(
     assert "materia" in normalized_content
     assert "sasamón" not in normalized_content
     assert "fragmento 22" not in normalized_content
+    assert gateway.calls == []
+
+
+def test_map_availability_question_answers_without_map_items_search(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Mapa")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "map.view", "map.edit", "projects.view_all"],
+    )
+    project = Project(
+        organization_id=organization.id,
+        name="Proyecto secreto de prueba de mapa",
+        description="Debe existir para detectar filtrado accidental.",
+        status="active",
+    )
+    db.add(project)
+    db.commit()
+    assert client.post(
+        "/geo/entity-locations",
+        json={
+            "entity_type": "project",
+            "entity_id": project.id,
+            "role": "primary",
+            "location": {
+                "label": "Plaza Mayor de Fuentelcésped",
+                "latitude": 41.5917,
+                "longitude": -3.6409,
+            },
+        },
+        headers=headers_for(user),
+    ).status_code == 201
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "hay mapa municipal?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["routing"]["reason"] == "map_capabilities"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "mapa" in normalized_content
+    assert "ubic" in normalized_content
+    assert "proyecto secreto de prueba de mapa" not in normalized_content
+    assert "/mapa?entity_type=project" not in assistant_message["content"]
     assert gateway.calls == []
 
 
@@ -1366,6 +1439,106 @@ def test_semantic_planner_map_intent_executes_action_policy(
         "limit": 5,
     }
     assert "Plan de accesibilidad" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_show_map_items_question_still_executes_map_tool(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcaldesa Mapa Explícito")
+    organization = make_organization(name="Ayuntamiento Mapa Explícito")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "map.view", "map.edit", "projects.view_all"],
+    )
+    project = Project(
+        organization_id=organization.id,
+        name="Proyecto visible del mapa municipal",
+        description="Proyecto con ubicación para consulta explícita.",
+        status="active",
+    )
+    db.add(project)
+    db.commit()
+    assert client.post(
+        "/geo/entity-locations",
+        json={
+            "entity_type": "project",
+            "entity_id": project.id,
+            "role": "primary",
+            "location": {
+                "label": "Casa consistorial",
+                "latitude": 41.5917,
+                "longitude": -3.6404,
+            },
+        },
+        headers=headers_for(user),
+    ).status_code == 201
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "muéstrame los proyectos del mapa municipal"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "read_map_items"
+    assert assistant_message["routing"]["reason"] == "action_policy_read_map_items"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "get_map_items"
+    ]
+    assert assistant_message["actions"][0]["input"]["entity_type"] == "project"
+    assert "Proyecto visible del mapa municipal" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_map_availability_question_vetoes_semantic_read_map_plan(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_map_items",
+            action="get_map_items",
+            confidence=0.9,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "hay mapa municipal?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["routing"]["reason"] == "map_capabilities"
+    assert assistant_message["actions"] == []
     assert gateway.calls == []
 
 
@@ -1751,6 +1924,38 @@ def test_classify_turn_intent_maps_common_direct_requests():
     )
 
 
+@pytest.mark.parametrize(
+    ("text", "unexpected_kind", "unexpected_reason"),
+    [
+        ("hay mapa municipal?", "read_map_items", "direct_map_items"),
+        ("tienes mapa municipal?", "read_map_items", "direct_map_items"),
+        ("dispones de mapa municipal?", "read_map_items", "direct_map_items"),
+        ("cuentas con mapa municipal?", "read_map_items", "direct_map_items"),
+        ("la plataforma tiene mapa municipal?", "read_map_items", "direct_map_items"),
+        (
+            "la plataforma soporta necesidades registradas?",
+            "read_requirements",
+            "direct_list_requirements",
+        ),
+        (
+            "puedes trabajar con necesidades registradas?",
+            "read_requirements",
+            "direct_list_requirements",
+        ),
+        ("tienes ordenanzas municipales?", "read_ordinances", "direct_ordinance_search"),
+        ("hay ordenanzas municipales?", "read_ordinances", "direct_ordinance_search"),
+    ],
+)
+def test_availability_questions_do_not_classify_as_broad_reads(
+    text,
+    unexpected_kind,
+    unexpected_reason,
+):
+    intent = assistant_service.classify_turn_intent(text)
+
+    assert (intent.kind, intent.reason) != (unexpected_kind, unexpected_reason)
+
+
 def test_requirement_candidate_matches_ignores_generic_capture_words():
     requirements = [
         {
@@ -2049,6 +2254,91 @@ def test_semantic_planner_requirements_intent_executes_action_policy(
     assert action["tool"] == "list_requirements"
     assert action["input"] == {"organization_id": organization.id}
     assert "Revisión de licencias" in assistant_message["content"]
+    assert gateway.calls == []
+
+
+def test_requirement_capability_question_answers_without_listing_requirements(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Necesidad secreta no debe salir",
+        summary="Existe solo para detectar una lectura accidental.",
+        status="draft",
+        priority="high",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "la plataforma soporta necesidades registradas?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["routing"]["reason"] == "requirement_capabilities"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "necesidades" in normalized_content
+    assert "borrador" in normalized_content
+    assert "necesidad secreta no debe salir" not in normalized_content
+    assert gateway.calls == []
+
+
+def test_registered_requirements_question_still_lists_requirements(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Necesidad registrada visible",
+        summary="Debe seguir saliendo cuando la consulta es organizacional.",
+        status="draft",
+        priority="medium",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "qué necesidades tenemos registradas?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "read_requirements"
+    assert assistant_message["routing"]["reason"] == "action_policy_read_requirements"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements"
+    ]
+    assert "Necesidad registrada visible" in assistant_message["content"]
     assert gateway.calls == []
 
 
@@ -3929,6 +4219,44 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
         "query": "normas comparables para adaptar al municipio",
         "municipality_name": "Fuentelcésped",
     }
+    assert gateway.calls == []
+
+
+def test_ordinance_availability_question_vetoes_semantic_read_ordinance_plan(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_ordinances",
+            action="semantic_search_ordinances",
+            confidence=0.9,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "tienes ordenanzas municipales?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["routing"]["reason"] == "ordinance_capabilities"
+    assert assistant_message["actions"] == []
     assert gateway.calls == []
 
 

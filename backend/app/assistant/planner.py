@@ -47,8 +47,14 @@ intención estructurada que el backend pueda validar y ejecutar. No llames
 herramientas de producto. Devuelve siempre una llamada a plan_turn.
 
 Reglas:
+- Si el usuario pregunta si existe una capacidad o disponibilidad genérica
+  (por ejemplo “¿hay mapa municipal?”, “¿tienes ordenanzas?”, “¿la plataforma
+  soporta necesidades registradas?”) y no pide listar/consultar/comparar un dato
+  concreto, usa intent=global_capabilities y action=none.
 - Si pide comparar o consultar ordenanzas/reglamentos/normativa municipal, usa
   intent=read_ordinances y action=semantic_search_ordinances.
+- Si pide listar, mostrar, consultar, comparar o localizar datos concretos de
+  mapa, necesidades u ordenanzas, usa la intención de lectura correspondiente.
 - Si pide consultar elementos geolocalizados del mapa municipal, usa
   intent=read_map_items y action=get_map_items.
 - Si el usuario pide ver necesidades/requisitos ya registrados, usa intent=read_requirements.

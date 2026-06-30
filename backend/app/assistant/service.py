@@ -76,6 +76,22 @@ ORDINANCE_CAPABILITIES_REPLY = (
     "municipios, también puedo ayudarte a contrastar los resultados, siempre "
     "como apoyo y no como revisión jurídica oficial."
 )
+MAP_CAPABILITIES_REPLY = (
+    "Sí. Puedo ayudarte con el mapa municipal cuando haya proyectos, "
+    "necesidades u otros elementos con ubicación registrada. Puedo mostrarte "
+    "elementos visibles, darte el enlace para abrir el mapa centrado y ayudarte "
+    "a localizar proyectos o necesidades concretas.\n\n"
+    "Si quieres consultarlo ahora, dime qué quieres ver: proyectos, necesidades "
+    "o una ubicación concreta."
+)
+REQUIREMENT_CAPABILITIES_REPLY = (
+    "Sí. Puedo trabajar con necesidades/requisitos registrados: consultar los "
+    "visibles, ayudarte a estructurar una necesidad nueva y convertir una "
+    "conversación en un borrador cuando tus permisos lo permitan.\n\n"
+    "Si quieres consultar las necesidades de tu ayuntamiento, pídeme listarlas; "
+    "si quieres crear o aterrizar una nueva, cuéntame el problema y el resultado "
+    "esperado."
+)
 
 COMMON_SYSTEM_PROMPT = """Eres el asistente municipal de Asistente Ayuntamientos, una plataforma de gestión para ayuntamientos pequeños y medianos.
 
@@ -244,6 +260,14 @@ class ActionPolicy:
     agent_key: str
     tool_name: str
     reason: str
+
+
+@dataclass(frozen=True)
+class DomainCapabilityQuestion:
+    domain: str
+    reason: str
+    reply: str
+    preferred_agent_key: str | None = None
 
 
 def build_tool_prompt_block(agent_tools: list[ToolSpec]) -> str:
@@ -1024,6 +1048,153 @@ def is_ordinance_capability_question(text: str) -> bool:
     return not any(
         normalize_text(marker) in normalized for marker in ORDINANCE_TOPIC_MARKERS
     )
+
+
+def asks_availability_or_capability(normalized: str) -> bool:
+    return any(
+        marker in normalized
+        for marker in {
+            "cuenta con",
+            "cuentas con",
+            "dispone",
+            "dispones",
+            "existe",
+            "existen",
+            "hay",
+            "puede trabajar",
+            "puedes trabajar",
+            "se puede",
+            "soporta",
+            "teneis",
+            "tenemos",
+            "tiene",
+            "tienes",
+        }
+    )
+
+
+def asks_for_concrete_read(normalized: str) -> bool:
+    return any(
+        marker in normalized
+        for marker in {
+            "abre",
+            "abrir",
+            "busca",
+            "buscar",
+            "compara",
+            "comparar",
+            "consulta",
+            "consultar",
+            "contrasta",
+            "contrastar",
+            "donde",
+            "donde esta",
+            "lista",
+            "listar",
+            "localiza",
+            "localizar",
+            "muestra",
+            "muestrame",
+            "que dice",
+            "que hay en",
+            "que necesidades tenemos",
+            "que requisitos tenemos",
+            "verifica",
+            "verificar",
+        }
+    )
+
+
+def mentions_map_domain(normalized: str) -> bool:
+    return any(
+        marker in normalized
+        for marker in {
+            "mapa",
+            "mapa municipal",
+        }
+    )
+
+
+def mentions_map_specific_read_target(normalized: str) -> bool:
+    tokens = set(TOKEN_PATTERN.findall(normalized))
+    return bool(
+        tokens
+        & {
+            "elemento",
+            "elementos",
+            "necesidad",
+            "necesidades",
+            "proyecto",
+            "proyectos",
+            "requisito",
+            "requisitos",
+            "ubicacion",
+            "ubicaciones",
+            "ubicada",
+            "ubicado",
+        }
+    )
+
+
+def is_map_capability_question(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized or not mentions_map_domain(normalized):
+        return False
+    if not asks_availability_or_capability(normalized):
+        return False
+    if asks_for_concrete_read(normalized):
+        return False
+    return not mentions_map_specific_read_target(normalized)
+
+
+def asks_platform_requirement_capability(normalized: str) -> bool:
+    return any(
+        marker in normalized
+        for marker in {
+            "la plataforma",
+            "plataforma",
+            "puede trabajar con",
+            "puedes trabajar con",
+            "se puede trabajar con",
+            "soporta",
+        }
+    )
+
+
+def is_requirement_capability_question(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized or not mentions_need_or_requirement(normalized):
+        return False
+    if not asks_availability_or_capability(normalized):
+        return False
+    if asks_for_concrete_read(normalized):
+        return False
+    return asks_platform_requirement_capability(normalized)
+
+
+def detect_domain_capability_question(text: str) -> DomainCapabilityQuestion | None:
+    if is_ordinance_capability_question(text):
+        return DomainCapabilityQuestion(
+            domain="ordinances",
+            reason="ordinance_capabilities",
+            reply=ORDINANCE_CAPABILITIES_REPLY,
+            preferred_agent_key="consultation",
+        )
+    if is_map_capability_question(text):
+        return DomainCapabilityQuestion(
+            domain="map",
+            reason="map_capabilities",
+            reply=MAP_CAPABILITIES_REPLY,
+            preferred_agent_key="consultation",
+        )
+    if is_requirement_capability_question(text):
+        return DomainCapabilityQuestion(
+            domain="requirements",
+            reason="requirement_capabilities",
+            reply=REQUIREMENT_CAPABILITIES_REPLY,
+            preferred_agent_key="requirements_intake",
+        )
+    return None
 
 
 def is_map_items_request(text: str) -> bool:
@@ -2785,10 +2956,11 @@ def is_global_capability_question(text: str) -> bool:
 
 
 def classify_turn_intent(text: str) -> TurnIntent:
+    domain_capability = detect_domain_capability_question(text)
+    if domain_capability is not None:
+        return TurnIntent("global_capabilities", domain_capability.reason)
     if is_global_capability_question(text):
         return TurnIntent("global_capabilities", "global_capabilities")
-    if is_ordinance_capability_question(text):
-        return TurnIntent("global_capabilities", "ordinance_capabilities")
     if is_ordinance_request(text):
         return TurnIntent("read_ordinances", "direct_ordinance_search")
     if is_requirement_capture_intro(text):
@@ -3285,19 +3457,22 @@ def try_handle_direct_turn(
                 intent="create_requirement",
             )
 
-    if is_ordinance_capability_question(user_text):
+    domain_capability = detect_domain_capability_question(user_text)
+    if domain_capability is not None:
+        preferred_agent_key = domain_capability.preferred_agent_key
         return persist_direct_prompt(
             db,
             conversation,
             allowed_agents,
             state,
             agent_key=(
-                "consultation"
-                if allowed_agent_by_key(allowed_agents, "consultation") is not None
+                preferred_agent_key
+                if preferred_agent_key is not None
+                and allowed_agent_by_key(allowed_agents, preferred_agent_key) is not None
                 else capability_agent_key(allowed_agents)
             ),
-            content=ORDINANCE_CAPABILITIES_REPLY,
-            reason="ordinance_capabilities",
+            content=domain_capability.reply,
+            reason=domain_capability.reason,
             intent="global_capabilities",
             semantic_plan=semantic_plan,
         )
