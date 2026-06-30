@@ -239,6 +239,71 @@ _TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "create_agent_office_task",
+        "description": (
+            "Crea una tarea supervisada en la oficina interna de Anacleto para "
+            "trabajo diferido, multi-paso o que requiera aprobación humana. "
+            "Úsala cuando el usuario pida encargar, preparar o dejar para "
+            "revisión un trabajo que no deba ejecutarse como una consulta inmediata."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización donde se crea la tarea supervisada",
+                },
+                "title": {"type": "string", "description": "Título breve de la tarea"},
+                "description": {
+                    "type": "string",
+                    "description": "Descripción accionable del trabajo a preparar",
+                },
+                "department": {
+                    "type": "string",
+                    "enum": [
+                        "front_desk",
+                        "requirements",
+                        "ordinances",
+                        "documents",
+                        "projects",
+                        "map",
+                        "admin_feedback",
+                        "daily_briefing",
+                    ],
+                    "description": "Capacidad interna sugerida; si falta se usa triage",
+                },
+                "requested_action": {
+                    "type": "string",
+                    "description": "Acción backend solicitada, por ejemplo triage o list_requirements",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                    "description": "Prioridad de la tarea",
+                },
+                "approval_policy": {
+                    "type": "string",
+                    "enum": ["never", "before_execution", "after_draft", "always"],
+                    "description": "Política de aprobación humana",
+                },
+                "requires_human_approval": {
+                    "type": "boolean",
+                    "description": "Si la tarea debe quedar pendiente de aprobación humana",
+                },
+                "input": {
+                    "type": "object",
+                    "description": "Payload estructurado para la futura ejecución",
+                },
+                "due_at": {"type": "string", "description": "Fecha límite ISO opcional"},
+                "scheduled_for": {
+                    "type": "string",
+                    "description": "Fecha programada ISO opcional",
+                },
+            },
+            "required": ["organization_id", "title", "description"],
+        },
+    },
+    {
         "name": "send_admin_feedback",
         "description": (
             "Envía al administrador feedback explícito del usuario sobre la "
@@ -1245,6 +1310,57 @@ def _send_admin_feedback(
     }
 
 
+def _parse_optional_datetime(value: object) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _create_agent_office_task(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    from app.agent_office.service import create_task
+
+    input_payload = tool_input.get("input")
+    if input_payload is not None and not isinstance(input_payload, dict):
+        raise ValueError("input debe ser un objeto")
+
+    task = create_task(
+        db,
+        current_user,
+        organization_id=int(tool_input["organization_id"]),
+        title=str(tool_input["title"]).strip(),
+        description=str(tool_input["description"]).strip(),
+        department=tool_input.get("department"),
+        requested_action=tool_input.get("requested_action"),
+        priority=str(tool_input.get("priority") or "medium"),
+        approval_policy=tool_input.get("approval_policy"),
+        requires_human_approval=tool_input.get("requires_human_approval"),
+        input_payload=input_payload,
+        due_at=_parse_optional_datetime(tool_input.get("due_at")),
+        scheduled_for=_parse_optional_datetime(tool_input.get("scheduled_for")),
+        source_conversation_id=context.conversation_id,
+        source_message_id=context.user_message_id,
+    )
+
+    return {
+        "id": task.id,
+        "organization_id": task.organization_id,
+        "title": task.title,
+        "department": task.department,
+        "requested_action": task.requested_action,
+        "status": task.status,
+        "approval_policy": task.approval_policy,
+        "requires_human_approval": task.requires_human_approval,
+        "next_step": "human_approval" if task.requires_human_approval else "ready_to_run",
+    }
+
+
 def _clean_transversal_text(name: str, value: object, max_chars: int) -> str:
     text = str(value).strip()
     if not text:
@@ -1461,6 +1577,7 @@ _EXECUTORS = {
     "update_requirement": _update_requirement,
     "add_requirement_message": _add_requirement_message,
     "propose_memory_entry": _propose_memory_entry,
+    "create_agent_office_task": _create_agent_office_task,
     "send_admin_feedback": _send_admin_feedback,
     "propose_transversal_feature": _propose_transversal_feature,
     "list_available_transversal_features": _list_available_transversal_features,
@@ -1526,6 +1643,12 @@ _TOOL_METADATA: dict[str, dict] = {
         "read_only": False,
         "domain": "memory",
         "required_permission": "assistant.memory.propose",
+    },
+    "create_agent_office_task": {
+        "label": "Crear tarea supervisada",
+        "read_only": False,
+        "domain": "agent_office",
+        "required_permission": "agent_office.create",
     },
     "send_admin_feedback": {
         "label": "Enviar feedback al admin",

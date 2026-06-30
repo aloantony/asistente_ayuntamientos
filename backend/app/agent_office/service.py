@@ -24,6 +24,7 @@ from app.db.session import SessionLocal
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization
 from app.rbac.permissions import has_permission
+from app.requirements.models import Requirement
 from app.users.models import User
 
 
@@ -167,6 +168,18 @@ DEFAULT_ACTION_BY_DEPARTMENT = {
     "admin_feedback": "send_admin_feedback",
     "daily_briefing": "daily_briefing",
 }
+ACTION_TO_DEPARTMENT = {
+    "semantic_search_ordinances": "ordinances",
+    "list_projects": "projects",
+    "get_map_items": "map",
+    "send_admin_feedback": "admin_feedback",
+    "daily_briefing": "daily_briefing",
+    "list_requirements": "requirements",
+    "get_requirement": "requirements",
+    "create_requirement": "requirements",
+    "update_requirement": "requirements",
+    "add_requirement_message": "requirements",
+}
 TOOL_ACTIONS = {
     "list_organizations",
     "list_projects",
@@ -245,6 +258,7 @@ def get_task_for_user(db: Session, current_user: User, task_id: int) -> AgentOff
     task = db.scalar(
         select(AgentOfficeTask)
         .options(selectinload(AgentOfficeTask.events))
+        .execution_options(populate_existing=True)
         .where(AgentOfficeTask.id == task_id)
     )
     if task is None or not user_can_view_task(db, current_user, task):
@@ -316,34 +330,8 @@ def add_task_event(
 
 def infer_department(text: str, requested_action: str | None = None) -> str:
     action = (requested_action or "").strip().lower()
-    if action in {"semantic_search_ordinances"}:
-        return "ordinances"
-    if action in {"list_projects"}:
-        return "projects"
-    if action in {"get_map_items"}:
-        return "map"
-    if action in {"send_admin_feedback"}:
-        return "admin_feedback"
-    if action in {"daily_briefing"}:
-        return "daily_briefing"
-    if action in {"list_requirements", "get_requirement", "create_requirement", "update_requirement", "add_requirement_message"}:
-        return "requirements"
-
-    normalized = text.lower()
-    if any(word in normalized for word in {"ordenanza", "ordenanzas", "reglamento", "normativa"}):
-        return "ordinances"
-    if any(word in normalized for word in {"mapa", "ubicación", "ubicacion", "coordenada"}):
-        return "map"
-    if any(word in normalized for word in {"proyecto", "expediente"}):
-        return "projects"
-    if any(word in normalized for word in {"documento", "archivo", "pdf"}):
-        return "documents"
-    if any(word in normalized for word in {"feedback", "fallo", "bug", "error", "mejora"}):
-        return "admin_feedback"
-    if any(word in normalized for word in {"informe diario", "briefing", "resumen diario"}):
-        return "daily_briefing"
-    if any(word in normalized for word in {"requisito", "requisitos", "necesidad", "necesidades"}):
-        return "requirements"
+    if action in ACTION_TO_DEPARTMENT:
+        return ACTION_TO_DEPARTMENT[action]
     return "front_desk"
 
 
@@ -417,7 +405,7 @@ def create_task(
     )
     agent = OFFICE_AGENTS[normalized_department]
     input_payload = dict(input_payload or {})
-    input_payload.setdefault("organization_id", organization_id)
+    input_payload["organization_id"] = organization_id
 
     task = AgentOfficeTask(
         organization_id=organization_id,
@@ -432,7 +420,7 @@ def create_task(
         assigned_agent_key=agent.key,
         routing_reason=(
             f"Routed to {agent.key} from requested_action={action!r}; "
-            "Obsidian/external knowledge graph excluded by design."
+            "internal task routing; Obsidian/external knowledge graph excluded by design."
         ),
         input_json=_json_dumps(input_payload),
         due_at=due_at,
@@ -447,7 +435,7 @@ def create_task(
         db,
         task,
         "created",
-        "Task created and routed to a specialist municipal agent.",
+        "Task created and routed to an internal municipal capability.",
         payload={
             "department": normalized_department,
             "requested_action": action,
@@ -509,7 +497,7 @@ def mark_task_queued(db: Session, current_user: User, task: AgentOfficeTask) -> 
 
 def _tool_input_for_task(task: AgentOfficeTask) -> dict:
     tool_input = dict(task.input)
-    tool_input.setdefault("organization_id", task.organization_id)
+    tool_input["organization_id"] = task.organization_id
     if task.requested_action == "semantic_search_ordinances":
         tool_input.setdefault("query", task.description)
     if task.requested_action == "send_admin_feedback":
@@ -518,6 +506,36 @@ def _tool_input_for_task(task: AgentOfficeTask) -> dict:
         tool_input.setdefault("description", task.description)
         tool_input.setdefault("priority", task.priority)
     return tool_input
+
+
+REQUIREMENT_ID_SCOPED_ACTIONS = frozenset(
+    {"get_requirement", "update_requirement", "add_requirement_message"}
+)
+
+
+def _validate_task_tool_scope(
+    db: Session,
+    task: AgentOfficeTask,
+    tool_input: dict,
+) -> None:
+    if task.requested_action not in REQUIREMENT_ID_SCOPED_ACTIONS:
+        return
+
+    raw_requirement_id = tool_input.get("requirement_id")
+    if raw_requirement_id is None:
+        return
+    try:
+        requirement_id = int(raw_requirement_id)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Invalid requirement_id for scoped agent office task") from error
+
+    requirement_organization_id = db.scalar(
+        select(Requirement.organization_id).where(Requirement.id == requirement_id)
+    )
+    if requirement_organization_id is None:
+        return
+    if requirement_organization_id != task.organization_id:
+        raise ValueError("Referenced requirement is outside task organization")
 
 
 def _decode_tool_content(content: str) -> Any:
@@ -535,11 +553,13 @@ def _run_tool_action(db: Session, user: User, task: AgentOfficeTask) -> dict:
         raise ValueError(
             f"Action {task.requested_action} is not available for department {task.department}"
         )
+    tool_input = _tool_input_for_task(task)
+    _validate_task_tool_scope(db, task, tool_input)
     result = execute_tool(
         db,
         user,
         task.requested_action,
-        _tool_input_for_task(task),
+        tool_input,
         ToolContext(
             conversation_id=task.source_conversation_id,
             user_message_id=task.source_message_id,

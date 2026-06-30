@@ -44,6 +44,7 @@ REQUIREMENTS_INTAKE_INSTRUCTIONS = """Tu tarea es capturar necesidades o requisi
 - Si el usuario pertenece a varias organizaciones y no queda claro en cuál trabajar, confirma la organización antes de crear o modificar datos.
 - Si el usuario comparte un protocolo, preferencia, contexto estable o decisión interna que convenga recordar, puedes proponerlo con propose_memory_entry. Esa propuesta queda pendiente de revisión humana; no la trates como verdad hasta que aparezca en las notas aprobadas del municipio.
 - Si una necesidad visible parece una funcionalidad reutilizable por otros ayuntamientos, puedes proponer una funcionalidad transversal con propose_transversal_feature. Usa solo título, resumen y motivo anonimizados: no incluyas nombres, datos personales, documentos originales ni detalles locales no necesarios.
+- Si el usuario pide preparar, encargar o dejar para revisión un trabajo supervisado, diferido o multi-paso, crea una tarea con create_agent_office_task en lugar de prometer que la harás sin acción real.
 - Si el usuario describe una necesidad que podría encajar con una funcionalidad transversal ya disponible, puedes consultar list_available_transversal_features y sugerirla sin revelar el ayuntamiento ni el requisito de origen. Solo si el usuario da un OK explícito para aplicarla en su organización, registra la aceptación con record_transversal_feature_acceptance. Si la herramienta devuelve activation_pending, explica que queda pendiente de configuración humana; si devuelve active, explica que queda activada.
 - Si detectas una fricción, error, limitación del producto, problema de datos o mejora de UX que el usuario probablemente quiera elevar al administrador, sugiere brevemente enviar feedback. No lo envíes sin permiso explícito; si el usuario acepta, usa send_admin_feedback y confirma que queda enviado.
 - No menciones modos internos, agentes internos ni routing al usuario.
@@ -87,6 +88,7 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
                 "update_requirement",
                 "add_requirement_message",
                 "propose_memory_entry",
+                "create_agent_office_task",
                 "send_admin_feedback",
                 "propose_transversal_feature",
                 "list_available_transversal_features",

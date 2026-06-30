@@ -4,22 +4,24 @@ Actualizado: 2026-06-29.
 
 ## Alcance
 
-La oficina de agentes v1 añade una capa de tareas delegables a agentes municipales especialistas. Obsidian queda fuera del diseño.
+La oficina de agentes v1 añade una capa interna de tareas delegables para Anacleto. Obsidian queda fuera del diseño.
 
 El objetivo es una cola auditable de trabajo: cada acción usa permisos del usuario, queda registrada y puede exigir aprobación humana.
 
-## Agentes v1
+Anacleto sigue siendo el único interlocutor visible. Los departamentos de la oficina son capacidades internas para enrutar, aprobar y ejecutar trabajo; no deben presentarse como voces separadas ante el usuario.
 
-| Departamento | Agente | Alcance |
+## Capacidades internas v1
+
+| Departamento | Capacidad interna | Alcance |
 | --- | --- | --- |
 | `front_desk` | Anacleto Recepción | Recibir peticiones, convertirlas en tareas y derivarlas. |
-| `requirements` | Agente de necesidades | Consultar, crear y actualizar necesidades como borradores supervisados. |
-| `ordinances` | Agente de ordenanzas | Buscar normativa ya importada, aprobada y vectorizada. |
-| `documents` | Agente documental | Preparar planes de trabajo documental; lectura automática de documentos queda fuera de v1. |
-| `projects` | Agente de proyectos | Consultar proyectos visibles. |
-| `map` | Agente de mapa | Consultar ubicaciones visibles de proyectos y necesidades. |
-| `admin_feedback` | Agente de feedback | Registrar fricciones, bugs y mejoras para administración. |
-| `daily_briefing` | Agente de informe diario | Preparar resúmenes diarios de proyectos y necesidades visibles. |
+| `requirements` | Necesidades | Consultar, crear y actualizar necesidades como borradores supervisados. |
+| `ordinances` | Ordenanzas | Buscar normativa ya importada, aprobada y vectorizada. |
+| `documents` | Documental | Preparar planes de trabajo documental; lectura automática de documentos queda fuera de v1. |
+| `projects` | Proyectos | Consultar proyectos visibles. |
+| `map` | Mapa | Consultar ubicaciones visibles de proyectos y necesidades. |
+| `admin_feedback` | Feedback | Registrar fricciones, bugs y mejoras para administración. |
+| `daily_briefing` | Informe diario | Preparar resúmenes diarios de proyectos y necesidades visibles. |
 
 ## Permisos
 
@@ -34,7 +36,7 @@ Las tareas se delimitan por `organization_id`. Aprobar y ejecutar exige permiso 
 ## Flujo
 
 1. Se crea una tarea con organización, título, descripción, departamento opcional y acción solicitada.
-2. El backend infiere el departamento si no viene especificado.
+2. Si no hay departamento explícito, el backend solo infiere por `requested_action`; si tampoco hay acción estructurada, entra por `front_desk`/`triage`. No se enruta semánticamente por palabras sueltas del texto libre.
 3. Las acciones que modifican datos fuerzan aprobación humana aunque el cliente pida `approval_policy=never`.
 4. Las tareas aprobadas se ejecutan con el usuario solicitante como contexto RBAC.
 5. Cada cambio de estado crea un evento auditable.
@@ -63,6 +65,7 @@ La rutina v1 es `daily_briefing`. Puede crear una tarea aprobada de informe diar
 - Sin Obsidian.
 - Hermes Agent o el modelo no deciden permisos.
 - Las herramientas reales siguen en el backend propio.
+- El texto libre no debe activar rutas de producto por marcadores como “ordenanza”, “mapa” o “necesidad”; esa decisión pertenece al planner semántico de Anacleto o a una acción estructurada.
 - El usuario solicitante es el contexto de ejecución RBAC.
 - Las acciones que modifican datos requieren aprobación humana por defecto.
 - Los documentos originales siguen fuera de llamadas a IA.

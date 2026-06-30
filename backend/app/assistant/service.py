@@ -127,6 +127,19 @@ TOOL_INTENT_STOPWORDS = {
     "visibles",
     "y",
 }
+REQUIREMENT_MATCH_STOPWORDS = TOOL_INTENT_STOPWORDS | {
+    "gustaria",
+    "gustaría",
+    "necesidad",
+    "necesidades",
+    "quiero",
+    "querria",
+    "querría",
+    "registrar",
+    "registro",
+    "requisito",
+    "requisitos",
+}
 AFFIRMATIVE_TEXTS = {
     "adelante",
     "claro",
@@ -1019,6 +1032,10 @@ def is_requirement_capture_intro(text: str) -> bool:
             "quiero contarte un nuevo requisito",
             "quiero decirte algo que me gustaria",
             "quiero decirte algo que me gustaría",
+            "registrar una necesidad",
+            "registrar una nueva necesidad",
+            "registrar un requisito",
+            "registrar un nuevo requisito",
             "de acuerdo",
         }
     )
@@ -1144,9 +1161,11 @@ def requirement_content_prompt(organization: Organization, draft: dict | None = 
             f"Me falta el título breve para crear la necesidad en {organization.name}."
         )
     if missing == ["problema"]:
+        title = str(draft.get("title") or "").strip()
+        title_context = f" para “{title}”" if title else ""
         return (
-            f"Me falta el problema o necesidad que queréis resolver para crear "
-            f"la necesidad en {organization.name}."
+            f"Me falta el problema o necesidad que queréis resolver{title_context} "
+            f"para crear la necesidad en {organization.name}."
         )
     return ""
 
@@ -1207,7 +1226,7 @@ def requirement_candidate_matches(requirements: list, text: str, limit: int = 3)
     query_tokens = {
         token
         for token in TOKEN_PATTERN.findall(normalize_text(text))
-        if len(token) >= 4 and token not in TOOL_INTENT_STOPWORDS
+        if len(token) >= 4 and token not in REQUIREMENT_MATCH_STOPWORDS
     }
     if not query_tokens:
         return []
@@ -1498,6 +1517,273 @@ def semantic_plan_ordinance_input(
     return tool_input
 
 
+def semantic_plan_blocks_legacy_routes(plan: SemanticTurnPlan | None) -> bool:
+    if (
+        plan is None
+        or plan.source != "planner"
+        or plan.confidence < 0.5
+    ):
+        return False
+    return plan.intent not in {"confirm_pending_work", "retry_pending_action"}
+
+
+def semantic_plan_confirms_pending_work(plan: SemanticTurnPlan | None) -> bool:
+    return (
+        plan is not None
+        and plan.source == "planner"
+        and plan.confidence >= 0.5
+        and plan.intent == "confirm_pending_work"
+        and plan.action in {"confirm_pending_work", "none"}
+    )
+
+
+def semantic_plan_retries_pending_action(plan: SemanticTurnPlan | None) -> bool:
+    return (
+        plan is not None
+        and plan.source == "planner"
+        and plan.confidence >= 0.5
+        and plan.intent == "retry_pending_action"
+        and plan.action in {"retry_pending_action", "none"}
+    )
+
+
+def semantic_plan_cancels_pending_action(plan: SemanticTurnPlan | None) -> bool:
+    return (
+        plan is not None
+        and plan.source == "planner"
+        and plan.confidence >= 0.5
+        and plan.intent == "cancel_pending_action"
+        and plan.action in {"cancel_pending_action", "none"}
+    )
+
+
+def semantic_plan_requirements_organization(
+    plan: SemanticTurnPlan,
+    organizations: list[Organization],
+    selected_organization: Organization | None,
+) -> Organization | None:
+    if plan.intent != "read_requirements":
+        return None
+    if plan.action not in {"list_requirements", "none"}:
+        return None
+    if plan.confidence < 0.5:
+        return None
+
+    target = plan.target if isinstance(plan.target, dict) else {}
+    raw_organization_id = target.get("organization_id") or target.get("organization")
+    try:
+        organization_id = int(raw_organization_id) if raw_organization_id is not None else None
+    except (TypeError, ValueError):
+        organization_id = None
+    return organization_by_id(organizations, organization_id) or selected_organization
+
+
+def semantic_plan_capture_requirement_organization(
+    plan: SemanticTurnPlan,
+    organizations: list[Organization],
+    selected_organization: Organization | None,
+) -> Organization | None:
+    if plan.intent != "capture_requirement":
+        return None
+    if plan.action not in {"list_requirements", "capture_requirement", "none"}:
+        return None
+    if plan.confidence < 0.5:
+        return None
+
+    target = plan.target if isinstance(plan.target, dict) else {}
+    raw_organization_id = target.get("organization_id") or target.get("organization")
+    try:
+        organization_id = int(raw_organization_id) if raw_organization_id is not None else None
+    except (TypeError, ValueError):
+        organization_id = None
+    return organization_by_id(organizations, organization_id) or selected_organization
+
+
+def semantic_plan_map_items_input(
+    plan: SemanticTurnPlan,
+    selected_organization: Organization | None,
+) -> dict | None:
+    if plan.intent != "read_map_items":
+        return None
+    if plan.action not in {"get_map_items", "none"}:
+        return None
+    if plan.confidence < 0.5:
+        return None
+
+    target = plan.target if isinstance(plan.target, dict) else {}
+    try:
+        limit = int(target.get("limit") or 5)
+    except (TypeError, ValueError):
+        limit = 5
+    tool_input: dict[str, object] = {"limit": limit}
+    for key in ("entity_type", "entity_id", "organization_id"):
+        if target.get(key) is not None:
+            tool_input[key] = target[key]
+    if selected_organization is not None and not tool_input.get("organization_id"):
+        tool_input["organization_id"] = selected_organization.id
+    return tool_input
+
+
+def semantic_plan_create_requirement_target(
+    plan: SemanticTurnPlan,
+    organizations: list[Organization],
+    selected_organization: Organization | None,
+    base_draft: dict | None = None,
+) -> tuple[Organization | None, dict] | None:
+    if plan.intent != "create_requirement":
+        return None
+    if plan.action not in {"create_requirement", "none"}:
+        return None
+    if plan.confidence < 0.5:
+        return None
+
+    target = plan.target if isinstance(plan.target, dict) else {}
+    raw_organization_id = target.get("organization_id") or target.get("organization")
+    try:
+        organization_id = int(raw_organization_id) if raw_organization_id is not None else None
+    except (TypeError, ValueError):
+        organization_id = None
+    organization = organization_by_id(organizations, organization_id) or selected_organization
+    draft = merge_requirement_draft(base_draft or {}, plan.draft or {})
+    return organization, draft
+
+
+def semantic_plan_confirms_admin_feedback(plan: SemanticTurnPlan | None) -> bool:
+    return (
+        plan is not None
+        and plan.source == "planner"
+        and plan.confidence >= 0.5
+        and plan.intent == "suggest_admin_feedback"
+        and plan.action == "send_admin_feedback"
+    )
+
+
+def semantic_plan_admin_feedback_input(
+    plan: SemanticTurnPlan,
+    user_text: str,
+    selected_organization: Organization | None,
+) -> dict | None:
+    if not semantic_plan_confirms_admin_feedback(plan):
+        return None
+
+    draft = plan.draft if isinstance(plan.draft, dict) else {}
+    target = plan.target if isinstance(plan.target, dict) else {}
+    fallback = build_admin_feedback_input(user_text, selected_organization)
+
+    category = str(
+        draft.get("category") or target.get("category") or fallback["category"]
+    ).strip()
+    if category not in {
+        "bug",
+        "improvement",
+        "missing_capability",
+        "data_issue",
+        "ux",
+        "other",
+    }:
+        category = "other"
+
+    priority = str(
+        draft.get("priority") or target.get("priority") or fallback.get("priority")
+    ).strip()
+    if priority not in {"low", "medium", "high", "urgent"}:
+        priority = "medium"
+
+    description = str(
+        draft.get("description") or plan.query or fallback["description"]
+    ).strip()
+    title = str(
+        draft.get("title")
+        or target.get("title")
+        or description.splitlines()[0][:120]
+        or fallback["title"]
+    ).strip(" .")
+    if not title or not description:
+        return None
+
+    tool_input: dict[str, object] = {
+        "category": category,
+        "title": title[:120],
+        "description": description,
+        "priority": priority,
+    }
+    raw_organization_id = target.get("organization_id") or draft.get("organization_id")
+    if raw_organization_id is None and selected_organization is not None:
+        raw_organization_id = selected_organization.id
+    if raw_organization_id is not None:
+        try:
+            tool_input["organization_id"] = int(raw_organization_id)
+        except (TypeError, ValueError):
+            pass
+    return tool_input
+
+
+def semantic_plan_agent_office_input(
+    plan: SemanticTurnPlan,
+    user_text: str,
+    organization: Organization | None,
+) -> dict | None:
+    if plan.intent != "delegate_agent_office":
+        return None
+    if plan.action != "create_agent_office_task":
+        return None
+    if plan.confidence < 0.5:
+        return None
+
+    payload: dict[str, object] = {}
+    if isinstance(plan.delegation, dict):
+        payload.update(plan.delegation)
+    if isinstance(plan.target, dict):
+        payload.update(plan.target)
+
+    if organization is not None and not payload.get("organization_id"):
+        payload["organization_id"] = organization.id
+    if not payload.get("organization_id"):
+        return None
+
+    title = str(
+        payload.get("title")
+        or plan.reference
+        or user_text.strip().splitlines()[0][:120]
+        or "Tarea supervisada"
+    ).strip()
+    description = str(
+        payload.get("description")
+        or plan.query
+        or user_text.strip()
+        or title
+    ).strip()
+    if not title or not description:
+        return None
+
+    payload["title"] = title[:255]
+    payload["description"] = description
+    payload.setdefault("department", "front_desk")
+    payload.setdefault("requested_action", "triage")
+    payload.setdefault("priority", "medium")
+    payload.setdefault("approval_policy", "before_execution")
+    payload.setdefault("requires_human_approval", True)
+    return payload
+
+
+def agent_office_task_reply(result_content: str, *, ok: bool) -> str:
+    if not ok:
+        return f"No he podido crear la tarea supervisada: {result_content}"
+
+    payload = decode_tool_json(result_content)
+    if not isinstance(payload, dict):
+        return "La creación de la tarea supervisada devolvió una respuesta inesperada."
+
+    task_id = payload.get("id")
+    title = payload.get("title") or "tarea supervisada"
+    if payload.get("requires_human_approval"):
+        return (
+            f"He dejado creada la tarea supervisada #{task_id}: {title}. "
+            "Queda pendiente de aprobación humana antes de ejecutarse."
+        )
+    return f"He dejado creada la tarea supervisada #{task_id}: {title}."
+
+
 def ordinance_search_reply(result_content: str, *, ok: bool) -> str:
     if not ok:
         return f"No he podido consultar la base de ordenanzas: {result_content}"
@@ -1588,6 +1874,30 @@ ACTION_POLICIES = {
         tool_name="semantic_search_ordinances",
         reason="action_policy_read_ordinances",
     ),
+    "capture_requirement": ActionPolicy(
+        intent="capture_requirement",
+        agent_key="requirements_intake",
+        tool_name="list_requirements",
+        reason="action_policy_capture_requirement",
+    ),
+    "create_requirement": ActionPolicy(
+        intent="create_requirement",
+        agent_key="requirements_intake",
+        tool_name="create_requirement",
+        reason="action_policy_create_requirement",
+    ),
+    "delegate_agent_office": ActionPolicy(
+        intent="delegate_agent_office",
+        agent_key="requirements_intake",
+        tool_name="create_agent_office_task",
+        reason="action_policy_delegate_agent_office",
+    ),
+    "suggest_admin_feedback": ActionPolicy(
+        intent="suggest_admin_feedback",
+        agent_key="requirements_intake",
+        tool_name="send_admin_feedback",
+        reason="action_policy_suggest_admin_feedback",
+    ),
 }
 
 
@@ -1663,6 +1973,7 @@ def handle_direct_map_items(
     allowed_agents: list[AgentSpec],
     state: dict,
     tool_input: dict,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     return handle_action_policy(
         db,
@@ -1674,6 +1985,7 @@ def handle_direct_map_items(
         ACTION_POLICIES["read_map_items"],
         tool_input,
         map_items_reply,
+        semantic_plan=semantic_plan,
     )
 
 
@@ -1697,6 +2009,30 @@ def handle_direct_ordinance_search(
         ACTION_POLICIES["read_ordinances"],
         tool_input,
         ordinance_search_reply,
+        semantic_plan=semantic_plan,
+    )
+
+
+def handle_direct_agent_office_task(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    user_message: AssistantMessage,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    tool_input: dict,
+    semantic_plan: SemanticTurnPlan | None = None,
+) -> AssistantMessage | None:
+    return handle_action_policy(
+        db,
+        current_user,
+        conversation,
+        user_message,
+        allowed_agents,
+        state,
+        ACTION_POLICIES["delegate_agent_office"],
+        tool_input,
+        agent_office_task_reply,
         semantic_plan=semantic_plan,
     )
 
@@ -1791,6 +2127,7 @@ def handle_direct_list_requirements(
     reason: str,
     use_needs: bool = False,
     intent: str | None = None,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     policy = ACTION_POLICIES["read_requirements"]
     agent = allowed_agent_by_key(allowed_agents, policy.agent_key)
@@ -1849,6 +2186,7 @@ def handle_direct_list_requirements(
             conversation,
             policy.reason,
             intent or policy.intent,
+            semantic_plan=semantic_plan,
         ),
         state=state,
     )
@@ -1866,6 +2204,7 @@ def handle_direct_requirement_capture(
     *,
     reason: str,
     intent: str | None = None,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, "requirements_intake")
     if agent is None:
@@ -1930,7 +2269,14 @@ def handle_direct_requirement_capture(
         content=content,
         actions=[action],
         agent=agent,
-        routing=direct_routing(allowed_agents, agent, conversation, reason, intent),
+        routing=direct_routing(
+            allowed_agents,
+            agent,
+            conversation,
+            reason,
+            intent,
+            semantic_plan=semantic_plan,
+        ),
         state=state,
     )
 
@@ -2057,6 +2403,7 @@ def handle_direct_create_requirement(
     *,
     reason: str,
     intent: str | None = None,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, "requirements_intake")
     if agent is None:
@@ -2080,8 +2427,9 @@ def handle_direct_create_requirement(
             state,
             agent_key="requirements_intake",
             content=requirement_content_prompt(organization, draft),
-            reason="direct_create_requirement_needs_content",
+            reason=f"{reason}_needs_content",
             intent=intent,
+            semantic_plan=semantic_plan,
         )
 
     record_selected_organization(state, organization)
@@ -2194,7 +2542,14 @@ def handle_direct_create_requirement(
         content=content,
         actions=actions,
         agent=agent,
-        routing=direct_routing(allowed_agents, agent, conversation, reason, intent),
+        routing=direct_routing(
+            allowed_agents,
+            agent,
+            conversation,
+            reason,
+            intent,
+            semantic_plan=semantic_plan,
+        ),
         state=state,
     )
 
@@ -2209,6 +2564,7 @@ def persist_direct_prompt(
     content: str,
     reason: str,
     intent: str | None = None,
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     agent = allowed_agent_by_key(allowed_agents, agent_key)
     if agent is None:
@@ -2219,7 +2575,14 @@ def persist_direct_prompt(
         content=content,
         actions=[],
         agent=agent,
-        routing=direct_routing(allowed_agents, agent, conversation, reason, intent),
+        routing=direct_routing(
+            allowed_agents,
+            agent,
+            conversation,
+            reason,
+            intent,
+            semantic_plan=semantic_plan,
+        ),
         state=state,
     )
 
@@ -2313,6 +2676,15 @@ def classify_turn_intent(text: str) -> TurnIntent:
     return TurnIntent("unknown", "unclassified")
 
 
+def capture_requirement_intro_reply() -> str:
+    return (
+        "De acuerdo. Cuéntame la idea cuando quieras: qué te gustaría "
+        "que tuviera la app, quién lo usaría y qué problema resolvería. "
+        "Cuando haya contenido concreto, lo ordenamos y comprobamos si "
+        "conviene crear un borrador nuevo o ampliar algo existente."
+    )
+
+
 def handle_global_capabilities_question(
     db: Session,
     current_user: User,
@@ -2320,6 +2692,7 @@ def handle_global_capabilities_question(
     allowed_agents: list[AgentSpec],
     state: dict,
     organizations: list[Organization],
+    semantic_plan: SemanticTurnPlan | None = None,
 ) -> AssistantMessage | None:
     content = (
         GLOBAL_CAPABILITIES_REPLY
@@ -2335,6 +2708,7 @@ def handle_global_capabilities_question(
         content=content,
         reason="global_capabilities",
         intent="global_capabilities",
+        semantic_plan=semantic_plan,
     )
 
 
@@ -2406,6 +2780,200 @@ def handle_direct_create_requirement_intent(
     )
 
 
+def try_handle_legacy_read_intent(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    user_message: AssistantMessage,
+    user_text: str,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    organizations: list[Organization],
+    selected_organization: Organization | None,
+    turn_intent: TurnIntent,
+) -> AssistantMessage | None:
+    if turn_intent.kind == "read_requirements":
+        if selected_organization is not None:
+            return handle_direct_list_requirements(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                selected_organization,
+                reason=turn_intent.reason,
+                use_needs=turn_intent.use_needs,
+                intent=turn_intent.kind,
+            )
+        set_pending_action(
+            state,
+            {"type": "list_requirements", "use_needs": turn_intent.use_needs},
+        )
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="consultation",
+            content=organization_prompt(organizations, "list_requirements"),
+            reason="direct_list_requirements_needs_organization",
+            intent=turn_intent.kind,
+        )
+
+    if turn_intent.kind == "read_map_items":
+        return handle_direct_map_items(
+            db,
+            current_user,
+            conversation,
+            user_message,
+            allowed_agents,
+            state,
+            build_map_items_input(user_text, selected_organization),
+        )
+
+    return None
+
+
+def try_handle_legacy_requirement_intent(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    user_message: AssistantMessage,
+    user_text: str,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    organizations: list[Organization],
+    selected_organization: Organization | None,
+    parsed_draft: dict,
+    turn_intent: TurnIntent,
+) -> AssistantMessage | None:
+    if turn_intent.kind == "capture_requirement_intro":
+        set_pending_action(
+            state,
+            {"type": "capture_requirement_intro"},
+        )
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="requirements_intake",
+            content=capture_requirement_intro_reply(),
+            reason=turn_intent.reason,
+            intent=turn_intent.kind,
+        )
+
+    has_prior_conversation_context = any(
+        message.id != user_message.id for message in conversation.messages
+    )
+    if turn_intent.kind == "capture_requirement" and has_prior_conversation_context:
+        if selected_organization is not None:
+            return handle_direct_requirement_capture(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                selected_organization,
+                user_text,
+                reason=turn_intent.reason,
+                intent=turn_intent.kind,
+            )
+        set_pending_action(
+            state,
+            {"type": "capture_requirement_organization"},
+        )
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="requirements_intake",
+            content=organization_prompt(organizations, "create_requirement"),
+            reason="direct_capture_requirement_needs_organization",
+            intent=turn_intent.kind,
+        )
+
+    if turn_intent.kind == "create_requirement":
+        return handle_direct_create_requirement_intent(
+            db,
+            current_user,
+            conversation,
+            user_message,
+            allowed_agents,
+            state,
+            organizations,
+            selected_organization,
+            parsed_draft,
+            reason=turn_intent.reason,
+            intent=turn_intent.kind,
+        )
+
+    return None
+
+
+def try_handle_legacy_test_requirement_intent(
+    db: Session,
+    conversation: AssistantConversation,
+    user_text: str,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    organizations: list[Organization],
+    selected_organization: Organization | None,
+    turn_intent: TurnIntent,
+) -> AssistantMessage | None:
+    if turn_intent.kind != "create_test_requirement":
+        return None
+
+    if selected_organization is None:
+        set_pending_action(
+            state,
+            {"type": "create_test_requirement_organization"},
+        )
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="requirements_intake",
+            content=organization_prompt(organizations, "create_requirement"),
+            reason="direct_create_test_requirement_needs_organization",
+        )
+
+    record_selected_organization(state, selected_organization)
+    if is_user_delegating_content(user_text):
+        set_pending_action(
+            state,
+            {
+                "type": "confirm_create_test_requirement",
+                "organization_id": selected_organization.id,
+            },
+        )
+        content = propose_test_requirement_reply(selected_organization)
+        reason = "direct_create_test_requirement_proposal"
+    else:
+        set_pending_action(
+            state,
+            {
+                "type": "create_test_requirement_content",
+                "organization_id": selected_organization.id,
+            },
+        )
+        content = ask_for_test_requirement_content_reply(selected_organization)
+        reason = "direct_create_test_requirement_needs_content"
+    return persist_direct_prompt(
+        db,
+        conversation,
+        allowed_agents,
+        state,
+        agent_key="requirements_intake",
+        content=content,
+        reason=reason,
+    )
+
+
 def try_handle_direct_turn(
     db: Session,
     current_user: User,
@@ -2436,7 +3004,6 @@ def try_handle_direct_turn(
     if not isinstance(pending_work, dict):
         pending_work = None
     parsed_draft = extract_requirement_draft_from_text(user_text)
-    turn_intent = classify_turn_intent(user_text)
     semantic_plan = plan_turn(
         conversation=conversation,
         user_text=user_text,
@@ -2451,10 +3018,38 @@ def try_handle_direct_turn(
             "pending_work": pending_work,
         },
     )
+    turn_intent = (
+        TurnIntent("unknown", "semantic_plan_blocks_legacy")
+        if semantic_plan_blocks_legacy_routes(semantic_plan)
+        else classify_turn_intent(user_text)
+    )
+
+    if (
+        (pending_action is not None or pending_work is not None)
+        and semantic_plan_cancels_pending_action(semantic_plan)
+    ):
+        set_pending_action(state, None)
+        set_pending_work(state, None)
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="requirements_intake",
+            content="De acuerdo, dejo sin efecto la acción pendiente.",
+            reason="action_policy_cancel_pending_action",
+            intent="cancel_pending_action",
+            semantic_plan=semantic_plan,
+        )
 
     if pending_action is not None and pending_type == "send_admin_feedback":
         agent = allowed_agent_by_key(allowed_agents, "requirements_intake")
-        if agent is not None and is_affirmative(user_text):
+        semantic_confirms_admin_feedback = semantic_plan_confirms_admin_feedback(
+            semantic_plan
+        )
+        if agent is not None and (
+            is_affirmative(user_text) or semantic_confirms_admin_feedback
+        ):
             tool_input = pending_action.get("tool_input")
             if isinstance(tool_input, dict):
                 action, result_content, ok = execute_direct_tool(
@@ -2481,8 +3076,15 @@ def try_handle_direct_turn(
                         allowed_agents,
                         agent,
                         conversation,
-                        "pending_admin_feedback_confirmed",
-                        "send_admin_feedback",
+                        ACTION_POLICIES["suggest_admin_feedback"].reason
+                        if semantic_confirms_admin_feedback
+                        else "pending_admin_feedback_confirmed",
+                        ACTION_POLICIES["suggest_admin_feedback"].intent
+                        if semantic_confirms_admin_feedback
+                        else "send_admin_feedback",
+                        semantic_plan=semantic_plan
+                        if semantic_confirms_admin_feedback
+                        else None,
                     ),
                     state=state,
                 )
@@ -2498,7 +3100,9 @@ def try_handle_direct_turn(
                 reason="pending_admin_feedback_cancelled",
             )
 
-    if turn_intent.kind == "global_capabilities":
+    if turn_intent.kind == "global_capabilities" and not semantic_plan_blocks_legacy_routes(
+        semantic_plan
+    ):
         return handle_global_capabilities_question(
             db,
             current_user,
@@ -2509,6 +3113,73 @@ def try_handle_direct_turn(
         )
 
     if semantic_plan is not None:
+        if (
+            semantic_plan.intent == "global_capabilities"
+            and semantic_plan.action in {"", "none"}
+            and semantic_plan.confidence >= 0.5
+        ):
+            planned_global_message = handle_global_capabilities_question(
+                db,
+                current_user,
+                conversation,
+                allowed_agents,
+                state,
+                organizations,
+                semantic_plan=semantic_plan,
+            )
+            if planned_global_message is not None:
+                return planned_global_message
+
+        if (
+            semantic_plan.intent == "capture_requirement_intro"
+            and semantic_plan.action in {"", "none"}
+            and semantic_plan.confidence >= 0.5
+        ):
+            set_pending_action(state, {"type": "capture_requirement_intro"})
+            planned_intro_message = persist_direct_prompt(
+                db,
+                conversation,
+                allowed_agents,
+                state,
+                agent_key="requirements_intake",
+                content=capture_requirement_intro_reply(),
+                reason="action_policy_capture_requirement_intro",
+                intent=semantic_plan.intent,
+                semantic_plan=semantic_plan,
+            )
+            if planned_intro_message is not None:
+                return planned_intro_message
+
+        planned_admin_feedback_input = semantic_plan_admin_feedback_input(
+            semantic_plan,
+            user_text,
+            selected_organization,
+        )
+        if pending_action is None and planned_admin_feedback_input is not None:
+            agent = allowed_agent_by_key(allowed_agents, "requirements_intake")
+            if agent is not None:
+                set_pending_action(
+                    state,
+                    {
+                        "type": "send_admin_feedback",
+                        "tool_input": planned_admin_feedback_input,
+                    },
+                )
+                return persist_direct_prompt(
+                    db,
+                    conversation,
+                    allowed_agents,
+                    state,
+                    agent_key="requirements_intake",
+                    content=build_admin_feedback_suggestion_reply(
+                        user_text,
+                        planned_admin_feedback_input,
+                    ),
+                    reason=ACTION_POLICIES["suggest_admin_feedback"].reason,
+                    intent=ACTION_POLICIES["suggest_admin_feedback"].intent,
+                    semantic_plan=semantic_plan,
+                )
+
         planned_ordinance_input = semantic_plan_ordinance_input(
             semantic_plan,
             user_text,
@@ -2527,6 +3198,131 @@ def try_handle_direct_turn(
             )
             if planned_ordinance_message is not None:
                 return planned_ordinance_message
+
+        planned_agent_office_input = semantic_plan_agent_office_input(
+            semantic_plan,
+            user_text,
+            selected_organization,
+        )
+        if planned_agent_office_input is not None:
+            planned_agent_office_message = handle_direct_agent_office_task(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                planned_agent_office_input,
+                semantic_plan=semantic_plan,
+            )
+            if planned_agent_office_message is not None:
+                return planned_agent_office_message
+
+        planned_capture_requirement_organization = semantic_plan_capture_requirement_organization(
+            semantic_plan,
+            organizations,
+            selected_organization,
+        )
+        if planned_capture_requirement_organization is not None:
+            planned_capture_requirement_message = handle_direct_requirement_capture(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                planned_capture_requirement_organization,
+                semantic_plan.query or user_text,
+                reason=ACTION_POLICIES["capture_requirement"].reason,
+                intent=semantic_plan.intent,
+                semantic_plan=semantic_plan,
+            )
+            if planned_capture_requirement_message is not None:
+                return planned_capture_requirement_message
+
+        pending_create_requirement_draft = (
+            pending_action.get("draft")
+            if pending_type in {"create_requirement_content", "create_requirement_organization"}
+            and isinstance(pending_action, dict)
+            and isinstance(pending_action.get("draft"), dict)
+            else None
+        )
+        planned_create_requirement = semantic_plan_create_requirement_target(
+            semantic_plan,
+            organizations,
+            selected_organization,
+            base_draft=pending_create_requirement_draft,
+        )
+        if planned_create_requirement is not None:
+            planned_organization, planned_draft = planned_create_requirement
+            if planned_organization is not None:
+                return handle_direct_create_requirement(
+                    db,
+                    current_user,
+                    conversation,
+                    user_message,
+                    allowed_agents,
+                    state,
+                    planned_organization,
+                    planned_draft,
+                    reason=ACTION_POLICIES["create_requirement"].reason,
+                    intent=semantic_plan.intent,
+                    semantic_plan=semantic_plan,
+                )
+            return handle_direct_create_requirement_intent(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                organizations,
+                selected_organization,
+                planned_draft,
+                reason=ACTION_POLICIES["create_requirement"].reason,
+                intent=semantic_plan.intent,
+            )
+
+        planned_map_items_input = semantic_plan_map_items_input(
+            semantic_plan,
+            selected_organization,
+        )
+        if planned_map_items_input is not None:
+            planned_map_items_message = handle_direct_map_items(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                planned_map_items_input,
+                semantic_plan=semantic_plan,
+            )
+            if planned_map_items_message is not None:
+                return planned_map_items_message
+
+        planned_requirements_organization = semantic_plan_requirements_organization(
+            semantic_plan,
+            organizations,
+            selected_organization,
+        )
+        if planned_requirements_organization is not None:
+            return handle_direct_list_requirements(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                planned_requirements_organization,
+                reason=ACTION_POLICIES["read_requirements"].reason,
+                use_needs=uses_need_language(user_text),
+                intent=semantic_plan.intent,
+                semantic_plan=semantic_plan,
+            )
+
+    if semantic_plan_blocks_legacy_routes(semantic_plan):
+        return None
 
     ordinance_tool_input = extract_ordinance_filters(db, user_text, selected_organization)
     if ordinance_tool_input is not None:
@@ -2571,7 +3367,11 @@ def try_handle_direct_turn(
             or organization_by_id(organizations, pending_work.get("organization_id"))
             or selected_organization
         )
-        accepts_pending_work = accepts_proposed_requirement_draft(user_text)
+        semantic_confirms_pending_work = semantic_plan_confirms_pending_work(semantic_plan)
+        accepts_pending_work = (
+            accepts_proposed_requirement_draft(user_text)
+            or semantic_confirms_pending_work
+        )
         draft = (
             dict(pending_work.get("draft") or {})
             if accepts_pending_work
@@ -2592,7 +3392,13 @@ def try_handle_direct_turn(
                 state,
                 organization,
                 draft,
-                reason="pending_work_create_requirement_confirmed",
+                reason=(
+                    "action_policy_confirm_pending_work"
+                    if semantic_confirms_pending_work
+                    else "pending_work_create_requirement_confirmed"
+                ),
+                intent=semantic_plan.intent if semantic_confirms_pending_work and semantic_plan else None,
+                semantic_plan=semantic_plan if semantic_confirms_pending_work else None,
             )
         if is_negative(user_text):
             set_pending_work(state, None)
@@ -2628,11 +3434,15 @@ def try_handle_direct_turn(
             or organization_by_id(organizations, pending_action.get("organization_id"))
             or selected_organization
         )
+        semantic_retries_pending_action = semantic_plan_retries_pending_action(
+            semantic_plan
+        )
         if organization is not None and (
             resolved_organization is not None
             or is_affirmative(user_text)
             or is_retry_request(user_text)
             or is_list_requirements_request(user_text)
+            or semantic_retries_pending_action
         ):
             return handle_direct_list_requirements(
                 db,
@@ -2642,9 +3452,15 @@ def try_handle_direct_turn(
                 allowed_agents,
                 state,
                 organization,
-                reason="pending_list_requirements",
+                reason=(
+                    "action_policy_retry_pending_action"
+                    if semantic_retries_pending_action
+                    else "pending_list_requirements"
+                ),
                 use_needs=bool((pending_action or {}).get("use_needs"))
                 or uses_need_language(user_text),
+                intent=semantic_plan.intent if semantic_retries_pending_action and semantic_plan else None,
+                semantic_plan=semantic_plan if semantic_retries_pending_action else None,
             )
 
     if pending_type == "create_requirement_organization":
@@ -2738,10 +3554,14 @@ def try_handle_direct_turn(
             or selected_organization
         )
         draft = merge_requirement_draft(pending_action.get("draft"), parsed_draft)
+        semantic_retries_pending_action = semantic_plan_retries_pending_action(
+            semantic_plan
+        )
         if organization is not None and (
             is_affirmative(user_text)
             or is_retry_request(user_text)
             or requirement_draft_is_complete(draft)
+            or semantic_retries_pending_action
         ):
             return handle_direct_create_requirement(
                 db,
@@ -2752,7 +3572,13 @@ def try_handle_direct_turn(
                 state,
                 organization,
                 draft,
-                reason="pending_create_requirement_retry",
+                reason=(
+                    "action_policy_retry_pending_action"
+                    if semantic_retries_pending_action
+                    else "pending_create_requirement_retry"
+                ),
+                intent=semantic_plan.intent if semantic_retries_pending_action and semantic_plan else None,
+                semantic_plan=semantic_plan if semantic_retries_pending_action else None,
             )
         if is_negative(user_text):
             set_pending_action(state, None)
@@ -2920,159 +3746,49 @@ def try_handle_direct_turn(
             reason="direct_create_requirement_content_followup",
         )
 
-    if turn_intent.kind == "read_requirements":
-        if selected_organization is not None:
-            return handle_direct_list_requirements(
-                db,
-                current_user,
-                conversation,
-                user_message,
-                allowed_agents,
-                state,
-                selected_organization,
-                reason=turn_intent.reason,
-                use_needs=turn_intent.use_needs,
-                intent=turn_intent.kind,
-            )
-        set_pending_action(
-            state,
-            {"type": "list_requirements", "use_needs": turn_intent.use_needs},
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="consultation",
-            content=organization_prompt(organizations, "list_requirements"),
-            reason="direct_list_requirements_needs_organization",
-            intent=turn_intent.kind,
-        )
-
-    if turn_intent.kind == "read_map_items":
-        return handle_direct_map_items(
-            db,
-            current_user,
-            conversation,
-            user_message,
-            allowed_agents,
-            state,
-            build_map_items_input(user_text, selected_organization),
-        )
-
-    if turn_intent.kind == "capture_requirement_intro":
-        set_pending_action(
-            state,
-            {"type": "capture_requirement_intro"},
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="requirements_intake",
-            content=(
-                "De acuerdo. Cuéntame la idea cuando quieras: qué te gustaría "
-                "que tuviera la app, quién lo usaría y qué problema resolvería. "
-                "Cuando haya contenido concreto, lo ordenamos y comprobamos si "
-                "conviene crear un borrador nuevo o ampliar algo existente."
-            ),
-            reason=turn_intent.reason,
-            intent=turn_intent.kind,
-        )
-
-    has_prior_conversation_context = any(
-        message.id != user_message.id for message in conversation.messages
+    legacy_read_message = try_handle_legacy_read_intent(
+        db,
+        current_user,
+        conversation,
+        user_message,
+        user_text,
+        allowed_agents,
+        state,
+        organizations,
+        selected_organization,
+        turn_intent,
     )
-    if turn_intent.kind == "capture_requirement" and has_prior_conversation_context:
-        if selected_organization is not None:
-            return handle_direct_requirement_capture(
-                db,
-                current_user,
-                conversation,
-                user_message,
-                allowed_agents,
-                state,
-                selected_organization,
-                user_text,
-                reason=turn_intent.reason,
-                intent=turn_intent.kind,
-            )
-        set_pending_action(
-            state,
-            {"type": "capture_requirement_organization"},
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="requirements_intake",
-            content=organization_prompt(organizations, "create_requirement"),
-            reason="direct_capture_requirement_needs_organization",
-            intent=turn_intent.kind,
-        )
+    if legacy_read_message is not None:
+        return legacy_read_message
 
-    if turn_intent.kind == "create_requirement":
-        return handle_direct_create_requirement_intent(
-            db,
-            current_user,
-            conversation,
-            user_message,
-            allowed_agents,
-            state,
-            organizations,
-            selected_organization,
-            parsed_draft,
-            reason=turn_intent.reason,
-            intent=turn_intent.kind,
-        )
+    legacy_requirement_message = try_handle_legacy_requirement_intent(
+        db,
+        current_user,
+        conversation,
+        user_message,
+        user_text,
+        allowed_agents,
+        state,
+        organizations,
+        selected_organization,
+        parsed_draft,
+        turn_intent,
+    )
+    if legacy_requirement_message is not None:
+        return legacy_requirement_message
 
-    if turn_intent.kind == "create_test_requirement":
-        if selected_organization is None:
-            set_pending_action(
-                state,
-                {"type": "create_test_requirement_organization"},
-            )
-            return persist_direct_prompt(
-                db,
-                conversation,
-                allowed_agents,
-                state,
-                agent_key="requirements_intake",
-                content=organization_prompt(organizations, "create_requirement"),
-                reason="direct_create_test_requirement_needs_organization",
-            )
-        record_selected_organization(state, selected_organization)
-        if is_user_delegating_content(user_text):
-            set_pending_action(
-                state,
-                {
-                    "type": "confirm_create_test_requirement",
-                    "organization_id": selected_organization.id,
-                },
-            )
-            content = propose_test_requirement_reply(selected_organization)
-            reason = "direct_create_test_requirement_proposal"
-        else:
-            set_pending_action(
-                state,
-                {
-                    "type": "create_test_requirement_content",
-                    "organization_id": selected_organization.id,
-                },
-            )
-            content = ask_for_test_requirement_content_reply(selected_organization)
-            reason = "direct_create_test_requirement_needs_content"
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="requirements_intake",
-            content=content,
-            reason=reason,
-        )
+    legacy_test_requirement_message = try_handle_legacy_test_requirement_intent(
+        db,
+        conversation,
+        user_text,
+        allowed_agents,
+        state,
+        organizations,
+        selected_organization,
+        turn_intent,
+    )
+    if legacy_test_requirement_message is not None:
+        return legacy_test_requirement_message
 
     return None
 
