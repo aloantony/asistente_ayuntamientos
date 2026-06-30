@@ -1009,36 +1009,7 @@ def is_ordinance_capability_question(text: str) -> bool:
     normalized = normalize_text(text)
     if not normalized or not is_ordinance_request(text):
         return False
-    asks_availability = any(
-        marker in normalized
-        for marker in {
-            "cuentas con",
-            "cuenta con",
-            "dispone",
-            "dispones",
-            "existen",
-            "hay",
-            "teneis",
-            "tenéis",
-            "tenemos",
-            "tienes",
-        }
-    )
-    if not asks_availability:
-        return False
-    asks_for_search = any(
-        marker in normalized
-        for marker in {
-            "buscar",
-            "busca",
-            "consulta",
-            "consultar",
-            "que dice",
-            "qué dice",
-            "sobre",
-        }
-    )
-    if asks_for_search:
+    if not asks_availability_or_capability(normalized):
         return False
     return not any(
         normalize_text(marker) in normalized for marker in ORDINANCE_TOPIC_MARKERS
@@ -1744,6 +1715,7 @@ def extract_ordinance_filters(
         return None
 
     municipality_name = None
+    municipality_inferred_from_context = False
     municipalities = db.scalars(select(Municipality).order_by(Municipality.name)).all()
     for municipality in municipalities:
         candidate = normalize_text(municipality.name)
@@ -1755,6 +1727,7 @@ def extract_ordinance_filters(
         for phrase in {"mi municipio", "mi ayuntamiento", "nuestro municipio"}
     ):
         municipality_name = organization_municipality_name(organization)
+        municipality_inferred_from_context = municipality_name is not None
 
     topic = None
     for marker, mapped_topic in ORDINANCE_TOPIC_MARKERS.items():
@@ -1777,6 +1750,8 @@ def extract_ordinance_filters(
     if not mentions_ordinance and not (municipality_name and topic):
         return None
     if not mentions_ordinance and not municipality_name and not topic:
+        return None
+    if municipality_inferred_from_context and topic is None:
         return None
 
     tool_input: dict[str, object] = {"query": text.strip()}
@@ -1802,6 +1777,7 @@ def semantic_plan_ordinance_input(
     tool_input: dict[str, object] = {"query": plan.query or user_text.strip()}
     target = plan.target if isinstance(plan.target, dict) else {}
     municipality_name = target.get("municipality_name") or target.get("municipality")
+    inferred_municipality_from_context = False
     if isinstance(municipality_name, str) and municipality_name.strip():
         tool_input["municipality_name"] = municipality_name.strip()
     elif any(
@@ -1811,10 +1787,13 @@ def semantic_plan_ordinance_input(
         inferred = organization_municipality_name(organization)
         if inferred:
             tool_input["municipality_name"] = inferred
+            inferred_municipality_from_context = True
 
     topic = target.get("topic")
     if isinstance(topic, str) and topic.strip():
         tool_input["topic"] = topic.strip()
+    if inferred_municipality_from_context and "topic" not in tool_input:
+        return None
     return tool_input
 
 

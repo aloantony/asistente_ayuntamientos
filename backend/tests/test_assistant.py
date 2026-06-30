@@ -1911,12 +1911,6 @@ def test_classify_turn_intent_maps_common_direct_requests():
         "direct_capture_requirement",
     )
     assert assistant_service.classify_turn_intent(
-        "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
-    ) == assistant_service.TurnIntent(
-        "global_capabilities",
-        "ordinance_capabilities",
-    )
-    assert assistant_service.classify_turn_intent(
         "Pues la necesidad que tengo identificada es que ahora mismo querría desarrollar algo que me permita controlar a todos los trabajadores que hay en el ayuntamiento"
     ) == assistant_service.TurnIntent(
         "capture_requirement",
@@ -1954,6 +1948,37 @@ def test_availability_questions_do_not_classify_as_broad_reads(
     intent = assistant_service.classify_turn_intent(text)
 
     assert (intent.kind, intent.reason) != (unexpected_kind, unexpected_reason)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "dispones de",
+        "tenéis",
+        "hay",
+        "la plataforma soporta",
+    ],
+)
+@pytest.mark.parametrize(
+    "task_suffix",
+    [
+        "que se puedan contrastar entre municipios",
+        "para verificar cuál sería más adecuada a mi municipio",
+        "para comparar de unos municipios y otros",
+    ],
+)
+def test_ordinance_capability_task_families_do_not_become_searches(
+    prefix,
+    task_suffix,
+):
+    intent = assistant_service.classify_turn_intent(
+        f"¿{prefix} ordenanzas municipales {task_suffix}?"
+    )
+
+    assert intent == assistant_service.TurnIntent(
+        "global_capabilities",
+        "ordinance_capabilities",
+    )
 
 
 def test_requirement_candidate_matches_ignores_generic_capture_words():
@@ -4110,6 +4135,14 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert gateway.calls == []
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?",
+        "¿Tenéis reglamentos municipales para comparar entre pueblos antes de elegir el más adecuado?",
+        "¿La plataforma soporta contrastar ordenanzas municipales de distintos municipios?",
+    ],
+)
 def test_ordinance_comparison_capability_question_answers_without_corpus_search(
     client,
     db,
@@ -4117,6 +4150,7 @@ def test_ordinance_comparison_capability_question_answers_without_corpus_search(
     make_organization,
     grant_permissions,
     use_gateway,
+    content,
 ):
     user = make_user(full_name="Alcalde Test")
     municipality = Municipality(
@@ -4168,9 +4202,7 @@ def test_ordinance_comparison_capability_question_answers_without_corpus_search(
 
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={
-            "content": "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
-        },
+        json={"content": content},
         headers=headers_for(user),
     )
 
