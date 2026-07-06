@@ -56,6 +56,10 @@ class AssistantStatusRead(BaseModel):
     tools: list["AssistantToolRead"] = []
 
 
+class AssistantAudioTranscriptionRead(BaseModel):
+    text: str
+
+
 class AssistantPlannerStatusRead(BaseModel):
     runtime: str
     enabled: bool

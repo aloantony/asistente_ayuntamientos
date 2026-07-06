@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_webhook_secret: str | None = None
     telegram_link_code_ttl_seconds: int = 600
+    speech_transcription_runtime: str = "disabled"
+    speech_transcription_language_code: str = "multi"
+    speech_transcription_max_bytes: int = 20 * 1024 * 1024
+    nvidia_api_key: str | None = None
+    nvidia_riva_server: str = "grpc.nvcf.nvidia.com:443"
+    nvidia_whisper_function_id: str | None = (
+        "b702f636-f60c-4a3d-a6f4-f3568c13bd7d"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -91,6 +99,16 @@ class Settings(BaseSettings):
         if normalized not in {"local_hash", "openai_compatible", "disabled"}:
             raise ValueError(
                 "embeddings_runtime must be 'local_hash', 'openai_compatible' or 'disabled'"
+            )
+        return normalized
+
+    @field_validator("speech_transcription_runtime")
+    @classmethod
+    def validate_speech_transcription_runtime(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"disabled", "nvidia_nim"}:
+            raise ValueError(
+                "speech_transcription_runtime must be 'disabled' or 'nvidia_nim'"
             )
         return normalized
 

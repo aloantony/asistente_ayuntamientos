@@ -215,6 +215,44 @@ def test_status_reports_disabled_gateway(
     assert "create_requirement" in {tool["name"] for tool in body["tools"]}
 
 
+def test_transcribe_audio_requires_assistant_permission(client, make_user):
+    user = make_user()
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        headers=headers_for(user),
+        files={"file": ("voice.ogg", b"audio", "audio/ogg")},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: assistant.use"
+
+
+def test_transcribe_audio_returns_text_for_assistant_user(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+
+    from app.assistant import routes as assistant_routes
+
+    monkeypatch.setattr(
+        assistant_routes,
+        "transcribe_audio_bytes",
+        lambda audio, language_code=None: "Necesito preparar un informe",
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        headers=headers_for(user),
+        files={"file": ("voice.ogg", b"audio", "audio/ogg")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "Necesito preparar un informe"}
+
+
 def test_status_reports_hermes_agent_runtime(
     client,
     assistant_user,
