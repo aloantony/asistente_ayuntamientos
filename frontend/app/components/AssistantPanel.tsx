@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   type FormEvent,
+  type KeyboardEvent,
   type MouseEvent,
   useEffect,
   useMemo,
@@ -609,6 +610,8 @@ export function AssistantPanel({
     assistantStatus.runtime_healthy === false &&
     assistantStatus.enabled;
   const selectedIsArchived = selectedConversation?.status === "archived";
+  const composerDisabled =
+    isSendingMessage || assistantDisabled || Boolean(selectedIsArchived);
   const capabilities = useMemo(
     () => buildCapabilities(currentUser, assistantStatus),
     [assistantStatus, currentUser],
@@ -629,6 +632,7 @@ export function AssistantPanel({
   const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const draftMessageRef = useRef(draftMessage);
+  const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const filteredConversations = useMemo(() => {
@@ -654,6 +658,14 @@ export function AssistantPanel({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [selectedConversation?.messages.length, isSendingMessage]);
+
+  useEffect(() => {
+    if (!selectedConversation || composerDisabled) {
+      return;
+    }
+
+    messageTextareaRef.current?.focus({ preventScroll: true });
+  }, [selectedConversation?.id, composerDisabled]);
 
   useEffect(() => {
     const SpeechRecognitionImpl = getSpeechRecognitionConstructor();
@@ -762,6 +774,20 @@ export function AssistantPanel({
     } else {
       startListening();
     }
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+      return;
+    }
+
+    event.preventDefault();
+    if (composerDisabled || draftMessage.trim().length === 0) {
+      return;
+    }
+
+    stopListening();
+    onSendMessage();
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -999,13 +1025,13 @@ export function AssistantPanel({
 
               <form className="assistant-composer" onSubmit={handleSubmit}>
                 <textarea
+                  ref={messageTextareaRef}
                   value={draftMessage}
                   onChange={(event) => onDraftMessageChange(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
                   placeholder="Escribe tu mensaje..."
                   rows={3}
-                  disabled={
-                    isSendingMessage || assistantDisabled || selectedIsArchived
-                  }
+                  disabled={composerDisabled}
                 />
                 <div className="assistant-composer-actions">
                   <button
@@ -1019,10 +1045,7 @@ export function AssistantPanel({
                     aria-pressed={isListening}
                     onClick={handleToggleListening}
                     disabled={
-                      !speechSupported ||
-                      isSendingMessage ||
-                      assistantDisabled ||
-                      selectedIsArchived
+                      !speechSupported || composerDisabled
                     }
                     title={
                       speechSupported
@@ -1039,10 +1062,7 @@ export function AssistantPanel({
                   <button
                     type="submit"
                     disabled={
-                      isSendingMessage ||
-                      assistantDisabled ||
-                      selectedIsArchived ||
-                      draftMessage.trim().length === 0
+                      composerDisabled || draftMessage.trim().length === 0
                     }
                   >
                     <Send aria-hidden size={17} />
