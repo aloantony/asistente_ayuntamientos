@@ -70,6 +70,38 @@ export type OrdinanceImportItemStatus =
 
 export type OrdinanceReviewDecision = "approve" | "needs_changes" | "reject";
 
+export type OrdinanceProvinceCoverageSummary = {
+  province: string;
+  municipalities_total: number;
+  municipalities_with_approved_ordinances: number;
+  municipalities_ready_for_assistant: number;
+  ordinances_total: number;
+  ordinances_approved: number;
+  chunks_total: number;
+  chunks_ready: number;
+  chunks_approved: number;
+  chunks_failed: number;
+  import_failures_total: number;
+};
+
+export type OrdinanceAutonomousCommunityCoverage = {
+  autonomous_community: string;
+  provinces_total: number;
+  provinces_with_municipalities: number;
+  provinces_ready_for_assistant: number;
+  municipalities_total: number;
+  municipalities_with_approved_ordinances: number;
+  municipalities_ready_for_assistant: number;
+  ordinances_total: number;
+  ordinances_approved: number;
+  chunks_total: number;
+  chunks_ready: number;
+  chunks_approved: number;
+  chunks_failed: number;
+  import_failures_total: number;
+  provinces: OrdinanceProvinceCoverageSummary[];
+};
+
 export type MunicipalityType =
   | "municipality"
   | "minor_local_entity"
@@ -978,6 +1010,15 @@ export type AssistantTool = {
   read_only: boolean;
   domain: string;
   required_permission: string | null;
+  available: boolean;
+  disabled_reason: string | null;
+};
+
+export type AssistantConversationStateSummary = {
+  selected_organization_id?: number;
+  pending_action_type?: string;
+  pending_work_type?: string;
+  pending_confirmation?: boolean;
 };
 
 export type AssistantMemoryCategory =
@@ -1053,6 +1094,7 @@ export type AssistantConversation = {
 
 export type AssistantConversationDetail = AssistantConversation & {
   messages: AssistantMessage[];
+  state_summary: AssistantConversationStateSummary | null;
 };
 
 export type AssistantConversationFolder = {

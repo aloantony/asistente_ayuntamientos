@@ -626,20 +626,38 @@ def create_official_source(client, headers, **overrides) -> dict:
     return response.json()
 
 
-def test_seed_initial_official_sources_includes_bop_burgos(db):
+def test_seed_initial_official_sources_includes_castilla_leon_bops(db):
     created = ensure_initial_official_legal_sources(db)
 
-    source = db.scalar(
-        select(OfficialLegalSource).where(
-            OfficialLegalSource.domain == "bopbur.diputaciondeburgos.es"
+    expected_domains = {
+        "diputacionavila.es",
+        "bopbur.diputaciondeburgos.es",
+        "bop.dipuleon.es",
+        "diputaciondepalencia.es",
+        "diputaciondesalamanca.gob.es",
+        "dipsegovia.es",
+        "bop.dipsoria.es",
+        "diputaciondevalladolid.es",
+        "diputaciondezamora.es",
+    }
+    sources = {
+        source.domain: source
+        for source in db.scalars(
+            select(OfficialLegalSource).where(
+                OfficialLegalSource.domain.in_(expected_domains)
+            )
         )
-    )
+    }
 
-    assert "bopbur.diputaciondeburgos.es" in created
-    assert source is not None
-    assert source.name == "Boletín Oficial de la Provincia de Burgos"
-    assert source.source_type == "bop"
-    assert source.status == "active"
+    assert expected_domains <= set(created)
+    assert set(sources) == expected_domains
+    assert all(source.source_type == "bop" for source in sources.values())
+    assert all(source.status == "active" for source in sources.values())
+    assert (
+        sources["bopbur.diputaciondeburgos.es"].name
+        == "Boletín Oficial de la Provincia de Burgos"
+    )
+    assert sources["bop.dipsoria.es"].name == "Boletín Oficial de la Provincia de Soria"
 
 
 def test_import_job_rejects_non_official_seed_url(
@@ -838,6 +856,35 @@ def test_import_job_discovers_candidates_with_bop_burgos_connector(
     assert candidates[0].url.endswith("bopbur-2025-177-anuncio-202504362.pdf")
 
 
+def test_import_service_allows_unverified_tls_only_for_soria_official_source():
+    soria_source = OfficialLegalSource(
+        name="Boletín Oficial de la Provincia de Soria",
+        base_url="https://bop.dipsoria.es/",
+        domain="bop.dipsoria.es",
+        source_type="bop",
+    )
+    other_source = OfficialLegalSource(
+        name="Fuente externa",
+        base_url="https://example.test/",
+        domain="example.test",
+        source_type="other",
+    )
+    soria_url = (
+        "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/"
+        "fichero.documentos_1304_40b94e38%232E%23pdf"
+    )
+
+    assert import_service._requires_unverified_tls(soria_url, [soria_source]) is True
+    assert import_service._requires_unverified_tls(soria_url, [other_source]) is False
+    assert (
+        import_service._requires_unverified_tls(
+            "https://bopbur.diputaciondeburgos.es/demo.pdf",
+            [soria_source],
+        )
+        is False
+    )
+
+
 def test_import_service_splits_chunks_by_articles():
     chunks = import_service._split_chunks(
         "Preámbulo de la ordenanza.\n\n"
@@ -901,6 +948,104 @@ def test_burgos_coverage_endpoint_reports_ready_municipalities(
     assert body["import_failures_total"] == 0
     assert body["import_failures"] == []
     assert body["municipalities"][0]["ready_for_assistant"] is True
+
+
+def test_province_coverage_endpoint_reports_soria_municipalities(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    municipality = create_municipality(
+        client,
+        headers,
+        name="Ágreda",
+        province="Soria",
+        autonomous_community="Castilla y León",
+    )
+    ordinance = create_ordinance(
+        client,
+        headers,
+        municipality["id"],
+        title="Ordenanza fiscal de abastecimiento de agua",
+        topic="agua",
+        curation_status="approved",
+    )
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance["id"],
+            chunk_index=0,
+            heading="Artículo 1. Objeto",
+            citation="Artículo 1",
+            text="Artículo 1. Objeto. Regula el abastecimiento de agua.",
+            source_url="https://bop.dipsoria.es/demo.pdf",
+            source_locator="articulo-1",
+            review_status="approved",
+            embedding_model="local_hash",
+            embedding="[0.1, 0.2]",
+            embedding_status="ready",
+        )
+    )
+    db.commit()
+
+    response = client.get("/ordinances/coverage/provinces/soria", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["province"] == "Soria"
+    assert body["municipalities_ready_for_assistant"] == 1
+    assert body["ordinances_approved"] == 1
+    assert body["chunks_ready"] == 1
+
+
+def test_castilla_leon_coverage_endpoint_summarizes_all_provinces(
+    client,
+    db,
+    superuser,
+):
+    headers = headers_for(superuser)
+    municipality = create_municipality(
+        client,
+        headers,
+        name="Medina del Campo",
+        province="Valladolid",
+        autonomous_community="Castilla y León",
+    )
+    ordinance = create_ordinance(
+        client,
+        headers,
+        municipality["id"],
+        title="Ordenanza de terrazas",
+        topic="ocupación vía pública",
+        curation_status="approved",
+    )
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance["id"],
+            chunk_index=0,
+            heading="Artículo 1. Objeto",
+            citation="Artículo 1",
+            text="Artículo 1. Objeto. Regula la ocupación de vía pública.",
+            source_url="https://bop.sede.diputaciondevalladolid.es/demo.pdf",
+            source_locator="articulo-1",
+            review_status="approved",
+            embedding_model="local_hash",
+            embedding="[0.1, 0.2]",
+            embedding_status="ready",
+        )
+    )
+    db.commit()
+
+    response = client.get("/ordinances/coverage/castilla-y-leon", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["autonomous_community"] == "Castilla y León"
+    assert body["provinces_total"] == 9
+    assert body["municipalities_ready_for_assistant"] == 1
+    valladolid = next(row for row in body["provinces"] if row["province"] == "Valladolid")
+    assert valladolid["municipalities_ready_for_assistant"] == 1
+    assert valladolid["chunks_ready"] == 1
 
 
 def test_burgos_coverage_groups_duplicate_municipality_names(
@@ -987,6 +1132,15 @@ def test_burgos_coverage_reports_failed_imports_requiring_manual_review(
     )
     db.add(job)
     db.flush()
+    existing = create_ordinance(
+        client,
+        headers,
+        municipality["id"],
+        title="Ordenanza ya importada",
+        topic="servicios municipales",
+        source_url="http://bopbur.diputaciondeburgos.es/demo-ya-importado.pdf",
+        curation_status="approved",
+    )
     db.add(
         import_service.OrdinanceImportItem(
             job_id=job.id,
@@ -994,6 +1148,16 @@ def test_burgos_coverage_reports_failed_imports_requiring_manual_review(
             source_url="http://bopbur.diputaciondeburgos.es/demo-escaneado.pdf",
             status="failed",
             error_message="El PDF no tiene texto extraíble; requiere OCR o revisión manual.",
+        )
+    )
+    db.add(
+        import_service.OrdinanceImportItem(
+            job_id=job.id,
+            municipality_id=municipality["id"],
+            ordinance_id=existing["id"],
+            source_url=existing["source_url"],
+            status="failed",
+            error_message="Fallo histórico ya resuelto por otra importación.",
         )
     )
     db.commit()

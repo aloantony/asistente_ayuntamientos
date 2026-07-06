@@ -11,7 +11,6 @@ from app.assistant import service as assistant_service
 from app.assistant.agents import AGENT_REGISTRY, get_agent_tools
 from app.assistant.gateway import _from_openai_response, _hermes_agent_url
 from app.assistant.models import (
-    AssistantAdminFeedback,
     AssistantConversation,
     AssistantMemoryEntry,
     AssistantMessage,
@@ -57,10 +56,32 @@ class FakeGateway:
         self.runtime_healthy = runtime_healthy
         self.responses = list(responses)
         self.calls: list[dict] = []
+        self.synthesis_calls: list[dict] = []
 
     def complete(self, *, system, messages, tools):
-        self.calls.append({"system": system, "messages": messages, "tools": tools})
+        call = {"system": system, "messages": messages, "tools": tools}
+        is_direct_synthesis = (
+            not tools
+            and messages
+            and isinstance(messages[-1].get("content"), str)
+            and "direct_context_ready_for_final_answer" in messages[-1]["content"]
+        )
+        if is_direct_synthesis:
+            self.synthesis_calls.append(call)
+        else:
+            self.calls.append(call)
         if not self.responses:
+            if is_direct_synthesis:
+                fallback = "Respuesta sintetizada por Anacleto."
+                try:
+                    payload = json.loads(messages[-1]["content"])
+                    fallback = (
+                        payload.get("tool_context", {}).get("fallback_summary")
+                        or fallback
+                    )
+                except (TypeError, ValueError):
+                    pass
+                return fake_response("end_turn", [text_block(fallback)])
             raise AssertionError("FakeGateway ran out of scripted responses")
         return self.responses.pop(0)
 
@@ -194,13 +215,13 @@ def test_conversation_folder_duplicate_name_returns_conflict(client, assistant_u
     assert duplicate.json()["detail"] == "Assistant conversation folder already exists"
 
 
-def test_assistant_suggests_and_sends_admin_feedback(
+def test_product_improvement_is_captured_as_requirement(
     client,
     assistant_user,
     db,
     use_gateway,
 ):
-    user, organization = assistant_user
+    user, _ = assistant_user
     gateway = use_gateway(FakeGateway([]))
     conversation = client.post(
         "/assistant/conversations",
@@ -208,238 +229,32 @@ def test_assistant_suggests_and_sends_admin_feedback(
         headers=headers_for(user),
     ).json()
 
-    suggestion = client.post(
+    intro = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "El chat falla cuando intento enviar feedback"},
+        json={"content": "Quiero registrar una necesidad"},
         headers=headers_for(user),
     )
+    assert intro.status_code == 200
 
-    assert suggestion.status_code == 200
-    suggestion_message = suggestion.json()["messages"][-1]
-    assert suggestion_message["routing"]["intent"] == "suggest_admin_feedback"
-    assert suggestion_message["actions"] == []
-    assert "administrador" in suggestion_message["content"].lower()
-    assert "esto parece feedback útil" not in suggestion_message["content"].lower()
-    assert db.scalar(select(func.count()).select_from(AssistantAdminFeedback)) == 0
-
-    confirmation = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "sí"},
-        headers=headers_for(user),
-    )
-
-    assert confirmation.status_code == 200
-    confirmation_message = confirmation.json()["messages"][-1]
-    assert confirmation_message["actions"][0]["tool"] == "send_admin_feedback"
-    assert "enviado el feedback" in confirmation_message["content"].lower()
-    feedback = db.scalar(select(AssistantAdminFeedback))
-    assert feedback is not None
-    assert feedback.organization_id == organization.id
-    assert feedback.status == "submitted"
-    assert feedback.category == "bug"
-    assert feedback.submitted_by_id == user.id
-    assert gateway.calls == []
-
-
-def test_feedback_can_be_explained_and_converted_to_requirement(
-    client,
-    assistant_user,
-    db,
-    use_gateway,
-):
-    user, organization = assistant_user
-    gateway = use_gateway(FakeGateway([]))
-    conversation = client.post(
-        "/assistant/conversations",
-        json={},
-        headers=headers_for(user),
-    ).json()
-
-    suggestion = client.post(
+    response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "Me gustaría que el asistente me pueda responder por voz también."},
         headers=headers_for(user),
     )
-    assert suggestion.status_code == 200
-    suggestion_message = suggestion.json()["messages"][-1]
-    assert suggestion_message["routing"]["intent"] == "suggest_admin_feedback"
-    assert suggestion_message["actions"] == []
 
-    confirmation = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "sí"},
-        headers=headers_for(user),
-    )
-    assert confirmation.status_code == 200
-    confirmation_message = confirmation.json()["messages"][-1]
-    assert confirmation_message["actions"][0]["tool"] == "send_admin_feedback"
-    feedback = db.scalar(select(AssistantAdminFeedback))
-    assert feedback is not None
-    assert feedback.title == "Me gustaría que el asistente me pueda responder por voz también"
-
-    where = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "dónde puede consultar el administrador esto?"},
-        headers=headers_for(user),
-    )
-    assert where.status_code == 200
-    where_message = where.json()["messages"][-1]
-    where_content = where_message["content"].lower()
-    assert where_message["actions"] == []
-    assert where_message["routing"]["reason"] == "direct_admin_feedback_location"
-    assert "feedback interno" in where_content
-    assert "superusuarios" in where_content
-    assert "no tengo una herramienta" not in where_content
-    assert "no puedo confirmar" not in where_content
-
-    create = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "créalo como necesidad"},
-        headers=headers_for(user),
-    )
-    assert create.status_code == 200
-    create_message = create.json()["messages"][-1]
-    assert [action["tool"] for action in create_message["actions"]] == [
-        "list_requirements",
-        "create_requirement",
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements"
     ]
-    assert create_message["routing"]["reason"] == "direct_feedback_to_requirement"
-    assert "borrador" in create_message["content"].lower()
-    assert "no puedo crear" not in create_message["content"].lower()
-    requirement = db.scalar(select(Requirement).where(Requirement.organization_id == organization.id))
-    assert requirement is not None
-    assert requirement.title == "Respuesta por voz del asistente"
-    assert "responder también por voz" in requirement.problem.lower()
-    assert gateway.calls == []
-
-
-def test_semantic_planner_suggests_admin_feedback_without_keyword_markers(
-    client,
-    assistant_user,
-    db,
-    use_gateway,
-    monkeypatch,
-):
-    user, organization = assistant_user
-    monkeypatch.setattr(
-        assistant_service,
-        "plan_turn",
-        lambda **kwargs: assistant_planner.SemanticTurnPlan(
-            intent="suggest_admin_feedback",
-            action="send_admin_feedback",
-            target={"organization_id": organization.id},
-            draft={
-                "category": "ux",
-                "title": "Flujo de pantalla confuso",
-                "description": "La pantalla de revisión no deja claro cuál es el siguiente paso.",
-                "priority": "medium",
-            },
-            confidence=0.92,
-            source="planner",
-        ),
-    )
-    gateway = use_gateway(FakeGateway([]))
-    conversation = client.post(
-        "/assistant/conversations",
-        json={},
-        headers=headers_for(user),
-    ).json()
-
-    suggestion = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "La pantalla de revisión no deja claro cuál es el siguiente paso."},
-        headers=headers_for(user),
-    )
-
-    assert suggestion.status_code == 200
-    suggestion_message = suggestion.json()["messages"][-1]
-    assert suggestion_message["actions"] == []
-    assert suggestion_message["routing"]["reason"] == "action_policy_suggest_admin_feedback"
-    assert suggestion_message["routing"]["semantic_plan"]["source"] == "planner"
-    assert "administra" in suggestion_message["content"].lower()
-    assert db.scalar(select(func.count()).select_from(AssistantAdminFeedback)) == 0
-
+    assert assistant_message["routing"]["intent"] == "capture_requirement"
+    content = assistant_message["content"].lower()
+    assert "administrador" not in content
     db.expire_all()
     stored_conversation = db.get(AssistantConversation, conversation["id"])
     assert stored_conversation is not None
     state = json.loads(stored_conversation.state or "{}")
-    assert state["pending_action"] == {
-        "type": "send_admin_feedback",
-        "tool_input": {
-            "category": "ux",
-            "title": "Flujo de pantalla confuso",
-            "description": "La pantalla de revisión no deja claro cuál es el siguiente paso.",
-            "priority": "medium",
-            "organization_id": organization.id,
-        },
-    }
-    assert gateway.calls == []
-
-
-def test_semantic_planner_confirms_pending_admin_feedback_without_phrase_match(
-    client,
-    assistant_user,
-    db,
-    use_gateway,
-    monkeypatch,
-):
-    user, organization = assistant_user
-    monkeypatch.setattr(
-        assistant_service,
-        "plan_turn",
-        lambda **kwargs: assistant_planner.SemanticTurnPlan(
-            intent="suggest_admin_feedback",
-            action="send_admin_feedback",
-            confidence=0.96,
-            source="planner",
-        ),
-    )
-    gateway = use_gateway(FakeGateway([]))
-    conversation = client.post(
-        "/assistant/conversations",
-        json={},
-        headers=headers_for(user),
-    ).json()
-    stored_conversation = db.get(AssistantConversation, conversation["id"])
-    assert stored_conversation is not None
-    stored_conversation.state = json.dumps(
-        {
-            "pending_action": {
-                "type": "send_admin_feedback",
-                "tool_input": {
-                    "category": "bug",
-                    "title": "Error al cargar",
-                    "description": "La pantalla queda cargando indefinidamente.",
-                    "priority": "high",
-                    "organization_id": organization.id,
-                },
-            }
-        },
-        ensure_ascii=False,
-    )
-    db.add(stored_conversation)
-    db.commit()
-
-    confirmation = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "proceda con ello"},
-        headers=headers_for(user),
-    )
-
-    assert confirmation.status_code == 200
-    confirmation_message = confirmation.json()["messages"][-1]
-    assert confirmation_message["routing"]["reason"] == "action_policy_suggest_admin_feedback"
-    assert confirmation_message["routing"]["semantic_plan"]["source"] == "planner"
-    assert confirmation_message["actions"][0]["tool"] == "send_admin_feedback"
-    feedback = db.scalar(select(AssistantAdminFeedback))
-    assert feedback is not None
-    assert feedback.organization_id == organization.id
-    assert feedback.category == "bug"
-    assert feedback.status == "submitted"
-    db.expire_all()
-    updated_conversation = db.get(AssistantConversation, conversation["id"])
-    assert updated_conversation is not None
-    assert "pending_action" not in json.loads(updated_conversation.state or "{}")
+    assert state.get("selected_organization_id") is not None
     assert gateway.calls == []
 
 
@@ -472,13 +287,10 @@ def test_semantic_planner_cancels_pending_action_without_phrase_match(
     stored_conversation.state = json.dumps(
         {
             "pending_action": {
-                "type": "send_admin_feedback",
-                "tool_input": {
-                    "category": "ux",
-                    "title": "Pantalla confusa",
-                    "description": "La pantalla no explica el siguiente paso.",
-                    "priority": "medium",
-                    "organization_id": organization.id,
+                "type": "create_requirement_content",
+                "organization_id": organization.id,
+                "draft": {
+                    "title": "Pantalla de revisión más clara",
                 },
             }
         },
@@ -498,48 +310,11 @@ def test_semantic_planner_cancels_pending_action_without_phrase_match(
     assert assistant_message["routing"]["reason"] == "action_policy_cancel_pending_action"
     assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
     assert assistant_message["actions"] == []
-    assert db.scalar(select(func.count()).select_from(AssistantAdminFeedback)) == 0
     db.expire_all()
     updated_conversation = db.get(AssistantConversation, conversation["id"])
     assert updated_conversation is not None
     assert "pending_action" not in json.loads(updated_conversation.state or "{}")
     assert gateway.calls == []
-
-
-def test_superuser_can_list_and_review_admin_feedback(
-    client,
-    assistant_user,
-    db,
-    superuser,
-):
-    user, organization = assistant_user
-    feedback = AssistantAdminFeedback(
-        organization_id=organization.id,
-        category="ux",
-        title="Mensaje confuso",
-        description="El asistente debería sugerir enviar feedback.",
-        priority="medium",
-        submitted_by_id=user.id,
-    )
-    db.add(feedback)
-    db.commit()
-
-    listed = client.get("/assistant/admin-feedback", headers=headers_for(superuser))
-
-    assert listed.status_code == 200
-    assert listed.json()[0]["title"] == "Mensaje confuso"
-
-    reviewed = client.patch(
-        f"/assistant/admin-feedback/{feedback.id}",
-        json={"status": "reviewed", "review_notes": "Visto"},
-        headers=headers_for(superuser),
-    )
-
-    assert reviewed.status_code == 200
-    body = reviewed.json()
-    assert body["status"] == "reviewed"
-    assert body["review_notes"] == "Visto"
-    assert body["reviewed_by_id"] == superuser.id
 
 
 def test_assistant_can_create_supervised_agent_office_task(
@@ -766,6 +541,32 @@ def test_status_reports_disabled_gateway(
         "consultation",
     }
     assert "create_requirement" in {tool["name"] for tool in body["tools"]}
+
+
+def test_status_marks_web_search_unavailable_when_runtime_is_not_configured(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "hermes_web_api_key", None)
+    use_gateway(FakeGateway([]))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    web_tool = next(
+        tool for tool in response.json()["tools"] if tool["name"] == "web_search"
+    )
+    assert web_tool["available"] is False
+    assert web_tool["disabled_reason"] == "runtime_unavailable:hermes_web"
+    assert all(
+        "web_search" not in agent["tool_names"]
+        for agent in response.json()["agents"]
+    )
 
 
 def test_transcribe_audio_requires_assistant_permission(client, make_user):
@@ -1006,7 +807,7 @@ def test_agent_turn_persists_disabled_planner_routing(
 ):
     user, _ = assistant_user
     monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
-    use_gateway(
+    gateway = use_gateway(
         FakeGateway(
             [
                 fake_response(
@@ -1289,6 +1090,86 @@ def test_map_location_question_executes_map_tool_without_gateway(
     assert "Demo mapa municipal" in assistant_message["content"]
     assert "/mapa?entity_type=project" in assistant_message["content"]
     assert gateway.calls == []
+
+
+def test_direct_tool_turn_uses_model_only_for_final_synthesis(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Síntesis")
+    organization = make_organization(name="Ayuntamiento Síntesis")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "map.view", "map.edit", "projects.view_all"],
+    )
+    project = Project(
+        organization_id=organization.id,
+        name="Plan de sombra",
+        description="Proyecto con ubicación para sintetizar",
+        status="active",
+    )
+    db.add(project)
+    db.commit()
+    assert client.post(
+        "/geo/entity-locations",
+        json={
+            "entity_type": "project",
+            "entity_id": project.id,
+            "role": "primary",
+            "location": {
+                "label": "Plaza Mayor",
+                "latitude": 41.5917,
+                "longitude": -3.6404,
+            },
+        },
+        headers=headers_for(user),
+    ).status_code == 201
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "He encontrado el Plan de sombra y te dejo el enlace al mapa."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Qué proyectos hay en el mapa?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == (
+        "He encontrado el Plan de sombra y te dejo el enlace al mapa."
+    )
+    assert assistant_message["routing"]["synthesized_by_model"] is True
+    assert assistant_message["actions"][0]["tool"] == "get_map_items"
+    assert gateway.calls == []
+    assert len(gateway.synthesis_calls) == 1
+    synthesis_call = gateway.synthesis_calls[0]
+    assert synthesis_call["tools"] == []
+    payload = json.loads(synthesis_call["messages"][-1]["content"])
+    assert payload["internal_context"] == "direct_context_ready_for_final_answer"
+    assert payload["tool_context"]["tool"] == "get_map_items"
+    assert "Plan de sombra" in payload["tool_context"]["tool_result"]
 
 
 def test_semantic_planner_map_intent_executes_action_policy(
@@ -3561,6 +3442,7 @@ def test_agent_web_search_uses_controlled_hermes_web_tool(
     user = make_user()
     organization = make_organization()
     grant_permissions(user, organization, ["assistant.use", "assistant.web.search"])
+    monkeypatch.setattr(settings, "hermes_web_api_key", "test-web-key")
     calls = []
 
     def fake_search(*, query: str, limit: int):
@@ -3575,7 +3457,7 @@ def test_agent_web_search_uses_controlled_hermes_web_tool(
         ]
 
     monkeypatch.setattr(assistant_tools.hermes_web_client, "search", fake_search)
-    use_gateway(
+    gateway = use_gateway(
         FakeGateway(
             [
                 fake_response(
@@ -3612,6 +3494,7 @@ def test_agent_web_search_uses_controlled_hermes_web_tool(
     )
 
     assert response.status_code == 200
+    assert any(tool["name"] == "web_search" for tool in gateway.calls[0]["tools"])
     assert calls == [{"query": "normativa municipal 2026", "limit": 5}]
 
     action = response.json()["messages"][1]["actions"][0]
@@ -3634,7 +3517,7 @@ def test_agent_web_search_requires_permission(
     organization = make_organization()
     grant_permissions(user, organization, ["assistant.use"])
 
-    use_gateway(
+    gateway = use_gateway(
         FakeGateway(
             [
                 fake_response(
@@ -3668,6 +3551,7 @@ def test_agent_web_search_requires_permission(
     )
 
     assert response.status_code == 200
+    assert all(tool["name"] != "web_search" for tool in gateway.calls[0]["tools"])
     action = response.json()["messages"][1]["actions"][0]
     assert action["tool"] == "web_search"
     assert action["ok"] is False

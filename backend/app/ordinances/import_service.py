@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import ssl
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from html.parser import HTMLParser
@@ -41,6 +42,7 @@ ORDINANCE_TITLE_RE = re.compile(
 )
 MAX_TITLE_CHARS = 500
 MAX_SUMMARY_CHARS = 900
+OFFICIAL_UNVERIFIED_TLS_DOMAINS = {"bop.dipsoria.es"}
 
 
 @dataclass(frozen=True)
@@ -293,7 +295,13 @@ def _process_item(
         item.status = "fetching"
         db.commit()
 
-        fetched = _fetch_source(item.source_url)
+        fetched = _fetch_source(
+            item.source_url,
+            allow_unverified_tls=_requires_unverified_tls(
+                item.source_url,
+                official_sources,
+            ),
+        )
         text = _extract_text(fetched.content, fetched.content_type, item.source_url)
         if len(text.strip()) < 80:
             raise ImportSourceError("No se pudo extraer texto suficiente de la fuente.")
@@ -337,14 +345,19 @@ class FetchedSource:
     content_type: str
 
 
-def _fetch_source(url: str) -> FetchedSource:
+def _fetch_source(
+    url: str,
+    *,
+    allow_unverified_tls: bool = False,
+) -> FetchedSource:
     request = urlrequest.Request(
         url,
         headers={"User-Agent": "AsistenteAyuntamientos/0.1 ordinance-import"},
         method="GET",
     )
+    context = _unverified_https_context() if allow_unverified_tls else None
     try:
-        with urlrequest.urlopen(request, timeout=30) as response:
+        with urlrequest.urlopen(request, timeout=30, context=context) as response:
             content_type = (response.headers.get("content-type") or "").lower()
             chunks: list[bytes] = []
             size = 0
@@ -358,6 +371,25 @@ def _fetch_source(url: str) -> FetchedSource:
     except (urlerror.URLError, TimeoutError) as error:
         raise ImportSourceError("No se pudo descargar la fuente.") from error
     return FetchedSource(content=b"".join(chunks), content_type=content_type)
+
+
+def _requires_unverified_tls(
+    url: str,
+    official_sources: list[OfficialLegalSource],
+) -> bool:
+    """Allow known official sources with incomplete TLS chains to be imported."""
+
+    host = (urlparse.urlparse(url).hostname or "").lower()
+    if not _host_matches_domains(host, OFFICIAL_UNVERIFIED_TLS_DOMAINS):
+        return False
+    return _url_allowed(url, official_sources)
+
+
+def _unverified_https_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 def _extract_text(content: bytes, content_type: str, url: str) -> str:
@@ -651,9 +683,13 @@ def _url_allowed(url: str, official_sources: list[OfficialLegalSource]) -> bool:
         return False
     for source in official_sources:
         domain = source.domain.lower()
-        if host == domain or host.endswith(f".{domain}"):
+        if _host_matches_domains(host, {domain}):
             return True
     return False
+
+
+def _host_matches_domains(host: str, domains: set[str]) -> bool:
+    return any(host == domain or host.endswith(f".{domain}") for domain in domains)
 
 
 def _json_list(value: str | None) -> list:

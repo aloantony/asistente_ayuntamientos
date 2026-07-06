@@ -35,7 +35,12 @@ function normalizeApiBaseUrl(value: string) {
   // tunnel would then call its *own* localhost and fail with "Failed to fetch".
   // In that public-origin case, fall back to same-origin relative API routes.
   if (typeof window !== "undefined" && isLoopbackApiBaseUrl(trimmed)) {
-    return isLoopbackHostname(window.location.hostname) ? trimmed : "";
+    if (!isLoopbackHostname(window.location.hostname)) {
+      return "";
+    }
+    const url = new URL(trimmed);
+    url.hostname = window.location.hostname;
+    return url.toString().replace(/\/$/, "");
   }
 
   return trimmed;

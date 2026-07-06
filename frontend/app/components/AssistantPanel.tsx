@@ -292,9 +292,34 @@ function getActionIcon(tool: string): LucideIcon {
   return Hammer;
 }
 
+function getActionErrorSummary(action: AssistantAction) {
+  const result = action.result.toLowerCase();
+
+  if (action.tool === "web_search") {
+    if (result.includes("assistant.web.search")) {
+      return "La búsqueda web no está disponible para este usuario.";
+    }
+    if (result.includes("hermes web is not configured")) {
+      return "La búsqueda web no está configurada en este servidor.";
+    }
+    if (
+      result.includes("hermes web api") ||
+      result.includes("connection failed")
+    ) {
+      return "La búsqueda web no responde ahora mismo.";
+    }
+  }
+
+  if (result.includes("permission required:")) {
+    return "No tienes permiso para ejecutar esta acción.";
+  }
+
+  return "La herramienta devolvió un error.";
+}
+
 function getActionSummary(action: AssistantAction) {
   if (!action.ok) {
-    return "La herramienta devolvio un error.";
+    return getActionErrorSummary(action);
   }
 
   const parsed = parseActionResult(action.result);
@@ -416,9 +441,11 @@ function actionDetailText(action: AssistantAction) {
 
 function ActionTimeline({
   actions,
+  showTechnicalDetail,
   toolLabels,
 }: {
   actions: AssistantAction[];
+  showTechnicalDetail: boolean;
   toolLabels: Record<string, string>;
 }) {
   if (actions.length === 0) {
@@ -475,10 +502,12 @@ function ActionTimeline({
                     ))}
                   </div>
                 ) : null}
-                <details className="assistant-action-detail">
-                  <summary>Detalle tecnico</summary>
-                  <pre>{actionDetailText(action)}</pre>
-                </details>
+                {showTechnicalDetail ? (
+                  <details className="assistant-action-detail">
+                    <summary>Detalle técnico</summary>
+                    <pre>{actionDetailText(action)}</pre>
+                  </details>
+                ) : null}
               </div>
             </div>
           );
@@ -548,6 +577,18 @@ export function AssistantPanel({
       ),
     [assistantStatus],
   );
+  const unavailableWebSearch =
+    assistantStatus?.tools.some(
+      (tool) => tool.name === "web_search" && !tool.available,
+    ) ?? false;
+  const conversationStateSummary = selectedConversation?.state_summary ?? null;
+  const pendingStateLabel = conversationStateSummary?.pending_confirmation
+    ? "Anacleto espera tu confirmacion antes de guardar el borrador."
+    : conversationStateSummary?.pending_work_type
+      ? "Hay un trabajo pendiente en esta conversacion."
+      : conversationStateSummary?.pending_action_type
+        ? "Hay una accion pendiente en esta conversacion."
+        : null;
   const [inlineTitleValue, setInlineTitleValue] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
@@ -1150,6 +1191,15 @@ export function AssistantPanel({
         </div>
       ) : null}
 
+      {unavailableWebSearch ? (
+        <div className="assistant-alert muted">
+          <CircleAlert aria-hidden size={18} />
+          <span>
+            La busqueda web no esta disponible para este usuario o servidor.
+          </span>
+        </div>
+      ) : null}
+
       <div
         className={[
           "assistant-agent-grid",
@@ -1502,6 +1552,13 @@ export function AssistantPanel({
                 )}
               </div>
 
+              {pendingStateLabel ? (
+                <div className="assistant-state-summary">
+                  <Clock3 aria-hidden size={16} />
+                  <span>{pendingStateLabel}</span>
+                </div>
+              ) : null}
+
               <div className="assistant-messages">
                 {selectedConversation.messages.length === 0 ? (
                   <div className="assistant-empty-thread">
@@ -1534,11 +1591,10 @@ export function AssistantPanel({
                           </p>
                         </div>
                         <AssistantMapActions actions={message.actions} />
-                        {message.actions.some((action) => action.tool === "web_search") ? (
+                        {message.actions.length > 0 ? (
                           <ActionTimeline
-                            actions={message.actions.filter(
-                              (action) => action.tool === "web_search",
-                            )}
+                            actions={message.actions}
+                            showTechnicalDetail={currentUser.is_superuser}
                             toolLabels={toolLabels}
                           />
                         ) : null}

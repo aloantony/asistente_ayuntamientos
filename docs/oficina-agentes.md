@@ -20,7 +20,6 @@ Anacleto sigue siendo el único interlocutor visible. Los departamentos de la of
 | `documents` | Documental | Preparar planes de trabajo documental; lectura automática de documentos queda fuera de v1. |
 | `projects` | Proyectos | Consultar proyectos visibles. |
 | `map` | Mapa | Consultar ubicaciones visibles de proyectos y necesidades. |
-| `admin_feedback` | Feedback | Registrar fricciones, bugs y mejoras para administración. |
 | `daily_briefing` | Informe diario | Preparar resúmenes diarios de proyectos y necesidades visibles. |
 
 ## Permisos

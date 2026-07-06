@@ -82,7 +82,6 @@ OFFICE_AGENTS: dict[str, AgentOfficeAgentSpec] = {
                 "update_requirement",
                 "add_requirement_message",
                 "propose_memory_entry",
-                "send_admin_feedback",
             }
         ),
         mutating_actions=frozenset(
@@ -91,7 +90,6 @@ OFFICE_AGENTS: dict[str, AgentOfficeAgentSpec] = {
                 "update_requirement",
                 "add_requirement_message",
                 "propose_memory_entry",
-                "send_admin_feedback",
             }
         ),
     ),
@@ -137,15 +135,6 @@ OFFICE_AGENTS: dict[str, AgentOfficeAgentSpec] = {
         mutating_actions=frozenset(),
         requires_approval_by_default=False,
     ),
-    "admin_feedback": AgentOfficeAgentSpec(
-        key="admin_feedback",
-        name="Agente de feedback",
-        department="admin_feedback",
-        description="Convierte fricciones, bugs y propuestas en feedback supervisado para administración.",
-        assistant_agent_key="requirements_intake",
-        tool_names=frozenset({"send_admin_feedback"}),
-        mutating_actions=frozenset({"send_admin_feedback"}),
-    ),
     "daily_briefing": AgentOfficeAgentSpec(
         key="daily_briefing",
         name="Agente de informe diario",
@@ -165,14 +154,12 @@ DEFAULT_ACTION_BY_DEPARTMENT = {
     "documents": "prepare_document_work",
     "projects": "list_projects",
     "map": "get_map_items",
-    "admin_feedback": "send_admin_feedback",
     "daily_briefing": "daily_briefing",
 }
 ACTION_TO_DEPARTMENT = {
     "semantic_search_ordinances": "ordinances",
     "list_projects": "projects",
     "get_map_items": "map",
-    "send_admin_feedback": "admin_feedback",
     "daily_briefing": "daily_briefing",
     "list_requirements": "requirements",
     "get_requirement": "requirements",
@@ -189,7 +176,6 @@ TOOL_ACTIONS = {
     "update_requirement",
     "add_requirement_message",
     "propose_memory_entry",
-    "send_admin_feedback",
     "semantic_search_ordinances",
     "get_map_items",
 }
@@ -198,7 +184,6 @@ MUTATING_ACTIONS = {
     "update_requirement",
     "add_requirement_message",
     "propose_memory_entry",
-    "send_admin_feedback",
     "create_agent_office_task",
 }
 
@@ -500,11 +485,6 @@ def _tool_input_for_task(task: AgentOfficeTask) -> dict:
     tool_input["organization_id"] = task.organization_id
     if task.requested_action == "semantic_search_ordinances":
         tool_input.setdefault("query", task.description)
-    if task.requested_action == "send_admin_feedback":
-        tool_input.setdefault("category", "other")
-        tool_input.setdefault("title", task.title)
-        tool_input.setdefault("description", task.description)
-        tool_input.setdefault("priority", task.priority)
     return tool_input
 
 

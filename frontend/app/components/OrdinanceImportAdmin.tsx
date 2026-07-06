@@ -11,6 +11,7 @@ import {
   userHasPermission,
   type Municipality,
   type OfficialLegalSource,
+  type OrdinanceAutonomousCommunityCoverage,
   type OrdinanceComparison,
   type OrdinanceImportJob,
   type OrdinanceReviewDecision,
@@ -29,6 +30,8 @@ export function OrdinanceImportAdmin({
   const { user, getStoredToken, handleRequestError } = useSession();
   const [sources, setSources] = useState<OfficialLegalSource[]>([]);
   const [jobs, setJobs] = useState<OrdinanceImportJob[]>([]);
+  const [coverage, setCoverage] =
+    useState<OrdinanceAutonomousCommunityCoverage | null>(null);
   const [selectedJob, setSelectedJob] = useState<OrdinanceImportJob | null>(
     null,
   );
@@ -72,6 +75,11 @@ export function OrdinanceImportAdmin({
       (userHasPermission(user, "ordinances.compare") ||
         userHasPermission(user, "ordinances.manage")),
   );
+  const canViewCoverage = Boolean(
+    user &&
+      (userHasPermission(user, "ordinances.view") ||
+        userHasPermission(user, "ordinances.manage")),
+  );
 
   const activeMunicipalities = useMemo(
     () =>
@@ -99,7 +107,7 @@ export function OrdinanceImportAdmin({
     setImportError("");
     try {
       const token = getStoredToken();
-      const [sourceData, jobData] = await Promise.all([
+      const [sourceData, jobData, coverageData] = await Promise.all([
         adminRequest<OfficialLegalSource[]>(
           "/ordinances/official-sources",
           token,
@@ -110,9 +118,17 @@ export function OrdinanceImportAdmin({
           token,
           "No se pudieron cargar las importaciones.",
         ),
+        canViewCoverage
+          ? adminRequest<OrdinanceAutonomousCommunityCoverage>(
+              "/ordinances/coverage/castilla-y-leon",
+              token,
+              "No se pudo cargar la cobertura de ordenanzas.",
+            )
+          : Promise.resolve(null),
       ]);
       setSources(sourceData);
       setJobs(jobData);
+      setCoverage(coverageData);
     } catch (error) {
       handleRequestError(
         error,
@@ -239,6 +255,29 @@ export function OrdinanceImportAdmin({
     }
   }
 
+  async function handleRetryProvinceEmbeddings(province: string) {
+    setImportError("");
+    setImportMessage("");
+    try {
+      await adminRequest(
+        `/ordinances/coverage/provinces/${encodeURIComponent(
+          province,
+        )}/retry-embeddings`,
+        getStoredToken(),
+        "No se pudieron reintentar los embeddings.",
+        { method: "POST" },
+      );
+      setImportMessage(`Reintento lanzado para ${province}.`);
+      await loadImportData();
+    } catch (error) {
+      handleRequestError(
+        error,
+        setImportError,
+        "No se pudieron reintentar los embeddings.",
+      );
+    }
+  }
+
   async function handleReviewItem(
     itemId: number,
     decision: OrdinanceReviewDecision,
@@ -321,6 +360,86 @@ export function OrdinanceImportAdmin({
           {importError ? <p className="error-message">{importError}</p> : null}
           {importMessage ? (
             <p className="success-message">{importMessage}</p>
+          ) : null}
+
+          {coverage ? (
+            <div className="coverage-panel">
+              <div className="section-header">
+                <h4>Cobertura Castilla y León</h4>
+                <span className="small-muted">
+                  {coverage.provinces_ready_for_assistant} de{" "}
+                  {coverage.provinces_total} provincias con corpus listo
+                </span>
+              </div>
+              <div className="coverage-summary-grid">
+                <div>
+                  <span>Municipios</span>
+                  <strong>
+                    {coverage.municipalities_ready_for_assistant}/
+                    {coverage.municipalities_total}
+                  </strong>
+                </div>
+                <div>
+                  <span>Ordenanzas aprobadas</span>
+                  <strong>{coverage.ordinances_approved}</strong>
+                </div>
+                <div>
+                  <span>Chunks listos</span>
+                  <strong>{coverage.chunks_ready}</strong>
+                </div>
+                <div>
+                  <span>Fallos importación</span>
+                  <strong>{coverage.import_failures_total}</strong>
+                </div>
+              </div>
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Provincia</th>
+                      <th>Municipios</th>
+                      <th>Listos</th>
+                      <th>Ordenanzas</th>
+                      <th>Chunks</th>
+                      <th>Fallos</th>
+                      <th>Acción</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {coverage.provinces.map((province) => (
+                      <tr key={province.province}>
+                        <td>{province.province}</td>
+                        <td>{province.municipalities_total}</td>
+                        <td>
+                          {province.municipalities_ready_for_assistant}/
+                          {province.municipalities_total}
+                        </td>
+                        <td>{province.ordinances_approved}</td>
+                        <td>
+                          {province.chunks_ready}
+                          {province.chunks_failed > 0
+                            ? ` (${province.chunks_failed} fallidos)`
+                            : ""}
+                        </td>
+                        <td>{province.import_failures_total}</td>
+                        <td>
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            onClick={() =>
+                              void handleRetryProvinceEmbeddings(province.province)
+                            }
+                            disabled={province.chunks_failed === 0}
+                          >
+                            Reintentar embeddings
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           ) : null}
 
           <form className="admin-form" onSubmit={handleCreateJob}>

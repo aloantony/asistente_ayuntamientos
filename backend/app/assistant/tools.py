@@ -22,7 +22,6 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
 from app.assistant.models import (
-    AssistantAdminFeedback,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
@@ -74,21 +73,12 @@ VALID_TRANSVERSAL_FEATURE_CATEGORIES = {
     "citizen_service",
     "other",
 }
-VALID_ADMIN_FEEDBACK_CATEGORIES = {
-    "bug",
-    "improvement",
-    "missing_capability",
-    "data_issue",
-    "ux",
-    "other",
-}
 MAX_WEB_QUERY_CHARS = 400
 MAX_WEB_RESULTS = 5
 MAX_ORDINANCE_QUERY_CHARS = 400
 MAX_ORDINANCE_RESULTS = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
-MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
 PERSONAL_DATA_PATTERN = re.compile(
     r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
     re.IGNORECASE,
@@ -267,7 +257,6 @@ _TOOL_DEFINITIONS: list[dict] = [
                         "documents",
                         "projects",
                         "map",
-                        "admin_feedback",
                         "daily_briefing",
                     ],
                     "description": "Capacidad interna sugerida; si falta se usa triage",
@@ -301,51 +290,6 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
             },
             "required": ["organization_id", "title", "description"],
-        },
-    },
-    {
-        "name": "send_admin_feedback",
-        "description": (
-            "Envía al administrador feedback explícito del usuario sobre la "
-            "plataforma o el asistente: errores, fricciones, capacidades que "
-            "faltan, problemas de datos o mejoras de UX. Úsala solo después de "
-            "que el usuario acepte enviarlo; antes puedes sugerirlo en lenguaje "
-            "natural. Resume el problema sin datos personales innecesarios."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "category": {
-                    "type": "string",
-                    "enum": [
-                        "bug",
-                        "improvement",
-                        "missing_capability",
-                        "data_issue",
-                        "ux",
-                        "other",
-                    ],
-                    "description": "Tipo de feedback",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Título breve para el administrador",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Descripción accionable del feedback",
-                },
-                "priority": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high", "urgent"],
-                    "description": "Prioridad estimada",
-                },
-                "organization_id": {
-                    "type": "integer",
-                    "description": "Organización relacionada, si procede",
-                },
-            },
-            "required": ["category", "title", "description"],
         },
     },
     {
@@ -687,15 +631,22 @@ def execute_tool(
     context: ToolContext | None = None,
     allowed: frozenset[str] | None = None,
 ) -> ToolResult:
+    spec = TOOL_CATALOG.get(name)
+    if spec is None:
+        return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
+
+    disabled_reason = tool_disabled_reason(db, current_user, spec)
+    if disabled_reason is not None:
+        return ToolResult(
+            content=f"Herramienta no disponible: {disabled_reason}",
+            ok=False,
+        )
+
     if allowed is not None and name not in allowed:
         return ToolResult(
             content=f"Herramienta no disponible para este agente: {name}",
             ok=False,
         )
-
-    spec = TOOL_CATALOG.get(name)
-    if spec is None:
-        return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
 
     try:
         result = spec.executor(db, current_user, tool_input, context or ToolContext())
@@ -1249,67 +1200,6 @@ def _propose_memory_entry(
     }
 
 
-def _send_admin_feedback(
-    db: Session,
-    current_user: User,
-    tool_input: dict,
-    context: ToolContext,
-) -> dict:
-    organization_id = tool_input.get("organization_id")
-    if organization_id is not None:
-        organization_id = int(organization_id)
-        ensure_organization_exists(db, organization_id)
-        if not has_permission(
-            current_user,
-            "assistant.use",
-            db,
-            organization_id=organization_id,
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="Permission required: assistant.use",
-            )
-
-    category = str(tool_input["category"]).strip()
-    if category not in VALID_ADMIN_FEEDBACK_CATEGORIES:
-        raise ValueError(f"category inválida: {category}")
-
-    title = _clean_transversal_text("title", tool_input["title"], 255)
-    description = str(tool_input["description"]).strip()
-    if not description:
-        raise ValueError("description no puede estar vacío")
-    if len(description) > MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS:
-        raise ValueError(
-            "description no puede superar "
-            f"{MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS} caracteres"
-        )
-
-    priority = str(tool_input.get("priority") or "medium").strip()
-    if priority not in VALID_PRIORITIES:
-        raise ValueError(f"priority inválida: {priority}")
-
-    feedback = AssistantAdminFeedback(
-        organization_id=organization_id,
-        category=category,
-        title=title,
-        description=description,
-        priority=priority,
-        status="submitted",
-        source_conversation_id=context.conversation_id,
-        source_message_id=context.user_message_id,
-        submitted_by_id=current_user.id,
-    )
-    db.add(feedback)
-    db.commit()
-    return {
-        "id": feedback.id,
-        "status": feedback.status,
-        "category": feedback.category,
-        "priority": feedback.priority,
-        "organization_id": feedback.organization_id,
-    }
-
-
 def _parse_optional_datetime(value: object) -> datetime | None:
     if value is None or value == "":
         return None
@@ -1578,7 +1468,6 @@ _EXECUTORS = {
     "add_requirement_message": _add_requirement_message,
     "propose_memory_entry": _propose_memory_entry,
     "create_agent_office_task": _create_agent_office_task,
-    "send_admin_feedback": _send_admin_feedback,
     "propose_transversal_feature": _propose_transversal_feature,
     "list_available_transversal_features": _list_available_transversal_features,
     "record_transversal_feature_acceptance": _record_transversal_feature_acceptance,
@@ -1627,6 +1516,7 @@ _TOOL_METADATA: dict[str, dict] = {
         "label": "Crear necesidad",
         "read_only": False,
         "domain": "requirements",
+        "required_permission": "requirements.create",
     },
     "update_requirement": {
         "label": "Actualizar necesidad",
@@ -1649,11 +1539,6 @@ _TOOL_METADATA: dict[str, dict] = {
         "read_only": False,
         "domain": "agent_office",
         "required_permission": "agent_office.create",
-    },
-    "send_admin_feedback": {
-        "label": "Enviar feedback al admin",
-        "read_only": False,
-        "domain": "feedback",
     },
     "propose_transversal_feature": {
         "label": "Proponer funcionalidad transversal",
@@ -1703,5 +1588,40 @@ def get_tool_definitions(tool_names: frozenset[str]) -> list[dict]:
     ]
 
 
-def get_tool_metadata() -> list[dict]:
-    return [spec.metadata for spec in TOOL_CATALOG.values()]
+def tool_disabled_reason(db: Session, current_user: User, spec: ToolSpec) -> str | None:
+    if spec.required_permission and not has_permission(
+        current_user,
+        spec.required_permission,
+        db,
+    ):
+        return f"missing_permission:{spec.required_permission}"
+    if spec.name == "web_search" and not hermes_web_client.enabled:
+        return "runtime_unavailable:hermes_web"
+    return None
+
+
+def get_available_tools(
+    db: Session,
+    current_user: User,
+    tools: list[ToolSpec],
+) -> list[ToolSpec]:
+    return [
+        spec
+        for spec in tools
+        if tool_disabled_reason(db, current_user, spec) is None
+    ]
+
+
+def get_tool_metadata(
+    db: Session | None = None,
+    current_user: User | None = None,
+) -> list[dict]:
+    metadata = []
+    for spec in TOOL_CATALOG.values():
+        item = dict(spec.metadata)
+        if db is not None and current_user is not None:
+            disabled_reason = tool_disabled_reason(db, current_user, spec)
+            item["available"] = disabled_reason is None
+            item["disabled_reason"] = disabled_reason
+        metadata.append(item)
+    return metadata

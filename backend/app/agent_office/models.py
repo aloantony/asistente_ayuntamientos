@@ -19,7 +19,6 @@ AGENT_OFFICE_DEPARTMENTS = (
     "documents",
     "projects",
     "map",
-    "admin_feedback",
     "daily_briefing",
 )
 AGENT_OFFICE_TASK_STATUSES = (

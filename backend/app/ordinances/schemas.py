@@ -430,6 +430,38 @@ class OrdinanceCoverageRead(BaseModel):
     municipalities: list[OrdinanceCoverageMunicipalityRead]
 
 
+class OrdinanceProvinceCoverageSummaryRead(BaseModel):
+    province: str
+    municipalities_total: int
+    municipalities_with_approved_ordinances: int
+    municipalities_ready_for_assistant: int
+    ordinances_total: int
+    ordinances_approved: int
+    chunks_total: int
+    chunks_ready: int
+    chunks_approved: int
+    chunks_failed: int
+    import_failures_total: int
+
+
+class OrdinanceAutonomousCommunityCoverageRead(BaseModel):
+    autonomous_community: str
+    provinces_total: int
+    provinces_with_municipalities: int
+    provinces_ready_for_assistant: int
+    municipalities_total: int
+    municipalities_with_approved_ordinances: int
+    municipalities_ready_for_assistant: int
+    ordinances_total: int
+    ordinances_approved: int
+    chunks_total: int
+    chunks_ready: int
+    chunks_approved: int
+    chunks_failed: int
+    import_failures_total: int
+    provinces: list[OrdinanceProvinceCoverageSummaryRead]
+
+
 class OrdinanceFailedEmbeddingRead(BaseModel):
     chunk_id: int
     ordinance_id: int

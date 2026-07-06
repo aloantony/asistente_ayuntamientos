@@ -6,10 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.assistant.agents import get_allowed_agents
+from app.assistant.agents import get_agent_tools, get_allowed_agents
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
 from app.assistant.models import (
-    AssistantAdminFeedback,
     AssistantConversation,
     AssistantConversationFolder,
     AssistantMemoryEntry,
@@ -17,9 +16,6 @@ from app.assistant.models import (
     AssistantTransversalFeatureAdoption,
 )
 from app.assistant.schemas import (
-    AdminFeedbackStatus,
-    AssistantAdminFeedbackRead,
-    AssistantAdminFeedbackUpdate,
     AssistantAudioTranscriptionRead,
     AssistantConversationCreate,
     AssistantConversationDetail,
@@ -47,7 +43,7 @@ from app.assistant.planner import (
     planner_enabled,
     planner_healthy,
 )
-from app.assistant.tools import get_tool_metadata
+from app.assistant.tools import get_available_tools, get_tool_metadata
 from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
 from app.db.session import get_db
@@ -70,6 +66,21 @@ def require_assistant_use(db: Session, current_user: User) -> None:
         status_code=http_status.HTTP_403_FORBIDDEN,
         detail="Permission required: assistant.use",
     )
+
+
+def get_agent_metadata(
+    db: Session,
+    current_user: User,
+) -> list[dict]:
+    agents = []
+    for agent in get_allowed_agents(db, current_user):
+        metadata = dict(agent.metadata)
+        metadata["tool_names"] = sorted(
+            tool.name
+            for tool in get_available_tools(db, current_user, get_agent_tools(agent))
+        )
+        agents.append(metadata)
+    return agents
 
 
 @router.get("/status", response_model=AssistantStatusRead)
@@ -98,8 +109,8 @@ def get_assistant_status(
             else None,
             "runtime_healthy": planner_healthy(),
         },
-        agents=[agent.metadata for agent in get_allowed_agents(db, current_user)],
-        tools=get_tool_metadata(),
+        agents=get_agent_metadata(db, current_user),
+        tools=get_tool_metadata(db, current_user),
     )
 
 
@@ -211,56 +222,6 @@ def update_memory_entry(
 
     db.commit()
     return get_existing_memory_entry(db, entry_id)
-
-
-@router.get(
-    "/admin-feedback",
-    response_model=list[AssistantAdminFeedbackRead],
-)
-def list_admin_feedback(
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
-    status: Annotated[AdminFeedbackStatus | None, Query()] = None,
-) -> list[AssistantAdminFeedback]:
-    query = (
-        select(AssistantAdminFeedback)
-        .options(
-            selectinload(AssistantAdminFeedback.submitted_by),
-            selectinload(AssistantAdminFeedback.reviewed_by),
-        )
-        .order_by(
-            AssistantAdminFeedback.updated_at.desc(),
-            AssistantAdminFeedback.id.desc(),
-        )
-    )
-    if status is not None:
-        query = query.where(AssistantAdminFeedback.status == status)
-    return list(db.scalars(query))
-
-
-@router.patch(
-    "/admin-feedback/{feedback_id}",
-    response_model=AssistantAdminFeedbackRead,
-)
-def update_admin_feedback(
-    feedback_id: int,
-    payload: AssistantAdminFeedbackUpdate,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_superuser)],
-) -> AssistantAdminFeedback:
-    feedback = get_existing_admin_feedback(db, feedback_id)
-    updates = payload.model_dump(exclude_unset=True)
-    if "priority" in updates and updates["priority"] is not None:
-        feedback.priority = updates["priority"]
-    if "review_notes" in updates:
-        feedback.review_notes = updates["review_notes"]
-    if "status" in updates and updates["status"] is not None:
-        feedback.status = updates["status"]
-        feedback.reviewed_by_id = current_user.id
-        feedback.reviewed_at = datetime.now(timezone.utc)
-
-    db.commit()
-    return get_existing_admin_feedback(db, feedback_id)
 
 
 @router.get(
@@ -713,27 +674,6 @@ def get_existing_memory_entry(db: Session, entry_id: int) -> AssistantMemoryEntr
             detail="Assistant memory entry not found",
         )
     return entry
-
-
-def get_existing_admin_feedback(
-    db: Session,
-    feedback_id: int,
-) -> AssistantAdminFeedback:
-    feedback = db.scalar(
-        select(AssistantAdminFeedback)
-        .options(
-            selectinload(AssistantAdminFeedback.submitted_by),
-            selectinload(AssistantAdminFeedback.reviewed_by),
-        )
-        .where(AssistantAdminFeedback.id == feedback_id)
-        .execution_options(populate_existing=True)
-    )
-    if feedback is None:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="Assistant admin feedback not found",
-        )
-    return feedback
 
 
 def get_existing_transversal_feature(

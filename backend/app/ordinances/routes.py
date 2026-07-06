@@ -25,6 +25,11 @@ from app.ordinances.bop_burgos import (
     build_burgos_coverage_report,
     retry_failed_burgos_embeddings,
 )
+from app.ordinances.coverage import (
+    build_castilla_leon_coverage_report,
+    build_province_coverage_report,
+    retry_failed_province_embeddings,
+)
 from app.ordinances.embeddings import embed_text, vector_similarity
 from app.ordinances.import_service import run_import_job
 from app.ordinances.models import (
@@ -39,6 +44,7 @@ from app.ordinances.schemas import (
     OfficialLegalSourceCreate,
     OfficialLegalSourceRead,
     OfficialLegalSourceUpdate,
+    OrdinanceAutonomousCommunityCoverageRead,
     OrdinanceComparisonRead,
     OrdinanceCoverageRead,
     OrdinanceCreate,
@@ -147,6 +153,56 @@ def create_ordinance(
     db.commit()
 
     return get_existing_ordinance(db, ordinance.id)
+
+
+@router.get(
+    "/coverage/castilla-y-leon",
+    response_model=OrdinanceAutonomousCommunityCoverageRead,
+)
+def get_castilla_leon_coverage(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.view")
+    return build_castilla_leon_coverage_report(db)
+
+
+@router.get(
+    "/coverage/provinces/{province}",
+    response_model=OrdinanceCoverageRead,
+)
+def get_province_coverage(
+    province: str,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.view")
+    try:
+        return build_province_coverage_report(db, province)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+
+
+@router.post(
+    "/coverage/provinces/{province}/retry-embeddings",
+    response_model=OrdinanceEmbeddingRetryRead,
+)
+def retry_province_failed_embeddings(
+    province: str,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_ordinance_permission(db, current_user, "ordinances.import")
+    try:
+        return retry_failed_province_embeddings(db, province)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
 
 
 @router.get(

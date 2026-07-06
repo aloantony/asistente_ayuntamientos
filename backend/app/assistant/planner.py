@@ -57,15 +57,10 @@ Reglas:
 - Si el usuario describe una nueva necesidad o algo que quiere desarrollar y aporta campos suficientes para borrador,
   usa intent=create_requirement, pero no inventes campos que no estén claros.
 - Si confirma un borrador pendiente, usa intent=confirm_pending_work.
-- Si pide convertir el feedback o la mejora anterior en necesidad, usa
-  intent=convert_feedback_to_requirement, action=create_requirement y
-  reference=last_admin_feedback.
 - Si pide reintentar una acción pendiente o fallida, usa intent=retry_pending_action.
 - Si cancela, descarta o deja sin efecto una acción pendiente, usa intent=cancel_pending_action y action=cancel_pending_action.
 - Si pide preparar, encargar o dejar para revisión una tarea supervisada o
   diferida, usa intent=delegate_agent_office y action=create_agent_office_task.
-- Si describe un fallo, fricción, problema de datos o mejora de la plataforma/asistente que conviene elevar al administrador, usa intent=suggest_admin_feedback y action=send_admin_feedback; incluye draft con category, title, description y priority si están claros.
-- Si hay pending_action de send_admin_feedback y el usuario confirma enviarlo, usa intent=suggest_admin_feedback y action=send_admin_feedback.
 - Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
 - Si no hay intención de producto clara, usa intent=unknown y action=none.
 
@@ -269,11 +264,9 @@ def _plan_with_hermes(
                         "capture_requirement",
                         "create_requirement",
                         "confirm_pending_work",
-                        "convert_feedback_to_requirement",
                         "retry_pending_action",
                         "cancel_pending_action",
                         "delegate_agent_office",
-                        "suggest_admin_feedback",
                         "unknown",
                     ],
                 },
@@ -289,7 +282,6 @@ def _plan_with_hermes(
                         "retry_pending_action",
                         "cancel_pending_action",
                         "create_agent_office_task",
-                        "send_admin_feedback",
                     ],
                 },
                 "query": {"type": "string"},

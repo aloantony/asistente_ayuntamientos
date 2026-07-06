@@ -3,6 +3,108 @@ from sqlalchemy.orm import Session
 
 from app.ordinances.models import OfficialLegalSource
 
+CASTILLA_LEON_PROVINCIAL_BOP_SOURCES = (
+    {
+        "name": "Boletín Oficial de la Provincia de Ávila",
+        "base_url": "https://www.diputacionavila.es/boletin-oficial/",
+        "domain": "diputacionavila.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de Burgos",
+        "base_url": "https://bopbur.diputaciondeburgos.es/",
+        "domain": "bopbur.diputaciondeburgos.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial con conector determinista BOPBUR para importación "
+            "supervisada de ordenanzas municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de León",
+        "base_url": "https://bop.dipuleon.es/",
+        "domain": "bop.dipuleon.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de Palencia",
+        "base_url": "https://www.diputaciondepalencia.es/servicios/boletin-oficial-provincia",
+        "domain": "diputaciondepalencia.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de Salamanca",
+        "base_url": "https://sede.diputaciondesalamanca.gob.es/BOP/",
+        "domain": "diputaciondesalamanca.gob.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de Segovia",
+        "base_url": "https://www.dipsegovia.es/bop",
+        "domain": "dipsegovia.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de Soria",
+        "base_url": "https://bop.dipsoria.es/",
+        "domain": "bop.dipsoria.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de Valladolid",
+        "base_url": "https://bop.sede.diputaciondevalladolid.es/",
+        "domain": "diputaciondevalladolid.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+    {
+        "name": "Boletín Oficial de la Provincia de Zamora",
+        "base_url": "https://www.diputaciondezamora.es/opencms/servicios/BOP/bop/index.html",
+        "domain": "diputaciondezamora.es",
+        "source_type": "bop",
+        "status": "active",
+        "notes": (
+            "Fuente provincial para importación supervisada de ordenanzas "
+            "municipales de Castilla y León."
+        ),
+    },
+)
+
 INITIAL_OFFICIAL_LEGAL_SOURCES = (
     {
         "name": "BOE Datos Abiertos",
@@ -12,14 +114,7 @@ INITIAL_OFFICIAL_LEGAL_SOURCES = (
         "status": "active",
         "notes": "Fuente estatal auxiliar; no es fuente primaria de ordenanzas municipales.",
     },
-    {
-        "name": "Boletín Oficial de la Provincia de Burgos",
-        "base_url": "https://bopbur.diputaciondeburgos.es/",
-        "domain": "bopbur.diputaciondeburgos.es",
-        "source_type": "bop",
-        "status": "active",
-        "notes": "Fuente primaria del MVP de ordenanzas para pueblos de la provincia de Burgos.",
-    },
+    *CASTILLA_LEON_PROVINCIAL_BOP_SOURCES,
 )
 
 

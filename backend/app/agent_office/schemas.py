@@ -10,7 +10,6 @@ AgentOfficeDepartment = Literal[
     "documents",
     "projects",
     "map",
-    "admin_feedback",
     "daily_briefing",
 ]
 AgentOfficeTaskStatus = Literal[
