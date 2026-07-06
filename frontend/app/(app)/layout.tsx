@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { userHasPermission } from "../components/types";
+import { userHasPermission, type User } from "../components/types";
 import { fetchRequirementsTotal } from "../lib/fetchers";
 import {
   consumePendingLoginRedirect,
@@ -16,6 +16,23 @@ import {
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
+
+function getMunicipalBrandName(user: User) {
+  const organization = user?.organizations?.[0];
+  const municipalityName = organization?.municipality?.name?.trim();
+
+  if (municipalityName) {
+    return municipalityName;
+  }
+
+  const organizationName = organization?.name?.trim();
+
+  if (organizationName) {
+    return organizationName.replace(/^Ayuntamiento\s+de\s+/i, "");
+  }
+
+  return "Anacleto";
+}
 
 // Iconos del menú lateral (trazo fino, coherentes con el resto del shell).
 type NavIconName =
@@ -237,10 +254,7 @@ export default function AppLayout({
   }
 
   const canUseAssistant = userHasPermission(user, "assistant.use");
-  const brandName =
-    user.organizations?.[0]?.municipality?.name ??
-    user.organizations?.[0]?.name ??
-    "Anacleto";
+  const brandName = getMunicipalBrandName(user);
   const userInitials = getUserInitials(user.full_name);
 
   const navGroups: NavGroup[] = [
