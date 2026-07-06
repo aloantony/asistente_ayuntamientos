@@ -1,0 +1,205 @@
+{"progress": "1/53", "municipality": "Adradas", "candidates": 0}
+{"progress": "2/53", "municipality": "Alcubilla de las Peñas", "candidates": 0}
+{"progress": "3/53", "municipality": "Aldealafuente", "candidates": 0}
+{"progress": "4/53", "municipality": "Aldehuelas, Las", "candidates": 0}
+{"progress": "5/53", "municipality": "Alpanseque", "candidates": 2}
+{"progress": "6/53", "municipality": "Arenillas", "candidates": 0}
+{"progress": "7/53", "municipality": "Arévalo de la Sierra", "candidates": 0}
+{"progress": "8/53", "municipality": "Baraona", "candidates": 4}
+{"progress": "9/53", "municipality": "Barcones", "candidates": 0}
+{"progress": "10/53", "municipality": "Bayubas de Arriba", "candidates": 0}
+{"progress": "11/53", "municipality": "Blacos", "candidates": 0}
+{"progress": "12/53", "municipality": "Bliecos", "candidates": 0}
+{"progress": "13/53", "municipality": "Buberos", "candidates": 0}
+{"progress": "14/53", "municipality": "Cabrejas del Campo", "candidates": 0}
+{"progress": "15/53", "municipality": "Caltojar", "candidates": 0}
+{"progress": "16/53", "municipality": "Candilichera", "candidates": 0}
+{"progress": "17/53", "municipality": "Carabantes", "candidates": 0}
+{"progress": "18/53", "municipality": "Carrascosa de Abajo", "candidates": 0}
+{"progress": "19/53", "municipality": "Carrascosa de la Sierra", "candidates": 0}
+{"progress": "20/53", "municipality": "Cerbón", "candidates": 0}
+{"progress": "21/53", "municipality": "Cihuela", "candidates": 0}
+{"progress": "22/53", "municipality": "Cirujales del Río", "candidates": 0}
+{"progress": "23/53", "municipality": "Cubilla", "candidates": 0}
+{"progress": "24/53", "municipality": "Estepa de San Juan", "candidates": 0}
+{"progress": "25/53", "municipality": "Fuentepinilla", "candidates": 0}
+{"progress": "26/53", "municipality": "Fuentes de Magaña", "candidates": 0}
+{"progress": "27/53", "municipality": "Gómara", "candidates": 0}
+{"progress": "28/53", "municipality": "Hinojosa del Campo", "candidates": 0}
+{"progress": "29/53", "municipality": "Losilla, La", "candidates": 0}
+{"progress": "30/53", "municipality": "Magaña", "candidates": 0}
+{"progress": "31/53", "municipality": "Muriel de la Fuente", "candidates": 0}
+{"progress": "32/53", "municipality": "Muriel Viejo", "candidates": 0}
+{"progress": "33/53", "municipality": "Nepas", "candidates": 0}
+{"progress": "34/53", "municipality": "Pinilla del Campo", "candidates": 0}
+{"progress": "35/53", "municipality": "Pozalmuro", "candidates": 0}
+{"progress": "36/53", "municipality": "Rello", "candidates": 0}
+{"progress": "37/53", "municipality": "Retortillo de Soria", "candidates": 0}
+{"progress": "38/53", "municipality": "Riba de Escalote, La", "candidates": 0}
+{"progress": "39/53", "municipality": "Tajahuerce", "candidates": 0}
+{"progress": "40/53", "municipality": "Tajueco", "candidates": 0}
+{"progress": "41/53", "municipality": "Taroda", "candidates": 1}
+{"progress": "42/53", "municipality": "Tejado", "candidates": 0}
+{"progress": "43/53", "municipality": "Valdemaluque", "candidates": 0}
+{"progress": "44/53", "municipality": "Valdeprado", "candidates": 0}
+{"progress": "45/53", "municipality": "Valderrodilla", "candidates": 0}
+{"progress": "46/53", "municipality": "Viana de Duero", "candidates": 0}
+{"progress": "47/53", "municipality": "Villaciervos", "candidates": 0}
+{"progress": "48/53", "municipality": "Villar del Campo", "candidates": 0}
+{"progress": "49/53", "municipality": "Villar del Río", "candidates": 0}
+{"progress": "50/53", "municipality": "Villasayas", "candidates": 0}
+{"progress": "51/53", "municipality": "Vizmanos", "candidates": 1}
+{"progress": "52/53", "municipality": "Vozmediano", "candidates": 0}
+{"progress": "53/53", "municipality": "Yelo", "candidates": 0}
+{
+  "coverage_before": {
+    "municipios_catalogo": 183,
+    "municipios_con_ordenanzas": 130,
+    "municipios_sin_cobertura": 53,
+    "ordenanzas_aprobadas": 558,
+    "chunks_ready_approved": 3437,
+    "chunks_failed": 0
+  },
+  "gaps": 53,
+  "candidates": 8,
+  "candidate_municipalities": 4,
+  "per_municipality": {
+    "Adradas": 0,
+    "Alcubilla de las Peñas": 0,
+    "Aldealafuente": 0,
+    "Aldehuelas, Las": 0,
+    "Alpanseque": 2,
+    "Arenillas": 0,
+    "Arévalo de la Sierra": 0,
+    "Baraona": 4,
+    "Barcones": 0,
+    "Bayubas de Arriba": 0,
+    "Blacos": 0,
+    "Bliecos": 0,
+    "Buberos": 0,
+    "Cabrejas del Campo": 0,
+    "Caltojar": 0,
+    "Candilichera": 0,
+    "Carabantes": 0,
+    "Carrascosa de Abajo": 0,
+    "Carrascosa de la Sierra": 0,
+    "Cerbón": 0,
+    "Cihuela": 0,
+    "Cirujales del Río": 0,
+    "Cubilla": 0,
+    "Estepa de San Juan": 0,
+    "Fuentepinilla": 0,
+    "Fuentes de Magaña": 0,
+    "Gómara": 0,
+    "Hinojosa del Campo": 0,
+    "Losilla, La": 0,
+    "Magaña": 0,
+    "Muriel de la Fuente": 0,
+    "Muriel Viejo": 0,
+    "Nepas": 0,
+    "Pinilla del Campo": 0,
+    "Pozalmuro": 0,
+    "Rello": 0,
+    "Retortillo de Soria": 0,
+    "Riba de Escalote, La": 0,
+    "Tajahuerce": 0,
+    "Tajueco": 0,
+    "Taroda": 1,
+    "Tejado": 0,
+    "Valdemaluque": 0,
+    "Valdeprado": 0,
+    "Valderrodilla": 0,
+    "Viana de Duero": 0,
+    "Villaciervos": 0,
+    "Villar del Campo": 0,
+    "Villar del Río": 0,
+    "Villasayas": 0,
+    "Vizmanos": 1,
+    "Vozmediano": 0,
+    "Yelo": 0
+  },
+  "sample": [
+    {
+      "municipality_id": 401,
+      "municipality_name": "Alpanseque",
+      "title": "Ordenanza tasa recogida de basura",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_2611_ee553be9%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.49965/relcategoria.210/relmenu.149",
+      "query": "Alpanseque ordenanza"
+    },
+    {
+      "municipality_id": 401,
+      "municipality_name": "Alpanseque",
+      "title": "Ordenanza tasa suministro de agua",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_2612_492e365d%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.49965/relcategoria.210/relmenu.149",
+      "query": "Alpanseque ordenanza"
+    },
+    {
+      "municipality_id": 407,
+      "municipality_name": "Baraona",
+      "title": "Ordenanza suministro agua potable",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_2599_b96ca9f5%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.49965/relcategoria.210/relmenu.149",
+      "query": "Baraona ordenanza fiscal"
+    },
+    {
+      "municipality_id": 407,
+      "municipality_name": "Baraona",
+      "title": "Ordenanza tasa recogida de basura",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_2600_2567f86c%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.49965/relcategoria.210/relmenu.149",
+      "query": "Baraona ordenanza fiscal"
+    },
+    {
+      "municipality_id": 407,
+      "municipality_name": "Baraona",
+      "title": "Ordenanza tasa suministro de agua",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_2601_6448c9d4%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.49965/relcategoria.210/relmenu.149",
+      "query": "Baraona ordenanza fiscal"
+    },
+    {
+      "municipality_id": 407,
+      "municipality_name": "Baraona",
+      "title": "Ordenanza uso, mantenimiento y mejora de los caminos rurales",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_1238_f92d27d1%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.51639/relcategoria.210/relmenu.149",
+      "query": "Baraona ordenanza"
+    },
+    {
+      "municipality_id": 531,
+      "municipality_name": "Taroda",
+      "title": "Modificación Ordenanza de ICIO",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_1088_76e5087f%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.54755/relcategoria.210/relmenu.149",
+      "query": "Taroda ordenanza"
+    },
+    {
+      "municipality_id": 560,
+      "municipality_name": "Vizmanos",
+      "title": "Ordenanza Fiscal Impuesto Construcciones, Instalaciones y Obras",
+      "source_url": "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_55_5af92f06%232E%23pdf",
+      "detail_url": "https://bop.dipsoria.es/index.php/mod.boloficial/mem.detalle/id.50152/relcategoria.210/relmenu.149",
+      "query": "Vizmanos ordenanza"
+    }
+  ],
+  "dry_run": false,
+  "job_id": 30,
+  "approvals": {
+    "job_id": 30,
+    "items_total": 8,
+    "approved": 8,
+    "duplicates": 0,
+    "failed": 0,
+    "ready_chunks": 106
+  },
+  "coverage_after": {
+    "municipios_catalogo": 183,
+    "municipios_con_ordenanzas": 134,
+    "municipios_sin_cobertura": 49,
+    "ordenanzas_aprobadas": 566,
+    "chunks_ready_approved": 3543,
+    "chunks_failed": 0
+  }
+}

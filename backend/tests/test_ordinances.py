@@ -7,9 +7,21 @@ from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.ordinances import import_service
-from app.ordinances.bop_burgos import parse_bop_burgos_search_results
+from app.ordinances.bop_burgos import (
+    BopBurgosAnnouncement,
+    is_municipal_bopbur_announcement,
+    is_normative_bopbur_announcement,
+    natural_municipality_name,
+    parse_bop_burgos_search_results,
+)
+from app.ordinances.burgos_full_coverage import _FiscalOrdinanceTableParser
 from app.ordinances.models import OfficialLegalSource, OrdinanceLegalChunk
 from app.ordinances.seed import ensure_initial_official_legal_sources
+from app.ordinances.soria_coverage import (
+    _extract_candidate_sections,
+    _normalize_key as normalize_soria_key,
+    NORMATIVE_RE,
+)
 from app.projects.models import Project, project_users
 from conftest import headers_for, unique_suffix
 
@@ -791,6 +803,107 @@ def test_parse_bop_burgos_search_results_extracts_official_pdf_metadata():
     assert result.cve == "BOPBUR-2025-04362"
     assert result.pdf_url.endswith("bopbur-2025-177-anuncio-202504362.pdf")
     assert "recogida de basuras" in result.title
+
+
+def test_bop_burgos_filters_municipal_normative_announcements():
+    matching = BopBurgosAnnouncement(
+        title="Aprobación definitiva de la ordenanza fiscal reguladora de la tasa",
+        entity="Ayuntamiento de La Horra",
+        bulletin_number="núm. 1",
+        bulletin_date="viernes, 1 de enero de 2025",
+        cve="BOPBUR-2025-00001",
+        pdf_url="http://bopbur.diputaciondeburgos.es/demo.pdf",
+    )
+    wrong_municipality = BopBurgosAnnouncement(
+        title=matching.title,
+        entity="Ayuntamiento de Roa",
+        bulletin_number=matching.bulletin_number,
+        bulletin_date=matching.bulletin_date,
+        cve=matching.cve,
+        pdf_url=matching.pdf_url,
+    )
+    supramunicipal = BopBurgosAnnouncement(
+        title=matching.title,
+        entity="Diputación Provincial de Burgos",
+        bulletin_number=matching.bulletin_number,
+        bulletin_date=matching.bulletin_date,
+        cve=matching.cve,
+        pdf_url=matching.pdf_url,
+    )
+    non_normative = BopBurgosAnnouncement(
+        title="Convocatoria para la contratación de personal laboral",
+        entity=matching.entity,
+        bulletin_number=matching.bulletin_number,
+        bulletin_date=matching.bulletin_date,
+        cve=matching.cve,
+        pdf_url=matching.pdf_url,
+    )
+
+    assert natural_municipality_name("Horra, La") == "La Horra"
+    assert is_municipal_bopbur_announcement(matching, "Horra, La") is True
+    assert is_normative_bopbur_announcement(matching) is True
+    assert is_municipal_bopbur_announcement(wrong_municipality, "Horra, La") is False
+    assert is_municipal_bopbur_announcement(supramunicipal, "Burgos") is False
+    assert is_normative_bopbur_announcement(non_normative) is False
+
+
+def test_diputacion_fiscal_table_parser_extracts_pdf_rows():
+    parser = _FiscalOrdinanceTableParser()
+
+    parser.feed(
+        """
+        <table><tbody>
+          <tr><th>AYUNTAMIENTO</th><th>IBI</th><th>IAE</th><th>IVTM</th></tr>
+          <tr>
+            <td>ABAJAS</td>
+            <td><a href="/sites/default/files/ORD_ABAJAS_IBI_2004.pdf" title="BOP 08/01/2004">X</a></td>
+            <td>X</td>
+            <td><a href="/sites/default/files/ORD_ABAJAS_IVTM_2004.pdf" title="BOP 08/01/2004">X</a></td>
+          </tr>
+        </tbody></table>
+        """
+    )
+
+    assert parser.rows == [
+        (
+            "ABAJAS",
+            "IBI",
+            "BOP 08/01/2004",
+            "/sites/default/files/ORD_ABAJAS_IBI_2004.pdf",
+        ),
+        (
+            "ABAJAS",
+            "IVTM",
+            "BOP 08/01/2004",
+            "/sites/default/files/ORD_ABAJAS_IVTM_2004.pdf",
+        ),
+    ]
+
+
+def test_soria_bop_parser_maps_municipal_normative_documents():
+    html = """
+    <p class="fec-f1">- AYUNTAMIENTOS </p>
+    <p class="fec-f1">- ÁGREDA </p>
+    <p class="fec-f1"> - Modificación Ordenanza nº 21 </p>
+    <a href="/index.php/mod.documentos/mem.descargar/fichero.documentos_2135_80d4f7e0%232E%23pdf">Descargar</a>
+    <p class="fec-f1">- DIPUTACIÓN PROVINCIAL DE SORIA </p>
+    <p class="fec-f1"> - Ordenanza provincial </p>
+    <a href="/index.php/mod.documentos/mem.descargar/fichero.documentos_999_aaaa%232E%23pdf">Descargar</a>
+    """
+
+    assert _extract_candidate_sections(html) == [
+        (
+            "ÁGREDA",
+            "Modificación Ordenanza nº 21",
+            "http://bop.dipsoria.es/index.php/mod.documentos/mem.descargar/fichero.documentos_2135_80d4f7e0%232E%23pdf",
+        )
+    ]
+
+
+def test_soria_bop_filters_generic_definitive_approval_titles():
+    assert NORMATIVE_RE.search("Aprobación definitiva modificación presupuesto") is None
+    assert NORMATIVE_RE.search("Aprobación definitiva Ordenanza de ICIO") is not None
+    assert normalize_soria_key("Burgo de Osma-Ciudad de Osma") == "burgo osma ciudad osma"
 
 
 def test_import_job_discovers_candidates_with_bop_burgos_connector(

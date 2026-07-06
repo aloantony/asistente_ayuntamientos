@@ -8,6 +8,7 @@ search page, parses official announcement links, and reports local DB coverage.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
@@ -27,6 +28,18 @@ BOP_BURGOS_SEARCH_PATH = "/busqueda"
 BOP_BURGOS_PROVINCE = "Burgos"
 
 MAX_BOP_BURGOS_SEARCH_RESULTS = 50
+ORDINANCE_ANNOUNCEMENT_MARKERS = (
+    "ordenanza",
+    "reglamento",
+    "norma",
+)
+NON_MUNICIPAL_ENTITY_MARKERS = (
+    "diputacion",
+    "mancomunidad",
+    "consorcio",
+    "junta vecinal",
+    "entidad local menor",
+)
 
 
 @dataclass(frozen=True)
@@ -171,6 +184,54 @@ def build_burgos_coverage_report(db: Session) -> dict:
         "import_failures": import_failures,
         "municipalities": municipalities,
     }
+
+
+def normalize_bopbur_text(value: str | None) -> str:
+    """Return a comparison-safe lowercase string for BOPBUR metadata."""
+
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_text = "".join(char for char in normalized if not unicodedata.combining(char))
+    ascii_text = re.sub(r"[^a-zA-Z0-9]+", " ", ascii_text).strip().lower()
+    return re.sub(r"\s+", " ", ascii_text)
+
+
+def natural_municipality_name(name: str) -> str:
+    """Convert INE names such as `Horra, La` to BOPBUR-friendly `La Horra`."""
+
+    parts = [part.strip() for part in name.split(",", 1)]
+    if len(parts) != 2:
+        return name.strip()
+    base, suffix = parts
+    if suffix.lower() in {"el", "la", "los", "las"}:
+        return f"{suffix} {base}".strip()
+    return name.strip()
+
+
+def is_municipal_bopbur_announcement(
+    announcement: BopBurgosAnnouncement,
+    municipality_name: str,
+) -> bool:
+    """Return whether a BOPBUR result belongs to the expected ayuntamiento."""
+
+    entity = normalize_bopbur_text(announcement.entity)
+    if not entity.startswith("ayuntamiento de "):
+        return False
+    if any(marker in entity for marker in NON_MUNICIPAL_ENTITY_MARKERS):
+        return False
+    expected = normalize_bopbur_text(natural_municipality_name(municipality_name))
+    return entity == f"ayuntamiento de {expected}"
+
+
+def is_normative_bopbur_announcement(announcement: BopBurgosAnnouncement) -> bool:
+    """Return whether the announcement looks like ordinance/regulation material."""
+
+    # BOPBUR snippets/excerpts can include search terms from surrounding page
+    # chrome or nearby results. Use the announcement title as the conservative
+    # import gate so broad searches do not ingest non-normative notices.
+    haystack = normalize_bopbur_text(announcement.title)
+    return any(marker in haystack for marker in ORDINANCE_ANNOUNCEMENT_MARKERS)
 
 
 def retry_failed_burgos_embeddings(db: Session) -> dict:

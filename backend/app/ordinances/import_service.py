@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import ssl
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from html.parser import HTMLParser
@@ -19,6 +20,8 @@ from app.db.session import SessionLocal
 from app.municipalities.models import Municipality
 from app.ordinances.bop_burgos import (
     BOP_BURGOS_DOMAIN,
+    is_municipal_bopbur_announcement,
+    is_normative_bopbur_announcement,
     search_bop_burgos_announcements,
 )
 from app.ordinances.embeddings import EmbeddingsUnavailableError, embed_text
@@ -225,6 +228,10 @@ def _discover_bop_burgos_candidates(
             limit=settings.ordinance_import_search_limit,
         )
         for announcement in announcements:
+            if not is_municipal_bopbur_announcement(announcement, municipality.name):
+                continue
+            if not is_normative_bopbur_announcement(announcement):
+                continue
             candidates.append(
                 SourceCandidate(
                     url=announcement.pdf_url,
@@ -326,9 +333,12 @@ def _process_item(
         _create_review_report(db, ordinance, item)
         db.commit()
     except Exception as error:
-        item.status = "failed"
-        item.error_message = str(error)[:2000]
-        db.commit()
+        db.rollback()
+        item = db.get(OrdinanceImportItem, item_id)
+        if item is not None:
+            item.status = "failed"
+            item.error_message = str(error)[:2000]
+            db.commit()
 
 
 @dataclass(frozen=True)
@@ -338,13 +348,29 @@ class FetchedSource:
 
 
 def _fetch_source(url: str) -> FetchedSource:
+    parsed_url = urlparse.urlsplit(url)
+    safe_url = urlparse.urlunsplit(
+        (
+            parsed_url.scheme,
+            parsed_url.netloc,
+            urlparse.quote(parsed_url.path, safe="/%"),
+            urlparse.quote(parsed_url.query, safe="=&%"),
+            parsed_url.fragment,
+        )
+    )
     request = urlrequest.Request(
-        url,
+        safe_url,
         headers={"User-Agent": "AsistenteAyuntamientos/0.1 ordinance-import"},
         method="GET",
     )
+    context = None
+    if parsed_url.netloc.endswith("bop.dipsoria.es"):
+        # BOP Soria serves official PDF endpoints with a certificate chain that
+        # fails Python's default verifier in the import container. Keep this
+        # workaround scoped to that official host.
+        context = ssl._create_unverified_context()
     try:
-        with urlrequest.urlopen(request, timeout=30) as response:
+        with urlrequest.urlopen(request, timeout=30, context=context) as response:
             content_type = (response.headers.get("content-type") or "").lower()
             chunks: list[bytes] = []
             size = 0
@@ -369,7 +395,12 @@ def _extract_text(content: bytes, content_type: str, url: str) -> str:
             raise ImportSourceError(
                 "El PDF no tiene texto extraíble; requiere OCR o revisión manual."
             ) from error
-        return _normalize_text("\n\n".join(pages))
+        text = _normalize_text("\n\n".join(pages))
+        if _readable_text_ratio(text) < 0.35:
+            raise ImportSourceError(
+                "El PDF no tiene texto legible suficiente; requiere OCR o revisión manual."
+            )
+        return text
     try:
         decoded = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -683,9 +714,25 @@ def _optional_text(value: object) -> str | None:
 
 
 def _normalize_text(text: str) -> str:
+    text = "".join(
+        char
+        for char in text
+        if char in "\n\t" or (ord(char) >= 32 and char != "\x7f")
+    )
     lines = [" ".join(line.split()) for line in text.replace("\r", "\n").split("\n")]
     compact = "\n".join(line for line in lines if line)
     return re.sub(r"\n{3,}", "\n\n", compact).strip()
+
+
+def _readable_text_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    readable = sum(
+        1
+        for char in text
+        if char.isalnum() or char.isspace() or char in ".,;:¿?¡!()[]/%€ºª-_'\""
+    )
+    return readable / len(text)
 
 
 def _build_summary(text: str) -> str:
