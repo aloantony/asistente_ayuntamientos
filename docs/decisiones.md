@@ -123,3 +123,15 @@ La primera versión usa puntos con `latitude`, `longitude` y `geometry_json`. El
 La seguridad del mapa combina permisos específicos (`map.view`, `map.edit`, `map.import`, `map.manage`) con las reglas normales de visibilidad de cada entidad. Tener acceso al mapa no basta para ver una necesidad/proyecto inaccesible, y tener acceso a una entidad no basta si falta permiso de mapa en su organización.
 
 En frontend se usa Leaflet directo en un componente cliente, con import dinámico y marcadores propios, evitando React-Leaflet en esta primera versión para reducir riesgo de SSR/compatibilidad con Next.js y React.
+
+## ADR-020: Captura conversacional supervisada de requisitos (2026-07-03)
+
+La captura de necesidades pasa a un flujo conversacional supervisado puro. Anacleto puede conversar, preguntar, resumir, estructurar y proponer borradores, pero toda escritura relevante exige confirmación explícita del usuario.
+
+Para crear una necesidad, el backend guarda una propuesta estructurada en el estado de la conversación (`pending_work`) con organización, título y problema, y pregunta si debe guardarla como borrador. Si el usuario confirma, el backend ejecuta `create_requirement` con los permisos RBAC del usuario, comprueba duplicados visibles y crea el registro como `status=draft` y `source_type=conversation`. Si el usuario matiza o corrige, la propuesta se actualiza sin escribir todavía.
+
+El planificador semántico puede reconocer intención, referencias naturales y confirmaciones, pero no convierte texto libre en escritura automática. Si el modelo intenta llamar a `create_requirement` sin una confirmación previa o una petición explícita de guardado con datos mínimos completos, el backend rechaza la herramienta y no crea la necesidad.
+
+Las acciones de lectura (`read_requirements`, `read_ordinances`, `read_map_items`) y la delegación a la oficina de agentes siguen pudiendo resolverse mediante políticas backend auditadas, siempre con permisos y visibilidad del usuario. Las heurísticas rígidas por palabras clave no son la dirección de producto para nuevas escrituras: la regla operativa es conversación, propuesta y confirmación.
+
+Consecuencia: las ramas de heurísticas de capacidad por dominio (`7843555`) no se integran como implementación actual. La idea de responder preguntas de capacidad sin lecturas amplias queda válida como trabajo futuro, pero deberá implementarse sobre este flujo supervisado.
