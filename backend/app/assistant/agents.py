@@ -49,6 +49,7 @@ REQUIREMENTS_INTAKE_INSTRUCTIONS = """Tu tarea es capturar necesidades o requisi
 - Si el usuario pide preparar, encargar o dejar para revisión un trabajo supervisado, diferido o multi-paso, crea una tarea con create_agent_office_task en lugar de prometer que la harás sin acción real.
 - Si el usuario describe una necesidad que podría encajar con una funcionalidad transversal ya disponible, puedes consultar list_available_transversal_features y sugerirla sin revelar el ayuntamiento ni el requisito de origen. Solo si el usuario da un OK explícito para aplicarla en su organización, registra la aceptación con record_transversal_feature_acceptance. Si la herramienta devuelve activation_pending, explica que queda pendiente de configuración humana; si devuelve active, explica que queda activada.
 - Si detectas una fricción, error, limitación del producto, problema de datos o mejora de UX que el usuario probablemente quiera elevar al administrador, sugiere brevemente enviar feedback. No lo envíes sin permiso explícito; si el usuario acepta, usa send_admin_feedback y confirma que queda enviado. Si después pregunta dónde se consulta, no niegues la herramienta: queda como feedback interno revisable por superusuarios.
+- Si el usuario pide una capacidad que el asistente todavía no tiene o no debe prometer, explícalo con precisión y ofrece convertirlo en una necesidad/requisito revisable en lugar de fingir que puede hacerlo.
 - No menciones modos internos, agentes internos ni routing al usuario.
 """
 
@@ -59,6 +60,7 @@ CONSULTATION_INSTRUCTIONS = """Tu tarea es consultar información visible.
 - Para necesidades registradas, usa list_requirements cuando el usuario pida un listado, resumen, estado general o "qué tenemos"; usa get_requirement solo cuando necesites el detalle de una necesidad concreta.
 - Para ubicaciones o peticiones de mapa, usa get_map_items y ofrece el enlace interno devuelto (`map_url`) para abrir el mapa centrado en la ubicación.
 - Para preguntas sobre ordenanzas, reglamentos o normativa municipal ya cargada, usa semantic_search_ordinances antes de responder. Si el usuario menciona un municipio o una materia concreta, pásalos como filtros estructurados (`municipality_name`/`municipality_id` y `topic`) además de la consulta textual. Cita el municipio, la ordenanza y la fuente devuelta; si no hay resultados, explica que no hay cobertura aprobada suficiente en la base de datos.
+- Para conclusiones de conjunto/subconjunto, patrones, cobertura o materias frecuentes del corpus de ordenanzas, usa analyze_ordinance_corpus; no improvises conclusiones jurídicas sin datos agregados y fuentes del corpus aprobado.
 - Puedes usar web_search solo cuando el usuario pida buscar o verificar información externa actual. No envíes datos internos, documentos, historial ni datos personales a la búsqueda web.
 - No digas que estás en modo consulta, solo lectura o que el usuario debe cambiar de agente.
 """
@@ -120,6 +122,7 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
                 "list_requirements",
                 "get_requirement",
                 "semantic_search_ordinances",
+                "analyze_ordinance_corpus",
                 "list_available_transversal_features",
             }
         ),

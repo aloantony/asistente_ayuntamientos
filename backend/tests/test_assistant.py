@@ -313,6 +313,146 @@ def test_feedback_can_be_explained_and_converted_to_requirement(
     assert gateway.calls == []
 
 
+def test_unsupported_capability_question_suggests_requirement_draft(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Puedes firmar electrónicamente un decreto y publicarlo en el BOP?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "unsupported_capability"
+    assert assistant_message["routing"]["reason"] == "direct_unsupported_capability"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "no tengo esa capacidad" in normalized_content
+    assert "necesidad" in normalized_content
+    assert "borrador" in normalized_content
+    assert "firmar electrónicamente" in normalized_content
+    assert db.scalar(select(func.count()).select_from(Requirement)) == 0
+
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "unsupported_capability_requirement"
+    assert state["pending_action"]["organization_id"] == organization.id
+    assert "firmar electrónicamente" in state["pending_action"]["draft"]["title"].lower()
+    assert gateway.calls == []
+
+
+def test_unsupported_capability_suggestion_can_be_created_as_requirement(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    suggestion = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Puedes firmar electrónicamente un decreto y publicarlo en el BOP?"},
+        headers=headers_for(user),
+    )
+    assert suggestion.status_code == 200
+
+    confirmation = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí, créalo como necesidad"},
+        headers=headers_for(user),
+    )
+
+    assert confirmation.status_code == 200
+    confirmation_message = confirmation.json()["messages"][-1]
+    assert confirmation_message["routing"]["reason"] == (
+        "pending_unsupported_capability_requirement_confirmed"
+    )
+    assert [action["tool"] for action in confirmation_message["actions"]] == [
+        "list_requirements",
+        "create_requirement",
+    ]
+    requirement = db.scalar(select(Requirement).where(Requirement.organization_id == organization.id))
+    assert requirement is not None
+    assert "firmar electrónicamente" in requirement.title.lower()
+    assert "no puede ejecutar actualmente" in requirement.problem.lower()
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    assert "pending_action" not in json.loads(stored_conversation.state or "{}")
+    assert gateway.calls == []
+
+
+def test_semantic_planner_unsupported_capability_suggests_requirement(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="unsupported_capability",
+            action="none",
+            draft={
+                "title": "Integración de firma biométrica",
+                "problem": "El usuario quiere que el asistente tramite firma biométrica, pero la plataforma no tiene esa capacidad.",
+            },
+            confidence=0.93,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Necesito que el asistente tramite firma biométrica."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "unsupported_capability"
+    assert assistant_message["routing"]["reason"] == "semantic_unsupported_capability"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"] == []
+    assert "firma biométrica" in assistant_message["content"].lower()
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "unsupported_capability_requirement"
+    assert state["pending_action"]["organization_id"] == organization.id
+    assert gateway.calls == []
+
+
 def test_semantic_planner_suggests_admin_feedback_without_keyword_markers(
     client,
     assistant_user,
@@ -1591,6 +1731,7 @@ def test_read_intents_are_backed_by_action_policies():
         "read_map_items": ("consultation", "get_map_items"),
         "read_requirements": ("consultation", "list_requirements"),
         "read_ordinances": ("consultation", "semantic_search_ordinances"),
+        "analyze_ordinances": ("consultation", "analyze_ordinance_corpus"),
         "capture_requirement": ("requirements_intake", "list_requirements"),
     }
 
@@ -4046,6 +4187,263 @@ def test_consultation_agent_can_search_approved_ordinance_chunks(
     assert payload["results"][0]["municipality_name"] == "Villarcayo"
     assert payload["results"][0]["citation"] == "Artículo 1"
     assert payload["results"][0]["source_url"] == ordinance.source_url
+
+
+def test_consultation_agent_can_analyze_ordinance_corpus_subset(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["ordinances.compare"])
+    roa = Municipality(
+        name="Roa",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    belorado = Municipality(
+        name="Belorado",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    agreda = Municipality(
+        name="Ágreda",
+        province="Soria",
+        autonomous_community="Castilla y León",
+    )
+    db.add_all([roa, belorado, agreda])
+    db.flush()
+
+    approved_specs = [
+        (roa, "Ordenanza de residuos de Roa", "residuos", "Artículo 1"),
+        (belorado, "Ordenanza de residuos de Belorado", "residuos", "Artículo 2"),
+        (belorado, "Ordenanza de abastecimiento de agua", "agua", "Artículo 3"),
+        (agreda, "Ordenanza de residuos de Ágreda", "residuos", "Artículo 4"),
+    ]
+    for index, (municipality, title, topic, citation) in enumerate(approved_specs):
+        ordinance = Ordinance(
+            municipality_id=municipality.id,
+            title=title,
+            topic=topic,
+            ordinance_type="ordinance",
+            source_url=f"https://example.test/{index}.pdf",
+            curation_status="approved",
+            status="active",
+        )
+        db.add(ordinance)
+        db.flush()
+        embedding, model, status = embed_text(f"{topic} {municipality.name}")
+        db.add(
+            OrdinanceLegalChunk(
+                ordinance_id=ordinance.id,
+                chunk_index=0,
+                citation=citation,
+                text=f"Texto aprobado sobre {topic} en {municipality.name}.",
+                source_url=ordinance.source_url,
+                review_status="approved",
+                embedding=embedding,
+                embedding_model=model,
+                embedding_status=status,
+            )
+        )
+
+    pending = Ordinance(
+        municipality_id=roa.id,
+        title="Ordenanza pendiente de animales",
+        topic="animales",
+        ordinance_type="ordinance",
+        source_url="https://example.test/pending.pdf",
+        curation_status="pending_review",
+        status="active",
+    )
+    db.add(pending)
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "analyze_ordinance_corpus",
+        {"province": "Burgos", "topic": "residuos"},
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.content)
+    assert payload["scope"] == {
+        "province": "Burgos",
+        "municipality_name": None,
+        "topic": "residuos",
+        "include_pending": False,
+    }
+    assert payload["ordinance_count"] == 2
+    assert payload["municipality_count"] == 2
+    assert payload["ready_approved_chunks"] == 2
+    assert payload["topic_breakdown"][0] == {
+        "topic": "residuos",
+        "ordinance_count": 2,
+        "municipality_count": 2,
+    }
+    assert {item["municipality_name"] for item in payload["sample_ordinances"]} == {
+        "Belorado",
+        "Roa",
+    }
+    assert any("residuos" in conclusion.lower() for conclusion in payload["conclusions"])
+
+
+def test_agent_turn_analyzes_ordinance_corpus_for_conclusions(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcaldesa Analítica")
+    organization = make_organization(name="Ayuntamiento Analítico")
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    municipality = Municipality(
+        name="Villarcayo",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    for index, topic in enumerate(["residuos", "agua"]):
+        ordinance = Ordinance(
+            municipality_id=municipality.id,
+            title=f"Ordenanza de {topic}",
+            topic=topic,
+            ordinance_type="ordinance",
+            source_url=f"https://example.test/{topic}.pdf",
+            curation_status="approved",
+            status="active",
+        )
+        db.add(ordinance)
+        db.flush()
+        embedding, model, status = embed_text(f"{topic} Villarcayo")
+        db.add(
+            OrdinanceLegalChunk(
+                ordinance_id=ordinance.id,
+                chunk_index=index,
+                citation=f"Artículo {index + 1}",
+                text=f"Texto sobre {topic} en Villarcayo.",
+                source_url=ordinance.source_url,
+                review_status="approved",
+                embedding=embedding,
+                embedding_model=model,
+                embedding_status=status,
+            )
+        )
+    db.commit()
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Saca conclusiones del conjunto de ordenanzas de Burgos"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_analyze_ordinances"
+    assert assistant_message["routing"]["intent"] == "analyze_ordinances"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "analyze_ordinance_corpus"
+    ]
+    assert assistant_message["actions"][0]["input"] == {"province": "Burgos"}
+    normalized_content = assistant_message["content"].lower()
+    assert "conclusiones" in normalized_content
+    assert "burgos" in normalized_content
+    assert "2 ordenanzas" in normalized_content
+    assert gateway.calls == []
+
+
+def test_semantic_planner_ordinance_analysis_intent_executes_corpus_tool(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Analítico")
+    organization = make_organization(name="Ayuntamiento Analítico")
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    municipality = Municipality(
+        name="Roa",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    ordinance = Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza de residuos de Roa",
+        topic="residuos",
+        ordinance_type="ordinance",
+        source_url="https://example.test/roa-residuos.pdf",
+        curation_status="approved",
+        status="active",
+    )
+    db.add(ordinance)
+    db.flush()
+    embedding, model, status = embed_text("residuos Roa")
+    db.add(
+        OrdinanceLegalChunk(
+            ordinance_id=ordinance.id,
+            chunk_index=0,
+            citation="Artículo 1",
+            text="Texto sobre residuos en Roa.",
+            source_url=ordinance.source_url,
+            review_status="approved",
+            embedding=embedding,
+            embedding_model=model,
+            embedding_status=status,
+        )
+    )
+    db.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="analyze_ordinances",
+            action="analyze_ordinance_corpus",
+            target={"province": "Burgos", "topic": "residuos"},
+            confidence=0.91,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Qué patrones ves en las ordenanzas de residuos?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "analyze_ordinances"
+    assert assistant_message["routing"]["reason"] == "action_policy_analyze_ordinances"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"][0]["tool"] == "analyze_ordinance_corpus"
+    assert assistant_message["actions"][0]["input"] == {
+        "province": "Burgos",
+        "topic": "residuos",
+    }
+    assert gateway.calls == []
 
 
 def test_agent_turn_searches_ordinances_with_structured_filters(

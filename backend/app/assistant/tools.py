@@ -86,6 +86,9 @@ MAX_WEB_QUERY_CHARS = 400
 MAX_WEB_RESULTS = 5
 MAX_ORDINANCE_QUERY_CHARS = 400
 MAX_ORDINANCE_RESULTS = 5
+MAX_ORDINANCE_ANALYSIS_ROWS = 5000
+MAX_ORDINANCE_ANALYSIS_BREAKDOWN = 10
+MAX_ORDINANCE_ANALYSIS_SAMPLES = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
@@ -387,6 +390,41 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "analyze_ordinance_corpus",
+        "description": (
+            "Resume y extrae conclusiones descriptivas del conjunto o de un "
+            "subconjunto de ordenanzas municipales ya importadas, revisadas y "
+            "vectorizadas. Úsala para análisis agregado, patrones, materias "
+            "frecuentes, cobertura, visión de conjunto o conclusiones sobre "
+            "una provincia, municipio o materia."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "province": {
+                    "type": "string",
+                    "description": "Provincia por la que acotar el análisis, si el usuario la indica",
+                },
+                "municipality_id": {
+                    "type": "integer",
+                    "description": "Municipio por ID, si ya está resuelto",
+                },
+                "municipality_name": {
+                    "type": "string",
+                    "description": "Nombre del municipio, si el usuario lo indica",
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Materia o tema a analizar, por ejemplo residuos, agua o tasas",
+                },
+                "include_pending": {
+                    "type": "boolean",
+                    "description": "Incluir ordenanzas pendientes de revisión; por defecto false",
+                },
+            },
         },
     },
     {
@@ -1070,6 +1108,210 @@ def _semantic_search_ordinances(
     }
 
 
+def _optional_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _top_breakdown(
+    counts: dict[str, dict[str, object]],
+    *,
+    label: str,
+) -> list[dict]:
+    rows = list(counts.values())
+    rows.sort(
+        key=lambda item: (
+            -int(str(item.get("ordinance_count") or 0)),
+            str(item.get(label) or ""),
+        )
+    )
+    return rows[:MAX_ORDINANCE_ANALYSIS_BREAKDOWN]
+
+
+def _ordinance_analysis_conclusions(
+    *,
+    ordinance_count: int,
+    municipality_count: int,
+    ready_approved_chunks: int,
+    topic_breakdown: list[dict],
+    scope_label: str,
+    topic: str | None,
+) -> list[str]:
+    if ordinance_count == 0:
+        return [
+            f"No hay ordenanzas aprobadas suficientes en {scope_label} para extraer conclusiones del corpus.",
+        ]
+
+    conclusions = [
+        f"El subconjunto {scope_label} contiene {ordinance_count} ordenanzas aprobadas de {municipality_count} municipios.",
+    ]
+    if topic:
+        conclusions.append(
+            f"La lectura está acotada a la materia “{topic}”, así que las conclusiones son comparables dentro de ese tema, no sobre todo el corpus."
+        )
+    if topic_breakdown:
+        top_topic = topic_breakdown[0]
+        top_count = int(top_topic["ordinance_count"])
+        share = top_count / ordinance_count if ordinance_count else 0
+        conclusions.append(
+            f"La materia con más presencia es “{top_topic['topic']}” ({top_count} ordenanzas, {share:.0%} del subconjunto)."
+        )
+    if municipality_count > 1:
+        conclusions.append(
+            "Hay base para comparar criterios entre municipios, siempre citando ordenanzas concretas antes de proponer una adaptación local."
+        )
+    else:
+        conclusions.append(
+            "El alcance municipal es estrecho; sirve para diagnóstico local, pero no para deducir patrones provinciales."
+        )
+    conclusions.append(
+        f"Hay {ready_approved_chunks} fragmentos aprobados y vectorizados para fundamentar búsquedas y citas posteriores."
+    )
+    return conclusions
+
+
+def _analyze_ordinance_corpus(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    if not has_permission(current_user, "ordinances.compare", db):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.compare",
+        )
+
+    include_pending = bool(tool_input.get("include_pending") or False)
+    province = _optional_text(tool_input.get("province"))
+    municipality_name = _optional_text(tool_input.get("municipality_name"))
+    topic = _optional_text(tool_input.get("topic"))
+    municipality_id = tool_input.get("municipality_id")
+
+    query = (
+        select(Ordinance)
+        .join(Ordinance.municipality)
+        .options(
+            selectinload(Ordinance.municipality),
+            selectinload(Ordinance.legal_chunks),
+        )
+        .order_by(Municipality.name, Ordinance.topic, Ordinance.title)
+    )
+    if municipality_id is not None:
+        query = query.where(Ordinance.municipality_id == int(municipality_id))
+    if municipality_name:
+        query = query.where(Municipality.name.ilike(municipality_name))
+    if province:
+        query = query.where(Municipality.province.ilike(province))
+    if topic:
+        topic_pattern = f"%{topic}%"
+        query = query.where(
+            (Ordinance.topic.ilike(topic_pattern))
+            | (Ordinance.subtopic.ilike(topic_pattern))
+            | (Ordinance.title.ilike(topic_pattern))
+        )
+    if include_pending:
+        query = query.where(Ordinance.curation_status != "rejected")
+    else:
+        query = query.where(Ordinance.curation_status == "approved")
+
+    ordinances = list(db.scalars(query.limit(MAX_ORDINANCE_ANALYSIS_ROWS)))
+    municipality_ids = {ordinance.municipality_id for ordinance in ordinances}
+    topic_counts: dict[str, int] = {}
+    topic_municipalities: dict[str, set[int]] = {}
+    municipality_counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
+    ready_approved_chunks = 0
+
+    for ordinance in ordinances:
+        topic_key = ordinance.topic or "sin materia"
+        topic_counts[topic_key] = topic_counts.get(topic_key, 0) + 1
+        topic_municipalities.setdefault(topic_key, set()).add(ordinance.municipality_id)
+
+        municipality_key = ordinance.municipality.name
+        municipality_counts[municipality_key] = municipality_counts.get(municipality_key, 0) + 1
+        type_counts[ordinance.ordinance_type] = type_counts.get(ordinance.ordinance_type, 0) + 1
+        ready_approved_chunks += sum(
+            1
+            for chunk in ordinance.legal_chunks
+            if chunk.review_status == "approved" and chunk.embedding_status == "ready"
+        )
+
+    topic_breakdown_input = {
+        topic_name: {
+            "topic": topic_name,
+            "ordinance_count": count,
+            "municipality_count": len(topic_municipalities.get(topic_name, set())),
+        }
+        for topic_name, count in topic_counts.items()
+    }
+    municipality_breakdown_input = {
+        municipality_name_key: {
+            "municipality_name": municipality_name_key,
+            "ordinance_count": count,
+        }
+        for municipality_name_key, count in municipality_counts.items()
+    }
+    topic_breakdown = _top_breakdown(topic_breakdown_input, label="topic")
+    municipality_breakdown = _top_breakdown(
+        municipality_breakdown_input,
+        label="municipality_name",
+    )
+    type_breakdown = [
+        {"ordinance_type": ordinance_type, "ordinance_count": count}
+        for ordinance_type, count in sorted(
+            type_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:MAX_ORDINANCE_ANALYSIS_BREAKDOWN]
+    ]
+    scope_parts = []
+    if province:
+        scope_parts.append(f"la provincia de {province}")
+    if municipality_name:
+        scope_parts.append(f"el municipio de {municipality_name}")
+    if topic:
+        scope_parts.append(f"la materia {topic}")
+    scope_label = ", ".join(scope_parts) if scope_parts else "todo el corpus aprobado"
+
+    return {
+        "scope": {
+            "province": province,
+            "municipality_name": municipality_name,
+            "topic": topic,
+            "include_pending": include_pending,
+        },
+        "ordinance_count": len(ordinances),
+        "municipality_count": len(municipality_ids),
+        "ready_approved_chunks": ready_approved_chunks,
+        "topic_breakdown": topic_breakdown,
+        "municipality_breakdown": municipality_breakdown,
+        "ordinance_type_breakdown": type_breakdown,
+        "sample_ordinances": [
+            {
+                "ordinance_id": ordinance.id,
+                "title": ordinance.title,
+                "municipality_name": ordinance.municipality.name,
+                "province": ordinance.municipality.province,
+                "topic": ordinance.topic,
+                "source_url": ordinance.source_url,
+            }
+            for ordinance in ordinances[:MAX_ORDINANCE_ANALYSIS_SAMPLES]
+        ],
+        "conclusions": _ordinance_analysis_conclusions(
+            ordinance_count=len(ordinances),
+            municipality_count=len(municipality_ids),
+            ready_approved_chunks=ready_approved_chunks,
+            topic_breakdown=topic_breakdown,
+            scope_label=scope_label,
+            topic=topic,
+        ),
+        "limitations": [
+            "Conclusiones descriptivas sobre metadatos y fragmentos aprobados; no sustituyen revisión jurídica humana.",
+            "Para una conclusión normativa concreta hay que abrir las ordenanzas y citar fragmentos específicos.",
+        ],
+    }
+
+
 def _create_requirement(
     db: Session,
     current_user: User,
@@ -1571,6 +1813,7 @@ _EXECUTORS = {
     "get_map_items": _get_map_items,
     "web_search": _web_search,
     "semantic_search_ordinances": _semantic_search_ordinances,
+    "analyze_ordinance_corpus": _analyze_ordinance_corpus,
     "list_requirements": _list_requirements,
     "get_requirement": _get_requirement,
     "create_requirement": _create_requirement,
@@ -1609,6 +1852,12 @@ _TOOL_METADATA: dict[str, dict] = {
     },
     "semantic_search_ordinances": {
         "label": "Buscar ordenanzas",
+        "read_only": True,
+        "domain": "ordinances",
+        "required_permission": "ordinances.compare",
+    },
+    "analyze_ordinance_corpus": {
+        "label": "Analizar ordenanzas",
         "read_only": True,
         "domain": "ordinances",
         "required_permission": "ordinances.compare",

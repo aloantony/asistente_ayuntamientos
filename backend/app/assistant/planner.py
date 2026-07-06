@@ -53,6 +53,9 @@ Reglas:
   concreto, usa intent=global_capabilities y action=none.
 - Si pide comparar o consultar ordenanzas/reglamentos/normativa municipal, usa
   intent=read_ordinances y action=semantic_search_ordinances.
+- Si pide conclusiones de conjunto/subconjunto, patrones, cobertura, materias
+  frecuentes o visión agregada del corpus de ordenanzas, usa
+  intent=analyze_ordinances y action=analyze_ordinance_corpus.
 - Si pide listar, mostrar, consultar, comparar o localizar datos concretos de
   mapa, necesidades u ordenanzas, usa la intención de lectura correspondiente.
 - Si pide consultar elementos geolocalizados del mapa municipal, usa
@@ -70,6 +73,9 @@ Reglas:
 - Si cancela, descarta o deja sin efecto una acción pendiente, usa intent=cancel_pending_action y action=cancel_pending_action.
 - Si pide preparar, encargar o dejar para revisión una tarea supervisada o
   diferida, usa intent=delegate_agent_office y action=create_agent_office_task.
+- Si pide que el asistente ejecute una capacidad que no existe o no debe prometer
+  todavía, usa intent=unsupported_capability y action=none; incluye draft con
+  title y problem para convertirlo en necesidad si el usuario acepta.
 - Si describe un fallo, fricción, problema de datos o mejora de la plataforma/asistente que conviene elevar al administrador, usa intent=suggest_admin_feedback y action=send_admin_feedback; incluye draft con category, title, description y priority si están claros.
 - Si hay pending_action de send_admin_feedback y el usuario confirma enviarlo, usa intent=suggest_admin_feedback y action=send_admin_feedback.
 - Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
@@ -269,6 +275,7 @@ def _plan_with_hermes(
                     "enum": [
                         "global_capabilities",
                         "read_ordinances",
+                        "analyze_ordinances",
                         "read_map_items",
                         "read_requirements",
                         "capture_requirement_intro",
@@ -279,6 +286,7 @@ def _plan_with_hermes(
                         "retry_pending_action",
                         "cancel_pending_action",
                         "delegate_agent_office",
+                        "unsupported_capability",
                         "suggest_admin_feedback",
                         "unknown",
                     ],
@@ -288,6 +296,7 @@ def _plan_with_hermes(
                     "enum": [
                         "none",
                         "semantic_search_ordinances",
+                        "analyze_ordinance_corpus",
                         "get_map_items",
                         "list_requirements",
                         "create_requirement",

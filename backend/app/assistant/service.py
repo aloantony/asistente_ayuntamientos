@@ -74,7 +74,9 @@ ORDINANCE_CAPABILITIES_REPLY = (
     "Para buscar bien, dime un municipio y una materia concreta, por ejemplo "
     "tasas, terrazas, residuos, agua, caminos o animales. Si quieres comparar "
     "municipios, también puedo ayudarte a contrastar los resultados, siempre "
-    "como apoyo y no como revisión jurídica oficial."
+    "como apoyo y no como revisión jurídica oficial. También puedo sacar "
+    "conclusiones descriptivas del conjunto o de subconjuntos del corpus, por "
+    "provincia, municipio o materia."
 )
 MAP_CAPABILITIES_REPLY = (
     "Sí. Puedo ayudarte con el mapa municipal cuando haya proyectos, "
@@ -229,6 +231,12 @@ ORDINANCE_TOPIC_MARKERS = {
     "aguas residuales": "aguas residuales",
     "lenas": "montes",
     "leñas": "montes",
+}
+ORDINANCE_PROVINCE_MARKERS = {
+    "burgos": "Burgos",
+    "soria": "Soria",
+    "leon": "Leon",
+    "león": "Leon",
 }
 TEST_REQUIREMENT_DRAFT = {
     "title": "Requisito de prueba",
@@ -905,6 +913,113 @@ def feedback_requirement_draft(feedback: dict) -> dict:
         "title": title[:120] or "Necesidad detectada desde feedback",
         "problem": description,
     }
+
+
+UNSUPPORTED_CAPABILITY_ACTION_MARKERS = {
+    "aprobar",
+    "aprueba",
+    "dictar",
+    "dicta",
+    "emitir",
+    "emite",
+    "firmar",
+    "firma",
+    "firmarlo",
+    "publicar",
+    "publica",
+    "publicarlo",
+    "presentar",
+    "presenta",
+    "tramitar",
+    "tramita",
+    "notificar",
+    "notifica",
+    "resolver expediente",
+    "firma electronica",
+    "firma electrónica",
+    "firma biometrica",
+    "firma biométrica",
+    "decreto",
+    "bop",
+}
+
+
+def is_unsupported_capability_request(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    asks_or_orders_capability = any(
+        marker in normalized
+        for marker in {
+            "puedes",
+            "puede el asistente",
+            "podrias",
+            "podrías",
+            "necesito que el asistente",
+            "quiero que el asistente",
+            "haz que el asistente",
+        }
+    )
+    if not asks_or_orders_capability:
+        return False
+    return any(marker in normalized for marker in UNSUPPORTED_CAPABILITY_ACTION_MARKERS)
+
+
+def unsupported_capability_summary(text: str) -> str:
+    summary = clean_requirement_field(text.strip().strip("¿? ."))
+    summary = re.sub(
+        r"^(puedes|podr[ií]as|puede el asistente|necesito que el asistente|quiero que el asistente)\s+",
+        "",
+        summary,
+        flags=re.IGNORECASE,
+    ).strip("¿? .")
+    return summary[:180] or "nueva capacidad solicitada"
+
+
+def unsupported_capability_requirement_draft(text: str) -> dict:
+    summary = unsupported_capability_summary(text)
+    return {
+        "title": f"Capacidad del asistente: {summary}"[:120],
+        "problem": (
+            "El usuario solicita una capacidad que el asistente no puede ejecutar "
+            f"actualmente: {text.strip()}"
+        ),
+    }
+
+
+def unsupported_capability_reply(draft: dict, organization: Organization | None) -> str:
+    title = str(draft.get("title") or "Nueva capacidad del asistente").strip()
+    problem = str(draft.get("problem") or "").strip()
+    organization_suffix = f" en {organization.name}" if organization else ""
+    return (
+        "Ahora mismo no tengo esa capacidad en la plataforma y no debo simular "
+        "que la ejecuto.\n\n"
+        "Sí puedo ayudarte a convertirlo en una necesidad para que el equipo la "
+        f"valore{organization_suffix}. Propuesta de borrador:\n"
+        f"Título: {title}\n"
+        f"Problema: {problem}\n\n"
+        "Si quieres, la creo como borrador de necesidad."
+    )
+
+
+def semantic_plan_unsupported_capability_draft(
+    plan: SemanticTurnPlan | None,
+    user_text: str,
+) -> dict | None:
+    if (
+        plan is None
+        or plan.source != "planner"
+        or plan.confidence < 0.5
+        or plan.intent != "unsupported_capability"
+        or plan.action not in {"", "none"}
+    ):
+        return None
+    draft = plan.draft if isinstance(plan.draft, dict) else {}
+    title = str(draft.get("title") or "").strip()
+    problem = str(draft.get("problem") or "").strip()
+    if title and problem:
+        return {"title": title[:120], "problem": problem}
+    return unsupported_capability_requirement_draft(user_text)
 
 
 def is_retry_request(text: str) -> bool:
@@ -1797,6 +1912,119 @@ def semantic_plan_ordinance_input(
     return tool_input
 
 
+def is_ordinance_analysis_request(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    mentions_ordinance_set = any(
+        marker in normalized
+        for marker in {
+            "ordenanzas",
+            "reglamentos",
+            "normativa municipal",
+            "corpus",
+        }
+    )
+    if not mentions_ordinance_set:
+        return False
+    return any(
+        marker in normalized
+        for marker in {
+            "analiza",
+            "analisis",
+            "análisis",
+            "conclusion",
+            "conclusiones",
+            "patron",
+            "patrones",
+            "tendencia",
+            "tendencias",
+            "vision de conjunto",
+            "visión de conjunto",
+            "vision general",
+            "visión general",
+            "panorama",
+            "materias frecuentes",
+            "mas frecuentes",
+            "más frecuentes",
+            "cobertura",
+            "conjunto",
+            "subconjunto",
+            "cuantas ordenanzas",
+            "cuántas ordenanzas",
+        }
+    )
+
+
+def extract_ordinance_analysis_filters(
+    db: Session,
+    text: str,
+    organization: Organization | None = None,
+) -> dict | None:
+    if not is_ordinance_analysis_request(text):
+        return None
+    normalized = normalize_text(text)
+    tool_input: dict[str, object] = {}
+    for marker, province in ORDINANCE_PROVINCE_MARKERS.items():
+        if normalize_text(marker) in normalized:
+            tool_input["province"] = province
+            break
+
+    municipalities = db.scalars(select(Municipality).order_by(Municipality.name)).all()
+    for municipality in municipalities:
+        candidate = normalize_text(municipality.name)
+        if candidate and candidate in normalized:
+            tool_input["municipality_name"] = municipality.name
+            break
+    if not tool_input.get("municipality_name") and any(
+        phrase in normalized
+        for phrase in {"mi municipio", "mi ayuntamiento", "nuestro municipio"}
+    ):
+        inferred = organization_municipality_name(organization)
+        if inferred:
+            tool_input["municipality_name"] = inferred
+
+    for marker, mapped_topic in ORDINANCE_TOPIC_MARKERS.items():
+        if normalize_text(marker) in normalized:
+            tool_input["topic"] = mapped_topic
+            break
+    return tool_input
+
+
+def semantic_plan_ordinance_analysis_input(
+    plan: SemanticTurnPlan,
+    user_text: str,
+    organization: Organization | None,
+) -> dict | None:
+    if plan.intent != "analyze_ordinances":
+        return None
+    if plan.action not in {"analyze_ordinance_corpus", "none"}:
+        return None
+    if plan.confidence < 0.5:
+        return None
+
+    target = plan.target if isinstance(plan.target, dict) else {}
+    tool_input: dict[str, object] = {}
+    for key in (
+        "province",
+        "municipality_id",
+        "municipality_name",
+        "topic",
+        "include_pending",
+    ):
+        value = target.get(key)
+        if value not in (None, ""):
+            tool_input[key] = value
+    if "municipality_name" not in tool_input and any(
+        marker in normalize_text(user_text)
+        for marker in {"aqui", "aquí", "mi municipio", "mi ayuntamiento"}
+    ):
+        inferred = organization_municipality_name(organization)
+        if inferred:
+            tool_input["municipality_name"] = inferred
+    return tool_input
+
+
 def semantic_plan_blocks_legacy_routes(plan: SemanticTurnPlan | None) -> bool:
     if (
         plan is None
@@ -2104,6 +2332,69 @@ def ordinance_search_reply(result_content: str, *, ok: bool) -> str:
     )
 
 
+def ordinance_analysis_reply(result_content: str, *, ok: bool) -> str:
+    if not ok:
+        return f"No he podido analizar la base de ordenanzas: {result_content}"
+
+    payload = decode_tool_json(result_content)
+    if not isinstance(payload, dict):
+        return "El análisis de ordenanzas devolvió una respuesta inesperada."
+
+    raw_scope = payload.get("scope")
+    scope = raw_scope if isinstance(raw_scope, dict) else {}
+    scope_parts = []
+    if scope.get("province"):
+        scope_parts.append(f"provincia de {scope['province']}")
+    if scope.get("municipality_name"):
+        scope_parts.append(f"municipio de {scope['municipality_name']}")
+    if scope.get("topic"):
+        scope_parts.append(f"materia {scope['topic']}")
+    scope_label = ", ".join(scope_parts) if scope_parts else "corpus aprobado"
+    ordinance_count = int(payload.get("ordinance_count") or 0)
+    municipality_count = int(payload.get("municipality_count") or 0)
+    ready_chunks = int(payload.get("ready_approved_chunks") or 0)
+    if ordinance_count == 0:
+        return (
+            f"No encuentro ordenanzas aprobadas en el subconjunto {scope_label}. "
+            "No debo sacar conclusiones si no hay corpus aprobado suficiente."
+        )
+
+    lines = [
+        f"Conclusiones sobre {scope_label}:",
+        f"- Base analizada: {ordinance_count} ordenanzas en {municipality_count} municipios, con {ready_chunks} fragmentos aprobados y vectorizados.",
+    ]
+    conclusions = payload.get("conclusions")
+    if isinstance(conclusions, list):
+        for conclusion in conclusions[:5]:
+            lines.append(f"- {conclusion}")
+
+    topic_breakdown = payload.get("topic_breakdown")
+    if isinstance(topic_breakdown, list) and topic_breakdown:
+        lines.append("Materias principales:")
+        for row in topic_breakdown[:5]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"- {row.get('topic')}: {row.get('ordinance_count')} ordenanzas en {row.get('municipality_count')} municipios."
+            )
+
+    sample_ordinances = payload.get("sample_ordinances")
+    if isinstance(sample_ordinances, list) and sample_ordinances:
+        lines.append("Muestra de fuentes:")
+        for ordinance in sample_ordinances[:3]:
+            if not isinstance(ordinance, dict):
+                continue
+            source = ordinance.get("source_url") or "fuente no indicada"
+            lines.append(
+                f"- {ordinance.get('municipality_name')}: {ordinance.get('title')} ({source})"
+            )
+
+    lines.append(
+        "Estas son conclusiones descriptivas del corpus aprobado; no sustituyen revisión jurídica humana."
+    )
+    return "\n".join(lines)
+
+
 def map_items_reply(result_content: str, *, ok: bool) -> str:
     if not ok:
         return f"No he podido consultar el mapa: {result_content}"
@@ -2153,6 +2444,12 @@ ACTION_POLICIES = {
         agent_key="consultation",
         tool_name="semantic_search_ordinances",
         reason="action_policy_read_ordinances",
+    ),
+    "analyze_ordinances": ActionPolicy(
+        intent="analyze_ordinances",
+        agent_key="consultation",
+        tool_name="analyze_ordinance_corpus",
+        reason="action_policy_analyze_ordinances",
     ),
     "capture_requirement": ActionPolicy(
         intent="capture_requirement",
@@ -2289,6 +2586,30 @@ def handle_direct_ordinance_search(
         ACTION_POLICIES["read_ordinances"],
         tool_input,
         ordinance_search_reply,
+        semantic_plan=semantic_plan,
+    )
+
+
+def handle_direct_ordinance_analysis(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    user_message: AssistantMessage,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    tool_input: dict,
+    semantic_plan: SemanticTurnPlan | None = None,
+) -> AssistantMessage | None:
+    return handle_action_policy(
+        db,
+        current_user,
+        conversation,
+        user_message,
+        allowed_agents,
+        state,
+        ACTION_POLICIES["analyze_ordinances"],
+        tool_input,
+        ordinance_analysis_reply,
         semantic_plan=semantic_plan,
     )
 
@@ -2935,6 +3256,8 @@ def classify_turn_intent(text: str) -> TurnIntent:
         return TurnIntent("global_capabilities", domain_capability.reason)
     if is_global_capability_question(text):
         return TurnIntent("global_capabilities", "global_capabilities")
+    if is_ordinance_analysis_request(text):
+        return TurnIntent("analyze_ordinances", "direct_ordinance_analysis")
     if is_ordinance_request(text):
         return TurnIntent("read_ordinances", "direct_ordinance_search")
     if is_requirement_capture_intro(text):
@@ -3394,6 +3717,55 @@ def try_handle_direct_turn(
                 reason="pending_admin_feedback_cancelled",
             )
 
+    if pending_action is not None and pending_type == "unsupported_capability_requirement":
+        if is_negative(user_text):
+            set_pending_action(state, None)
+            return persist_direct_prompt(
+                db,
+                conversation,
+                allowed_agents,
+                state,
+                agent_key="requirements_intake",
+                content="De acuerdo, no creo la necesidad por ahora.",
+                reason="pending_unsupported_capability_requirement_cancelled",
+                intent="unsupported_capability",
+            )
+        if is_affirmative(user_text) or is_convert_feedback_to_requirement_request(user_text):
+            draft = pending_action.get("draft")
+            organization = (
+                resolved_organization
+                or organization_by_id(organizations, pending_action.get("organization_id"))
+                or selected_organization
+            )
+            if isinstance(draft, dict) and organization is not None:
+                record_selected_organization(state, organization)
+                return handle_direct_create_requirement(
+                    db,
+                    current_user,
+                    conversation,
+                    user_message,
+                    allowed_agents,
+                    state,
+                    organization,
+                    draft,
+                    reason="pending_unsupported_capability_requirement_confirmed",
+                    intent="create_requirement",
+                    semantic_plan=semantic_plan
+                    if semantic_plan_confirms_pending_work(semantic_plan)
+                    else None,
+                )
+            set_pending_action(state, pending_action)
+            return persist_direct_prompt(
+                db,
+                conversation,
+                allowed_agents,
+                state,
+                agent_key="requirements_intake",
+                content=organization_prompt(organizations, "create_requirement"),
+                reason="pending_unsupported_capability_requirement_needs_organization",
+                intent="create_requirement",
+            )
+
     last_admin_feedback = state.get("last_admin_feedback")
     if not isinstance(last_admin_feedback, dict):
         last_admin_feedback = None
@@ -3430,6 +3802,63 @@ def try_handle_direct_turn(
                 reason="direct_feedback_to_requirement",
                 intent="create_requirement",
             )
+
+    planned_unsupported_capability_draft = semantic_plan_unsupported_capability_draft(
+        semantic_plan,
+        user_text,
+    )
+    if pending_action is None and planned_unsupported_capability_draft is not None:
+        if selected_organization is not None:
+            record_selected_organization(state, selected_organization)
+        set_pending_action(
+            state,
+            {
+                "type": "unsupported_capability_requirement",
+                "organization_id": selected_organization.id
+                if selected_organization is not None
+                else None,
+                "draft": planned_unsupported_capability_draft,
+            },
+        )
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="requirements_intake",
+            content=unsupported_capability_reply(
+                planned_unsupported_capability_draft,
+                selected_organization,
+            ),
+            reason="semantic_unsupported_capability",
+            intent="unsupported_capability",
+            semantic_plan=semantic_plan,
+        )
+
+    if pending_action is None and is_unsupported_capability_request(user_text):
+        draft = unsupported_capability_requirement_draft(user_text)
+        if selected_organization is not None:
+            record_selected_organization(state, selected_organization)
+        set_pending_action(
+            state,
+            {
+                "type": "unsupported_capability_requirement",
+                "organization_id": selected_organization.id
+                if selected_organization is not None
+                else None,
+                "draft": draft,
+            },
+        )
+        return persist_direct_prompt(
+            db,
+            conversation,
+            allowed_agents,
+            state,
+            agent_key="requirements_intake",
+            content=unsupported_capability_reply(draft, selected_organization),
+            reason="direct_unsupported_capability",
+            intent="unsupported_capability",
+        )
 
     domain_capability = detect_domain_capability_question(user_text)
     if domain_capability is not None:
@@ -3530,6 +3959,25 @@ def try_handle_direct_turn(
                     intent=ACTION_POLICIES["suggest_admin_feedback"].intent,
                     semantic_plan=semantic_plan,
                 )
+
+        planned_ordinance_analysis_input = semantic_plan_ordinance_analysis_input(
+            semantic_plan,
+            user_text,
+            selected_organization,
+        )
+        if planned_ordinance_analysis_input is not None:
+            planned_ordinance_analysis_message = handle_direct_ordinance_analysis(
+                db,
+                current_user,
+                conversation,
+                user_message,
+                allowed_agents,
+                state,
+                planned_ordinance_analysis_input,
+                semantic_plan=semantic_plan,
+            )
+            if planned_ordinance_analysis_message is not None:
+                return planned_ordinance_analysis_message
 
         planned_ordinance_input = semantic_plan_ordinance_input(
             semantic_plan,
@@ -3674,6 +4122,24 @@ def try_handle_direct_turn(
 
     if semantic_plan_blocks_legacy_routes(semantic_plan):
         return None
+
+    ordinance_analysis_input = extract_ordinance_analysis_filters(
+        db,
+        user_text,
+        selected_organization,
+    )
+    if ordinance_analysis_input is not None:
+        direct_ordinance_analysis_message = handle_direct_ordinance_analysis(
+            db,
+            current_user,
+            conversation,
+            user_message,
+            allowed_agents,
+            state,
+            ordinance_analysis_input,
+        )
+        if direct_ordinance_analysis_message is not None:
+            return direct_ordinance_analysis_message
 
     ordinance_tool_input = extract_ordinance_filters(db, user_text, selected_organization)
     if ordinance_tool_input is not None:
