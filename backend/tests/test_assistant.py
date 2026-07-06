@@ -325,6 +325,169 @@ def test_agent_turn_persists_disabled_planner_routing(
     assert assistant_message["routing"]["chosen"] == "requirements_intake"
 
 
+def test_long_conversation_suggests_clean_chat_for_independent_topic(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    for index in range(6):
+        db.add(
+            AssistantMessage(
+                conversation_id=stored_conversation.id,
+                role="user",
+                content=f"Detalle previo sobre requisitos municipales {index}",
+            )
+        )
+        db.add(
+            AssistantMessage(
+                conversation_id=stored_conversation.id,
+                role="assistant",
+                content=f"Seguimos con el requisito municipal {index}.",
+                agent_key="requirements_intake",
+            )
+        )
+    db.commit()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "cambiando totalmente de tema, quiero hablar de organizar mis entrenamientos"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert "tema independiente" in assistant_message["content"]
+    assert "conversación limpia" in assistant_message["content"]
+    assert assistant_message["routing"]["source"] == "deterministic"
+    assert assistant_message["routing"]["reason"] == "context_transition_suggest_new_chat"
+    assert gateway.calls == []
+
+
+def test_explicit_clean_start_suggests_even_in_short_conversation():
+    conversation = AssistantConversation(title="Conversación", created_by_id=1)
+
+    assert assistant_service.should_suggest_clean_chat(
+        conversation,
+        "empecemos de cero con un tema nuevo",
+        {},
+    ) is True
+
+
+def test_short_conversation_does_not_spend_turn_on_clean_chat_suggestion(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Te respondo aquí sin abrir otro hilo.")],
+                )
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "cambiando totalmente de tema, quiero hablar de organizar mis entrenamientos"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == "Te respondo aquí sin abrir otro hilo."
+    assert len(gateway.calls) == 1
+
+
+def test_active_pending_work_blocks_clean_chat_suggestion(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Antes cierro la necesidad que estaba pendiente.")],
+                )
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "pending_work": {
+                "type": "create_requirement",
+                "status": "awaiting_confirmation",
+                "organization_id": organization.id,
+                "draft": {"title": "Mapa", "problem": "Visualizar datos"},
+            }
+        },
+        ensure_ascii=False,
+    )
+    for index in range(6):
+        db.add(
+            AssistantMessage(
+                conversation_id=stored_conversation.id,
+                role="user",
+                content=f"Detalle previo sobre requisitos municipales {index}",
+            )
+        )
+        db.add(
+            AssistantMessage(
+                conversation_id=stored_conversation.id,
+                role="assistant",
+                content=f"Seguimos con el requisito municipal {index}.",
+                agent_key="requirements_intake",
+            )
+        )
+    db.commit()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "cambiando totalmente de tema, quiero hablar de organizar mis entrenamientos"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == "Antes cierro la necesidad que estaba pendiente."
+    assert len(gateway.calls) == 1
+
+
 def test_short_followup_keeps_previous_agent():
     conversation = SimpleNamespace(
         messages=[

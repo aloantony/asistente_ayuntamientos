@@ -130,6 +130,59 @@ TEST_REQUIREMENT_DRAFT = {
         "actualizarse o enviarse más adelante."
     ),
 }
+CONTEXT_TRANSITION_LONG_MESSAGE_COUNT = 12
+CONTEXT_TRANSITION_REFERENCE_PHRASES = {
+    "anterior",
+    "contexto actual",
+    "ese plan",
+    "eso",
+    "este hilo",
+    "la conversacion",
+    "la conversación",
+    "lo anterior",
+    "lo de antes",
+    "mismo proyecto",
+    "seguimos",
+    "sobre el flujo",
+    "sobre lo que",
+}
+CONTEXT_TRANSITION_SHIFT_PHRASES = {
+    "cambiando de tema",
+    "cambiando totalmente de tema",
+    "nuevo tema",
+    "otra cosa",
+    "por cierto",
+    "quiero hablar de",
+}
+CONTEXT_TRANSITION_CLEAN_START_PHRASES = {
+    "conversacion limpia",
+    "conversación limpia",
+    "empecemos de cero",
+    "empezar de cero",
+    "hilo nuevo",
+    "limpio nuevo",
+    "nuevo hilo",
+    "olvida lo anterior",
+}
+CONTEXT_TRANSITION_PROJECT_TOKENS = {
+    "ayuntamiento",
+    "ayuntamientos",
+    "borrador",
+    "consulta",
+    "consultar",
+    "documento",
+    "expediente",
+    "municipal",
+    "municipales",
+    "necesidad",
+    "necesidades",
+    "ordenanza",
+    "organizacion",
+    "organización",
+    "proyecto",
+    "requisito",
+    "requisitos",
+}
 
 
 def build_tool_prompt_block(agent_tools: list[ToolSpec]) -> str:
@@ -428,6 +481,134 @@ def direct_routing(
         "previous_agent_key": get_previous_agent_key(conversation),
         "reason": reason,
     }
+
+
+def context_size_bucket(conversation: AssistantConversation) -> str:
+    message_count = len(conversation.messages)
+    if message_count >= 40:
+        return "near_limit"
+    if message_count >= CONTEXT_TRANSITION_LONG_MESSAGE_COUNT:
+        return "long"
+    if message_count >= 6:
+        return "medium"
+    return "short"
+
+
+def has_active_conversation_work(state: dict) -> bool:
+    pending_action = state.get("pending_action")
+    if isinstance(pending_action, dict) and pending_action.get("type"):
+        return True
+
+    pending_work = state.get("pending_work")
+    if not isinstance(pending_work, dict):
+        return False
+    return pending_work.get("status") not in {None, "completed", "cancelled"}
+
+
+def contains_any_phrase(normalized_text: str, phrases: set[str]) -> bool:
+    return any(normalize_text(phrase) in normalized_text for phrase in phrases)
+
+
+def references_current_context(user_text: str) -> bool:
+    normalized = normalize_text(user_text)
+    if contains_any_phrase(normalized, CONTEXT_TRANSITION_REFERENCE_PHRASES):
+        return True
+    tokens = tokenize_tool_intent(normalized)
+    return bool(tokens.intersection(CONTEXT_TRANSITION_PROJECT_TOKENS))
+
+
+def looks_like_context_shift(user_text: str) -> bool:
+    normalized = normalize_text(user_text)
+    return contains_any_phrase(
+        normalized,
+        CONTEXT_TRANSITION_SHIFT_PHRASES | CONTEXT_TRANSITION_CLEAN_START_PHRASES,
+    )
+
+
+def explicitly_requests_clean_start(user_text: str) -> bool:
+    return contains_any_phrase(
+        normalize_text(user_text),
+        CONTEXT_TRANSITION_CLEAN_START_PHRASES,
+    )
+
+
+def looks_independent_from_project(user_text: str) -> bool:
+    tokens = tokenize_tool_intent(user_text)
+    return not bool(tokens.intersection(CONTEXT_TRANSITION_PROJECT_TOKENS))
+
+
+def should_suggest_clean_chat(
+    conversation: AssistantConversation,
+    user_text: str,
+    state: dict,
+) -> bool:
+    bucket = context_size_bucket(conversation)
+    if has_active_conversation_work(state):
+        return False
+    if explicitly_requests_clean_start(user_text):
+        return True
+    if bucket in {"short", "medium"}:
+        return False
+
+    cheap_signals = 0
+    if looks_like_context_shift(user_text):
+        cheap_signals += 1
+    if not references_current_context(user_text):
+        cheap_signals += 1
+    if not has_active_conversation_work(state):
+        cheap_signals += 1
+    if looks_independent_from_project(user_text):
+        cheap_signals += 1
+
+    return bucket in {"long", "near_limit"} and cheap_signals >= 3
+
+
+def clean_chat_suggestion_reply(user_text: str) -> str:
+    if explicitly_requests_clean_start(user_text):
+        return (
+            "Perfecto: este mensaje parece pedir un tema limpio. "
+            "No hace falta llevar contexto de este hilo salvo tus preferencias generales. "
+            "Abre una conversación nueva y seguimos allí."
+        )
+    return (
+        "Esto parece un tema independiente del contexto anterior. "
+        "Si vamos a seguir con ello, convendría abrir una conversación limpia "
+        "para no arrastrar ruido. No hace falta llevar contexto de este hilo."
+    )
+
+
+def maybe_handle_context_transition(
+    db: Session,
+    conversation: AssistantConversation,
+    allowed_agents: list[AgentSpec],
+    state: dict,
+    user_text: str,
+) -> AssistantMessage | None:
+    if not should_suggest_clean_chat(conversation, user_text, state):
+        return None
+
+    agent = (
+        allowed_agent_by_key(allowed_agents, get_previous_agent_key(conversation) or "")
+        or allowed_agents[0]
+    )
+    state["context_transition"] = {
+        "last_recommendation": "suggest_new_chat",
+        "context_size_bucket": context_size_bucket(conversation),
+    }
+    return persist_assistant_message(
+        db,
+        conversation,
+        content=clean_chat_suggestion_reply(user_text),
+        actions=[],
+        agent=agent,
+        routing=direct_routing(
+            allowed_agents,
+            agent,
+            conversation,
+            "context_transition_suggest_new_chat",
+        ),
+        state=state,
+    )
 
 
 def persist_assistant_message(
@@ -1983,6 +2164,16 @@ def run_agent_turn(
     )
     if direct_message is not None:
         return direct_message
+
+    transition_message = maybe_handle_context_transition(
+        db,
+        conversation,
+        allowed_agents,
+        load_conversation_state(conversation),
+        user_text,
+    )
+    if transition_message is not None:
+        return transition_message
 
     routing_decision = choose_agent(
         conversation=conversation,
