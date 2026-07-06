@@ -7,6 +7,7 @@ import io
 from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
+from app.documents.models import DocumentWorkArtifact
 from app.projects.models import Project, project_users
 from conftest import headers_for, unique_suffix
 
@@ -289,3 +290,102 @@ def test_download_nonexistent_document_returns_404(client, superuser):
     )
 
     assert response.status_code == 404
+
+
+def test_project_member_can_prepare_document_work_artifact_as_reviewable_draft(
+    client, db, make_organization, make_user, grant_permissions
+):
+    organization = make_organization()
+    project = make_project(db, organization)
+    user = make_user()
+    grant_permissions(user, organization, ["documents.draft", "documents.view"])
+    add_project_member(db, project, user)
+
+    response = client.post(
+        f"/projects/{project.id}/document-work-artifacts",
+        headers=headers_for(user),
+        json={
+            "artifact_type": "report",
+            "title": "Informe de contratación menor",
+            "content": "Borrador de trabajo para revisión de secretaría.",
+            "source_summary": "Preparado desde notas internas, sin enviar documentos a la web.",
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["artifact_type"] == "report"
+    assert body["status"] == "draft"
+    assert body["review_notes"] is None
+    assert body["reviewed_by_id"] is None
+    assert body["export_format"] is None
+    assert body["export_requested_at"] is None
+    assert body["exported_at"] is None
+    assert body["source_document_ids"] == []
+
+    artifact = db.get(DocumentWorkArtifact, body["id"])
+    assert artifact is not None
+    assert artifact.status == "draft"
+    assert artifact.project_id == project.id
+    assert artifact.created_by_id == user.id
+
+
+def test_document_work_artifact_export_request_requires_human_review_approval(
+    client, db, make_organization, make_user, grant_permissions
+):
+    organization = make_organization()
+    project = make_project(db, organization)
+    author = make_user()
+    reviewer = make_user()
+    exporter = make_user()
+    grant_permissions(author, organization, ["documents.draft", "documents.view"])
+    grant_permissions(reviewer, organization, ["documents.review", "documents.view"])
+    grant_permissions(exporter, organization, ["documents.export", "documents.view"])
+    add_project_member(db, project, author)
+    add_project_member(db, project, reviewer)
+    add_project_member(db, project, exporter)
+
+    created = client.post(
+        f"/projects/{project.id}/document-work-artifacts",
+        headers=headers_for(author),
+        json={
+            "artifact_type": "communication",
+            "title": "Comunicación a vecinos",
+            "content": "Texto de trabajo pendiente de revisión.",
+        },
+    )
+    assert created.status_code == 201
+    artifact_id = created.json()["id"]
+
+    premature_export = client.patch(
+        f"/document-work-artifacts/{artifact_id}",
+        headers=headers_for(exporter),
+        json={"status": "export_requested", "export_format": "docx"},
+    )
+
+    assert premature_export.status_code == 409
+    assert "approved" in premature_export.json()["detail"]
+
+    reviewed = client.patch(
+        f"/document-work-artifacts/{artifact_id}",
+        headers=headers_for(reviewer),
+        json={"status": "approved", "review_notes": "Revisado por secretaría."},
+    )
+
+    assert reviewed.status_code == 200
+    assert reviewed.json()["status"] == "approved"
+    assert reviewed.json()["reviewed_by_id"] == reviewer.id
+
+    export_requested = client.patch(
+        f"/document-work-artifacts/{artifact_id}",
+        headers=headers_for(exporter),
+        json={"status": "export_requested", "export_format": "docx"},
+    )
+
+    assert export_requested.status_code == 200
+    body = export_requested.json()
+    assert body["status"] == "export_requested"
+    assert body["export_format"] == "docx"
+    assert body["export_requested_by_id"] == exporter.id
+    assert body["export_requested_at"] is not None
+    assert body["exported_at"] is None

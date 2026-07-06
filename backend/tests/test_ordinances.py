@@ -896,6 +896,9 @@ def test_burgos_coverage_endpoint_reports_ready_municipalities(
     assert response.status_code == 200
     body = response.json()
     assert body["province"] == "Burgos"
+    assert body["coverage_status"] == "demo_ready"
+    assert body["full_coverage_verified"] is False
+    assert "cobertura completa" in body["coverage_note"].lower()
     assert body["municipalities_ready_for_assistant"] == 1
     assert body["chunks_ready"] == 1
     assert body["import_failures_total"] == 0

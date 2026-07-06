@@ -19,6 +19,7 @@ function AsistentePageInner() {
   const assistantController = useAssistantController({
     getStoredToken,
     handleRequestError,
+    currentUser: user,
   });
 
   const canUseAssistant = Boolean(
@@ -139,10 +140,15 @@ function AsistentePageInner() {
         assistantStatus={assistantController.assistantStatus}
         conversations={assistantController.conversations}
         conversationFolders={assistantController.conversationFolders}
+        memoryEntries={assistantController.memoryEntries}
+        knowledgeProposals={assistantController.knowledgeProposals}
+        agentOfficeTasks={assistantController.agentOfficeTasks}
+        documentWorkArtifacts={assistantController.documentWorkArtifacts}
         currentUser={user}
         selectedConversation={assistantController.selectedConversation}
         draftMessage={assistantController.draftMessage}
         isLoadingAssistant={assistantController.isLoadingAssistant}
+        isLoadingWorkspaceQueues={assistantController.isLoadingWorkspaceQueues}
         isSendingMessage={assistantController.isSendingMessage}
         assistantError={assistantController.assistantError}
         includeArchivedConversations={
@@ -160,6 +166,12 @@ function AsistentePageInner() {
         onCreateConversationFolder={assistantController.createConversationFolder}
         onRenameConversationFolder={assistantController.renameConversationFolder}
         onDeleteConversationFolder={assistantController.deleteConversationFolder}
+        onUpdateMemoryEntry={assistantController.updateMemoryEntry}
+        onUpdateKnowledgeProposal={assistantController.updateKnowledgeProposal}
+        onReviewAgentOfficeTask={assistantController.reviewAgentOfficeTask}
+        onUpdateDocumentWorkArtifact={
+          assistantController.updateDocumentWorkArtifact
+        }
         onIncludeArchivedConversationsChange={
           assistantController.toggleIncludeArchivedConversations
         }

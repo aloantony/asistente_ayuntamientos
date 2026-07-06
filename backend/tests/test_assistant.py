@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 
 from app.agent_office.models import AgentOfficeTask
 from app.assistant import planner as assistant_planner
@@ -13,6 +13,7 @@ from app.assistant.gateway import _from_openai_response, _hermes_agent_url
 from app.assistant.models import (
     AssistantAdminFeedback,
     AssistantConversation,
+    AssistantKnowledgeProposal,
     AssistantMemoryEntry,
     AssistantMessage,
     AssistantTransversalFeature,
@@ -21,11 +22,12 @@ from app.assistant.models import (
 from app.assistant.planner import SemanticTurnPlan, choose_agent
 from app.assistant.routes import get_gateway
 from app.core.config import settings
+from app.documents.models import DocumentWorkArtifact
 from app.main import app
 from app.municipalities.models import Municipality
 from app.ordinances.embeddings import embed_text
 from app.ordinances.models import Ordinance, OrdinanceLegalChunk
-from app.projects.models import Project
+from app.projects.models import Project, project_users
 from app.requirements.models import Requirement
 from conftest import headers_for
 
@@ -689,6 +691,288 @@ def test_semantic_plan_can_create_supervised_agent_office_task_without_gateway(
     assert task.status == "pending_approval"
 
 
+def test_semantic_plan_uses_direct_read_instead_of_agent_office_for_simple_lookup(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    organization = make_organization("Ayuntamiento Lectura Directa")
+    user = make_user(full_name="Alcaldesa Lectura Directa")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "agent_office.create", "requirements.view"],
+    )
+    db.add(
+        Requirement(
+            organization_id=organization.id,
+            title="Poda de árboles",
+            summary="Necesidad visible para comprobar la lectura directa.",
+            status="draft",
+            priority="medium",
+            source_type="conversation",
+            created_by_id=user.id,
+        )
+    )
+    db.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: SemanticTurnPlan(
+            intent="delegate_agent_office",
+            action="create_agent_office_task",
+            confidence=0.93,
+            target={
+                "organization_id": organization.id,
+                "title": "Consulta simple de necesidades",
+                "description": "Consultar las necesidades visibles registradas.",
+                "department": "requirements",
+                "requested_action": "list_requirements",
+                "approval_policy": "never",
+                "requires_human_approval": False,
+            },
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Qué necesidades hay registradas?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"][0]["tool"] == "list_requirements"
+    assert assistant_message["actions"][0]["ok"] is True
+    assert "necesidades visibles" in assistant_message["content"].lower()
+    assert "tarea supervisada" not in assistant_message["content"].lower()
+    assert "agente de" not in assistant_message["content"].lower()
+    assert db.scalar(select(func.count()).select_from(AgentOfficeTask)) == 0
+    assert gateway.calls == []
+
+
+def test_assistant_blocks_agent_office_tool_call_for_simple_read_lookup(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    organization = make_organization("Ayuntamiento Bloqueo Lectura")
+    user = make_user(full_name="Alcaldesa Bloqueo Lectura")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "agent_office.create", "requirements.view"],
+    )
+    monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "office_read_1",
+                            "create_agent_office_task",
+                            {
+                                "organization_id": organization.id,
+                                "title": "Consulta simple de necesidades",
+                                "description": "Consultar las necesidades visibles registradas.",
+                                "department": "requirements",
+                                "requested_action": "list_requirements",
+                                "approval_policy": "never",
+                                "requires_human_approval": False,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No dejo una tarea supervisada para una lectura simple.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Trabaja este asunto cuando puedas."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"][0]["tool"] == "create_agent_office_task"
+    assert assistant_message["actions"][0]["ok"] is False
+    assert "lecturas simples" in assistant_message["actions"][0]["result"]
+    assert db.scalar(select(func.count()).select_from(AgentOfficeTask)) == 0
+    assert "agente de" not in assistant_message["content"].lower()
+    assert gateway.calls
+
+
+def test_semantic_agent_office_mutating_delegation_forces_human_approval_policy(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    organization = make_organization("Ayuntamiento Mutación Diferida")
+    user = make_user(full_name="Alcaldesa Mutación Diferida")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "agent_office.create"],
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: SemanticTurnPlan(
+            intent="delegate_agent_office",
+            action="create_agent_office_task",
+            confidence=0.94,
+            target={
+                "organization_id": organization.id,
+                "title": "Crear necesidad diferida",
+                "description": "Crear un borrador de necesidad como trabajo supervisado.",
+                "department": "requirements",
+                "requested_action": "create_requirement",
+                "approval_policy": "never",
+                "requires_human_approval": False,
+                "input": {
+                    "title": "Inventario de llaves",
+                    "problem": "No hay un inventario municipal común de llaves.",
+                },
+            },
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Deja creada para revisión una necesidad de inventario de llaves."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"][0]["tool"] == "create_agent_office_task"
+    assert assistant_message["actions"][0]["ok"] is True
+    assert "pendiente de aprobación humana" in assistant_message["content"].lower()
+    assert "agente de" not in assistant_message["content"].lower()
+    task = db.get(
+        AgentOfficeTask,
+        json.loads(assistant_message["actions"][0]["result"])["id"],
+    )
+    assert task is not None
+    assert task.requested_action == "create_requirement"
+    assert task.status == "pending_approval"
+    assert task.approval_policy == "before_execution"
+    assert task.requires_human_approval is True
+    assert gateway.calls == []
+
+
+def test_semantic_plan_prepares_reviewable_document_work_without_export(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    organization = make_organization("Ayuntamiento Borradores")
+    project = Project(name="Expediente de contratación", organization_id=organization.id)
+    db.add(project)
+    db.commit()
+    user = make_user(full_name="Secretaria Borradores")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "documents.draft", "documents.view"],
+    )
+    db.execute(insert(project_users).values(project_id=project.id, user_id=user.id))
+    db.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: SemanticTurnPlan(
+            intent="prepare_document_work",
+            action="prepare_document_work",
+            confidence=0.93,
+            target={
+                "organization_id": organization.id,
+                "project_id": project.id,
+                "artifact_type": "report",
+                "title": "Informe previo de contratación",
+            },
+            draft={
+                "content": (
+                    "Borrador de informe para revisión humana antes de aprobar "
+                    "o exportar nada."
+                ),
+                "source_summary": "Notas internas resumidas, sin búsqueda web.",
+            },
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Prepara un informe administrativo revisable."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "prepare_document_work"
+    assert assistant_message["actions"][0]["tool"] == "prepare_document_work"
+    assert assistant_message["actions"][0]["ok"] is True
+    assert "borrador documental" in assistant_message["content"].lower()
+    assert "no está aprobado ni exportado" in assistant_message["content"].lower()
+    assert gateway.calls == []
+
+    artifact_id = json.loads(assistant_message["actions"][0]["result"])["id"]
+    artifact = db.get(DocumentWorkArtifact, artifact_id)
+    assert artifact is not None
+    assert artifact.status == "draft"
+    assert artifact.artifact_type == "report"
+    assert artifact.source_conversation_id == conversation["id"]
+    assert artifact.source_message_id is not None
+    assert artifact.reviewed_by_id is None
+    assert artifact.exported_at is None
+
+
 def test_semantic_plan_rejects_agent_office_action_when_intent_mismatches(
     client,
     db,
@@ -744,7 +1028,7 @@ def test_semantic_plan_rejects_agent_office_action_when_intent_mismatches(
     assert gateway.calls
 
 
-def test_status_reports_disabled_gateway(
+def test_status_reports_disabled_gateway_with_forced_hermes_planner(
     client,
     assistant_user,
     use_gateway,
@@ -759,8 +1043,8 @@ def test_status_reports_disabled_gateway(
     assert response.status_code == 200
     body = response.json()
     assert body["enabled"] is False
-    assert body["planner"]["runtime"] == "disabled"
-    assert body["planner"]["enabled"] is False
+    assert body["planner"]["runtime"] == "hermes_agent"
+    assert body["planner"]["enabled"] is True
     assert {agent["key"] for agent in body["agents"]} == {
         "requirements_intake",
         "consultation",
@@ -956,6 +1240,70 @@ def test_consultation_agent_has_only_read_only_tools():
     )
 
 
+def test_tool_catalog_metadata_exposes_policy_contract():
+    expected_fields = {
+        "name",
+        "label",
+        "domain",
+        "read_only",
+        "required_permission",
+        "risk_level",
+        "requires_confirmation",
+        "requires_review",
+        "input_schema_summary",
+        "output_summary_shape",
+        "user_visible_summary_template",
+    }
+    metadata_by_name = {
+        metadata["name"]: metadata for metadata in assistant_tools.get_tool_metadata()
+    }
+
+    assert set(metadata_by_name) == set(assistant_tools.TOOL_CATALOG)
+    mutating_tools = []
+    for name, spec in assistant_tools.TOOL_CATALOG.items():
+        metadata = metadata_by_name[name]
+        assert expected_fields.issubset(metadata), name
+        assert metadata == spec.metadata
+        assert metadata["risk_level"] in {"low", "medium", "high"}
+        assert isinstance(metadata["requires_confirmation"], bool)
+        assert isinstance(metadata["requires_review"], bool)
+        for field in (
+            "label",
+            "domain",
+            "input_schema_summary",
+            "output_summary_shape",
+            "user_visible_summary_template",
+        ):
+            assert isinstance(metadata[field], str), (name, field)
+            assert metadata[field].strip(), (name, field)
+        if not metadata["read_only"]:
+            mutating_tools.append(name)
+            assert metadata["requires_confirmation"] or metadata["requires_review"], name
+
+    assert mutating_tools
+
+
+def test_status_exposes_tool_metadata_contract(client, assistant_user, use_gateway):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    tools = {tool["name"]: tool for tool in response.json()["tools"]}
+    create_requirement = tools["create_requirement"]
+    assert create_requirement["read_only"] is False
+    assert create_requirement["risk_level"] == "medium"
+    assert create_requirement["requires_confirmation"] is True
+    assert create_requirement["requires_review"] is True
+    assert "borrador" in create_requirement["user_visible_summary_template"].lower()
+
+    list_requirements = tools["list_requirements"]
+    assert list_requirements["read_only"] is True
+    assert list_requirements["requires_confirmation"] is False
+    assert "necesidades" in list_requirements["output_summary_shape"].lower()
+
+
 def test_consultation_prompt_lists_read_tools(db, assistant_user):
     user, _ = assistant_user
     agent = AGENT_REGISTRY["consultation"]
@@ -998,7 +1346,7 @@ def test_requirements_intake_prompt_lists_write_tools(db, assistant_user):
     assert "borrador" in prompt
 
 
-def test_agent_turn_persists_disabled_planner_routing(
+def test_agent_turn_persists_router_routing_when_legacy_env_disables_planner(
     client,
     assistant_user,
     use_gateway,
@@ -1006,6 +1354,13 @@ def test_agent_turn_persists_disabled_planner_routing(
 ):
     user, _ = assistant_user
     monkeypatch.setattr(settings, "assistant_planner_runtime", "disabled")
+    monkeypatch.setattr(assistant_planner, "planner_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_planner,
+        "_route_with_hermes",
+        lambda **kwargs: "requirements_intake",
+    )
+    monkeypatch.setattr(assistant_service, "plan_turn", lambda **kwargs: None)
     use_gateway(
         FakeGateway(
             [
@@ -1031,7 +1386,7 @@ def test_agent_turn_persists_disabled_planner_routing(
     assert response.status_code == 200
     assistant_message = response.json()["messages"][1]
     assert assistant_message["agent_key"] == "requirements_intake"
-    assert assistant_message["routing"]["source"] == "disabled"
+    assert assistant_message["routing"]["source"] == "router"
     assert assistant_message["routing"]["chosen"] == "requirements_intake"
 
 
@@ -1179,6 +1534,11 @@ def test_ordinance_availability_question_answers_without_corpus_search(
     assert "ordenanzas" in normalized_content
     assert "municipio" in normalized_content
     assert "materia" in normalized_content
+    assert "1 ordenanza aprobada" in normalized_content
+    assert "1 fragmento" in normalized_content
+    assert "demo-ready" in normalized_content
+    assert "cobertura completa" in normalized_content
+    assert "no verificada" in normalized_content
     assert "sasamón" not in normalized_content
     assert "fragmento 22" not in normalized_content
     assert gateway.calls == []
@@ -1614,6 +1974,172 @@ def test_semantic_planner_capture_requirement_runs_duplicate_check_without_legac
     assert gateway.calls == []
 
 
+def test_semantic_planner_capture_need_prepares_reviewable_draft_without_creating(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    draft = {
+        "title": "Control de llaves municipales",
+        "problem": "No hay un inventario común de quién tiene cada copia de las llaves.",
+    }
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="capture_requirement",
+            action="list_requirements",
+            target={"organization_id": organization.id},
+            draft=draft,
+            query=(
+                "En secretaría estamos viendo que no hay un inventario común "
+                "de quién tiene cada copia de las llaves municipales."
+            ),
+            confidence=0.93,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": (
+                "En secretaría estamos viendo que no hay un inventario común "
+                "de quién tiene cada copia de las llaves municipales."
+            )
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_policy_capture_requirement"
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements"
+    ]
+    assert db.scalar(
+        select(func.count()).select_from(Requirement).where(Requirement.title == draft["title"])
+    ) == 0
+    normalized_content = assistant_message["content"].lower()
+    assert "necesidad" in normalized_content
+    assert "borrador" in normalized_content
+    assert "confirmas" in normalized_content
+    assert "control de llaves municipales" in normalized_content
+    assert "requisito" not in normalized_content
+
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_work"] == {
+        "type": "create_requirement",
+        "status": "awaiting_confirmation",
+        "organization_id": organization.id,
+        "draft": draft,
+    }
+    assert "pending_action" not in state
+    assert gateway.calls == []
+
+
+def test_capture_need_duplicate_warning_requires_specific_choice_not_generic_yes(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    existing = Requirement(
+        organization_id=organization.id,
+        title="Control de llaves municipales",
+        summary="Inventario de llaves y copias en edificios municipales.",
+        problem="No hay un inventario común de quién tiene cada copia.",
+        status="draft",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(existing)
+    db.commit()
+    draft = {
+        "title": "Inventario de llaves municipales",
+        "problem": "No hay un inventario común de quién tiene cada copia de las llaves.",
+    }
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="capture_requirement",
+            action="list_requirements",
+            target={"organization_id": organization.id},
+            draft=draft,
+            query="Necesitamos ordenar quién tiene las llaves municipales.",
+            confidence=0.93,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Necesitamos ordenar quién tiene las llaves municipales."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "list_requirements"
+    ]
+    normalized_content = assistant_message["content"].lower()
+    assert "posible necesidad existente" in normalized_content
+    assert f"#{existing.id}" in assistant_message["content"]
+    assert "no duplicar" in normalized_content
+    assert "crear una necesidad nueva" in normalized_content
+    assert db.scalar(
+        select(func.count()).select_from(Requirement).where(Requirement.title == draft["title"])
+    ) == 0
+
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_work"] == {
+        "type": "create_requirement",
+        "status": "awaiting_duplicate_decision",
+        "organization_id": organization.id,
+        "draft": draft,
+        "duplicate_candidate_ids": [existing.id],
+    }
+
+    generic_confirmation = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
+
+    assert generic_confirmation.status_code == 200
+    confirmation_message = generic_confirmation.json()["messages"][-1]
+    assert confirmation_message["actions"] == []
+    assert "ampliar" in confirmation_message["content"].lower()
+    assert "crear una necesidad nueva" in confirmation_message["content"].lower()
+    assert db.scalar(select(func.count()).select_from(Requirement)) == 1
+    assert gateway.calls == []
+
+
 def test_semantic_planner_capture_requirement_intro_prompts_without_gateway(
     client,
     assistant_user,
@@ -1740,8 +2266,8 @@ def test_classify_turn_intent_maps_common_direct_requests():
     assert assistant_service.classify_turn_intent(
         "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
     ) == assistant_service.TurnIntent(
-        "read_ordinances",
-        "direct_ordinance_search",
+        "global_capabilities",
+        "ordinance_capabilities",
     )
     assert assistant_service.classify_turn_intent(
         "Pues la necesidad que tengo identificada es que ahora mismo querría desarrollar algo que me permita controlar a todos los trabajadores que hay en el ayuntamiento"
@@ -3552,6 +4078,7 @@ def test_agent_tool_respects_rbac_of_current_user(
 
 def test_agent_web_search_uses_controlled_hermes_web_tool(
     client,
+    db,
     make_user,
     make_organization,
     grant_permissions,
@@ -3621,6 +4148,17 @@ def test_agent_web_search_uses_controlled_hermes_web_tool(
     assert result["query"] == "normativa municipal 2026"
     assert result["limit"] == 5
     assert result["results"][0]["url"] == "https://example.test/normativa"
+
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["last_research"]["query"] == "normativa municipal 2026"
+    assert state["last_research"]["policy_notes"] == [
+        "privacy_gate_passed",
+        "public_sources_only",
+    ]
+    assert state["last_research"]["results"][0]["url"] == "https://example.test/normativa"
 
 
 def test_agent_web_search_requires_permission(
@@ -3858,17 +4396,20 @@ def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
-    assert assistant_message["routing"]["intent"] == "read_ordinances"
-    assert [action["tool"] for action in assistant_message["actions"]] == [
-        "semantic_search_ordinances"
-    ]
-    assert assistant_message["actions"][0]["input"]["municipality_name"] == "Fuentelcésped"
-    assert "necesidades visibles" not in assistant_message["content"].lower()
+    assert assistant_message["routing"]["reason"] == "ordinance_capabilities"
+    assert assistant_message["routing"]["intent"] == "global_capabilities"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "ordenanzas" in normalized_content
+    assert "comparar" in normalized_content or "contrastar" in normalized_content
+    assert "cobertura completa" in normalized_content
+    assert "no verificada" in normalized_content
+    assert "cita:" not in normalized_content
+    assert "fuente:" not in normalized_content
     assert gateway.calls == []
 
 
-def test_semantic_planner_ordinance_intent_executes_grounded_action(
+def test_semantic_planner_ordinance_intent_without_topic_asks_for_scope(
     client,
     db,
     make_user,
@@ -3920,14 +4461,81 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
     assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert assistant_message["routing"]["reason"] == "ordinance_scope_clarification"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "materia" in normalized_content
+    assert "municipio" in normalized_content
+    assert "cita:" not in normalized_content
+    assert "fuente:" not in normalized_content
+    assert gateway.calls == []
+
+
+def test_semantic_planner_ordinance_intent_with_topic_executes_grounded_action(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    gateway = use_gateway(FakeGateway([]))
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_ordinances",
+            action="semantic_search_ordinances",
+            query="ordenanzas fiscales comparables para adaptar al municipio",
+            target={
+                "municipality_name": "Fuentelcésped",
+                "topic": "ordenanzas fiscales",
+            },
+            confidence=0.92,
+            source="planner",
+        ),
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Qué ordenanzas fiscales de otros pueblos me sirven para adaptar las de aquí?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
     assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
     assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
     assert [action["tool"] for action in assistant_message["actions"]] == [
         "semantic_search_ordinances"
     ]
     assert assistant_message["actions"][0]["input"] == {
-        "query": "normas comparables para adaptar al municipio",
+        "query": "ordenanzas fiscales comparables para adaptar al municipio",
         "municipality_name": "Fuentelcésped",
+        "topic": "ordenanzas fiscales",
     }
     assert gateway.calls == []
 
@@ -4193,6 +4801,36 @@ def test_web_search_tool_rejects_personal_data_query(
     assert "datos personales" in result.content
 
 
+def test_web_search_tool_rejects_internal_markers_before_client_call(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.web.search"])
+    calls = []
+
+    def fake_search(*, query: str, limit: int):
+        calls.append({"query": query, "limit": limit})
+        return []
+
+    monkeypatch.setattr(assistant_tools.hermes_web_client, "search", fake_search)
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "buscar expediente interno de la comisión de gobierno"},
+    )
+
+    assert result.ok is False
+    assert calls == []
+    assert "datos internos" in result.content or "información interna" in result.content
+
+
 def test_agent_can_only_propose_memory_until_human_approval(
     client,
     db,
@@ -4282,6 +4920,179 @@ def test_agent_can_only_propose_memory_until_human_approval(
     )
     assert third.status_code == 200
     assert "justificante de domicilio" in gateway.calls[-1]["system"]
+
+
+def test_knowledge_proposals_are_reviewed_before_reuse(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Secretaria Fuentes")
+    organization = make_organization(name="Ayuntamiento Fuentes")
+    grant_permissions(
+        user,
+        organization,
+        [
+            "assistant.use",
+            "assistant.knowledge.propose",
+            "assistant.knowledge.review",
+            "assistant.knowledge.view",
+        ],
+    )
+    monkeypatch.setattr(assistant_service, "plan_turn", lambda **kwargs: None)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_knowledge",
+                            "propose_knowledge_entry",
+                            {
+                                "organization_id": organization.id,
+                                "title": "Guía oficial de subvenciones LED",
+                                "summary": "Convocatoria pública para renovar alumbrado municipal.",
+                                "source_url": "https://example.test/subvenciones-led",
+                                "source_title": "Convocatoria LED 2026",
+                                "source_type": "official",
+                                "confidence": "high",
+                            },
+                        ),
+                    ],
+                ),
+                fake_response("end_turn", [text_block("Queda pendiente de revisión.")]),
+                fake_response("end_turn", [text_block("Todavía no la uso.")]),
+                fake_response("end_turn", [text_block("Ahora ya la tengo en cuenta.")]),
+            ]
+        )
+    )
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    first = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Guarda esta fuente para revisarla antes de reutilizarla"},
+        headers=headers_for(user),
+    )
+    assert first.status_code == 200
+
+    proposal = db.scalar(select(AssistantKnowledgeProposal))
+    assert proposal is not None
+    assert proposal.status == "proposed"
+    assert proposal.organization_id == organization.id
+    assert proposal.source_url == "https://example.test/subvenciones-led"
+    assert proposal.source_conversation_id == conversation["id"]
+    assert proposal.source_message_id is not None
+    assert db.scalar(select(AssistantMemoryEntry)) is None
+
+    review_queue = client.get(
+        "/assistant/knowledge-proposals",
+        headers=headers_for(user),
+    )
+    assert review_queue.status_code == 200
+    assert [item["id"] for item in review_queue.json()] == [proposal.id]
+
+    second = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Hola de nuevo"},
+        headers=headers_for(user),
+    )
+    assert second.status_code == 200
+    assert "Guía oficial de subvenciones LED" not in gateway.calls[-1]["system"]
+    assert "https://example.test/subvenciones-led" not in gateway.calls[-1]["system"]
+
+    approved = client.patch(
+        f"/assistant/knowledge-proposals/{proposal.id}",
+        json={"status": "approved", "review_notes": "Fuente oficial validada."},
+        headers=headers_for(user),
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+    assert approved.json()["reviewed_by_id"] == user.id
+
+    approved_list = client.get(
+        "/assistant/knowledge-proposals?status=approved",
+        headers=headers_for(user),
+    )
+    assert approved_list.status_code == 200
+    assert [item["id"] for item in approved_list.json()] == [proposal.id]
+
+    third = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Continúa"},
+        headers=headers_for(user),
+    )
+    assert third.status_code == 200
+    assert "Guía oficial de subvenciones LED" in gateway.calls[-1]["system"]
+    assert "https://example.test/subvenciones-led" in gateway.calls[-1]["system"]
+
+
+def test_propose_knowledge_tool_requires_knowledge_permission(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.memory.propose"])
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "propose_knowledge_entry",
+        {
+            "organization_id": organization.id,
+            "title": "Fuente pública",
+            "summary": "Resumen de fuente pública.",
+            "source_url": "https://example.test/fuente",
+        },
+    )
+
+    assert result.ok is False
+    assert "assistant.knowledge.propose" in result.content
+    assert db.scalar(select(AssistantKnowledgeProposal)) is None
+    assert db.scalar(select(AssistantMemoryEntry)) is None
+
+
+def test_knowledge_proposal_review_requires_knowledge_review_permission(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.use", "assistant.knowledge.view"])
+    proposal = AssistantKnowledgeProposal(
+        organization_id=organization.id,
+        title="Fuente pendiente",
+        summary="Resumen pendiente",
+        source_url="https://example.test/pendiente",
+        status="proposed",
+        proposed_by_id=user.id,
+    )
+    db.add(proposal)
+    db.commit()
+
+    response = client.patch(
+        f"/assistant/knowledge-proposals/{proposal.id}",
+        json={"status": "approved"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: assistant.knowledge.review"
 
 
 def test_memory_review_requires_review_permission(

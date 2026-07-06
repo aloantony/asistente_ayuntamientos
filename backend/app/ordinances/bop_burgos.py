@@ -152,15 +152,26 @@ def build_burgos_coverage_report(db: Session) -> dict:
         for row in rows
     ]
     import_failures = _burgos_import_failures(db)
+    municipalities_ready_for_assistant = sum(
+        1 for row in municipalities if row["ready_for_assistant"]
+    )
+    coverage_status = (
+        "demo_ready" if municipalities_ready_for_assistant > 0 else "empty"
+    )
     return {
         "province": BOP_BURGOS_PROVINCE,
+        "coverage_status": coverage_status,
+        "full_coverage_verified": False,
+        "coverage_note": (
+            "Cobertura completa no verificada: este endpoint informa solo de "
+            "municipios, ordenanzas aprobadas, fragmentos vectorizados y fallos "
+            "presentes ahora mismo en la base de datos local."
+        ),
         "municipalities_total": len(municipalities),
         "municipalities_with_approved_ordinances": sum(
             1 for row in municipalities if row["ordinances_approved"] > 0
         ),
-        "municipalities_ready_for_assistant": sum(
-            1 for row in municipalities if row["ready_for_assistant"]
-        ),
+        "municipalities_ready_for_assistant": municipalities_ready_for_assistant,
         "ordinances_total": sum(row["ordinances_total"] for row in municipalities),
         "ordinances_approved": sum(row["ordinances_approved"] for row in municipalities),
         "chunks_total": sum(row["chunks_total"] for row in municipalities),

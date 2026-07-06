@@ -234,6 +234,114 @@ class AssistantMemoryEntry(TimestampMixin, Base):
     )
 
 
+class AssistantKnowledgeProposal(TimestampMixin, Base):
+    __tablename__ = "assistant_knowledge_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('proposed', 'approved', 'rejected')",
+            name="ck_assistant_knowledge_proposals_status",
+        ),
+        CheckConstraint(
+            "source_type in ('official', 'public_administration', 'news', 'provider', 'blog', 'unknown')",
+            name="ck_assistant_knowledge_proposals_source_type",
+        ),
+        CheckConstraint(
+            "confidence in ('low', 'medium', 'high')",
+            name="ck_assistant_knowledge_proposals_confidence",
+        ),
+        CheckConstraint(
+            "sensitivity in ('normal', 'personal', 'sensitive', 'legal')",
+            name="ck_assistant_knowledge_proposals_sensitivity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    source_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_type: Mapped[str] = mapped_column(
+        String(40),
+        default="unknown",
+        server_default="unknown",
+        nullable=False,
+    )
+    confidence: Mapped[str] = mapped_column(
+        String(20),
+        default="medium",
+        server_default="medium",
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(30),
+        index=True,
+        default="proposed",
+        server_default="proposed",
+        nullable=False,
+    )
+    sensitivity: Mapped[str] = mapped_column(
+        String(30),
+        default="normal",
+        server_default="normal",
+        nullable=False,
+    )
+    requires_legal_review: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )
+    source_conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    source_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assistant_messages.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    proposed_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    reviewed_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    organization: Mapped["Organization"] = relationship("Organization")
+    source_conversation: Mapped["AssistantConversation | None"] = relationship(
+        "AssistantConversation",
+        foreign_keys=[source_conversation_id],
+    )
+    source_message: Mapped["AssistantMessage | None"] = relationship(
+        "AssistantMessage",
+        foreign_keys=[source_message_id],
+    )
+    proposed_by: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[proposed_by_id],
+    )
+    reviewed_by: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[reviewed_by_id],
+    )
+
+
 class AssistantAdminFeedback(TimestampMixin, Base):
     __tablename__ = "assistant_admin_feedback"
     __table_args__ = (

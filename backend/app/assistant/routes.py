@@ -12,6 +12,7 @@ from app.assistant.models import (
     AssistantAdminFeedback,
     AssistantConversation,
     AssistantConversationFolder,
+    AssistantKnowledgeProposal,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
@@ -28,6 +29,8 @@ from app.assistant.schemas import (
     AssistantConversationFolderUpdate,
     AssistantConversationRead,
     AssistantConversationUpdate,
+    AssistantKnowledgeProposalRead,
+    AssistantKnowledgeProposalUpdate,
     AssistantMemoryEntryRead,
     AssistantMemoryEntryUpdate,
     AssistantStatusRead,
@@ -36,6 +39,7 @@ from app.assistant.schemas import (
     AssistantTransversalFeatureRead,
     AssistantTransversalFeatureUpdate,
     AssistantUserMessageCreate,
+    KnowledgeProposalStatus,
     MemoryStatus,
     TransversalFeatureAdoptionStatus,
     TransversalFeatureStatus,
@@ -140,7 +144,7 @@ def list_memory_entries(
     permission_code = (
         "assistant.memory.view" if status == "approved" else "assistant.memory.review"
     )
-    organization_ids = get_memory_permission_organization_ids(
+    organization_ids = get_assistant_permission_organization_ids(
         db,
         current_user,
         permission_code,
@@ -211,6 +215,101 @@ def update_memory_entry(
 
     db.commit()
     return get_existing_memory_entry(db, entry_id)
+
+
+@router.get(
+    "/knowledge-proposals",
+    response_model=list[AssistantKnowledgeProposalRead],
+)
+def list_knowledge_proposals(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    status: KnowledgeProposalStatus | None = "proposed",
+    organization_id: int | None = None,
+) -> list[AssistantKnowledgeProposal]:
+    require_assistant_use(db, current_user)
+    permission_code = (
+        "assistant.knowledge.view"
+        if status == "approved"
+        else "assistant.knowledge.review"
+    )
+    organization_ids = get_assistant_permission_organization_ids(
+        db,
+        current_user,
+        permission_code,
+    )
+    if organization_id is not None:
+        organization_ids = [
+            permitted_id
+            for permitted_id in organization_ids
+            if permitted_id == organization_id
+        ]
+    if not organization_ids:
+        return []
+
+    query = (
+        select(AssistantKnowledgeProposal)
+        .options(
+            selectinload(AssistantKnowledgeProposal.proposed_by),
+            selectinload(AssistantKnowledgeProposal.reviewed_by),
+        )
+        .where(AssistantKnowledgeProposal.organization_id.in_(organization_ids))
+        .order_by(
+            AssistantKnowledgeProposal.updated_at.desc(),
+            AssistantKnowledgeProposal.id.desc(),
+        )
+    )
+    if status is not None:
+        query = query.where(AssistantKnowledgeProposal.status == status)
+
+    return list(db.scalars(query))
+
+
+@router.patch(
+    "/knowledge-proposals/{proposal_id}",
+    response_model=AssistantKnowledgeProposalRead,
+)
+def update_knowledge_proposal(
+    proposal_id: int,
+    payload: AssistantKnowledgeProposalUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AssistantKnowledgeProposal:
+    require_assistant_use(db, current_user)
+    proposal = get_existing_knowledge_proposal(db, proposal_id)
+    if not has_permission(
+        current_user,
+        "assistant.knowledge.review",
+        db,
+        organization_id=proposal.organization_id,
+    ):
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="Permission required: assistant.knowledge.review",
+        )
+
+    updates = payload.model_dump(exclude_unset=True)
+    for field in (
+        "title",
+        "summary",
+        "content",
+        "source_url",
+        "source_title",
+        "source_type",
+        "confidence",
+        "sensitivity",
+        "requires_legal_review",
+        "review_notes",
+    ):
+        if field in updates:
+            setattr(proposal, field, updates[field])
+    if "status" in updates and updates["status"] is not None:
+        proposal.status = updates["status"]
+        proposal.reviewed_by_id = current_user.id
+        proposal.reviewed_at = datetime.now(timezone.utc)
+
+    db.commit()
+    return get_existing_knowledge_proposal(db, proposal_id)
 
 
 @router.get(
@@ -677,7 +776,7 @@ def ensure_conversation_folder_name_available(
         raise_conversation_folder_name_conflict()
 
 
-def get_memory_permission_organization_ids(
+def get_assistant_permission_organization_ids(
     db: Session,
     current_user: User,
     permission_code: str,
@@ -695,6 +794,27 @@ def get_memory_permission_organization_ids(
             organization_id=organization.id,
         )
     ]
+
+
+def get_existing_knowledge_proposal(
+    db: Session,
+    proposal_id: int,
+) -> AssistantKnowledgeProposal:
+    proposal = db.scalar(
+        select(AssistantKnowledgeProposal)
+        .options(
+            selectinload(AssistantKnowledgeProposal.proposed_by),
+            selectinload(AssistantKnowledgeProposal.reviewed_by),
+        )
+        .where(AssistantKnowledgeProposal.id == proposal_id)
+        .execution_options(populate_existing=True)
+    )
+    if proposal is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Assistant knowledge proposal not found",
+        )
+    return proposal
 
 
 def get_existing_memory_entry(db: Session, entry_id: int) -> AssistantMemoryEntry:

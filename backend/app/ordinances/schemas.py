@@ -416,6 +416,9 @@ class OrdinanceImportFailureRead(BaseModel):
 
 class OrdinanceCoverageRead(BaseModel):
     province: str
+    coverage_status: Literal["empty", "demo_ready", "in_progress"]
+    full_coverage_verified: bool
+    coverage_note: str
     municipalities_total: int
     municipalities_with_approved_ordinances: int
     municipalities_ready_for_assistant: int

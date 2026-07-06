@@ -1,15 +1,24 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type {
-  AssistantConversation,
-  AssistantConversationDetail,
-  AssistantConversationFolder,
-  AssistantMemoryCategory,
-  AssistantMemoryEntry,
-  AssistantMemorySensitivity,
-  AssistantMemoryStatus,
-  AssistantStatus,
+import {
+  userHasPermission,
+  type AgentOfficeApprovalDecision,
+  type AgentOfficeTask,
+  type AssistantConversation,
+  type AssistantConversationDetail,
+  type AssistantConversationFolder,
+  type AssistantKnowledgeProposal,
+  type AssistantKnowledgeProposalStatus,
+  type AssistantMemoryCategory,
+  type AssistantMemoryEntry,
+  type AssistantMemorySensitivity,
+  type AssistantMemoryStatus,
+  type AssistantStatus,
+  type DocumentWorkArtifact,
+  type DocumentWorkArtifactStatus,
+  type Project,
+  type User,
 } from "../components/types";
 import { adminRequest } from "./api";
 
@@ -22,6 +31,7 @@ type RequestErrorHandler = (
 type UseAssistantControllerArgs = {
   getStoredToken: () => string;
   handleRequestError: RequestErrorHandler;
+  currentUser?: User | null;
   onRequirementsChanged?: () => void;
 };
 
@@ -43,6 +53,7 @@ function toSummary(detail: AssistantConversationDetail): AssistantConversation {
 export function useAssistantController({
   getStoredToken,
   handleRequestError,
+  currentUser,
   onRequirementsChanged,
 }: UseAssistantControllerArgs) {
   const [assistantStatus, setAssistantStatus] =
@@ -56,6 +67,17 @@ export function useAssistantController({
   const [memoryEntries, setMemoryEntries] = useState<AssistantMemoryEntry[]>(
     [],
   );
+  const [knowledgeProposals, setKnowledgeProposals] = useState<
+    AssistantKnowledgeProposal[]
+  >([]);
+  const [agentOfficeTasks, setAgentOfficeTasks] = useState<AgentOfficeTask[]>(
+    [],
+  );
+  const [documentWorkArtifacts, setDocumentWorkArtifacts] = useState<
+    DocumentWorkArtifact[]
+  >([]);
+  const [isLoadingWorkspaceQueues, setIsLoadingWorkspaceQueues] =
+    useState(false);
   const [selectedConversation, setSelectedConversation] =
     useState<AssistantConversationDetail | null>(null);
   const [draftMessage, setDraftMessage] = useState("");
@@ -80,12 +102,118 @@ export function useAssistantController({
     setConversations([]);
     setConversationFolders([]);
     setMemoryEntries([]);
+    setKnowledgeProposals([]);
+    setAgentOfficeTasks([]);
+    setDocumentWorkArtifacts([]);
+    setIsLoadingWorkspaceQueues(false);
     applySelectedConversation(null);
     setDraftMessage("");
     setIncludeArchivedConversations(false);
     setIsLoadingAssistant(false);
     setIsSendingMessage(false);
     setAssistantError("");
+  }
+
+  function hasAnyPermission(permissionCodes: string[]) {
+    if (!currentUser) {
+      return false;
+    }
+    return permissionCodes.some((permissionCode) =>
+      userHasPermission(currentUser, permissionCode),
+    );
+  }
+
+  async function loadDocumentWorkArtifacts(token: string) {
+    if (
+      !hasAnyPermission([
+        "documents.view",
+        "documents.draft",
+        "documents.review",
+        "documents.export",
+        "documents.manage",
+      ])
+    ) {
+      return [];
+    }
+
+    const projects = await adminRequest<Project[]>(
+      "/projects",
+      token,
+      "No se pudieron cargar los proyectos.",
+    ).catch(() => []);
+
+    const artifactResults = await Promise.all(
+      projects.map(async (project) => {
+        try {
+          const artifacts = await adminRequest<DocumentWorkArtifact[]>(
+            `/projects/${project.id}/document-work-artifacts`,
+            token,
+            "No se pudieron cargar los borradores documentales.",
+          );
+          return artifacts.map((artifact) => ({
+            ...artifact,
+            project_name: project.name,
+          }));
+        } catch {
+          return [] as DocumentWorkArtifact[];
+        }
+      }),
+    );
+
+    return artifactResults
+      .flat()
+      .filter((artifact) => artifact.status !== "archived")
+      .sort(
+        (left, right) =>
+          new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
+      );
+  }
+
+  async function loadWorkspaceQueues(
+    token: string = getStoredToken(),
+    options: { showLoading?: boolean } = {},
+  ) {
+    if (!currentUser) {
+      setMemoryEntries([]);
+      setKnowledgeProposals([]);
+      setAgentOfficeTasks([]);
+      setDocumentWorkArtifacts([]);
+      return;
+    }
+
+    if (options.showLoading) {
+      setIsLoadingWorkspaceQueues(true);
+    }
+
+    try {
+      const [pendingMemory, pendingKnowledge, tasks, artifacts] =
+        await Promise.all([
+          adminRequest<AssistantMemoryEntry[]>(
+            "/assistant/memory?status=proposed",
+            token,
+            "No se pudieron cargar las propuestas de memoria.",
+          ).catch(() => []),
+          adminRequest<AssistantKnowledgeProposal[]>(
+            "/assistant/knowledge-proposals?status=proposed",
+            token,
+            "No se pudieron cargar las propuestas de fuentes.",
+          ).catch(() => []),
+          adminRequest<AgentOfficeTask[]>(
+            "/agent-office/tasks",
+            token,
+            "No se pudieron cargar las tareas supervisadas.",
+          ).catch(() => []),
+          loadDocumentWorkArtifacts(token),
+        ]);
+      setMemoryEntries(pendingMemory);
+      setKnowledgeProposals(pendingKnowledge);
+      setAgentOfficeTasks(tasks);
+      setDocumentWorkArtifacts(artifacts);
+    } finally {
+      if (options.showLoading) {
+        setIsLoadingWorkspaceQueues(false);
+      }
+    }
   }
 
   async function loadAssistant(
@@ -99,33 +227,28 @@ export function useAssistantController({
       const conversationsPath = includeArchived
         ? "/assistant/conversations?include_archived=true"
         : "/assistant/conversations";
-      const [status, conversationList, conversationFoldersList, pendingMemory] =
+      const [status, conversationList, conversationFoldersList] =
         await Promise.all([
-        adminRequest<AssistantStatus>(
-          "/assistant/status",
-          token,
-          "No se pudo consultar el estado del asistente.",
-        ),
-        adminRequest<AssistantConversation[]>(
-          conversationsPath,
-          token,
-          "No se pudieron cargar las conversaciones.",
-        ),
-        adminRequest<AssistantConversationFolder[]>(
-          "/assistant/conversation-folders",
-          token,
-          "No se pudieron cargar las carpetas.",
-        ).catch(() => []),
-        adminRequest<AssistantMemoryEntry[]>(
-          "/assistant/memory?status=proposed",
-          token,
-          "No se pudieron cargar las propuestas de memoria.",
-        ),
-      ]);
+          adminRequest<AssistantStatus>(
+            "/assistant/status",
+            token,
+            "No se pudo consultar el estado del asistente.",
+          ),
+          adminRequest<AssistantConversation[]>(
+            conversationsPath,
+            token,
+            "No se pudieron cargar las conversaciones.",
+          ),
+          adminRequest<AssistantConversationFolder[]>(
+            "/assistant/conversation-folders",
+            token,
+            "No se pudieron cargar las carpetas.",
+          ).catch(() => []),
+        ]);
       setAssistantStatus(status);
       setConversations(conversationList);
       setConversationFolders(conversationFoldersList);
-      setMemoryEntries(pendingMemory);
+      await loadWorkspaceQueues(token, { showLoading: true });
     } catch (requestError) {
       handleRequestError(
         requestError,
@@ -256,6 +379,7 @@ export function useAssistantController({
       );
       if (hasMutatingAction) {
         onRequirementsChanged?.();
+        void loadWorkspaceQueues(getStoredToken());
       }
     } catch (requestError) {
       // Drop the optimistic echo from this conversation only; the backend
@@ -538,7 +662,7 @@ export function useAssistantController({
         "No se pudo actualizar la memoria.",
         { method: "PATCH", body: JSON.stringify(updates) },
       );
-      await loadMemoryEntries();
+      await loadWorkspaceQueues();
     } catch (requestError) {
       handleRequestError(
         requestError,
@@ -548,20 +672,102 @@ export function useAssistantController({
     }
   }
 
+  async function updateKnowledgeProposal(
+    proposalId: number,
+    updates: {
+      status?: AssistantKnowledgeProposalStatus;
+      review_notes?: string;
+    },
+  ) {
+    setAssistantError("");
+
+    try {
+      await adminRequest<AssistantKnowledgeProposal>(
+        `/assistant/knowledge-proposals/${proposalId}`,
+        getStoredToken(),
+        "No se pudo actualizar la propuesta de fuente.",
+        { method: "PATCH", body: JSON.stringify(updates) },
+      );
+      await loadWorkspaceQueues();
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo actualizar la propuesta de fuente.",
+      );
+    }
+  }
+
+  async function reviewAgentOfficeTask(
+    taskId: number,
+    decision: AgentOfficeApprovalDecision,
+    notes?: string,
+  ) {
+    setAssistantError("");
+
+    try {
+      await adminRequest<AgentOfficeTask>(
+        `/agent-office/tasks/${taskId}/approval`,
+        getStoredToken(),
+        "No se pudo actualizar la tarea supervisada.",
+        { method: "PATCH", body: JSON.stringify({ decision, notes }) },
+      );
+      await loadWorkspaceQueues();
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo actualizar la tarea supervisada.",
+      );
+    }
+  }
+
+  async function updateDocumentWorkArtifact(
+    artifactId: number,
+    updates: {
+      status?: DocumentWorkArtifactStatus;
+      review_notes?: string;
+      export_format?: string;
+    },
+  ) {
+    setAssistantError("");
+
+    try {
+      await adminRequest<DocumentWorkArtifact>(
+        `/document-work-artifacts/${artifactId}`,
+        getStoredToken(),
+        "No se pudo actualizar el borrador documental.",
+        { method: "PATCH", body: JSON.stringify(updates) },
+      );
+      await loadWorkspaceQueues();
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAssistantError,
+        "No se pudo actualizar el borrador documental.",
+      );
+    }
+  }
+
   return {
     assistantStatus,
     conversations,
     conversationFolders,
     memoryEntries,
+    knowledgeProposals,
+    agentOfficeTasks,
+    documentWorkArtifacts,
     selectedConversation,
     draftMessage,
     includeArchivedConversations,
     isLoadingAssistant,
+    isLoadingWorkspaceQueues,
     isSendingMessage,
     assistantError,
     setDraftMessage,
     loadAssistant,
     loadMemoryEntries,
+    loadWorkspaceQueues,
     toggleIncludeArchivedConversations,
     selectConversation,
     deselectConversation,
@@ -576,6 +782,9 @@ export function useAssistantController({
     renameConversationFolder,
     deleteConversationFolder,
     updateMemoryEntry,
+    updateKnowledgeProposal,
+    reviewAgentOfficeTask,
+    updateDocumentWorkArtifact,
     clearAssistantState,
   };
 }

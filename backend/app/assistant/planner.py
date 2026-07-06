@@ -7,10 +7,16 @@ keeps the allowed-agent set, tool ceiling, RBAC checks and audit trail.
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from app.assistant.agents import AGENT_REGISTRY, AgentSpec
+from app.assistant.capabilities import (
+    CAPABILITIES,
+    action_policy_for_intent,
+    capability_for_intent,
+    default_action_for_intent,
+)
 from app.assistant.gateway import (
     AssistantUnavailableError,
     AITextBlock,
@@ -47,8 +53,8 @@ intención estructurada que el backend pueda validar y ejecutar. No llames
 herramientas de producto. Devuelve siempre una llamada a plan_turn.
 
 Reglas:
-- Si pide comparar o consultar ordenanzas/reglamentos/normativa municipal, usa
-  intent=read_ordinances y action=semantic_search_ordinances.
+- Si pregunta si existen, si disponemos de, o si puede comparar ordenanzas/reglamentos/normativa municipal sin una materia concreta, usa intent=global_capabilities y action=none.
+- Si pide comparar o consultar ordenanzas/reglamentos/normativa municipal con materia concreta (por ejemplo tasas, IVTM, terrazas, residuos, agua, caminos o animales), usa intent=read_ordinances y action=semantic_search_ordinances; incluye target.topic y, si procede, target.municipality_name. Si falta la materia, no inventes topic: usa intent=read_ordinances, action=none y missing_slots=["topic"].
 - Si pide consultar elementos geolocalizados del mapa municipal, usa
   intent=read_map_items y action=get_map_items.
 - Si el usuario pide ver necesidades/requisitos ya registrados, usa intent=read_requirements.
@@ -64,8 +70,12 @@ Reglas:
 - Si cancela, descarta o deja sin efecto una acción pendiente, usa intent=cancel_pending_action y action=cancel_pending_action.
 - Si pide preparar, encargar o dejar para revisión una tarea supervisada o
   diferida, usa intent=delegate_agent_office y action=create_agent_office_task.
+- No uses delegate_agent_office para lecturas rápidas de un solo turno (por ejemplo listar necesidades, consultar mapa u ordenanzas concretas); usa el intent de lectura correspondiente.
+- Si pide preparar un borrador documental revisable (informe, nota, comparativa, comunicación o checklist), usa intent=prepare_document_work, capability=document_work y action=prepare_document_work. No afirmes que queda aprobado ni exportado.
 - Si describe un fallo, fricción, problema de datos o mejora de la plataforma/asistente que conviene elevar al administrador, usa intent=suggest_admin_feedback y action=send_admin_feedback; incluye draft con category, title, description y priority si están claros.
 - Si hay pending_action de send_admin_feedback y el usuario confirma enviarlo, usa intent=suggest_admin_feedback y action=send_admin_feedback.
+- Si pide buscar información pública actual fuera de la plataforma, usa intent=external_research, capability=web_research y action=web_search; no incluyas datos internos o personales en query.
+- Si pide guardar una fuente o hallazgo de la última búsqueda para futuras consultas, usa intent=save_last_research, capability=knowledge_sources y action=propose_knowledge_entry.
 - Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
 - Si no hay intención de producto clara, usa intent=unknown y action=none.
 
@@ -90,6 +100,14 @@ class SemanticTurnPlan:
     reference: str | None = None
     confidence: float = 0.0
     source: str = "planner"
+    capability: str | None = None
+    slots: dict | None = None
+    missing_slots: tuple[str, ...] = ()
+    entity_refs: tuple[dict, ...] = ()
+    source_refs: tuple[dict, ...] = ()
+    risk_level: str | None = None
+    requires_confirmation: bool | None = None
+    reason: str | None = None
 
     def as_routing_payload(self) -> dict:
         payload: dict[str, object] = {
@@ -108,7 +126,237 @@ class SemanticTurnPlan:
             payload["delegation"] = self.delegation
         if self.reference:
             payload["reference"] = self.reference
+        if self.capability:
+            payload["capability"] = self.capability
+        if isinstance(self.slots, dict) and self.slots:
+            payload["slots"] = self.slots
+        if self.missing_slots:
+            payload["missing_slots"] = list(self.missing_slots)
+        if self.entity_refs:
+            payload["entity_refs"] = list(self.entity_refs)
+        if self.source_refs:
+            payload["source_refs"] = list(self.source_refs)
+        if self.risk_level:
+            payload["risk_level"] = self.risk_level
+        if self.requires_confirmation is not None:
+            payload["requires_confirmation"] = self.requires_confirmation
+        if self.reason:
+            payload["reason"] = self.reason
         return payload
+
+    def as_turn_plan(self) -> "TurnPlan":
+        turn_plan = normalize_turn_plan(self)
+        assert turn_plan is not None
+        return turn_plan
+
+
+@dataclass(frozen=True)
+class TurnPlan:
+    intent: str
+    capability: str = "general"
+    action: str = "none"
+    slots: dict = field(default_factory=dict)
+    missing_slots: tuple[str, ...] = ()
+    entity_refs: tuple[dict, ...] = ()
+    source_refs: tuple[dict, ...] = ()
+    risk_level: str = "low"
+    requires_confirmation: bool = False
+    confidence: float = 0.0
+    reason: str | None = None
+    source: str = "planner"
+    raw_intent: str | None = None
+    raw_action: str | None = None
+
+    def as_routing_payload(self) -> dict:
+        payload: dict[str, object] = {
+            "intent": self.intent,
+            "capability": self.capability,
+            "action": self.action,
+            "slots": self.slots,
+            "missing_slots": list(self.missing_slots),
+            "entity_refs": list(self.entity_refs),
+            "source_refs": list(self.source_refs),
+            "risk_level": self.risk_level,
+            "requires_confirmation": self.requires_confirmation,
+            "confidence": self.confidence,
+            "source": self.source,
+        }
+        if self.reason:
+            payload["reason"] = self.reason
+        if self.raw_intent and self.raw_intent != self.intent:
+            payload["raw_intent"] = self.raw_intent
+        if self.raw_action and self.raw_action != self.action:
+            payload["raw_action"] = self.raw_action
+        return payload
+
+
+def normalize_turn_plan(plan: SemanticTurnPlan | TurnPlan | None) -> TurnPlan | None:
+    """Return the canonical TurnPlan used by capability/action policy.
+
+    SemanticTurnPlan is kept as the planner compatibility DTO.  This function
+    projects it into the normalized shape from the Anacleto plan without
+    changing legacy handlers yet.
+    """
+    if plan is None:
+        return None
+    if isinstance(plan, TurnPlan):
+        return _normalize_explicit_turn_plan(plan)
+
+    intent = _clean_plan_value(plan.intent, default="unknown")
+    raw_action = _clean_plan_value(plan.action, default="none")
+    policy = action_policy_for_intent(intent)
+    action = raw_action
+    if action in {"", "none"}:
+        action = default_action_for_intent(intent)
+    capability = _clean_plan_value(
+        plan.capability,
+        default=capability_for_intent(intent),
+    )
+    if capability not in CAPABILITIES:
+        capability = capability_for_intent(intent)
+    slots = _semantic_plan_slots(plan)
+    missing_slots = _normalize_missing_slots(
+        explicit=plan.missing_slots,
+        policy_required_slots=policy.required_slots if policy is not None else frozenset(),
+        slots=slots,
+    )
+    risk_level = _normalize_risk_level(
+        plan.risk_level,
+        default=policy.risk_level if policy is not None else "low",
+    )
+    requires_confirmation = bool(
+        policy.requires_confirmation if policy is not None else False
+    ) or bool(plan.requires_confirmation)
+    reason = plan.reason or (policy.reason if policy is not None else None)
+    return TurnPlan(
+        intent=intent,
+        capability=capability,
+        action=action,
+        slots=slots,
+        missing_slots=missing_slots,
+        entity_refs=_tuple_of_dicts(plan.entity_refs),
+        source_refs=_tuple_of_dicts(plan.source_refs),
+        risk_level=risk_level,
+        requires_confirmation=requires_confirmation,
+        confidence=plan.confidence,
+        reason=reason,
+        source=plan.source,
+        raw_action=raw_action,
+    )
+
+
+def _normalize_explicit_turn_plan(plan: TurnPlan) -> TurnPlan:
+    intent = _clean_plan_value(plan.intent, default="unknown")
+    policy = action_policy_for_intent(intent)
+    capability = _clean_plan_value(
+        plan.capability,
+        default=capability_for_intent(intent),
+    )
+    if capability not in CAPABILITIES:
+        capability = capability_for_intent(intent)
+    action = _clean_plan_value(plan.action, default="none")
+    if action in {"", "none"}:
+        action = default_action_for_intent(intent)
+    slots = dict(plan.slots) if isinstance(plan.slots, dict) else {}
+    missing_slots = _normalize_missing_slots(
+        explicit=plan.missing_slots,
+        policy_required_slots=policy.required_slots if policy is not None else frozenset(),
+        slots=slots,
+    )
+    return TurnPlan(
+        intent=intent,
+        capability=capability,
+        action=action,
+        slots=slots,
+        missing_slots=missing_slots,
+        entity_refs=_tuple_of_dicts(plan.entity_refs),
+        source_refs=_tuple_of_dicts(plan.source_refs),
+        risk_level=_normalize_risk_level(
+            plan.risk_level,
+            default=policy.risk_level if policy is not None else "low",
+        ),
+        requires_confirmation=bool(
+            plan.requires_confirmation
+            or (policy.requires_confirmation if policy is not None else False)
+        ),
+        confidence=plan.confidence,
+        reason=plan.reason or (policy.reason if policy is not None else None),
+        source=plan.source,
+        raw_intent=plan.raw_intent,
+        raw_action=plan.raw_action or plan.action,
+    )
+
+
+def _semantic_plan_slots(plan: SemanticTurnPlan) -> dict:
+    slots: dict[str, object] = {}
+    if isinstance(plan.target, dict):
+        slots.update(plan.target)
+    if plan.query:
+        slots["query"] = plan.query
+    if isinstance(plan.draft, dict) and plan.draft:
+        slots["draft"] = plan.draft
+    if isinstance(plan.delegation, dict) and plan.delegation:
+        slots["delegation"] = plan.delegation
+    if plan.reference:
+        slots["reference"] = plan.reference
+    if isinstance(plan.slots, dict):
+        slots.update(plan.slots)
+    return slots
+
+
+def _normalize_missing_slots(
+    *,
+    explicit: tuple[str, ...] | list | None,
+    policy_required_slots: frozenset[str],
+    slots: dict,
+) -> tuple[str, ...]:
+    explicit_slots = _tuple_of_strings(explicit or ())
+    if explicit_slots:
+        return explicit_slots
+    return tuple(
+        slot for slot in sorted(policy_required_slots) if not _slot_present(slots, slot)
+    )
+
+
+def _slot_present(slots: dict, slot: str) -> bool:
+    value = slots.get(slot)
+    if value is not None and value != "":
+        return True
+    for nested_key in ("draft", "delegation", "target"):
+        nested = slots.get(nested_key)
+        if isinstance(nested, dict):
+            nested_value = nested.get(slot)
+            if nested_value is not None and nested_value != "":
+                return True
+    return False
+
+
+def _tuple_of_strings(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def _tuple_of_dicts(value: object) -> tuple[dict, ...]:
+    if isinstance(value, dict):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(item for item in value if isinstance(item, dict))
+    return ()
+
+
+def _normalize_risk_level(value: object, *, default: str) -> str:
+    risk_level = _clean_plan_value(value, default=default)
+    if risk_level not in {"low", "medium", "high"}:
+        return default if default in {"low", "medium", "high"} else "low"
+    return risk_level
+
+
+def _clean_plan_value(value: object, *, default: str) -> str:
+    text = str(value or "").strip()
+    return text or default
 
 
 def effective_planner_runtime() -> str:
@@ -274,6 +522,10 @@ def _plan_with_hermes(
                         "cancel_pending_action",
                         "delegate_agent_office",
                         "suggest_admin_feedback",
+                        "external_research",
+                        "answer_with_web_research",
+                        "save_last_research",
+                        "propose_knowledge",
                         "unknown",
                     ],
                 },
@@ -290,6 +542,8 @@ def _plan_with_hermes(
                         "cancel_pending_action",
                         "create_agent_office_task",
                         "send_admin_feedback",
+                        "web_search",
+                        "propose_knowledge_entry",
                     ],
                 },
                 "query": {"type": "string"},
@@ -297,6 +551,29 @@ def _plan_with_hermes(
                 "draft": {"type": "object"},
                 "delegation": {"type": "object"},
                 "reference": {"type": "string"},
+                "capability": {
+                    "type": "string",
+                    "enum": list(CAPABILITIES.keys()),
+                },
+                "slots": {"type": "object"},
+                "missing_slots": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "entity_refs": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "source_refs": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "risk_level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                },
+                "requires_confirmation": {"type": "boolean"},
+                "reason": {"type": "string"},
                 "confidence": {"type": "number"},
             },
             "required": ["intent", "action", "confidence"],
@@ -352,8 +629,13 @@ def _semantic_plan_from_payload(payload: object) -> SemanticTurnPlan | None:
     target = payload.get("target") if isinstance(payload.get("target"), dict) else None
     draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else None
     delegation = payload.get("delegation") if isinstance(payload.get("delegation"), dict) else None
+    slots = payload.get("slots") if isinstance(payload.get("slots"), dict) else None
     query = payload.get("query")
     reference = payload.get("reference")
+    capability = payload.get("capability")
+    risk_level = payload.get("risk_level")
+    requires_confirmation = payload.get("requires_confirmation")
+    reason = payload.get("reason")
     return SemanticTurnPlan(
         intent=intent,
         action=action,
@@ -364,6 +646,16 @@ def _semantic_plan_from_payload(payload: object) -> SemanticTurnPlan | None:
         reference=str(reference).strip() if reference else None,
         confidence=confidence,
         source="planner",
+        capability=str(capability).strip() if capability else None,
+        slots=slots,
+        missing_slots=_tuple_of_strings(payload.get("missing_slots")),
+        entity_refs=_tuple_of_dicts(payload.get("entity_refs")),
+        source_refs=_tuple_of_dicts(payload.get("source_refs")),
+        risk_level=str(risk_level).strip() if risk_level else None,
+        requires_confirmation=requires_confirmation
+        if isinstance(requires_confirmation, bool)
+        else None,
+        reason=str(reason).strip() if reason else None,
     )
 
 

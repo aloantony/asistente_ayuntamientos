@@ -7,6 +7,7 @@ requirements as drafts (or moves them to 'submitted'); review states stay
 human-only.
 """
 import json
+import logging
 import re
 import unicodedata
 import uuid
@@ -23,10 +24,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
 from app.assistant.models import (
     AssistantAdminFeedback,
+    AssistantKnowledgeProposal,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
 )
+from app.documents.models import Document, DocumentWorkArtifact
 from app.geo.access import (
     get_visible_entity,
     has_any_map_view_permission,
@@ -40,7 +43,7 @@ from app.organizations.access import (
 )
 from app.ordinances.embeddings import embed_text, vector_similarity
 from app.ordinances.models import Ordinance, OrdinanceLegalChunk
-from app.projects.access import select_visible_projects
+from app.projects.access import select_visible_projects, user_can_access_project
 from app.projects.models import Project
 from app.rbac.permissions import has_permission
 from app.requirements.models import Requirement, RequirementMessage
@@ -56,6 +59,7 @@ from app.requirements.routes import (
 from app.users.models import User
 
 ToolExecutor = Callable[..., object]
+logger = logging.getLogger(__name__)
 
 VALID_PRIORITIES = {"low", "medium", "high", "urgent"}
 VALID_MEMORY_CATEGORIES = {
@@ -66,6 +70,15 @@ VALID_MEMORY_CATEGORIES = {
     "open_question",
 }
 VALID_MEMORY_SENSITIVITIES = {"normal", "personal", "sensitive", "legal"}
+VALID_KNOWLEDGE_SOURCE_TYPES = {
+    "official",
+    "public_administration",
+    "news",
+    "provider",
+    "blog",
+    "unknown",
+}
+VALID_KNOWLEDGE_CONFIDENCES = {"low", "medium", "high"}
 VALID_TRANSVERSAL_FEATURE_CATEGORIES = {
     "process",
     "compliance",
@@ -82,16 +95,77 @@ VALID_ADMIN_FEEDBACK_CATEGORIES = {
     "ux",
     "other",
 }
+VALID_DOCUMENT_WORK_ARTIFACT_TYPES = {
+    "report",
+    "note",
+    "comparison",
+    "communication",
+    "checklist",
+}
 MAX_WEB_QUERY_CHARS = 400
 MAX_WEB_RESULTS = 5
+MAX_WEB_RESULT_TITLE_CHARS = 300
+MAX_WEB_RESULT_URL_CHARS = 2000
+MAX_WEB_RESULT_SNIPPET_CHARS = 1000
+MAX_WEB_RESULT_PUBLISHED_AT_CHARS = 100
 MAX_ORDINANCE_QUERY_CHARS = 400
 MAX_ORDINANCE_RESULTS = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
+MAX_DOCUMENT_WORK_TITLE_CHARS = 255
+MAX_DOCUMENT_WORK_CONTENT_CHARS = 20000
+MAX_DOCUMENT_WORK_SOURCE_SUMMARY_CHARS = 4000
 PERSONAL_DATA_PATTERN = re.compile(
     r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
     re.IGNORECASE,
+)
+PRIVATE_WEB_QUERY_MARKERS = {
+    "api key",
+    "archivo adjunto",
+    "base de datos interna",
+    "clave privada",
+    "contrasena",
+    "contraseña",
+    "conversacion completa",
+    "conversación completa",
+    "correo privado",
+    "credencial",
+    "credenciales",
+    "datos internos",
+    "datos personales",
+    "documento adjunto",
+    "documento interno",
+    "documento privado",
+    "documentos internos",
+    "documentos privados",
+    "expediente interno",
+    "historial interno",
+    "historial municipal",
+    "secreto",
+    "secretos",
+    "token",
+    "todo el historial",
+}
+AGENT_OFFICE_DEFAULT_ACTION_BY_DEPARTMENT = {
+    "front_desk": "triage",
+    "requirements": "list_requirements",
+    "ordinances": "semantic_search_ordinances",
+    "documents": "prepare_document_work",
+    "projects": "list_projects",
+    "map": "get_map_items",
+    "admin_feedback": "send_admin_feedback",
+    "daily_briefing": "daily_briefing",
+}
+AGENT_OFFICE_SIMPLE_READ_ACTIONS = frozenset(
+    {
+        "list_organizations",
+        "list_projects",
+        "list_requirements",
+        "get_requirement",
+        "get_map_items",
+        "semantic_search_ordinances",
+    }
 )
 
 REQUIREMENT_CONTENT_FIELDS = (
@@ -239,12 +313,101 @@ _TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "propose_knowledge_entry",
+        "description": (
+            "Propone una fuente o hallazgo externo para revisión humana. "
+            "No lo convierte en conocimiento aprobado: deja una propuesta "
+            "revisable con URL, resumen, confianza y sensibilidad."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización a la que pertenece la propuesta",
+                },
+                "title": {"type": "string", "description": "Título breve"},
+                "summary": {"type": "string", "description": "Resumen verificable"},
+                "content": {
+                    "type": "string",
+                    "description": "Contenido adicional o notas de revisión",
+                },
+                "source_url": {"type": "string", "description": "URL de la fuente"},
+                "source_title": {"type": "string", "description": "Título de la fuente"},
+                "source_type": {
+                    "type": "string",
+                    "enum": [
+                        "official",
+                        "public_administration",
+                        "news",
+                        "provider",
+                        "blog",
+                        "unknown",
+                    ],
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "enum": ["normal", "personal", "sensitive", "legal"],
+                },
+                "requires_legal_review": {"type": "boolean"},
+            },
+            "required": ["organization_id", "title", "summary", "source_url"],
+        },
+    },
+    {
+        "name": "prepare_document_work",
+        "description": (
+            "Prepara un artefacto documental administrativo como borrador "
+            "revisable: informe, nota, comparativa, comunicación o checklist. "
+            "Nunca aprueba ni exporta el documento; solo crea un draft interno "
+            "pendiente de revisión humana. No envía documentos privados a la web."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización del proyecto",
+                },
+                "project_id": {
+                    "type": "integer",
+                    "description": "Proyecto o expediente donde queda el borrador",
+                },
+                "artifact_type": {
+                    "type": "string",
+                    "enum": ["report", "note", "comparison", "communication", "checklist"],
+                },
+                "title": {"type": "string", "description": "Título del borrador"},
+                "content": {
+                    "type": "string",
+                    "description": "Contenido del borrador revisable",
+                },
+                "source_summary": {
+                    "type": "string",
+                    "description": "Resumen de fuentes internas usadas, sin enviar documentos a web",
+                },
+                "source_document_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Documentos internos del mismo proyecto usados como fuente",
+                },
+            },
+            "required": ["project_id", "title", "content"],
+        },
+    },
+    {
         "name": "create_agent_office_task",
         "description": (
             "Crea una tarea supervisada en la oficina interna de Anacleto para "
             "trabajo diferido, multi-paso o que requiera aprobación humana. "
             "Úsala cuando el usuario pida encargar, preparar o dejar para "
-            "revisión un trabajo que no deba ejecutarse como una consulta inmediata."
+            "revisión un trabajo que no deba ejecutarse como una consulta inmediata. "
+            "No la uses para lecturas simples de un solo turno: en esos casos "
+            "usa la herramienta de lectura directa correspondiente."
         ),
         "input_schema": {
             "type": "object",
@@ -652,6 +815,12 @@ class ToolSpec:
     executor: ToolExecutor
     read_only: bool
     domain: str
+    risk_level: str
+    requires_confirmation: bool
+    requires_review: bool
+    input_schema_summary: str
+    output_summary_shape: str
+    user_visible_summary_template: str
     required_permission: str | None = None
 
     @property
@@ -670,6 +839,12 @@ class ToolSpec:
             "read_only": self.read_only,
             "domain": self.domain,
             "required_permission": self.required_permission,
+            "risk_level": self.risk_level,
+            "requires_confirmation": self.requires_confirmation,
+            "requires_review": self.requires_review,
+            "input_schema_summary": self.input_schema_summary,
+            "output_summary_shape": self.output_summary_shape,
+            "user_visible_summary_template": self.user_visible_summary_template,
         }
 
 
@@ -677,6 +852,33 @@ class ToolSpec:
 class ToolContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
+
+
+def _log_tool_execution(
+    *,
+    name: str,
+    ok: bool,
+    tool_input: dict,
+    context: ToolContext | None,
+    current_user: User,
+    spec: ToolSpec | None = None,
+) -> None:
+    """Emit structured operational telemetry without payload values."""
+    safe_context = context or ToolContext()
+    logger.info(
+        "assistant tool execution",
+        extra={
+            "assistant_event": "tool_execution",
+            "assistant_tool": name,
+            "assistant_tool_ok": ok,
+            "assistant_tool_domain": spec.domain if spec is not None else None,
+            "assistant_tool_read_only": spec.read_only if spec is not None else None,
+            "assistant_input_keys": sorted(str(key) for key in tool_input.keys()),
+            "assistant_actor_user_id": current_user.id,
+            "assistant_conversation_id": safe_context.conversation_id,
+            "assistant_user_message_id": safe_context.user_message_id,
+        },
+    )
 
 
 def execute_tool(
@@ -688,34 +890,158 @@ def execute_tool(
     allowed: frozenset[str] | None = None,
 ) -> ToolResult:
     if allowed is not None and name not in allowed:
-        return ToolResult(
+        result = ToolResult(
             content=f"Herramienta no disponible para este agente: {name}",
             ok=False,
         )
+        _log_tool_execution(
+            name=name,
+            ok=result.ok,
+            tool_input=tool_input,
+            context=context,
+            current_user=current_user,
+        )
+        return result
 
     spec = TOOL_CATALOG.get(name)
     if spec is None:
-        return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
+        result = ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
+        _log_tool_execution(
+            name=name,
+            ok=result.ok,
+            tool_input=tool_input,
+            context=context,
+            current_user=current_user,
+        )
+        return result
 
     try:
         result = spec.executor(db, current_user, tool_input, context or ToolContext())
     except HTTPException as error:
         db.rollback()
-        return ToolResult(
+        result = ToolResult(
             content=f"Error ({error.status_code}): {error.detail}",
             ok=False,
         )
+        _log_tool_execution(
+            name=name,
+            ok=result.ok,
+            tool_input=tool_input,
+            context=context,
+            current_user=current_user,
+            spec=spec,
+        )
+        return result
     except (KeyError, TypeError, ValueError) as error:
         db.rollback()
-        return ToolResult(content=f"Entrada inválida: {error}", ok=False)
+        result = ToolResult(content=f"Entrada inválida: {error}", ok=False)
+        _log_tool_execution(
+            name=name,
+            ok=result.ok,
+            tool_input=tool_input,
+            context=context,
+            current_user=current_user,
+            spec=spec,
+        )
+        return result
     except SQLAlchemyError:
         db.rollback()
-        return ToolResult(
+        result = ToolResult(
             content="Error de base de datos al ejecutar la herramienta",
             ok=False,
         )
+        _log_tool_execution(
+            name=name,
+            ok=result.ok,
+            tool_input=tool_input,
+            context=context,
+            current_user=current_user,
+            spec=spec,
+        )
+        return result
 
-    return ToolResult(content=json.dumps(result, ensure_ascii=False), ok=True)
+    tool_result = ToolResult(content=json.dumps(result, ensure_ascii=False), ok=True)
+    _log_tool_execution(
+        name=name,
+        ok=tool_result.ok,
+        tool_input=tool_input,
+        context=context,
+        current_user=current_user,
+        spec=spec,
+    )
+    return tool_result
+
+
+def normalize_public_web_query_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text.strip().lower())
+    return "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+
+
+def web_search_privacy_violation(query: str) -> str | None:
+    """Return the deterministic reason a query must not leave the backend."""
+    if PERSONAL_DATA_PATTERN.search(query):
+        return "query no puede contener datos personales identificables"
+    normalized = normalize_public_web_query_text(query)
+    if any(
+        normalize_public_web_query_text(marker) in normalized
+        for marker in PRIVATE_WEB_QUERY_MARKERS
+    ):
+        return (
+            "query no puede contener datos internos, documentos privados, "
+            "historial municipal ni secretos"
+        )
+    return None
+
+
+def _clean_optional_web_text(value: object, *, max_chars: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:max_chars]
+
+
+def _sanitize_web_search_results(
+    raw_results: object,
+    *,
+    limit: int,
+) -> list[dict[str, str | None]]:
+    if not isinstance(raw_results, list):
+        return []
+    results: list[dict[str, str | None]] = []
+    for raw in raw_results[:limit]:
+        if not isinstance(raw, dict):
+            continue
+        url = _clean_optional_web_text(
+            raw.get("url"),
+            max_chars=MAX_WEB_RESULT_URL_CHARS,
+        )
+        if not url:
+            continue
+        title = _clean_optional_web_text(
+            raw.get("title"),
+            max_chars=MAX_WEB_RESULT_TITLE_CHARS,
+        )
+        snippet = _clean_optional_web_text(
+            raw.get("snippet"),
+            max_chars=MAX_WEB_RESULT_SNIPPET_CHARS,
+        )
+        published_at = _clean_optional_web_text(
+            raw.get("published_at"),
+            max_chars=MAX_WEB_RESULT_PUBLISHED_AT_CHARS,
+        )
+        results.append(
+            {
+                "title": title or url,
+                "url": url,
+                "snippet": snippet,
+                "published_at": published_at,
+            }
+        )
+    return results
 
 
 def _serialize_requirement(requirement: Requirement, *, full: bool) -> dict:
@@ -950,10 +1276,9 @@ def _web_search(
         raise ValueError("query no puede estar vacío")
     if len(query) > MAX_WEB_QUERY_CHARS:
         raise ValueError(f"query no puede superar {MAX_WEB_QUERY_CHARS} caracteres")
-    if PERSONAL_DATA_PATTERN.search(query):
-        raise ValueError(
-            "query no puede contener datos personales identificables"
-        )
+    privacy_error = web_search_privacy_violation(query)
+    if privacy_error is not None:
+        raise ValueError(privacy_error)
 
     limit = int(tool_input.get("limit") or MAX_WEB_RESULTS)
     if limit < 1:
@@ -961,14 +1286,14 @@ def _web_search(
     limit = min(limit, MAX_WEB_RESULTS)
 
     try:
-        results = hermes_web_client.search(query=query, limit=limit)
+        raw_results = hermes_web_client.search(query=query, limit=limit)
     except HermesWebUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
     return {
         "query": query,
         "limit": limit,
-        "results": results,
+        "results": _sanitize_web_search_results(raw_results, limit=limit),
     }
 
 
@@ -1249,6 +1574,93 @@ def _propose_memory_entry(
     }
 
 
+def _propose_knowledge_entry(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    """Create a reviewable external-source proposal.
+
+    Knowledge proposals are separate from AssistantMemoryEntry so proposed
+    sources are never injected into future prompts until a reviewer approves
+    them.
+    """
+    organization_id = int(tool_input["organization_id"])
+    ensure_organization_exists(db, organization_id)
+    if not has_permission(
+        current_user,
+        "assistant.knowledge.propose",
+        db,
+        organization_id=organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.knowledge.propose",
+        )
+
+    title = str(tool_input["title"]).strip()
+    summary = str(tool_input["summary"]).strip()
+    source_url = str(tool_input["source_url"]).strip()
+    if not title:
+        raise ValueError("title no puede estar vacío")
+    if not summary:
+        raise ValueError("summary no puede estar vacío")
+    if not source_url:
+        raise ValueError("source_url no puede estar vacío")
+
+    source_title = str(tool_input.get("source_title") or title).strip()
+    source_type = str(tool_input.get("source_type") or "unknown").strip()
+    confidence = str(tool_input.get("confidence") or "medium").strip()
+    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
+    if source_type not in VALID_KNOWLEDGE_SOURCE_TYPES:
+        raise ValueError(f"source_type inválido: {source_type}")
+    if confidence not in VALID_KNOWLEDGE_CONFIDENCES:
+        raise ValueError(f"confidence inválida: {confidence}")
+    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
+        raise ValueError(f"sensitivity inválida: {sensitivity}")
+
+    extra_content = str(tool_input.get("content") or "").strip()
+    sensitivity_probe = "\n".join(
+        part for part in (title, summary, extra_content, source_url, source_title) if part
+    )
+    if sensitivity == "normal" and PERSONAL_DATA_PATTERN.search(sensitivity_probe):
+        sensitivity = "personal"
+
+    proposal = AssistantKnowledgeProposal(
+        organization_id=organization_id,
+        title=title,
+        summary=summary,
+        content=extra_content or None,
+        source_url=source_url,
+        source_title=source_title or None,
+        source_type=source_type,
+        confidence=confidence,
+        sensitivity=sensitivity,
+        status="proposed",
+        requires_legal_review=bool(tool_input.get("requires_legal_review") or False),
+        source_conversation_id=context.conversation_id,
+        source_message_id=context.user_message_id,
+        proposed_by_id=current_user.id,
+    )
+    db.add(proposal)
+    db.commit()
+    return {
+        "id": proposal.id,
+        "organization_id": proposal.organization_id,
+        "status": proposal.status,
+        "title": proposal.title,
+        "summary": proposal.summary,
+        "source_url": proposal.source_url,
+        "source_title": proposal.source_title,
+        "source_type": proposal.source_type,
+        "confidence": proposal.confidence,
+        "sensitivity": proposal.sensitivity,
+        "requires_legal_review": proposal.requires_legal_review,
+    }
+
+
+
 def _send_admin_feedback(
     db: Session,
     current_user: User,
@@ -1318,6 +1730,16 @@ def _parse_optional_datetime(value: object) -> datetime | None:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
+def agent_office_effective_requested_action(tool_input: dict) -> str | None:
+    requested_action = str(tool_input.get("requested_action") or "").strip()
+    if requested_action:
+        return requested_action
+    department = str(tool_input.get("department") or "").strip()
+    if not department:
+        return None
+    return AGENT_OFFICE_DEFAULT_ACTION_BY_DEPARTMENT.get(department)
+
+
 def _create_agent_office_task(
     db: Session,
     current_user: User,
@@ -1325,6 +1747,13 @@ def _create_agent_office_task(
     context: ToolContext,
 ) -> dict:
     from app.agent_office.service import create_task
+
+    effective_action = agent_office_effective_requested_action(tool_input)
+    if effective_action in AGENT_OFFICE_SIMPLE_READ_ACTIONS:
+        raise ValueError(
+            "create_agent_office_task no debe usarse para lecturas simples; "
+            "usa la herramienta de lectura directa correspondiente"
+        )
 
     input_payload = tool_input.get("input")
     if input_payload is not None and not isinstance(input_payload, dict):
@@ -1372,6 +1801,146 @@ def _clean_transversal_text(name: str, value: object, max_chars: int) -> str:
             f"{name} no puede contener datos personales identificables"
         )
     return text
+
+
+def _clean_optional_document_work_text(
+    name: str,
+    value: object,
+    max_chars: int,
+) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > max_chars:
+        raise ValueError(f"{name} no puede superar {max_chars} caracteres")
+    return text
+
+
+def _normalize_document_work_source_ids(value: object) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("source_document_ids debe ser una lista")
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw_document_id in value:
+        try:
+            document_id = int(raw_document_id)
+        except (TypeError, ValueError):
+            raise ValueError("source_document_ids contiene un id inválido") from None
+        if document_id <= 0:
+            raise ValueError("source_document_ids contiene un id inválido")
+        if document_id in seen:
+            continue
+        normalized.append(document_id)
+        seen.add(document_id)
+    return normalized
+
+
+def _prepare_document_work(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    artifact_type = str(tool_input.get("artifact_type") or "note").strip()
+    if artifact_type not in VALID_DOCUMENT_WORK_ARTIFACT_TYPES:
+        raise ValueError(f"artifact_type inválido: {artifact_type}")
+    project_id = int(tool_input["project_id"])
+    project = db.scalar(
+        select(Project)
+        .options(selectinload(Project.organization))
+        .where(Project.id == project_id)
+    )
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    organization_id = tool_input.get("organization_id")
+    if organization_id is not None and int(organization_id) != project.organization_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Project organization mismatch",
+        )
+    if not has_permission(
+        current_user,
+        "documents.draft",
+        db,
+        organization_id=project.organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: documents.draft",
+        )
+    if not user_can_access_project(db, current_user, project):
+        raise HTTPException(status_code=403, detail="Project access denied")
+
+    source_document_ids = _normalize_document_work_source_ids(
+        tool_input.get("source_document_ids")
+    )
+    if source_document_ids and not has_permission(
+        current_user,
+        "documents.view",
+        db,
+        organization_id=project.organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: documents.view",
+        )
+    for document_id in source_document_ids:
+        document = db.scalar(
+            select(Document).where(Document.id == document_id)
+        )
+        if document is None:
+            raise HTTPException(status_code=404, detail="Source document not found")
+        if document.project_id != project.id or document.organization_id != project.organization_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Source document does not belong to this project",
+            )
+        if document.status != "active":
+            raise HTTPException(status_code=409, detail="Source document is not active")
+
+    artifact = DocumentWorkArtifact(
+        organization_id=project.organization_id,
+        project_id=project.id,
+        artifact_type=artifact_type,
+        title=_clean_transversal_text(
+            "title",
+            tool_input["title"],
+            MAX_DOCUMENT_WORK_TITLE_CHARS,
+        ),
+        content=_clean_transversal_text(
+            "content",
+            tool_input["content"],
+            MAX_DOCUMENT_WORK_CONTENT_CHARS,
+        ),
+        status="draft",
+        source_summary=_clean_optional_document_work_text(
+            "source_summary",
+            tool_input.get("source_summary"),
+            MAX_DOCUMENT_WORK_SOURCE_SUMMARY_CHARS,
+        ),
+        source_document_ids=source_document_ids,
+        created_by_id=current_user.id,
+        source_conversation_id=context.conversation_id,
+        source_message_id=context.user_message_id,
+    )
+    db.add(artifact)
+    db.commit()
+    return {
+        "id": artifact.id,
+        "organization_id": artifact.organization_id,
+        "project_id": artifact.project_id,
+        "artifact_type": artifact.artifact_type,
+        "title": artifact.title,
+        "status": artifact.status,
+        "review_status": "pending_human_review",
+        "export_status": "not_exported",
+        "approved": False,
+        "exported_at": None,
+    }
 
 
 def _serialize_transversal_feature_for_tool(
@@ -1577,6 +2146,8 @@ _EXECUTORS = {
     "update_requirement": _update_requirement,
     "add_requirement_message": _add_requirement_message,
     "propose_memory_entry": _propose_memory_entry,
+    "propose_knowledge_entry": _propose_knowledge_entry,
+    "prepare_document_work": _prepare_document_work,
     "create_agent_office_task": _create_agent_office_task,
     "send_admin_feedback": _send_admin_feedback,
     "propose_transversal_feature": _propose_transversal_feature,
@@ -1617,32 +2188,49 @@ _TOOL_METADATA: dict[str, dict] = {
         "label": "Consultar necesidades",
         "read_only": True,
         "domain": "requirements",
+        "required_permission": "requirements.view",
     },
     "get_requirement": {
         "label": "Leer necesidad",
         "read_only": True,
         "domain": "requirements",
+        "required_permission": "requirements.view",
     },
     "create_requirement": {
         "label": "Crear necesidad",
         "read_only": False,
         "domain": "requirements",
+        "required_permission": "requirements.create",
     },
     "update_requirement": {
         "label": "Actualizar necesidad",
         "read_only": False,
         "domain": "requirements",
+        "required_permission": "requirements.edit",
     },
     "add_requirement_message": {
         "label": "Añadir nota a necesidad",
         "read_only": False,
         "domain": "requirements",
+        "required_permission": "requirements.view",
     },
     "propose_memory_entry": {
         "label": "Proponer memoria",
         "read_only": False,
         "domain": "memory",
         "required_permission": "assistant.memory.propose",
+    },
+    "propose_knowledge_entry": {
+        "label": "Proponer fuente",
+        "read_only": False,
+        "domain": "knowledge",
+        "required_permission": "assistant.knowledge.propose",
+    },
+    "prepare_document_work": {
+        "label": "Preparar borrador documental",
+        "read_only": False,
+        "domain": "documents",
+        "required_permission": "documents.draft",
     },
     "create_agent_office_task": {
         "label": "Crear tarea supervisada",
@@ -1654,23 +2242,200 @@ _TOOL_METADATA: dict[str, dict] = {
         "label": "Enviar feedback al admin",
         "read_only": False,
         "domain": "feedback",
+        "required_permission": "assistant.use",
     },
     "propose_transversal_feature": {
         "label": "Proponer funcionalidad transversal",
         "read_only": False,
         "domain": "transversal_features",
+        "required_permission": "requirements.view",
     },
     "list_available_transversal_features": {
         "label": "Consultar funcionalidades disponibles",
         "read_only": True,
         "domain": "transversal_features",
+        "required_permission": "assistant.use",
     },
     "record_transversal_feature_acceptance": {
         "label": "Registrar activación transversal",
         "read_only": False,
         "domain": "transversal_features",
+        "required_permission": "assistant.use",
     },
 }
+
+_TOOL_CONTRACT_METADATA: dict[str, dict] = {
+    "list_organizations": {
+        "risk_level": "low",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Lista de organizaciones visibles con id, nombre y estado.",
+        "user_visible_summary_template": "He consultado las organizaciones disponibles.",
+    },
+    "list_projects": {
+        "risk_level": "low",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Lista de proyectos visibles con id, nombre, organización y estado.",
+        "user_visible_summary_template": "He consultado los proyectos visibles.",
+    },
+    "get_map_items": {
+        "risk_level": "low",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Resultados de mapa con entidad visible, ubicación y enlace interno map_url.",
+        "user_visible_summary_template": "He localizado elementos visibles en el mapa municipal.",
+    },
+    "web_search": {
+        "risk_level": "medium",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Consulta pública, límite y resultados con título, URL y extracto.",
+        "user_visible_summary_template": "He buscado fuentes públicas en la web.",
+    },
+    "propose_knowledge_entry": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Propuesta revisable de fuente externa con estado, URL, confianza y sensibilidad.",
+        "user_visible_summary_template": "He dejado una fuente como propuesta revisable pendiente de aprobación.",
+    },
+    "prepare_document_work": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Artefacto documental revisable con id, tipo, estado draft y estado de exportación no_exportado.",
+        "user_visible_summary_template": "He preparado un borrador documental pendiente de revisión humana.",
+    },
+    "create_agent_office_task": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Tarea supervisada con id, estado, política de aprobación y siguiente paso.",
+        "user_visible_summary_template": "He creado una tarea supervisada para revisión o ejecución controlada.",
+    },
+    "send_admin_feedback": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Feedback interno enviado con id, estado, categoría, prioridad y organización.",
+        "user_visible_summary_template": "He enviado el feedback al administrador para su revisión.",
+    },
+    "semantic_search_ordinances": {
+        "risk_level": "medium",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Fragmentos citables de ordenanzas aprobadas con municipio, fuente y puntuación.",
+        "user_visible_summary_template": "He consultado el corpus interno de ordenanzas municipales.",
+    },
+    "list_requirements": {
+        "risk_level": "low",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Lista resumida de necesidades visibles con id, título, estado, prioridad y resumen.",
+        "user_visible_summary_template": "He consultado las necesidades registradas visibles.",
+    },
+    "get_requirement": {
+        "risk_level": "low",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Detalle completo de una necesidad visible con campos de contenido y estado.",
+        "user_visible_summary_template": "He leído el detalle de la necesidad indicada.",
+    },
+    "create_requirement": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Necesidad creada como borrador con campos estructurados y estado draft.",
+        "user_visible_summary_template": "He creado un borrador de necesidad para revisión.",
+    },
+    "update_requirement": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Necesidad actualizada con campos estructurados y estado permitido.",
+        "user_visible_summary_template": "He actualizado la necesidad indicada para que pueda revisarse.",
+    },
+    "add_requirement_message": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": False,
+        "output_summary_shape": "Nota o aclaración añadida al hilo de una necesidad con id y tipo de mensaje.",
+        "user_visible_summary_template": "He añadido una nota o aclaración a la necesidad.",
+    },
+    "propose_memory_entry": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Propuesta de memoria institucional con id, estado, categoría y sensibilidad.",
+        "user_visible_summary_template": "He dejado una propuesta de memoria pendiente de revisión humana.",
+    },
+    "propose_transversal_feature": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Funcionalidad transversal propuesta con id, estado, origen y sensibilidad.",
+        "user_visible_summary_template": "He propuesto una funcionalidad transversal para revisión.",
+    },
+    "list_available_transversal_features": {
+        "risk_level": "low",
+        "requires_confirmation": False,
+        "requires_review": False,
+        "output_summary_shape": "Funcionalidades transversales disponibles con resumen anonimizado y estado de adopción.",
+        "user_visible_summary_template": "He consultado funcionalidades transversales disponibles.",
+    },
+    "record_transversal_feature_acceptance": {
+        "risk_level": "medium",
+        "requires_confirmation": True,
+        "requires_review": True,
+        "output_summary_shape": "Adopción de funcionalidad transversal con id, organización, estado y fecha de activación.",
+        "user_visible_summary_template": "He registrado el OK para la funcionalidad transversal.",
+    },
+}
+
+_VALID_TOOL_RISK_LEVELS = {"low", "medium", "high"}
+
+
+def _summarize_input_schema(schema: dict) -> str:
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict) or not properties:
+        return "Sin parámetros."
+
+    required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
+    required_fields = [name for name in properties if name in required]
+    optional_fields = [name for name in properties if name not in required]
+    parts: list[str] = []
+    if required_fields:
+        parts.append(f"Requiere: {', '.join(required_fields)}")
+    else:
+        parts.append("Sin campos obligatorios")
+    if optional_fields:
+        parts.append(f"Opcionales: {', '.join(optional_fields)}")
+    return ". ".join(parts) + "."
+
+
+def _validated_tool_contract(name: str, metadata: dict, contract: dict) -> dict:
+    risk_level = str(contract["risk_level"]).strip()
+    if risk_level not in _VALID_TOOL_RISK_LEVELS:
+        raise RuntimeError(f"Invalid risk level for tool {name}: {risk_level}")
+    requires_confirmation = bool(contract["requires_confirmation"])
+    requires_review = bool(contract["requires_review"])
+    if not metadata["read_only"] and not (requires_confirmation or requires_review):
+        raise RuntimeError(
+            f"Mutating tool {name} must require confirmation or review"
+        )
+    for field in ("output_summary_shape", "user_visible_summary_template"):
+        if not str(contract.get(field) or "").strip():
+            raise RuntimeError(f"Tool {name} is missing {field}")
+    return {
+        "risk_level": risk_level,
+        "requires_confirmation": requires_confirmation,
+        "requires_review": requires_review,
+        "output_summary_shape": str(contract["output_summary_shape"]).strip(),
+        "user_visible_summary_template": str(
+            contract["user_visible_summary_template"]
+        ).strip(),
+    }
 
 
 def _build_tool_catalog() -> dict[str, ToolSpec]:
@@ -1678,15 +2443,27 @@ def _build_tool_catalog() -> dict[str, ToolSpec]:
     for definition in _TOOL_DEFINITIONS:
         name = definition["name"]
         metadata = _TOOL_METADATA[name]
+        input_schema = definition.get("input_schema", {"type": "object"})
+        contract = _validated_tool_contract(
+            name,
+            metadata,
+            _TOOL_CONTRACT_METADATA[name],
+        )
         catalog[name] = ToolSpec(
             name=name,
             label=metadata["label"],
             description=definition.get("description", ""),
-            input_schema=definition.get("input_schema", {"type": "object"}),
+            input_schema=input_schema,
             executor=_EXECUTORS[name],
             read_only=metadata["read_only"],
             domain=metadata["domain"],
             required_permission=metadata.get("required_permission"),
+            risk_level=contract["risk_level"],
+            requires_confirmation=contract["requires_confirmation"],
+            requires_review=contract["requires_review"],
+            input_schema_summary=_summarize_input_schema(input_schema),
+            output_summary_shape=contract["output_summary_shape"],
+            user_visible_summary_template=contract["user_visible_summary_template"],
         )
     return catalog
 

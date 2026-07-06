@@ -21,18 +21,36 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import {
+  AGENT_OFFICE_PRIORITY_LABELS,
+  AGENT_OFFICE_TASK_STATUS_LABELS,
+  ASSISTANT_KNOWLEDGE_CONFIDENCE_LABELS,
+  ASSISTANT_KNOWLEDGE_PROPOSAL_STATUS_LABELS,
+  ASSISTANT_KNOWLEDGE_SOURCE_TYPE_LABELS,
+  ASSISTANT_MEMORY_CATEGORY_LABELS,
+  ASSISTANT_MEMORY_SENSITIVITY_LABELS,
+  DOCUMENT_WORK_ARTIFACT_STATUS_LABELS,
+  DOCUMENT_WORK_ARTIFACT_TYPE_LABELS,
   formatAssistantTool,
+  type AgentOfficeApprovalDecision,
+  type AgentOfficeTask,
   type AssistantAction,
   type AssistantConversation,
   type AssistantConversationDetail,
   type AssistantConversationFolder,
+  type AssistantKnowledgeProposal,
+  type AssistantKnowledgeProposalStatus,
+  type AssistantMemoryEntry,
+  type AssistantMemoryStatus,
   type AssistantStatus,
+  type DocumentWorkArtifact,
+  type DocumentWorkArtifactStatus,
   type User,
 } from "./types";
 
@@ -40,10 +58,15 @@ type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
   conversations: AssistantConversation[];
   conversationFolders: AssistantConversationFolder[];
+  memoryEntries: AssistantMemoryEntry[];
+  knowledgeProposals: AssistantKnowledgeProposal[];
+  agentOfficeTasks: AgentOfficeTask[];
+  documentWorkArtifacts: DocumentWorkArtifact[];
   currentUser: User;
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
   isLoadingAssistant: boolean;
+  isLoadingWorkspaceQueues: boolean;
   isSendingMessage: boolean;
   assistantError: string;
   includeArchivedConversations: boolean;
@@ -64,6 +87,27 @@ type AssistantPanelProps = {
   ) => Promise<AssistantConversationFolder | null>;
   onRenameConversationFolder: (folderId: number, name: string) => Promise<void>;
   onDeleteConversationFolder: (folderId: number) => Promise<void>;
+  onUpdateMemoryEntry: (
+    entryId: number,
+    updates: { status?: AssistantMemoryStatus; review_notes?: string },
+  ) => Promise<void>;
+  onUpdateKnowledgeProposal: (
+    proposalId: number,
+    updates: { status?: AssistantKnowledgeProposalStatus; review_notes?: string },
+  ) => Promise<void>;
+  onReviewAgentOfficeTask: (
+    taskId: number,
+    decision: AgentOfficeApprovalDecision,
+    notes?: string,
+  ) => Promise<void>;
+  onUpdateDocumentWorkArtifact: (
+    artifactId: number,
+    updates: {
+      status?: DocumentWorkArtifactStatus;
+      review_notes?: string;
+      export_format?: string;
+    },
+  ) => Promise<void>;
   onIncludeArchivedConversationsChange: (includeArchived: boolean) => void;
 };
 
@@ -417,9 +461,11 @@ function actionDetailText(action: AssistantAction) {
 function ActionTimeline({
   actions,
   toolLabels,
+  showTechnicalDetails,
 }: {
   actions: AssistantAction[];
   toolLabels: Record<string, string>;
+  showTechnicalDetails: boolean;
 }) {
   if (actions.length === 0) {
     return null;
@@ -475,10 +521,12 @@ function ActionTimeline({
                     ))}
                   </div>
                 ) : null}
-                <details className="assistant-action-detail">
-                  <summary>Detalle tecnico</summary>
-                  <pre>{actionDetailText(action)}</pre>
-                </details>
+                {showTechnicalDetails ? (
+                  <details className="assistant-action-detail">
+                    <summary>Detalle técnico</summary>
+                    <pre>{actionDetailText(action)}</pre>
+                  </details>
+                ) : null}
               </div>
             </div>
           );
@@ -488,14 +536,293 @@ function ActionTimeline({
   );
 }
 
+function WorkspaceQueueSection({
+  title,
+  subtitle,
+  count,
+  icon: Icon,
+  isLoading,
+  emptyText,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  count: number;
+  icon: LucideIcon;
+  isLoading: boolean;
+  emptyText: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="assistant-workspace-section">
+      <header>
+        <div>
+          <Icon aria-hidden size={16} />
+          <span>{title}</span>
+        </div>
+        <small>{isLoading ? "Actualizando" : count}</small>
+      </header>
+      <p>{subtitle}</p>
+      {count === 0 ? (
+        <div className="assistant-workspace-empty">{emptyText}</div>
+      ) : (
+        <div className="assistant-workspace-list">{children}</div>
+      )}
+    </section>
+  );
+}
+
+function WorkspaceQueues({
+  memoryEntries,
+  knowledgeProposals,
+  agentOfficeTasks,
+  documentWorkArtifacts,
+  isLoading,
+  onUpdateMemoryEntry,
+  onUpdateKnowledgeProposal,
+  onReviewAgentOfficeTask,
+  onUpdateDocumentWorkArtifact,
+}: {
+  memoryEntries: AssistantMemoryEntry[];
+  knowledgeProposals: AssistantKnowledgeProposal[];
+  agentOfficeTasks: AgentOfficeTask[];
+  documentWorkArtifacts: DocumentWorkArtifact[];
+  isLoading: boolean;
+  onUpdateMemoryEntry: AssistantPanelProps["onUpdateMemoryEntry"];
+  onUpdateKnowledgeProposal: AssistantPanelProps["onUpdateKnowledgeProposal"];
+  onReviewAgentOfficeTask: AssistantPanelProps["onReviewAgentOfficeTask"];
+  onUpdateDocumentWorkArtifact: AssistantPanelProps["onUpdateDocumentWorkArtifact"];
+}) {
+  const visibleTasks = agentOfficeTasks
+    .filter((task) => !["completed", "cancelled"].includes(task.status))
+    .slice(0, 5);
+  const visibleArtifacts = documentWorkArtifacts
+    .filter((artifact) => artifact.status !== "archived")
+    .slice(0, 5);
+
+  return (
+    <aside className="assistant-workspace" aria-label="Mesa de trabajo">
+      <div className="assistant-workspace-head">
+        <p className="eyebrow">Mesa de trabajo</p>
+        <h3>Revisión y seguimiento</h3>
+        <p>
+          Fuentes, recuerdos, tareas y borradores preparados por Anacleto para
+          revisar con control humano.
+        </p>
+      </div>
+
+      <WorkspaceQueueSection
+        title="Recuerdos propuestos"
+        subtitle="Información que Anacleto sugiere guardar, pendiente de validación."
+        count={memoryEntries.length}
+        icon={Brain}
+        isLoading={isLoading}
+        emptyText="No hay recuerdos pendientes."
+      >
+        {memoryEntries.slice(0, 5).map((entry) => (
+          <article className="assistant-workspace-card" key={entry.id}>
+            <div className="assistant-workspace-card-meta">
+              <span>{ASSISTANT_MEMORY_CATEGORY_LABELS[entry.category]}</span>
+              <span>{ASSISTANT_MEMORY_SENSITIVITY_LABELS[entry.sensitivity]}</span>
+            </div>
+            <strong>{entry.content}</strong>
+            <div className="assistant-workspace-actions">
+              <button
+                type="button"
+                onClick={() =>
+                  void onUpdateMemoryEntry(entry.id, { status: "approved" })
+                }
+              >
+                Aprobar
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void onUpdateMemoryEntry(entry.id, { status: "rejected" })
+                }
+              >
+                Rechazar
+              </button>
+            </div>
+          </article>
+        ))}
+      </WorkspaceQueueSection>
+
+      <WorkspaceQueueSection
+        title="Fuentes propuestas"
+        subtitle="Hallazgos externos que aún no son conocimiento aprobado."
+        count={knowledgeProposals.length}
+        icon={Globe2}
+        isLoading={isLoading}
+        emptyText="No hay fuentes pendientes."
+      >
+        {knowledgeProposals.slice(0, 5).map((proposal) => (
+          <article className="assistant-workspace-card" key={proposal.id}>
+            <div className="assistant-workspace-card-meta">
+              <span>
+                {ASSISTANT_KNOWLEDGE_SOURCE_TYPE_LABELS[proposal.source_type]}
+              </span>
+              <span>{ASSISTANT_KNOWLEDGE_CONFIDENCE_LABELS[proposal.confidence]}</span>
+            </div>
+            <strong>{proposal.title}</strong>
+            <p>{proposal.summary}</p>
+            <a href={proposal.source_url} rel="noreferrer" target="_blank">
+              Abrir fuente
+            </a>
+            <div className="assistant-workspace-actions">
+              <button
+                type="button"
+                onClick={() =>
+                  void onUpdateKnowledgeProposal(proposal.id, {
+                    status: "approved",
+                  })
+                }
+              >
+                Aprobar
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void onUpdateKnowledgeProposal(proposal.id, {
+                    status: "rejected",
+                  })
+                }
+              >
+                Rechazar
+              </button>
+            </div>
+            <small>
+              {ASSISTANT_KNOWLEDGE_PROPOSAL_STATUS_LABELS[proposal.status]}
+            </small>
+          </article>
+        ))}
+      </WorkspaceQueueSection>
+
+      <WorkspaceQueueSection
+        title="Tareas supervisadas"
+        subtitle="Trabajo diferido que espera aprobación, ejecución o revisión."
+        count={visibleTasks.length}
+        icon={Hammer}
+        isLoading={isLoading}
+        emptyText="No hay tareas supervisadas abiertas."
+      >
+        {visibleTasks.map((task) => (
+          <article className="assistant-workspace-card" key={task.id}>
+            <div className="assistant-workspace-card-meta">
+              <span>{AGENT_OFFICE_TASK_STATUS_LABELS[task.status]}</span>
+              <span>{AGENT_OFFICE_PRIORITY_LABELS[task.priority]}</span>
+            </div>
+            <strong>{task.title}</strong>
+            <p>{task.description}</p>
+            {task.status === "pending_approval" ||
+            task.status === "waiting_approval" ? (
+              <div className="assistant-workspace-actions">
+                <button
+                  type="button"
+                  onClick={() => void onReviewAgentOfficeTask(task.id, "approve")}
+                >
+                  Aprobar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onReviewAgentOfficeTask(task.id, "cancel")}
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : null}
+          </article>
+        ))}
+      </WorkspaceQueueSection>
+
+      <WorkspaceQueueSection
+        title="Borradores documentales"
+        subtitle="Informes, notas y comunicaciones todavía revisables."
+        count={visibleArtifacts.length}
+        icon={FileText}
+        isLoading={isLoading}
+        emptyText="No hay borradores documentales abiertos."
+      >
+        {visibleArtifacts.map((artifact) => (
+          <article className="assistant-workspace-card" key={artifact.id}>
+            <div className="assistant-workspace-card-meta">
+              <span>
+                {DOCUMENT_WORK_ARTIFACT_TYPE_LABELS[artifact.artifact_type]}
+              </span>
+              <span>{DOCUMENT_WORK_ARTIFACT_STATUS_LABELS[artifact.status]}</span>
+            </div>
+            <strong>{artifact.title}</strong>
+            {artifact.project_name ? <p>{artifact.project_name}</p> : null}
+            <div className="assistant-workspace-actions">
+              {artifact.status === "draft" ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void onUpdateDocumentWorkArtifact(artifact.id, {
+                      status: "in_review",
+                    })
+                  }
+                >
+                  Enviar a revisión
+                </button>
+              ) : null}
+              {artifact.status === "in_review" ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void onUpdateDocumentWorkArtifact(artifact.id, {
+                        status: "approved",
+                      })
+                    }
+                  >
+                    Aprobar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void onUpdateDocumentWorkArtifact(artifact.id, {
+                        status: "changes_requested",
+                      })
+                    }
+                  >
+                    Pedir cambios
+                  </button>
+                </>
+              ) : null}
+              {artifact.status === "approved" ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void onUpdateDocumentWorkArtifact(artifact.id, {
+                      status: "export_requested",
+                    })
+                  }
+                >
+                  Solicitar exportación
+                </button>
+              ) : null}
+            </div>
+          </article>
+        ))}
+      </WorkspaceQueueSection>
+    </aside>
+  );
+}
+
 export function AssistantPanel({
   assistantStatus,
   conversations,
   conversationFolders,
+  memoryEntries,
+  knowledgeProposals,
+  agentOfficeTasks,
+  documentWorkArtifacts,
   currentUser,
   selectedConversation,
   draftMessage,
   isLoadingAssistant,
+  isLoadingWorkspaceQueues,
   isSendingMessage,
   assistantError,
   includeArchivedConversations,
@@ -511,6 +838,10 @@ export function AssistantPanel({
   onCreateConversationFolder,
   onRenameConversationFolder,
   onDeleteConversationFolder,
+  onUpdateMemoryEntry,
+  onUpdateKnowledgeProposal,
+  onReviewAgentOfficeTask,
+  onUpdateDocumentWorkArtifact,
   onIncludeArchivedConversationsChange,
 }: AssistantPanelProps) {
   const assistantDisabled = assistantStatus !== null && !assistantStatus.enabled;
@@ -548,6 +879,7 @@ export function AssistantPanel({
       ),
     [assistantStatus],
   );
+  const showTechnicalDetails = currentUser.is_superuser;
   const [inlineTitleValue, setInlineTitleValue] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
@@ -1534,12 +1866,11 @@ export function AssistantPanel({
                           </p>
                         </div>
                         <AssistantMapActions actions={message.actions} />
-                        {message.actions.some((action) => action.tool === "web_search") ? (
+                        {message.actions.length > 0 ? (
                           <ActionTimeline
-                            actions={message.actions.filter(
-                              (action) => action.tool === "web_search",
-                            )}
+                            actions={message.actions}
                             toolLabels={toolLabels}
+                            showTechnicalDetails={showTechnicalDetails}
                           />
                         ) : null}
                         {isAssistant && message.content.trim().length > 0 ? (
@@ -1702,6 +2033,18 @@ export function AssistantPanel({
             </div>
           )}
         </main>
+
+        <WorkspaceQueues
+          memoryEntries={memoryEntries}
+          knowledgeProposals={knowledgeProposals}
+          agentOfficeTasks={agentOfficeTasks}
+          documentWorkArtifacts={documentWorkArtifacts}
+          isLoading={isLoadingWorkspaceQueues}
+          onUpdateMemoryEntry={onUpdateMemoryEntry}
+          onUpdateKnowledgeProposal={onUpdateKnowledgeProposal}
+          onReviewAgentOfficeTask={onReviewAgentOfficeTask}
+          onUpdateDocumentWorkArtifact={onUpdateDocumentWorkArtifact}
+        />
 
       </div>
 

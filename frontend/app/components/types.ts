@@ -978,6 +978,12 @@ export type AssistantTool = {
   read_only: boolean;
   domain: string;
   required_permission: string | null;
+  risk_level: "low" | "medium" | "high";
+  requires_confirmation: boolean;
+  requires_review: boolean;
+  input_schema_summary: string;
+  output_summary_shape: string;
+  user_visible_summary_template: string;
 };
 
 export type AssistantMemoryCategory =
@@ -999,6 +1005,21 @@ export type AssistantMemorySensitivity =
   | "personal"
   | "sensitive"
   | "legal";
+
+export type AssistantKnowledgeProposalStatus =
+  | "proposed"
+  | "approved"
+  | "rejected";
+
+export type AssistantKnowledgeSourceType =
+  | "official"
+  | "public_administration"
+  | "news"
+  | "provider"
+  | "blog"
+  | "unknown";
+
+export type AssistantKnowledgeConfidence = "low" | "medium" | "high";
 
 export type AssistantMemoryUser = {
   id: number;
@@ -1025,11 +1046,137 @@ export type AssistantMemoryEntry = {
   updated_at: string;
 };
 
+export type AssistantKnowledgeProposal = {
+  id: number;
+  organization_id: number;
+  title: string;
+  summary: string;
+  content: string | null;
+  source_url: string;
+  source_title: string | null;
+  source_type: AssistantKnowledgeSourceType;
+  confidence: AssistantKnowledgeConfidence;
+  status: AssistantKnowledgeProposalStatus;
+  sensitivity: AssistantMemorySensitivity;
+  requires_legal_review: boolean;
+  source_conversation_id: number | null;
+  source_message_id: number | null;
+  proposed_by_id: number | null;
+  reviewed_by_id: number | null;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  proposed_by: AssistantMemoryUser | null;
+  reviewed_by: AssistantMemoryUser | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentOfficeDepartment =
+  | "front_desk"
+  | "requirements"
+  | "ordinances"
+  | "documents"
+  | "projects"
+  | "map"
+  | "admin_feedback"
+  | "daily_briefing";
+
+export type AgentOfficeTaskStatus =
+  | "pending_approval"
+  | "approved"
+  | "queued"
+  | "running"
+  | "waiting_approval"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AgentOfficePriority = "low" | "medium" | "high" | "urgent";
+
+export type AgentOfficeApprovalPolicy =
+  | "never"
+  | "before_execution"
+  | "after_draft"
+  | "always";
+
+export type AgentOfficeApprovalDecision = "approve" | "cancel";
+
+export type AgentOfficeTask = {
+  id: number;
+  organization_id: number;
+  title: string;
+  description: string;
+  department: AgentOfficeDepartment;
+  requested_action: string;
+  priority: AgentOfficePriority;
+  status: AgentOfficeTaskStatus;
+  approval_policy: AgentOfficeApprovalPolicy;
+  requires_human_approval: boolean;
+  assigned_agent_key: string | null;
+  routing_reason: string | null;
+  input: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error_message: string | null;
+  due_at: string | null;
+  scheduled_for: string | null;
+  source_conversation_id: number | null;
+  source_message_id: number | null;
+  requested_by_id: number | null;
+  approved_by_id: number | null;
+  approved_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DocumentWorkArtifactType =
+  | "report"
+  | "note"
+  | "comparison"
+  | "communication"
+  | "checklist";
+
+export type DocumentWorkArtifactStatus =
+  | "draft"
+  | "in_review"
+  | "approved"
+  | "changes_requested"
+  | "export_requested"
+  | "archived";
+
+export type DocumentWorkArtifact = {
+  id: number;
+  organization_id: number;
+  project_id: number;
+  project_name?: string;
+  artifact_type: DocumentWorkArtifactType;
+  title: string;
+  content: string;
+  status: DocumentWorkArtifactStatus;
+  source_summary: string | null;
+  source_document_ids: number[];
+  review_notes: string | null;
+  export_format: string | null;
+  created_by_id: number | null;
+  reviewed_by_id: number | null;
+  export_requested_by_id: number | null;
+  exported_by_id: number | null;
+  source_conversation_id: number | null;
+  source_message_id: number | null;
+  reviewed_at: string | null;
+  export_requested_at: string | null;
+  exported_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AssistantAction = {
   tool: string;
   ok: boolean;
   input: Record<string, unknown>;
   result: string;
+  audit?: Record<string, unknown> | null;
 };
 
 export type AssistantMessage = {
@@ -1067,16 +1214,21 @@ export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
   list_organizations: "Consultar organizaciones",
   list_projects: "Consultar proyectos",
   get_map_items: "Consultar mapa",
+  web_search: "Buscar en web",
+  semantic_search_ordinances: "Buscar ordenanzas",
   list_requirements: "Consultar necesidades",
   get_requirement: "Leer necesidad",
   create_requirement: "Crear necesidad",
   update_requirement: "Actualizar necesidad",
   add_requirement_message: "Añadir nota a necesidad",
   propose_memory_entry: "Proponer memoria",
+  propose_knowledge_entry: "Proponer fuente",
+  prepare_document_work: "Preparar borrador documental",
+  create_agent_office_task: "Crear tarea supervisada",
+  send_admin_feedback: "Enviar feedback al admin",
   propose_transversal_feature: "Proponer funcionalidad transversal",
   list_available_transversal_features: "Consultar funcionalidades disponibles",
   record_transversal_feature_acceptance: "Registrar activación transversal",
-  web_search: "Buscar en web",
 };
 
 export function formatAssistantTool(
@@ -1105,6 +1257,91 @@ export const ASSISTANT_MEMORY_SENSITIVITY_LABELS: Record<
   personal: "Personal",
   sensitive: "Sensible",
   legal: "Legal",
+};
+
+export const ASSISTANT_MEMORY_STATUS_LABELS: Record<
+  AssistantMemoryStatus,
+  string
+> = {
+  proposed: "Pendiente de revisión",
+  approved: "Aprobada",
+  rejected: "Rechazada",
+  archived: "Archivada",
+  blocked: "Bloqueada",
+};
+
+export const ASSISTANT_KNOWLEDGE_PROPOSAL_STATUS_LABELS: Record<
+  AssistantKnowledgeProposalStatus,
+  string
+> = {
+  proposed: "Pendiente de revisión",
+  approved: "Aprobada",
+  rejected: "Rechazada",
+};
+
+export const ASSISTANT_KNOWLEDGE_SOURCE_TYPE_LABELS: Record<
+  AssistantKnowledgeSourceType,
+  string
+> = {
+  official: "Fuente oficial",
+  public_administration: "Administración pública",
+  news: "Noticia",
+  provider: "Proveedor",
+  blog: "Artículo",
+  unknown: "Fuente externa",
+};
+
+export const ASSISTANT_KNOWLEDGE_CONFIDENCE_LABELS: Record<
+  AssistantKnowledgeConfidence,
+  string
+> = {
+  low: "Confianza baja",
+  medium: "Confianza media",
+  high: "Confianza alta",
+};
+
+export const AGENT_OFFICE_TASK_STATUS_LABELS: Record<
+  AgentOfficeTaskStatus,
+  string
+> = {
+  pending_approval: "Pendiente de aprobación",
+  approved: "Aprobada",
+  queued: "En cola",
+  running: "En curso",
+  waiting_approval: "Pendiente de validar resultado",
+  completed: "Completada",
+  failed: "Con incidencia",
+  cancelled: "Cancelada",
+};
+
+export const AGENT_OFFICE_PRIORITY_LABELS: Record<AgentOfficePriority, string> = {
+  low: "Baja",
+  medium: "Media",
+  high: "Alta",
+  urgent: "Urgente",
+};
+
+export const DOCUMENT_WORK_ARTIFACT_TYPE_LABELS: Record<
+  DocumentWorkArtifactType,
+  string
+> = {
+  report: "Informe",
+  note: "Nota",
+  comparison: "Comparativa",
+  communication: "Comunicación",
+  checklist: "Checklist",
+};
+
+export const DOCUMENT_WORK_ARTIFACT_STATUS_LABELS: Record<
+  DocumentWorkArtifactStatus,
+  string
+> = {
+  draft: "Borrador",
+  in_review: "En revisión",
+  approved: "Aprobado",
+  changes_requested: "Con cambios solicitados",
+  export_requested: "Exportación solicitada",
+  archived: "Archivado",
 };
 
 export function userHasPermission(user: User, permissionCode: string) {

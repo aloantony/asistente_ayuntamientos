@@ -19,6 +19,16 @@ MemoryStatus = Literal[
     "blocked",
 ]
 MemorySensitivity = Literal["normal", "personal", "sensitive", "legal"]
+KnowledgeProposalStatus = Literal["proposed", "approved", "rejected"]
+KnowledgeSourceType = Literal[
+    "official",
+    "public_administration",
+    "news",
+    "provider",
+    "blog",
+    "unknown",
+]
+KnowledgeConfidence = Literal["low", "medium", "high"]
 TransversalFeatureCategory = Literal[
     "process",
     "compliance",
@@ -91,6 +101,12 @@ class AssistantToolRead(BaseModel):
     read_only: bool
     domain: str
     required_permission: str | None = None
+    risk_level: Literal["low", "medium", "high"]
+    requires_confirmation: bool
+    requires_review: bool
+    input_schema_summary: str
+    output_summary_shape: str
+    user_visible_summary_template: str
 
 
 class AssistantActionRead(BaseModel):
@@ -98,6 +114,7 @@ class AssistantActionRead(BaseModel):
     ok: bool
     input: dict
     result: str
+    audit: dict | None = None
 
 
 class AssistantMessageRead(BaseModel):
@@ -223,6 +240,49 @@ class AssistantMemoryEntryUpdate(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=1000)
     status: MemoryStatus | None = None
     sensitivity: MemorySensitivity | None = None
+    review_notes: str | None = Field(default=None, max_length=2000)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantKnowledgeProposalRead(BaseModel):
+    id: int
+    organization_id: int
+    title: str
+    summary: str
+    content: str | None
+    source_url: str
+    source_title: str | None
+    source_type: KnowledgeSourceType
+    confidence: KnowledgeConfidence
+    status: KnowledgeProposalStatus
+    sensitivity: MemorySensitivity
+    requires_legal_review: bool
+    source_conversation_id: int | None
+    source_message_id: int | None
+    proposed_by_id: int | None
+    reviewed_by_id: int | None
+    review_notes: str | None
+    reviewed_at: datetime | None
+    proposed_by: AssistantMemoryUserSummary | None
+    reviewed_by: AssistantMemoryUserSummary | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AssistantKnowledgeProposalUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    summary: str | None = Field(default=None, min_length=1, max_length=2000)
+    content: str | None = Field(default=None, max_length=2000)
+    source_url: str | None = Field(default=None, min_length=1, max_length=2000)
+    source_title: str | None = Field(default=None, max_length=500)
+    source_type: KnowledgeSourceType | None = None
+    confidence: KnowledgeConfidence | None = None
+    status: KnowledgeProposalStatus | None = None
+    sensitivity: MemorySensitivity | None = None
+    requires_legal_review: bool | None = None
     review_notes: str | None = Field(default=None, max_length=2000)
 
     model_config = ConfigDict(str_strip_whitespace=True)
