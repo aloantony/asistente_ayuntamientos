@@ -2357,6 +2357,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-action-timeline {
+  width: min(100%, 720px);
   margin-top: 16px;
   color: var(--text-secondary);
 }

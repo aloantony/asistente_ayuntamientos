@@ -52,10 +52,10 @@ Reglas:
 - Si pide consultar elementos geolocalizados del mapa municipal, usa
   intent=read_map_items y action=get_map_items.
 - Si el usuario pide ver necesidades/requisitos ya registrados, usa intent=read_requirements.
-- Si el usuario pide empezar a contar una necesidad/requisito pero aún no aporta contenido concreto, usa intent=capture_requirement_intro y action=none.
-- Si el usuario quiere explorar, explicar o aterrizar una necesidad antes de guardarla, usa intent=capture_requirement y action=list_requirements para comprobar posibles duplicados/contexto.
-- Si el usuario describe una nueva necesidad o algo que quiere desarrollar y aporta campos suficientes para borrador,
-  usa intent=create_requirement, pero no inventes campos que no estén claros.
+- Si el usuario solo pide empezar a contar o registrar una necesidad/requisito y todavía no aporta contenido concreto, usa intent=unknown y action=none para que responda el agente conversacional.
+- Si el usuario quiere explorar, explicar, debatir o aterrizar una necesidad antes de guardarla, usa intent=unknown y action=none para que responda el agente conversacional.
+- Si el usuario aporta título, problema o detalles de una necesidad, usa intent=unknown y action=none salvo que esté confirmando un borrador pendiente; no lo conviertas en una comprobación o creación automática.
+- Usa intent=create_requirement solo para una creación ya confirmada o para continuar una acción pendiente; no lo uses solo porque aparezcan título y problema.
 - Si confirma un borrador pendiente, usa intent=confirm_pending_work.
 - Si pide convertir el feedback o la mejora anterior en necesidad, usa
   intent=convert_feedback_to_requirement, action=create_requirement y
@@ -64,7 +64,7 @@ Reglas:
 - Si cancela, descarta o deja sin efecto una acción pendiente, usa intent=cancel_pending_action y action=cancel_pending_action.
 - Si pide preparar, encargar o dejar para revisión una tarea supervisada o
   diferida, usa intent=delegate_agent_office y action=create_agent_office_task.
-- Si describe un fallo, fricción, problema de datos o mejora de la plataforma/asistente que conviene elevar al administrador, usa intent=suggest_admin_feedback y action=send_admin_feedback; incluye draft con category, title, description y priority si están claros.
+- Si describe un fallo, fricción, problema de datos o mejora de la plataforma/asistente, usa intent=unknown y action=none para que responda el agente conversacional.
 - Si hay pending_action de send_admin_feedback y el usuario confirma enviarlo, usa intent=suggest_admin_feedback y action=send_admin_feedback.
 - Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
 - Si no hay intención de producto clara, usa intent=unknown y action=none.
@@ -265,8 +265,6 @@ def _plan_with_hermes(
                         "read_ordinances",
                         "read_map_items",
                         "read_requirements",
-                        "capture_requirement_intro",
-                        "capture_requirement",
                         "create_requirement",
                         "confirm_pending_work",
                         "convert_feedback_to_requirement",

@@ -292,9 +292,34 @@ function getActionIcon(tool: string): LucideIcon {
   return Hammer;
 }
 
+function getActionErrorSummary(action: AssistantAction) {
+  const result = action.result.toLowerCase();
+
+  if (action.tool === "web_search") {
+    if (result.includes("assistant.web.search")) {
+      return "La búsqueda web no está disponible para este usuario.";
+    }
+    if (result.includes("hermes web is not configured")) {
+      return "La búsqueda web no está configurada en este servidor.";
+    }
+    if (
+      result.includes("hermes web api") ||
+      result.includes("connection failed")
+    ) {
+      return "La búsqueda web no responde ahora mismo.";
+    }
+  }
+
+  if (result.includes("permission required:")) {
+    return "No tienes permiso para ejecutar esta acción.";
+  }
+
+  return "La herramienta devolvió un error.";
+}
+
 function getActionSummary(action: AssistantAction) {
   if (!action.ok) {
-    return "La herramienta devolvio un error.";
+    return getActionErrorSummary(action);
   }
 
   const parsed = parseActionResult(action.result);

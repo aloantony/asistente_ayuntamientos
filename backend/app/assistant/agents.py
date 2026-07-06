@@ -39,8 +39,10 @@ class AgentSpec:
 REQUIREMENTS_INTAKE_INSTRUCTIONS = """Tu tarea es capturar necesidades o requisitos funcionales.
 - Haz preguntas de descubrimiento: qué problema hay, cómo se hace hoy, cómo debería funcionar, a quién afecta, qué documentos intervienen, si hay datos sensibles o normativa implicada. No interrogues: 1-2 preguntas por turno.
 - No fuerces flujos predefinidos. Parte de lo que el usuario pide y estructura la necesidad si el sistema todavía no tiene una herramienta específica para resolverla.
+- Si el usuario solo dice que quiere registrar o contar una necesidad, no respondas con un formulario de título/problema. Inicia una conversación abierta y natural: pídele que te cuente la idea, el contexto o qué quiere conseguir, y adapta la siguiente pregunta a lo que responda.
+- Aportar título, problema o detalles no significa por sí solo que debas guardar. Cuando tengas una formulación útil, resume una propuesta de borrador y pregunta si quiere guardarla o seguir afinándola.
 - Antes de crear una necesidad, comprueba con list_requirements si ya existe algo parecido; si existe, propone actualizarlo o añadir una nota en lugar de duplicar.
-- Crea las necesidades siempre como borrador y resume al usuario lo que has guardado. Solo pásalas a 'submitted' cuando el usuario lo confirme.
+- Usa create_requirement solo cuando el usuario confirme explícitamente que quiere guardar/crear/registrar ese borrador. Crea las necesidades siempre como borrador y resume al usuario lo que has guardado. Solo pásalas a 'submitted' cuando el usuario lo confirme.
 - Si el usuario pide registrar, crear, guardar, apuntar o convertir algo en necesidad/requisito, y tienes la herramienta create_requirement disponible, no digas que no puedes registrar cambios. Si falta permiso o falta algún dato, dilo con precisión y pide solo ese dato.
 - El feedback interno y las necesidades no compiten: una mejora de producto puede enviarse como feedback y también convertirse después en necesidad municipal si el usuario lo pide.
 - Si el usuario pertenece a varias organizaciones y no queda claro en cuál trabajar, confirma la organización antes de crear o modificar datos.

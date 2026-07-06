@@ -1703,5 +1703,38 @@ def get_tool_definitions(tool_names: frozenset[str]) -> list[dict]:
     ]
 
 
-def get_tool_metadata() -> list[dict]:
-    return [spec.metadata for spec in TOOL_CATALOG.values()]
+def is_tool_available_for_user(
+    db: Session,
+    current_user: User,
+    tool: ToolSpec,
+) -> bool:
+    if tool.required_permission and not has_permission(
+        current_user,
+        tool.required_permission,
+        db,
+    ):
+        return False
+    if tool.name == "web_search" and not hermes_web_client.enabled:
+        return False
+    return True
+
+
+def get_available_tool_specs(
+    db: Session,
+    current_user: User,
+    tool_names: frozenset[str],
+) -> list[ToolSpec]:
+    return [
+        TOOL_CATALOG[name]
+        for name in TOOL_CATALOG
+        if name in tool_names
+        and is_tool_available_for_user(db, current_user, TOOL_CATALOG[name])
+    ]
+
+
+def get_available_tool_metadata(db: Session, current_user: User) -> list[dict]:
+    return [
+        spec.metadata
+        for spec in TOOL_CATALOG.values()
+        if is_tool_available_for_user(db, current_user, spec)
+    ]
