@@ -31,11 +31,11 @@ function normalizeApiBaseUrl(value: string) {
   }
 
   // NEXT_PUBLIC_API_BASE_URL is baked into the Next.js bundle at build time.
-  // Local builds commonly set it to localhost, but a browser opening a public
-  // tunnel would then call its *own* localhost and fail with "Failed to fetch".
-  // In that public-origin case, fall back to same-origin relative API routes.
+  // Local builds commonly point it at loopback. Browser calls should still go
+  // through the same-origin Next proxy so cookies are set and read on the same
+  // host, whether the user opens localhost, 127.0.0.1 or a public tunnel.
   if (typeof window !== "undefined" && isLoopbackApiBaseUrl(trimmed)) {
-    return isLoopbackHostname(window.location.hostname) ? trimmed : "";
+    return "";
   }
 
   return trimmed;

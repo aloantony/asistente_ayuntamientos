@@ -26,7 +26,7 @@ from app.municipalities.models import Municipality
 from app.ordinances.embeddings import embed_text
 from app.ordinances.models import Ordinance, OrdinanceLegalChunk
 from app.projects.models import Project
-from app.requirements.models import Requirement
+from app.requirements.models import Requirement, RequirementMessage
 from conftest import headers_for
 
 
@@ -199,8 +199,28 @@ def test_assistant_suggests_and_sends_admin_feedback(
     assistant_user,
     db,
     use_gateway,
+    monkeypatch,
 ):
     user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="suggest_admin_feedback",
+            action="send_admin_feedback",
+            draft={
+                "category": "bug",
+                "title": "El chat falla cuando intento enviar feedback",
+                "description": "El chat falla cuando intento enviar feedback",
+                "priority": "high",
+            },
+            target={"organization_id": organization.id},
+            confidence=0.92,
+            source="planner",
+        )
+        if "chat falla" in kwargs["user_text"].lower()
+        else None,
+    )
     gateway = use_gateway(FakeGateway([]))
     conversation = client.post(
         "/assistant/conversations",
@@ -246,8 +266,30 @@ def test_feedback_can_be_explained_and_converted_to_requirement(
     assistant_user,
     db,
     use_gateway,
+    monkeypatch,
 ):
     user, organization = assistant_user
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="suggest_admin_feedback",
+            action="send_admin_feedback",
+            draft={
+                "category": "missing_capability",
+                "title": "Me gustaría que el asistente me pueda responder por voz también",
+                "description": (
+                    "Me gustaría que el asistente me pueda responder por voz también."
+                ),
+                "priority": "medium",
+            },
+            target={"organization_id": organization.id},
+            confidence=0.92,
+            source="planner",
+        )
+        if "responder por voz" in kwargs["user_text"].lower()
+        else None,
+    )
     gateway = use_gateway(FakeGateway([]))
     conversation = client.post(
         "/assistant/conversations",
@@ -338,7 +380,20 @@ def test_semantic_planner_suggests_admin_feedback_without_keyword_markers(
             source="planner",
         ),
     )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Puedo crear o actualizar necesidades/requisitos como borrador si me das el contenido."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -765,7 +820,11 @@ def test_status_reports_disabled_gateway(
         "requirements_intake",
         "consultation",
     }
-    assert "create_requirement" in {tool["name"] for tool in body["tools"]}
+    tool_names = {tool["name"] for tool in body["tools"]}
+    assert "create_requirement" in tool_names
+    assert "web_search" not in tool_names
+    assert "stage_requirement_proposal" in tool_names
+    assert "commit_requirement_proposal" in tool_names
 
 
 def test_transcribe_audio_requires_assistant_permission(client, make_user):
@@ -992,7 +1051,9 @@ def test_requirements_intake_prompt_lists_write_tools(db, assistant_user):
 
     assert "Agente activo: Necesidades (requirements_intake)" in prompt
     assert "Tu tarea es capturar necesidades" in prompt
-    assert "- create_requirement" in prompt
+    assert "- create_requirement" not in prompt
+    assert "- stage_requirement_proposal" in prompt
+    assert "- commit_requirement_proposal" in prompt
     assert "- update_requirement" in prompt
     assert "- record_transversal_feature_acceptance" in prompt
     assert "borrador" in prompt
@@ -1035,7 +1096,7 @@ def test_agent_turn_persists_disabled_planner_routing(
     assert assistant_message["routing"]["chosen"] == "requirements_intake"
 
 
-def test_short_followup_keeps_previous_agent():
+def test_short_followup_does_not_force_previous_agent_shortcut():
     conversation = SimpleNamespace(
         messages=[
             SimpleNamespace(
@@ -1053,11 +1114,11 @@ def test_short_followup_keeps_previous_agent():
     )
 
     assert decision.agent.key == "consultation"
-    assert decision.routing["source"] == "shortcut"
-    assert decision.routing["fallback_reason"] == "short_followup_previous_agent"
+    assert decision.routing["source"] != "shortcut"
+    assert decision.routing.get("fallback_reason") != "short_followup_previous_agent"
 
 
-def test_greeting_new_chat_routes_to_general_consultation():
+def test_greeting_new_chat_does_not_force_consultation_shortcut():
     conversation = SimpleNamespace(messages=[])
 
     decision = choose_agent(
@@ -1066,7 +1127,8 @@ def test_greeting_new_chat_routes_to_general_consultation():
         allowed_agents=list(AGENT_REGISTRY.values()),
     )
 
-    assert decision.agent.key == "consultation"
+    assert decision.agent.key in {"consultation", "requirements_intake"}
+    assert decision.routing["source"] != "shortcut"
 
 
 def test_new_need_language_still_routes_to_requirements_intake():
@@ -1081,13 +1143,26 @@ def test_new_need_language_still_routes_to_requirements_intake():
     assert decision.agent.key == "requirements_intake"
 
 
-def test_global_capability_question_returns_product_capabilities_without_gateway(
+def test_global_capability_question_uses_model_without_forced_reply(
     client,
     assistant_user,
     use_gateway,
 ):
     user, _ = assistant_user
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Puedo consultar información visible y ayudarte a crear o actualizar necesidades/requisitos como borrador. No apruebo trámites."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1102,15 +1177,13 @@ def test_global_capability_question_returns_product_capabilities_without_gateway
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["reason"] == "global_capabilities"
-    assert assistant_message["routing"]["intent"] == "global_capabilities"
     assert assistant_message["actions"] == []
     normalized_content = assistant_message["content"].lower()
     assert "solo consultar" not in normalized_content
     assert "crear o actualizar necesidades/requisitos como borrador" in normalized_content
+    assert "buscar información pública actual" not in normalized_content
     assert "no apruebo trámites" in normalized_content
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
 def test_ordinance_availability_question_answers_without_corpus_search(
@@ -1157,7 +1230,20 @@ def test_ordinance_availability_question_answers_without_corpus_search(
         )
     )
     db.commit()
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Puedo ayudarte con ordenanzas municipales ya cargadas. Para buscar bien, dime municipio y materia."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1172,8 +1258,6 @@ def test_ordinance_availability_question_answers_without_corpus_search(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "ordinance_capabilities"
-    assert assistant_message["routing"]["intent"] == "global_capabilities"
     assert assistant_message["actions"] == []
     normalized_content = assistant_message["content"].lower()
     assert "ordenanzas" in normalized_content
@@ -1181,10 +1265,10 @@ def test_ordinance_availability_question_answers_without_corpus_search(
     assert "materia" in normalized_content
     assert "sasamón" not in normalized_content
     assert "fragmento 22" not in normalized_content
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
-def test_semantic_planner_global_capabilities_uses_plan_without_gateway(
+def test_semantic_planner_global_capabilities_none_action_uses_model(
     client,
     assistant_user,
     use_gateway,
@@ -1201,7 +1285,20 @@ def test_semantic_planner_global_capabilities_uses_plan_without_gateway(
             source="planner",
         ),
     )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Puedo consultar información visible y crear o actualizar necesidades/requisitos como borrador."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1216,15 +1313,12 @@ def test_semantic_planner_global_capabilities_uses_plan_without_gateway(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "global_capabilities"
-    assert assistant_message["routing"]["intent"] == "global_capabilities"
-    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
     assert assistant_message["actions"] == []
     assert "crear o actualizar necesidades/requisitos como borrador" in assistant_message["content"].lower()
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
-def test_map_location_question_executes_map_tool_without_gateway(
+def test_map_location_question_can_use_map_tool_from_model(
     client,
     db,
     make_user,
@@ -1261,7 +1355,34 @@ def test_map_location_question_executes_map_tool_without_gateway(
         },
         headers=headers_for(user),
     ).status_code == 201
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_map",
+                            "get_map_items",
+                            {
+                                "entity_type": "project",
+                                "organization_id": organization.id,
+                                "limit": 5,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "He encontrado Demo mapa municipal. Abrir: /mapa?entity_type=project"
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1276,9 +1397,6 @@ def test_map_location_question_executes_map_tool_without_gateway(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["reason"] == "action_policy_read_map_items"
-    assert assistant_message["routing"]["intent"] == "read_map_items"
     assert assistant_message["actions"][0]["tool"] == "get_map_items"
     assert assistant_message["actions"][0]["ok"] is True
     assert assistant_message["actions"][0]["input"]["entity_type"] == "project"
@@ -1288,7 +1406,7 @@ def test_map_location_question_executes_map_tool_without_gateway(
     )
     assert "Demo mapa municipal" in assistant_message["content"]
     assert "/mapa?entity_type=project" in assistant_message["content"]
-    assert gateway.calls == []
+    assert len(gateway.calls) == 2
 
 
 def test_semantic_planner_map_intent_executes_action_policy(
@@ -1429,7 +1547,7 @@ def test_read_intents_are_backed_by_action_policies():
         assert policy.reason == f"action_policy_{intent}"
 
 
-def test_requirement_capture_executes_duplicate_check_after_chat_intro(
+def test_requirement_capture_can_execute_duplicate_check_from_model(
     client,
     assistant_user,
     db,
@@ -1446,7 +1564,34 @@ def test_requirement_capture_executes_duplicate_check_after_chat_intro(
     )
     db.add(requirement)
     db.commit()
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Cuéntame la idea y la ordenamos.")],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_requirements",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "He comprobado posibles coincidencias: Mapa municipal. La idea del alguacil puede ampliarlo."
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1476,21 +1621,18 @@ def test_requirement_capture_executes_duplicate_check_after_chat_intro(
 
     assert intro.status_code == 200
     intro_message = intro.json()["messages"][-1]
-    assert intro_message["routing"]["intent"] == "capture_requirement_intro"
     assert intro_message["actions"] == []
     assert "cuéntame la idea" in intro_message["content"].lower()
     assert "he comprobado" not in intro_message["content"].lower()
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["intent"] == "capture_requirement"
     assert assistant_message["actions"][0]["tool"] == "list_requirements"
     assert assistant_message["actions"][0]["ok"] is True
     normalized_content = assistant_message["content"].lower()
     assert "he comprobado" in normalized_content
     assert "mapa municipal" in normalized_content
     assert "alguacil" in normalized_content
-    assert gateway.calls == []
+    assert len(gateway.calls) == 3
 
 
 def test_register_need_request_prompts_for_content_without_duplicate_check(
@@ -1514,7 +1656,15 @@ def test_register_need_request_prompts_for_content_without_duplicate_check(
     db.add(requirement)
     db.commit()
     gateway = use_gateway(
-        FakeGateway([fake_response("end_turn", [text_block("Hola, hacemos una prueba.")])])
+        FakeGateway(
+            [
+                fake_response("end_turn", [text_block("Hola, hacemos una prueba.")]),
+                fake_response(
+                    "end_turn",
+                    [text_block("Cuéntame la idea y vemos si conviene guardarla.")],
+                ),
+            ]
+        )
     )
     conversation = client.post(
         "/assistant/conversations",
@@ -1536,13 +1686,12 @@ def test_register_need_request_prompts_for_content_without_duplicate_check(
     assert intro.status_code == 200
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["intent"] == "capture_requirement_intro"
     assert assistant_message["actions"] == []
     normalized_content = assistant_message["content"].lower()
     assert "cuéntame la idea" in normalized_content
     assert "he comprobado" not in normalized_content
     assert "control de personal municipal" not in normalized_content
-    assert len(gateway.calls) == 1
+    assert len(gateway.calls) == 2
 
 
 def test_semantic_planner_capture_requirement_runs_duplicate_check_without_legacy_intro(
@@ -1614,7 +1763,7 @@ def test_semantic_planner_capture_requirement_runs_duplicate_check_without_legac
     assert gateway.calls == []
 
 
-def test_semantic_planner_capture_requirement_intro_prompts_without_gateway(
+def test_semantic_planner_capture_requirement_intro_none_action_uses_model(
     client,
     assistant_user,
     db,
@@ -1632,7 +1781,16 @@ def test_semantic_planner_capture_requirement_intro_prompts_without_gateway(
             source="planner",
         ),
     )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Cuéntame la idea y la trabajamos.")],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1647,17 +1805,14 @@ def test_semantic_planner_capture_requirement_intro_prompts_without_gateway(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "action_policy_capture_requirement_intro"
-    assert assistant_message["routing"]["intent"] == "capture_requirement_intro"
-    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
     assert assistant_message["actions"] == []
     assert "cuéntame la idea" in assistant_message["content"].lower()
     db.expire_all()
     stored_conversation = db.get(AssistantConversation, conversation["id"])
     assert stored_conversation is not None
     state = json.loads(stored_conversation.state or "{}")
-    assert state["pending_action"] == {"type": "capture_requirement_intro"}
-    assert gateway.calls == []
+    assert "pending_action" not in state
+    assert len(gateway.calls) == 1
 
 
 def test_requirement_capture_without_matches_does_not_announce_empty_check(
@@ -1666,7 +1821,34 @@ def test_requirement_capture_without_matches_does_not_announce_empty_check(
     use_gateway,
 ):
     user, _ = assistant_user
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Cuéntame la idea y la trabajamos.")],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_requirements",
+                            "list_requirements",
+                            {},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Lo trabajamos como una idea nueva para gestionar llaves municipales."
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -1693,61 +1875,29 @@ def test_requirement_capture_without_matches_does_not_announce_empty_check(
     assert "he comprobado" not in normalized_content
     assert "0 en total" not in normalized_content
     assert "lo trabajamos como una idea nueva" in normalized_content
-    assert gateway.calls == []
+    assert len(gateway.calls) == 3
 
 
-def test_classify_turn_intent_maps_common_direct_requests():
-    assert assistant_service.classify_turn_intent(
-        "hola, qué puedes hacer?"
-    ) == assistant_service.TurnIntent("global_capabilities", "global_capabilities")
-    assert assistant_service.classify_turn_intent(
-        "Qué necesidades tenemos registradas?"
-    ) == assistant_service.TurnIntent(
-        "read_requirements",
-        "direct_list_requirements",
-        use_needs=True,
-    )
-    assert assistant_service.classify_turn_intent(
-        "crea otra necesidad"
-    ) == assistant_service.TurnIntent(
-        "create_requirement",
-        "direct_create_requirement",
-    )
-    assert assistant_service.classify_turn_intent(
-        "crea un requisito de prueba"
-    ) == assistant_service.TurnIntent(
-        "create_test_requirement",
-        "direct_create_test_requirement",
-    )
-    assert assistant_service.classify_turn_intent(
-        "Vamos a hacer una prueba, como que soy el alcalde y quiero contarte un nuevo requisito"
-    ) == assistant_service.TurnIntent(
-        "capture_requirement_intro",
-        "direct_capture_requirement_intro",
-    )
-    assert assistant_service.classify_turn_intent(
-        "me gustaría registrar una necesidad"
-    ) == assistant_service.TurnIntent(
-        "capture_requirement_intro",
-        "direct_capture_requirement_intro",
-    )
-    assert assistant_service.classify_turn_intent(
-        "En el mapa quiero que el alguacil pueda registrar cosas"
-    ) == assistant_service.TurnIntent(
-        "capture_requirement",
-        "direct_capture_requirement",
-    )
+def test_classify_turn_intent_no_longer_maps_common_direct_requests():
+    for text in (
+        "hola, qué puedes hacer?",
+        "Qué necesidades tenemos registradas?",
+        "crea otra necesidad",
+        "crea un requisito de prueba",
+        "Vamos a hacer una prueba, como que soy el alcalde y quiero contarte un nuevo requisito",
+        "me gustaría registrar una necesidad",
+        "En el mapa quiero que el alguacil pueda registrar cosas",
+        "Pues la necesidad que tengo identificada es que ahora mismo querría desarrollar algo que me permita controlar a todos los trabajadores que hay en el ayuntamiento",
+    ):
+        assert assistant_service.classify_turn_intent(
+            text
+        ) == assistant_service.TurnIntent("unknown", "model_decision")
+
     assert assistant_service.classify_turn_intent(
         "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
     ) == assistant_service.TurnIntent(
-        "read_ordinances",
-        "direct_ordinance_search",
-    )
-    assert assistant_service.classify_turn_intent(
-        "Pues la necesidad que tengo identificada es que ahora mismo querría desarrollar algo que me permita controlar a todos los trabajadores que hay en el ayuntamiento"
-    ) == assistant_service.TurnIntent(
-        "capture_requirement",
-        "direct_capture_requirement",
+        "unknown",
+        "ordinance_model_decision",
     )
 
 
@@ -1801,7 +1951,7 @@ def test_invalid_planner_fallback_routes_new_need_to_requirements_intake(monkeyp
     assert decision.routing["raw_agent_key"] == "Consulta"
 
 
-def test_valid_planner_choice_is_overridden_for_obvious_new_need(monkeypatch):
+def test_valid_planner_choice_is_not_overridden_by_keyword_heuristic(monkeypatch):
     conversation = SimpleNamespace(messages=[])
     monkeypatch.setattr(assistant_planner, "planner_enabled", lambda: True)
     monkeypatch.setattr(
@@ -1816,10 +1966,9 @@ def test_valid_planner_choice_is_overridden_for_obvious_new_need(monkeypatch):
         allowed_agents=list(AGENT_REGISTRY.values()),
     )
 
-    assert decision.agent.key == "requirements_intake"
-    assert decision.routing["source"] == "shortcut"
-    assert decision.routing["fallback_reason"] == "heuristic_override"
-    assert decision.routing["raw_agent_key"] == "consultation"
+    assert decision.agent.key == "consultation"
+    assert decision.routing["source"] == "router"
+    assert "fallback_reason" not in decision.routing
 
 
 def test_invalid_planner_fallback_keeps_explicit_read_requests_on_consultation(
@@ -1944,7 +2093,7 @@ def test_agent_recovers_hermes_argument_only_read_tool_call(
     assert recovered.content[0].input == {"organization_id": organization.id}
 
 
-def test_direct_list_requirements_handles_default_empty_result(
+def test_model_list_requirements_handles_default_empty_result(
     client,
     make_user,
     make_organization,
@@ -1958,34 +2107,44 @@ def test_direct_list_requirements_handles_default_empty_result(
         organization,
         ["assistant.use", "requirements.create", "requirements.view"],
     )
-    other = make_organization(name="Tenant Smoke B")
-    grant_permissions(user, other, ["assistant.use", "requirements.view"])
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_requirements",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            f"No hay requisitos visibles registrados en {organization.name}."
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
         headers=headers_for(user),
     ).json()
 
-    first = client.post(
+    response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "Qué requisitos tenemos registrados?"},
         headers=headers_for(user),
     )
-    second = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "DEFAULT"},
-        headers=headers_for(user),
-    )
 
-    assert first.status_code == 200
-    assert "¿De qué organización" in first.json()["messages"][1]["content"]
-    assert second.status_code == 200
-    assistant_message = second.json()["messages"][-1]
-    assert assistant_message["agent_key"] == "consultation"
-    assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["reason"] == "action_policy_read_requirements"
-    assert first.json()["messages"][1]["routing"]["intent"] == "read_requirements"
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
     assert assistant_message["content"] == (
         f"No hay requisitos visibles registrados en {organization.name}."
     )
@@ -1994,7 +2153,7 @@ def test_direct_list_requirements_handles_default_empty_result(
     assert action["ok"] is True
     assert action["input"] == {"organization_id": organization.id}
     assert json.loads(action["result"]) == []
-    assert gateway.calls == []
+    assert len(gateway.calls) == 2
 
 
 def test_semantic_planner_requirements_intent_executes_action_policy(
@@ -2293,7 +2452,26 @@ def test_direct_empty_requirements_followup_uses_last_result(
     use_gateway,
 ):
     user, organization = assistant_user
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_requirements",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No hay requisitos visibles registrados.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -2316,7 +2494,7 @@ def test_direct_empty_requirements_followup_uses_last_result(
     assert assistant_message["agent_key"] == "consultation"
     assert assistant_message["actions"] == []
     assert f"0 requisitos visibles en {organization.name}" in assistant_message["content"]
-    assert gateway.calls == []
+    assert len(gateway.calls) == 2
 
 
 def test_direct_empty_needs_followup_uses_last_result(
@@ -2325,7 +2503,26 @@ def test_direct_empty_needs_followup_uses_last_result(
     use_gateway,
 ):
     user, organization = assistant_user
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_requirements",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No hay necesidades visibles registradas.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -2348,50 +2545,55 @@ def test_direct_empty_needs_followup_uses_last_result(
     assert assistant_message["agent_key"] == "consultation"
     assert assistant_message["actions"] == []
     assert f"0 necesidades visibles en {organization.name}" in assistant_message["content"]
-    assert gateway.calls == []
+    assert len(gateway.calls) == 2
 
 
-def test_direct_create_test_requirement_confirmed(
+def test_model_can_create_test_requirement(
     client,
     db,
     assistant_user,
     use_gateway,
 ):
     user, organization = assistant_user
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_create_requirement",
+                            "create_requirement",
+                            {
+                                "organization_id": organization.id,
+                                **assistant_service.TEST_REQUIREMENT_DRAFT,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He creado el borrador del requisito de prueba.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
         headers=headers_for(user),
     ).json()
 
-    ask_content = client.post(
+    created = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "crea un requisito de prueba"},
         headers=headers_for(user),
     )
-    proposed = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "tú decides"},
-        headers=headers_for(user),
-    )
-    created = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "sí"},
-        headers=headers_for(user),
-    )
 
-    assert ask_content.status_code == 200
-    assert "necesito al menos confirmar" in ask_content.json()["messages"][-1]["content"]
-    assert proposed.status_code == 200
-    assert "¿Confirmas que lo cree como borrador?" in proposed.json()["messages"][-1]["content"]
     assert created.status_code == 200
     assistant_message = created.json()["messages"][-1]
-    assert assistant_message["agent_key"] == "requirements_intake"
-    assert assistant_message["routing"]["source"] == "deterministic"
     assert [action["tool"] for action in assistant_message["actions"]] == [
-        "list_requirements",
-        "create_requirement",
+        "create_requirement"
     ]
     requirement = db.scalar(
         select(Requirement).where(Requirement.title == "Requisito de prueba")
@@ -2401,11 +2603,11 @@ def test_direct_create_test_requirement_confirmed(
     assert requirement.status == "draft"
     assert requirement.source_type == "conversation"
     assert requirement.created_by_id == user.id
-    assert f"borrador #{requirement.id}" in assistant_message["content"]
-    assert gateway.calls == []
+    assert "borrador" in assistant_message["content"].lower()
+    assert len(gateway.calls) == 2
 
 
-def test_direct_create_test_requirement_avoids_duplicate(
+def test_model_can_check_test_requirement_duplicate_before_creating(
     client,
     db,
     assistant_user,
@@ -2422,25 +2624,34 @@ def test_direct_create_test_requirement_avoids_duplicate(
         )
     )
     db.commit()
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_requirements",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No he creado un duplicado del requisito de prueba.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
         headers=headers_for(user),
     ).json()
-    client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "crea un requisito de prueba"},
-        headers=headers_for(user),
-    )
-    client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "tú decides"},
-        headers=headers_for(user),
-    )
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "sí"},
+        json={"content": "crea un requisito de prueba"},
         headers=headers_for(user),
     )
 
@@ -2458,10 +2669,10 @@ def test_direct_create_test_requirement_avoids_duplicate(
         )
         == 1
     )
-    assert gateway.calls == []
+    assert len(gateway.calls) == 2
 
 
-def test_direct_create_another_requirement_collects_org_and_content(
+def test_model_can_create_another_requirement_with_explicit_content(
     client,
     db,
     make_user,
@@ -2478,40 +2689,46 @@ def test_direct_create_another_requirement_collects_org_and_content(
             organization,
             ["assistant.use", "requirements.create", "requirements.view"],
         )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_create_requirement",
+                            "create_requirement",
+                            {
+                                "organization_id": default_organization.id,
+                                "title": "prueba2",
+                                "problem": "probar2",
+                                "summary": "probar2",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He creado el borrador prueba2.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
         headers=headers_for(user),
     ).json()
 
-    ask_organization = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "crea otro requisito"},
-        headers=headers_for(user),
-    )
-    refuse_invention = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "en default. decide tú el resto"},
-        headers=headers_for(user),
-    )
     created = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "prueba2, y el problema es probar2"},
+        json={"content": "crea otro requisito en default: prueba2, y el problema es probar2"},
         headers=headers_for(user),
     )
 
-    assert ask_organization.status_code == 200
-    assert "¿En qué organización" in ask_organization.json()["messages"][-1]["content"]
-    assert "Título breve" in ask_organization.json()["messages"][-1]["content"]
-    assert refuse_invention.status_code == 200
-    assert "no debo inventar" in refuse_invention.json()["messages"][-1]["content"]
     assert created.status_code == 200
     assistant_message = created.json()["messages"][-1]
-    assert assistant_message["agent_key"] == "requirements_intake"
-    assert assistant_message["routing"]["source"] == "deterministic"
     assert [action["tool"] for action in assistant_message["actions"]] == [
-        "list_requirements",
         "create_requirement",
     ]
     requirement = db.scalar(
@@ -2522,11 +2739,11 @@ def test_direct_create_another_requirement_collects_org_and_content(
     assert requirement.problem == "probar2"
     assert requirement.summary == "probar2"
     assert requirement.status == "draft"
-    assert f"borrador #{requirement.id}" in assistant_message["content"]
-    assert gateway.calls == []
+    assert "borrador" in assistant_message["content"].lower()
+    assert len(gateway.calls) == 2
 
 
-def test_direct_create_another_need_collects_org_and_content(
+def test_model_can_create_another_need_with_explicit_content(
     client,
     db,
     make_user,
@@ -2543,40 +2760,46 @@ def test_direct_create_another_need_collects_org_and_content(
             organization,
             ["assistant.use", "requirements.create", "requirements.view"],
         )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_create_requirement",
+                            "create_requirement",
+                            {
+                                "organization_id": default_organization.id,
+                                "title": "prueba2",
+                                "problem": "probar2",
+                                "summary": "probar2",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He creado el borrador prueba2.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
         headers=headers_for(user),
     ).json()
 
-    ask_organization = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "crea otra necesidad"},
-        headers=headers_for(user),
-    )
-    refuse_invention = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "en default. decide tú el resto"},
-        headers=headers_for(user),
-    )
     created = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "prueba2, y el problema es probar2"},
+        json={"content": "crea otra necesidad en default: prueba2, y el problema es probar2"},
         headers=headers_for(user),
     )
 
-    assert ask_organization.status_code == 200
-    assert "¿En qué organización" in ask_organization.json()["messages"][-1]["content"]
-    assert "Título breve" in ask_organization.json()["messages"][-1]["content"]
-    assert refuse_invention.status_code == 200
-    assert "no debo inventar" in refuse_invention.json()["messages"][-1]["content"]
     assert created.status_code == 200
     assistant_message = created.json()["messages"][-1]
-    assert assistant_message["agent_key"] == "requirements_intake"
-    assert assistant_message["routing"]["source"] == "deterministic"
     assert [action["tool"] for action in assistant_message["actions"]] == [
-        "list_requirements",
         "create_requirement",
     ]
     requirement = db.scalar(
@@ -2587,8 +2810,8 @@ def test_direct_create_another_need_collects_org_and_content(
     assert requirement.problem == "probar2"
     assert requirement.summary == "probar2"
     assert requirement.status == "draft"
-    assert f"borrador #{requirement.id}" in assistant_message["content"]
-    assert gateway.calls == []
+    assert "borrador" in assistant_message["content"].lower()
+    assert len(gateway.calls) == 2
 
 
 def test_confirming_exact_generic_map_proposal_creates_draft_deterministically(
@@ -3234,7 +3457,20 @@ def test_create_capability_question_answers_without_starting_intake(
             organization,
             ["assistant.use", "requirements.create", "requirements.view"],
         )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Puedo crear o actualizar necesidades/requisitos como borrador si me das el contenido."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -3249,15 +3485,12 @@ def test_create_capability_question_answers_without_starting_intake(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["reason"] == "global_capabilities"
-    assert assistant_message["routing"]["intent"] == "global_capabilities"
     assert assistant_message["actions"] == []
     normalized_content = assistant_message["content"].lower()
     assert "claro. la creo" not in normalized_content
     assert "título breve" not in normalized_content
     assert "crear o actualizar necesidades/requisitos como borrador" in normalized_content
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
 def test_direct_create_agent_reference_switches_to_intake_without_internal_copy(
@@ -3276,23 +3509,25 @@ def test_direct_create_agent_reference_switches_to_intake_without_internal_copy(
             organization,
             ["assistant.use", "requirements.create", "requirements.view"],
         )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Puedo crear o actualizar necesidades/requisitos como borrador si me das el contenido."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
         headers=headers_for(user),
     ).json()
-    client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "Qué requisitos tenemos registrados?"},
-        headers=headers_for(user),
-    )
-    client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "DEFAULT"},
-        headers=headers_for(user),
-    )
-
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "bueno pero puedes llamar al agente de crear requisitos no?"},
@@ -3301,37 +3536,52 @@ def test_direct_create_agent_reference_switches_to_intake_without_internal_copy(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["reason"] == "global_capabilities"
-    assert assistant_message["routing"]["intent"] == "global_capabilities"
     assert assistant_message["actions"] == []
     normalized_content = assistant_message["content"].lower()
     assert "solo lectura" not in normalized_content
     assert "copia" not in normalized_content
     assert "agente" not in normalized_content
     assert "crear o actualizar necesidades/requisitos como borrador" in normalized_content
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
-def test_direct_create_another_requirement_accepts_labeled_content(
+def test_model_create_requirement_accepts_labeled_content(
     client,
     db,
     assistant_user,
     use_gateway,
 ):
     user, organization = assistant_user
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_create_requirement",
+                            "create_requirement",
+                            {
+                                "organization_id": organization.id,
+                                "title": "prueba 2",
+                                "problem": 'un texto de prueba "prueba 2"',
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He creado el borrador prueba 2.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
         headers=headers_for(user),
     ).json()
 
-    ask_content = client.post(
-        f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "crea otro requisito"},
-        headers=headers_for(user),
-    )
     created = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={
@@ -3343,12 +3593,9 @@ def test_direct_create_another_requirement_accepts_labeled_content(
         headers=headers_for(user),
     )
 
-    assert ask_content.status_code == 200
-    assert "Título breve" in ask_content.json()["messages"][-1]["content"]
     assert created.status_code == 200
     assistant_message = created.json()["messages"][-1]
     assert [action["tool"] for action in assistant_message["actions"]] == [
-        "list_requirements",
         "create_requirement",
     ]
     requirement = db.scalar(
@@ -3357,7 +3604,7 @@ def test_direct_create_another_requirement_accepts_labeled_content(
     assert requirement is not None
     assert requirement.organization_id == organization.id
     assert requirement.problem == 'un texto de prueba "prueba 2"'
-    assert gateway.calls == []
+    assert len(gateway.calls) == 2
 
 
 def test_conversations_are_private_to_their_creator(
@@ -3417,7 +3664,7 @@ def test_send_message_when_gateway_disabled_returns_503(
     assert response.json()["detail"] == "Assistant is not configured"
 
 
-def test_agent_turn_creates_requirement_draft_with_audit_trail(
+def test_agent_turn_stages_then_commits_requirement_draft_with_audit_trail(
     client,
     db,
     assistant_user,
@@ -3430,15 +3677,33 @@ def test_agent_turn_creates_requirement_draft_with_audit_trail(
                 fake_response(
                     "tool_use",
                     [
-                        text_block("Voy a registrar el requisito."),
+                        text_block("Preparo una propuesta de necesidad."),
                         tool_use_block(
                             "toolu_1",
-                            "create_requirement",
+                            "stage_requirement_proposal",
                             {
                                 "organization_id": organization.id,
                                 "title": "Cita previa para padrón",
                                 "problem": "Colas en el registro",
                             },
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Te propongo guardar “Cita previa para padrón”. ¿Lo creo como borrador?"
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_2",
+                            "commit_requirement_proposal",
+                            {"decision": "create_new"},
                         ),
                     ],
                 ),
@@ -3456,12 +3721,28 @@ def test_agent_turn_creates_requirement_draft_with_audit_trail(
         headers=headers_for(user),
     ).json()
 
-    response = client.post(
+    staged = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "Necesitamos cita previa para el padrón"},
         headers=headers_for(user),
     )
+    assert staged.status_code == 200
+    staged_message = staged.json()["messages"][-1]
+    assert [action["tool"] for action in staged_message["actions"]] == [
+        "stage_requirement_proposal"
+    ]
+    assert (
+        db.scalar(
+            select(Requirement).where(Requirement.title == "Cita previa para padrón")
+        )
+        is None
+    )
 
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
     assert response.status_code == 200
     detail = response.json()
 
@@ -3475,19 +3756,19 @@ def test_agent_turn_creates_requirement_draft_with_audit_trail(
     assert requirement.problem == "Colas en el registro"
 
     roles = [message["role"] for message in detail["messages"]]
-    assert roles == ["user", "assistant"]
-    assistant_message = detail["messages"][1]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    assistant_message = detail["messages"][-1]
     assert assistant_message["content"] == "He creado el borrador del requisito."
     assert len(assistant_message["actions"]) == 1
     action = assistant_message["actions"][0]
-    assert action["tool"] == "create_requirement"
+    assert action["tool"] == "commit_requirement_proposal"
     assert action["ok"] is True
-    assert json.loads(action["result"])["id"] == requirement.id
+    assert json.loads(action["result"])["requirement"]["id"] == requirement.id
 
     # Conversation title is taken from the first user message.
     assert detail["title"] == "Necesitamos cita previa para el padrón"
-    # Two API round-trips: tool call + final reply.
-    assert len(gateway.calls) == 2
+    # Two turns, each with tool call + final reply.
+    assert len(gateway.calls) == 4
 
 
 def test_agent_tool_respects_rbac_of_current_user(
@@ -3511,11 +3792,26 @@ def test_agent_tool_respects_rbac_of_current_user(
                     [
                         tool_use_block(
                             "toolu_1",
-                            "create_requirement",
+                            "stage_requirement_proposal",
                             {
                                 "organization_id": organization.id,
                                 "title": "No debería crearse",
+                                "problem": "No hay permiso de creación.",
                             },
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He preparado la propuesta. ¿La creo?")],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_2",
+                            "commit_requirement_proposal",
+                            {"decision": "create_new"},
                         ),
                     ],
                 ),
@@ -3533,19 +3829,26 @@ def test_agent_tool_respects_rbac_of_current_user(
         headers=headers_for(user),
     ).json()
 
-    response = client.post(
+    staged = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "Crea un requisito"},
         headers=headers_for(user),
     )
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
 
+    assert staged.status_code == 200
     assert response.status_code == 200
     requirement = db.scalar(
         select(Requirement).where(Requirement.title == "No debería crearse")
     )
     assert requirement is None
 
-    action = response.json()["messages"][1]["actions"][0]
+    action = response.json()["messages"][-1]["actions"][0]
+    assert action["tool"] == "commit_requirement_proposal"
     assert action["ok"] is False
     assert "requirements.create" in action["result"]
 
@@ -3561,6 +3864,7 @@ def test_agent_web_search_uses_controlled_hermes_web_tool(
     user = make_user()
     organization = make_organization()
     grant_permissions(user, organization, ["assistant.use", "assistant.web.search"])
+    monkeypatch.setattr(settings, "hermes_web_api_key", "test-key")
     calls = []
 
     def fake_search(*, query: str, limit: int):
@@ -3623,7 +3927,7 @@ def test_agent_web_search_uses_controlled_hermes_web_tool(
     assert result["results"][0]["url"] == "https://example.test/normativa"
 
 
-def test_agent_web_search_requires_permission(
+def test_agent_web_search_is_unavailable_without_permission(
     client,
     make_user,
     make_organization,
@@ -3634,26 +3938,8 @@ def test_agent_web_search_requires_permission(
     organization = make_organization()
     grant_permissions(user, organization, ["assistant.use"])
 
-    use_gateway(
-        FakeGateway(
-            [
-                fake_response(
-                    "tool_use",
-                    [
-                        tool_use_block(
-                            "toolu_1",
-                            "web_search",
-                            {"query": "normativa municipal 2026"},
-                        ),
-                    ],
-                ),
-                fake_response(
-                    "end_turn",
-                    [text_block("No tienes permiso para buscar en la web.")],
-                ),
-            ]
-        )
-    )
+    gateway = FakeGateway([])
+    use_gateway(gateway)
 
     conversation = client.post(
         "/assistant/conversations",
@@ -3668,10 +3954,44 @@ def test_agent_web_search_requires_permission(
     )
 
     assert response.status_code == 200
-    action = response.json()["messages"][1]["actions"][0]
-    assert action["tool"] == "web_search"
-    assert action["ok"] is False
-    assert "assistant.web.search" in action["result"]
+    assistant_message = response.json()["messages"][1]
+    assert assistant_message["content"] == assistant_service.WEB_SEARCH_UNAVAILABLE_REPLY
+    assert assistant_message["actions"] == []
+    assert gateway.calls == []
+
+
+def test_agent_web_search_is_unavailable_when_server_is_not_configured(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.use", "assistant.web.search"])
+    monkeypatch.setattr(settings, "hermes_web_api_key", None)
+    gateway = FakeGateway([])
+    use_gateway(gateway)
+
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca en internet"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][1]
+    assert assistant_message["content"] == assistant_service.WEB_SEARCH_UNAVAILABLE_REPLY
+    assert assistant_message["actions"] == []
+    assert gateway.calls == []
 
 
 def test_consultation_agent_can_search_approved_ordinance_chunks(
@@ -3733,7 +4053,7 @@ def test_consultation_agent_can_search_approved_ordinance_chunks(
     assert payload["results"][0]["source_url"] == ordinance.source_url
 
 
-def test_agent_turn_searches_ordinances_with_structured_filters(
+def test_agent_turn_can_search_ordinances_with_structured_filters(
     client,
     db,
     make_user,
@@ -3790,7 +4110,30 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
             routing={"chosen": "consultation", "source": "test"},
         ),
     )
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "toolu_ordinances",
+                            "semantic_search_ordinances",
+                            {
+                                "query": "¿Qué dice Miranda de Ebro sobre el IBI?",
+                                "municipality_name": "Miranda de Ebro",
+                                "topic": "ordenanzas fiscales",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He consultado la ordenanza de Miranda de Ebro.")],
+                ),
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -3806,9 +4149,7 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
     assert assistant_message["agent_key"] == "consultation"
-    assert assistant_message["routing"]["source"] == "deterministic"
-    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
-    assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert assistant_message["routing"]["source"] == "test"
     assert "Miranda de Ebro" in assistant_message["content"]
     action = assistant_message["actions"][0]
     assert action["tool"] == "semantic_search_ordinances"
@@ -3817,31 +4158,33 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert action["input"]["topic"] == "ordenanzas fiscales"
     assert '"municipality_name": "Miranda de Ebro"' in action["result"]
     assert '"topic": "ordenanzas fiscales"' in action["result"]
-    assert gateway.calls == []
+    assert len(gateway.calls) == 2
 
 
-def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
+def test_generic_ordinance_comparison_does_not_force_search(
     client,
-    db,
     make_user,
     make_organization,
     grant_permissions,
     use_gateway,
 ):
     user = make_user(full_name="Alcalde Test")
-    municipality = Municipality(
-        name="Fuentelcésped",
-        province="Burgos",
-        autonomous_community="Castilla y León",
-    )
-    db.add(municipality)
-    db.commit()
-    organization = make_organization(
-        name="Ayuntamiento de Fuentelcésped",
-        municipality_id=municipality.id,
-    )
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
     grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
-    gateway = use_gateway(FakeGateway([]))
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "Claro. Dime cuáles son las dos ordenanzas o los municipios y la materia."
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -3850,22 +4193,17 @@ def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
 
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={
-            "content": "¿Dispones de ordenanzas municipales que se puedan contrastar de unos municipios y otros para poder verificar cuál sería más adecuada a las necesidades de mi municipio?"
-        },
+        json={"content": "Comparar dos ordenanzas"},
         headers=headers_for(user),
     )
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
-    assert assistant_message["routing"]["intent"] == "read_ordinances"
-    assert [action["tool"] for action in assistant_message["actions"]] == [
-        "semantic_search_ordinances"
-    ]
-    assert assistant_message["actions"][0]["input"]["municipality_name"] == "Fuentelcésped"
+    assert assistant_message["agent_key"] == "consultation"
+    assert assistant_message["actions"] == []
+    assert "dos ordenanzas" in assistant_message["content"].lower()
     assert "necesidades visibles" not in assistant_message["content"].lower()
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
 def test_semantic_planner_ordinance_intent_executes_grounded_action(
@@ -3930,6 +4268,57 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
         "municipality_name": "Fuentelcésped",
     }
     assert gateway.calls == []
+
+
+def test_semantic_planner_ordinance_none_action_does_not_force_search(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_ordinances",
+            action="none",
+            query="Comparar dos ordenanzas",
+            confidence=0.86,
+            source="planner",
+        ),
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Dime cuáles son las dos ordenanzas y las comparo.")],
+                )
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Comparar dos ordenanzas"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["actions"] == []
+    assert "dos ordenanzas" in assistant_message["content"].lower()
+    assert len(gateway.calls) == 1
 
 
 def test_semantic_planner_unknown_vetoes_keyword_ordinance_route(
@@ -4474,6 +4863,284 @@ def test_transversal_feature_proposal_rejects_personal_data(
     assert result.ok is False
     assert "datos personales" in result.content
     assert db.scalar(select(AssistantTransversalFeature)) is None
+
+
+def test_stage_requirement_proposal_stores_pending_without_creating_requirement(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento Conversacional")
+    grant_permissions(user, organization, ["assistant.use", "requirements.view"])
+    conversation = AssistantConversation(title="Captación", created_by_id=user.id)
+    db.add(conversation)
+    db.flush()
+    user_message = AssistantMessage(
+        conversation_id=conversation.id,
+        role="user",
+        content="Necesitamos controlar llaves municipales.",
+    )
+    db.add(user_message)
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "stage_requirement_proposal",
+        {
+            "organization_id": organization.id,
+            "title": "Control de llaves municipales",
+            "problem": "No hay un registro común de quién tiene cada copia.",
+            "affected_users": "Secretaría y personal municipal.",
+        },
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+        ),
+    )
+
+    assert result.ok is True
+    data = json.loads(result.content)
+    assert data["status"] == "awaiting_confirmation"
+    assert data["draft"]["affected_users"] == "Secretaría y personal municipal."
+    assert (
+        db.scalar(
+            select(Requirement).where(
+                Requirement.title == "Control de llaves municipales"
+            )
+        )
+        is None
+    )
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation.id)
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_requirement_proposal"]["draft"]["title"] == (
+        "Control de llaves municipales"
+    )
+    assert state["pending_requirement_proposal"]["source_user_message_ids"] == [
+        user_message.id
+    ]
+
+
+def test_commit_requirement_proposal_creates_draft_after_confirmation(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento Confirmado")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.view", "requirements.create"],
+    )
+    conversation = AssistantConversation(title="Captación", created_by_id=user.id)
+    db.add(conversation)
+    db.flush()
+    user_message = AssistantMessage(
+        conversation_id=conversation.id,
+        role="user",
+        content="Preparar propuesta.",
+    )
+    db.add(user_message)
+    db.commit()
+
+    staged = assistant_tools.execute_tool(
+        db,
+        user,
+        "stage_requirement_proposal",
+        {
+            "organization_id": organization.id,
+            "title": "Control de llaves municipales",
+            "problem": "No hay un registro común de quién tiene cada copia.",
+            "desired_process": "Registrar préstamos y devoluciones desde una ficha.",
+            "acceptance_criteria": "Saber quién tiene cada llave en menos de un minuto.",
+        },
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+        ),
+    )
+    committed = assistant_tools.execute_tool(
+        db,
+        user,
+        "commit_requirement_proposal",
+        {"decision": "create_new"},
+        assistant_tools.ToolContext(conversation_id=conversation.id),
+    )
+
+    assert staged.ok is True
+    assert committed.ok is True
+    requirement = db.scalar(
+        select(Requirement).where(Requirement.title == "Control de llaves municipales")
+    )
+    assert requirement is not None
+    assert requirement.organization_id == organization.id
+    assert requirement.status == "draft"
+    assert requirement.source_type == "conversation"
+    assert requirement.desired_process == (
+        "Registrar préstamos y devoluciones desde una ficha."
+    )
+    assert requirement.acceptance_criteria == (
+        "Saber quién tiene cada llave en menos de un minuto."
+    )
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation.id)
+    state = json.loads(stored_conversation.state or "{}")
+    assert "pending_requirement_proposal" not in state
+
+
+def test_commit_requirement_proposal_can_add_note_to_existing_candidate(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento Duplicados")
+    grant_permissions(user, organization, ["assistant.use", "requirements.view"])
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Mapa municipal",
+        summary="Mostrar tareas pendientes en el mapa.",
+        status="draft",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    conversation = AssistantConversation(title="Captación", created_by_id=user.id)
+    db.add_all([requirement, conversation])
+    db.flush()
+    user_message = AssistantMessage(
+        conversation_id=conversation.id,
+        role="user",
+        content="El mapa debería permitir registrar pendientes.",
+    )
+    db.add(user_message)
+    db.commit()
+
+    staged = assistant_tools.execute_tool(
+        db,
+        user,
+        "stage_requirement_proposal",
+        {
+            "organization_id": organization.id,
+            "title": "Mapa municipal de pendientes",
+            "problem": "El alguacil necesita registrar cosas pendientes en el mapa.",
+        },
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+        ),
+    )
+    data = json.loads(staged.content)
+    committed = assistant_tools.execute_tool(
+        db,
+        user,
+        "commit_requirement_proposal",
+        {
+            "decision": "add_note_to_existing",
+            "requirement_id": requirement.id,
+            "note": "Añadir registro de pendientes desde conversación.",
+        },
+        assistant_tools.ToolContext(conversation_id=conversation.id),
+    )
+
+    assert staged.ok is True
+    assert data["status"] == "awaiting_duplicate_choice"
+    assert data["candidates"][0]["id"] == requirement.id
+    assert committed.ok is True
+    message = db.scalar(
+        select(RequirementMessage).where(
+            RequirementMessage.requirement_id == requirement.id
+        )
+    )
+    assert message is not None
+    assert message.message_type == "clarification"
+    assert "registro de pendientes" in message.body
+
+
+def test_pending_requirement_proposal_prevents_legacy_affirmative_create(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    organization = make_organization(name="Ayuntamiento Staged")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.view", "requirements.create"],
+    )
+    monkeypatch.setattr(assistant_service, "plan_turn", lambda **kwargs: None)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Lo mantenemos como propuesta pendiente.")],
+                )
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(
+        {
+            "selected_organization_id": organization.id,
+            "pending_requirement_proposal": {
+                "status": "awaiting_confirmation",
+                "organization_id": organization.id,
+                "draft": {
+                    "title": "Control de llaves municipales",
+                    "problem": "No hay control de copias.",
+                },
+                "candidate_requirement_ids": [],
+                "source_user_message_ids": [],
+            },
+        },
+        ensure_ascii=False,
+    )
+    db.add(
+        AssistantMessage(
+            conversation_id=stored_conversation.id,
+            role="assistant",
+            agent_key="requirements_intake",
+            content=(
+                "Título: “Control de llaves municipales”\n"
+                "Problema: “No hay control de copias.”\n\n¿Lo guardo?"
+            ),
+        )
+    )
+    db.commit()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "sí"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert gateway.calls
+    assert (
+        db.scalar(
+            select(Requirement).where(
+                Requirement.title == "Control de llaves municipales"
+            )
+        )
+        is None
+    )
 
 
 def test_transversal_feature_review_is_superuser_only(

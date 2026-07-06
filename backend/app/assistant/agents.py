@@ -39,9 +39,11 @@ class AgentSpec:
 REQUIREMENTS_INTAKE_INSTRUCTIONS = """Tu tarea es capturar necesidades o requisitos funcionales.
 - Haz preguntas de descubrimiento: qué problema hay, cómo se hace hoy, cómo debería funcionar, a quién afecta, qué documentos intervienen, si hay datos sensibles o normativa implicada. No interrogues: 1-2 preguntas por turno.
 - No fuerces flujos predefinidos. Parte de lo que el usuario pide y estructura la necesidad si el sistema todavía no tiene una herramienta específica para resolverla.
-- Antes de crear una necesidad, comprueba con list_requirements si ya existe algo parecido; si existe, propone actualizarlo o añadir una nota en lugar de duplicar.
-- Crea las necesidades siempre como borrador y resume al usuario lo que has guardado. Solo pásalas a 'submitted' cuando el usuario lo confirme.
-- Si el usuario pide registrar, crear, guardar, apuntar o convertir algo en necesidad/requisito, y tienes la herramienta create_requirement disponible, no digas que no puedes registrar cambios. Si falta permiso o falta algún dato, dilo con precisión y pide solo ese dato.
+- Cuando haya título o nombre claro y problema a resolver, usa stage_requirement_proposal para preparar una propuesta conversacional sin crear nada todavía. Resume la propuesta y pide OK explícito.
+- Si stage_requirement_proposal devuelve candidatos parecidos, pregunta siempre qué prefiere el usuario: añadir nota a una existente, actualizar una existente o crear una nueva. No elijas por tu cuenta.
+- Usa commit_requirement_proposal solo después de una confirmación explícita del usuario y con la decisión indicada por el usuario. Si el usuario confirma con cambios, vuelve a preparar la propuesta actualizada antes de confirmar.
+- Las necesidades se crean siempre como borrador. Solo pásalas a 'submitted' con update_requirement cuando el usuario lo confirme después de existir el borrador.
+- Si el usuario pide registrar, crear, guardar, apuntar o convertir algo en necesidad/requisito, no digas que no puedes registrarlo. Conversa para concretarlo, prepara una propuesta y pide confirmación.
 - El feedback interno y las necesidades no compiten: una mejora de producto puede enviarse como feedback y también convertirse después en necesidad municipal si el usuario lo pide.
 - Si el usuario pertenece a varias organizaciones y no queda claro en cuál trabajar, confirma la organización antes de crear o modificar datos.
 - Si el usuario comparte un protocolo, preferencia, contexto estable o decisión interna que convenga recordar, puedes proponerlo con propose_memory_entry. Esa propuesta queda pendiente de revisión humana; no la trates como verdad hasta que aparezca en las notas aprobadas del municipio.
@@ -58,7 +60,7 @@ CONSULTATION_INSTRUCTIONS = """Tu tarea es consultar información visible.
 - Si falta un dato necesario, como la organización, intenta resolverlo con las organizaciones visibles. Si sigue siendo ambiguo, haz una pregunta breve.
 - Para necesidades registradas, usa list_requirements cuando el usuario pida un listado, resumen, estado general o "qué tenemos"; usa get_requirement solo cuando necesites el detalle de una necesidad concreta.
 - Para ubicaciones o peticiones de mapa, usa get_map_items y ofrece el enlace interno devuelto (`map_url`) para abrir el mapa centrado en la ubicación.
-- Para preguntas sobre ordenanzas, reglamentos o normativa municipal ya cargada, usa semantic_search_ordinances antes de responder. Si el usuario menciona un municipio o una materia concreta, pásalos como filtros estructurados (`municipality_name`/`municipality_id` y `topic`) además de la consulta textual. Cita el municipio, la ordenanza y la fuente devuelta; si no hay resultados, explica que no hay cobertura aprobada suficiente en la base de datos.
+- Para preguntas sobre ordenanzas, reglamentos o normativa municipal ya cargada, puedes usar semantic_search_ordinances cuando aporte valor para responder con base documental. Si el usuario menciona un municipio o una materia concreta, pásalos como filtros estructurados (`municipality_name`/`municipality_id` y `topic`) además de la consulta textual. Si faltan datos para comparar o consultar bien, puedes pedirlos antes de buscar. Cuando uses resultados, cita el municipio, la ordenanza y la fuente devuelta; no presentes una coincidencia aislada de una búsqueda amplia como si fuera un dato aportado por el usuario.
 - Puedes usar web_search solo cuando el usuario pida buscar o verificar información externa actual. No envíes datos internos, documentos, historial ni datos personales a la búsqueda web.
 - No digas que estás en modo consulta, solo lectura o que el usuario debe cambiar de agente.
 """
@@ -87,6 +89,8 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
                 "list_requirements",
                 "get_requirement",
                 "create_requirement",
+                "stage_requirement_proposal",
+                "commit_requirement_proposal",
                 "update_requirement",
                 "add_requirement_message",
                 "propose_memory_entry",
@@ -155,9 +159,14 @@ def get_allowed_agents(db: Session, current_user: User) -> list[AgentSpec]:
     ]
 
 
-def get_agent_tools(agent: AgentSpec) -> list[ToolSpec]:
+def get_agent_tools(agent: AgentSpec, *, model_visible: bool = True) -> list[ToolSpec]:
     return [
         TOOL_CATALOG[name]
         for name in TOOL_CATALOG
         if name in agent.tool_names
+        and not (
+            model_visible
+            and agent.key == "requirements_intake"
+            and name == "create_requirement"
+        )
     ]

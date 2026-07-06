@@ -47,7 +47,7 @@ from app.assistant.planner import (
     planner_enabled,
     planner_healthy,
 )
-from app.assistant.tools import get_tool_metadata
+from app.assistant.tools import get_available_tool_metadata
 from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
 from app.db.session import get_db
@@ -99,7 +99,7 @@ def get_assistant_status(
             "runtime_healthy": planner_healthy(),
         },
         agents=[agent.metadata for agent in get_allowed_agents(db, current_user)],
-        tools=get_tool_metadata(),
+        tools=get_available_tool_metadata(db, current_user),
     )
 
 

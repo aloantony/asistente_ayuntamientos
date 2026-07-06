@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
 from app.assistant.models import (
     AssistantAdminFeedback,
+    AssistantConversation,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
@@ -89,6 +90,7 @@ MAX_ORDINANCE_RESULTS = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
+MAX_REQUIREMENT_PROPOSAL_CANDIDATES = 3
 PERSONAL_DATA_PATTERN = re.compile(
     r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
     re.IGNORECASE,
@@ -107,6 +109,27 @@ REQUIREMENT_CONTENT_FIELDS = (
     "acceptance_criteria",
     "open_questions",
 )
+REQUIREMENT_PROPOSAL_DECISIONS = {
+    "create_new",
+    "add_note_to_existing",
+    "update_existing",
+}
+REQUIREMENT_MATCH_STOPWORDS = {
+    "para",
+    "como",
+    "esto",
+    "esta",
+    "este",
+    "tener",
+    "poder",
+    "hacer",
+    "municipal",
+    "municipales",
+    "ayuntamiento",
+    "necesidad",
+    "requisito",
+    "problema",
+}
 
 _REQUIREMENT_FIELD_PROPERTIES = {
     "title": {"type": "string", "description": "Título corto del requisito"},
@@ -453,6 +476,61 @@ _TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "stage_requirement_proposal",
+        "description": (
+            "Prepara una propuesta de nueva necesidad en la conversación sin "
+            "crear ni modificar requisitos. Úsala cuando el usuario ya haya "
+            "dado al menos un título o nombre claro y el problema a resolver, "
+            "pero antes de pedir confirmación final. Devuelve posibles "
+            "coincidencias visibles para que preguntes si quiere ampliar una "
+            "existente, añadir una nota o crear una nueva."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización a la que pertenecería la necesidad",
+                },
+                **_REQUIREMENT_FIELD_PROPERTIES,
+            },
+            "required": ["organization_id", "title", "problem"],
+        },
+    },
+    {
+        "name": "commit_requirement_proposal",
+        "description": (
+            "Ejecuta una propuesta de necesidad pendiente solo después de un OK "
+            "explícito del usuario. Usa decision=create_new para crear un "
+            "borrador nuevo; add_note_to_existing para añadir una aclaración a "
+            "un requisito parecido; update_existing para actualizar un requisito "
+            "existente cuando el usuario lo pida claramente."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": [
+                        "create_new",
+                        "add_note_to_existing",
+                        "update_existing",
+                    ],
+                    "description": "Qué hacer con la propuesta pendiente",
+                },
+                "requirement_id": {
+                    "type": "integer",
+                    "description": "Requisito existente elegido por el usuario",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Nota opcional cuando decision=add_note_to_existing",
+                },
+            },
+            "required": ["decision"],
+        },
+    },
+    {
         "name": "update_requirement",
         "description": (
             "Actualiza los campos de contenido de un requisito existente, o "
@@ -734,6 +812,125 @@ def _serialize_requirement(requirement: Requirement, *, full: bool) -> dict:
     else:
         data["summary"] = requirement.summary
     return data
+
+
+def _normalize_match_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.lower())
+    without_accents = "".join(
+        char for char in decomposed if not unicodedata.combining(char)
+    )
+    return re.sub(r"\s+", " ", without_accents).strip()
+
+
+def _require_conversation_state(
+    db: Session,
+    context: ToolContext,
+) -> tuple[AssistantConversation, dict]:
+    if context.conversation_id is None:
+        raise ValueError("conversation_id es obligatorio para esta herramienta")
+    conversation = db.get(AssistantConversation, context.conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Assistant conversation not found")
+    if not conversation.state:
+        return conversation, {}
+    try:
+        state = json.loads(conversation.state)
+    except json.JSONDecodeError:
+        state = {}
+    return conversation, state if isinstance(state, dict) else {}
+
+
+def _dump_conversation_state(conversation: AssistantConversation, state: dict) -> None:
+    conversation.state = json.dumps(state, ensure_ascii=False) if state else None
+
+
+def _clean_requirement_proposal(tool_input: dict) -> dict:
+    title = str(tool_input["title"]).strip()
+    problem = str(tool_input["problem"]).strip()
+    if not title:
+        raise ValueError("title no puede estar vacío")
+    if not problem:
+        raise ValueError("problem no puede estar vacío")
+
+    draft: dict[str, object] = {
+        "title": title[:255],
+        "problem": problem,
+    }
+    for field in REQUIREMENT_CONTENT_FIELDS:
+        if field in {"title", "problem"}:
+            continue
+        value = tool_input.get(field)
+        if value is not None and str(value).strip():
+            draft[field] = str(value).strip()
+    priority = str(tool_input.get("priority") or "medium").strip()
+    if priority not in VALID_PRIORITIES:
+        raise ValueError(f"priority inválida: {priority}")
+    draft["priority"] = priority
+    project_id = tool_input.get("project_id")
+    if project_id is not None:
+        draft["project_id"] = int(project_id)
+    return draft
+
+
+def _visible_requirements_for_organization(
+    db: Session,
+    current_user: User,
+    organization_id: int,
+) -> list[Requirement]:
+    query = (
+        select(Requirement)
+        .where(
+            Requirement.organization_id == organization_id,
+            Requirement.status != "archived",
+        )
+        .order_by(Requirement.created_at.desc(), Requirement.id.desc())
+    )
+    if not current_user.is_superuser:
+        query = query.where(build_requirement_visibility_filter(db, current_user))
+    return list(db.scalars(query.limit(100)).all())
+
+
+def _proposal_candidate_requirements(
+    requirements: list[Requirement],
+    draft: dict,
+) -> list[Requirement]:
+    haystack = " ".join(
+        str(draft.get(field) or "") for field in ("title", "summary", "problem")
+    )
+    query_text = _normalize_match_text(haystack)
+    query_tokens = {
+        token
+        for token in re.findall(r"\w+", query_text)
+        if len(token) >= 4 and token not in REQUIREMENT_MATCH_STOPWORDS
+    }
+    expected_title = _normalize_match_text(str(draft.get("title") or ""))
+    compact_expected_title = expected_title.replace(" ", "")
+
+    scored: list[tuple[int, Requirement]] = []
+    for requirement in requirements:
+        candidate_title = _normalize_match_text(requirement.title or "")
+        score = 0
+        if candidate_title == expected_title:
+            score += 100
+        elif candidate_title.replace(" ", "") == compact_expected_title:
+            score += 90
+
+        candidate_text = _normalize_match_text(
+            " ".join(
+                str(getattr(requirement, field) or "")
+                for field in ("title", "summary", "problem")
+            )
+        )
+        candidate_tokens = set(re.findall(r"\w+", candidate_text))
+        overlap = query_tokens.intersection(candidate_tokens)
+        score += len(overlap)
+        if "mapa" in query_tokens and "mapa" in candidate_tokens:
+            score += 3
+        if score > 0:
+            scored.append((score, requirement))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [requirement for _, requirement in scored[:MAX_REQUIREMENT_PROPOSAL_CANDIDATES]]
 
 
 def _list_organizations(
@@ -1193,6 +1390,204 @@ def _add_requirement_message(
     }
 
 
+def _stage_requirement_proposal(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    organization_id = int(tool_input["organization_id"])
+    ensure_organization_exists(db, organization_id)
+    if not has_permission(
+        current_user,
+        "assistant.use",
+        db,
+        organization_id=organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.use",
+        )
+
+    draft = _clean_requirement_proposal(tool_input)
+    ensure_project_matches_organization(
+        db,
+        project_id=draft.get("project_id"),
+        organization_id=organization_id,
+    )
+
+    conversation, state = _require_conversation_state(db, context)
+    requirements = _visible_requirements_for_organization(
+        db,
+        current_user,
+        organization_id,
+    )
+    candidates = _proposal_candidate_requirements(requirements, draft)
+    source_message_ids = []
+    if context.user_message_id is not None:
+        source_message_ids.append(context.user_message_id)
+
+    proposal = {
+        "status": (
+            "awaiting_duplicate_choice" if candidates else "awaiting_confirmation"
+        ),
+        "organization_id": organization_id,
+        "draft": draft,
+        "candidate_requirement_ids": [candidate.id for candidate in candidates],
+        "source_user_message_ids": source_message_ids,
+    }
+    state["selected_organization_id"] = organization_id
+    state["pending_requirement_proposal"] = proposal
+    state.pop("pending_work", None)
+    _dump_conversation_state(conversation, state)
+    db.add(conversation)
+    db.commit()
+
+    return {
+        "status": proposal["status"],
+        "organization_id": organization_id,
+        "draft": draft,
+        "candidates": [
+            _serialize_requirement(requirement, full=False)
+            for requirement in candidates
+        ],
+    }
+
+
+def _proposal_note_body(draft: dict) -> str:
+    labels = {
+        "title": "Título",
+        "summary": "Resumen",
+        "problem": "Problema",
+        "current_process": "Proceso actual",
+        "desired_process": "Proceso deseado",
+        "affected_users": "Usuarios afectados",
+        "involved_documents": "Documentos implicados",
+        "data_sensitivity_notes": "Datos sensibles",
+        "legal_notes": "Notas legales",
+        "acceptance_criteria": "Criterios de aceptación",
+        "open_questions": "Dudas abiertas",
+    }
+    lines = ["Aclaración capturada en conversación:"]
+    for field in REQUIREMENT_CONTENT_FIELDS:
+        value = draft.get(field)
+        if value is not None and str(value).strip():
+            lines.append(f"{labels[field]}: {str(value).strip()}")
+    return "\n".join(lines)
+
+
+def _commit_requirement_proposal(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    conversation, state = _require_conversation_state(db, context)
+    proposal = state.get("pending_requirement_proposal")
+    if not isinstance(proposal, dict):
+        raise ValueError("no hay propuesta de necesidad pendiente")
+
+    decision = str(tool_input["decision"]).strip()
+    if decision not in REQUIREMENT_PROPOSAL_DECISIONS:
+        raise ValueError(f"decision inválida: {decision}")
+
+    organization_id = int(proposal["organization_id"])
+    ensure_organization_exists(db, organization_id)
+    draft = proposal.get("draft")
+    if not isinstance(draft, dict):
+        raise ValueError("la propuesta pendiente no tiene borrador válido")
+    candidate_ids = {
+        int(candidate_id)
+        for candidate_id in proposal.get("candidate_requirement_ids", [])
+        if candidate_id is not None
+    }
+
+    result: dict
+    if decision == "create_new":
+        require_requirement_permission(
+            db,
+            current_user,
+            organization_id,
+            "requirements.create",
+        )
+        ensure_project_matches_organization(
+            db,
+            project_id=draft.get("project_id"),
+            organization_id=organization_id,
+        )
+        priority = str(draft.get("priority") or "medium")
+        if priority not in VALID_PRIORITIES:
+            raise ValueError(f"priority inválida: {priority}")
+        requirement = Requirement(
+            organization_id=organization_id,
+            project_id=draft.get("project_id"),
+            title=str(draft["title"])[:255],
+            priority=priority,
+            status="draft",
+            source_type="conversation",
+            created_by_id=current_user.id,
+        )
+        for field in REQUIREMENT_CONTENT_FIELDS:
+            if field == "title":
+                continue
+            value = draft.get(field)
+            if value is not None:
+                setattr(requirement, field, str(value))
+        db.add(requirement)
+        db.flush()
+        result = {
+            "decision": decision,
+            "requirement": _serialize_requirement(requirement, full=True),
+        }
+    else:
+        requirement_id = int(tool_input["requirement_id"])
+        if candidate_ids and requirement_id not in candidate_ids:
+            raise ValueError("requirement_id no está entre los candidatos propuestos")
+        requirement = get_existing_requirement(db, requirement_id)
+        require_requirement_view(db, current_user, requirement)
+        if requirement.organization_id != organization_id:
+            raise ValueError("requirement_id pertenece a otra organización")
+
+        if decision == "add_note_to_existing":
+            body = str(tool_input.get("note") or "").strip() or _proposal_note_body(draft)
+            message = RequirementMessage(
+                requirement_id=requirement.id,
+                author_id=current_user.id,
+                body=body,
+                message_type="clarification",
+            )
+            db.add(message)
+            db.flush()
+            result = {
+                "decision": decision,
+                "requirement_id": requirement.id,
+                "message_id": message.id,
+            }
+        else:
+            require_requirement_content_edit(db, current_user, requirement)
+            for field in REQUIREMENT_CONTENT_FIELDS:
+                value = draft.get(field)
+                if value is not None:
+                    setattr(requirement, field, str(value))
+            priority = draft.get("priority")
+            if priority is not None:
+                if priority not in VALID_PRIORITIES:
+                    raise ValueError(f"priority inválida: {priority}")
+                requirement.priority = str(priority)
+            db.flush()
+            result = {
+                "decision": decision,
+                "requirement": _serialize_requirement(requirement, full=True),
+            }
+
+    state.pop("pending_requirement_proposal", None)
+    state.pop("pending_work", None)
+    _dump_conversation_state(conversation, state)
+    db.add(conversation)
+    db.commit()
+    return result
+
+
 def _propose_memory_entry(
     db: Session,
     current_user: User,
@@ -1574,6 +1969,8 @@ _EXECUTORS = {
     "list_requirements": _list_requirements,
     "get_requirement": _get_requirement,
     "create_requirement": _create_requirement,
+    "stage_requirement_proposal": _stage_requirement_proposal,
+    "commit_requirement_proposal": _commit_requirement_proposal,
     "update_requirement": _update_requirement,
     "add_requirement_message": _add_requirement_message,
     "propose_memory_entry": _propose_memory_entry,
@@ -1625,6 +2022,16 @@ _TOOL_METADATA: dict[str, dict] = {
     },
     "create_requirement": {
         "label": "Crear necesidad",
+        "read_only": False,
+        "domain": "requirements",
+    },
+    "stage_requirement_proposal": {
+        "label": "Preparar propuesta de necesidad",
+        "read_only": False,
+        "domain": "requirements",
+    },
+    "commit_requirement_proposal": {
+        "label": "Confirmar propuesta de necesidad",
         "read_only": False,
         "domain": "requirements",
     },
@@ -1703,5 +2110,42 @@ def get_tool_definitions(tool_names: frozenset[str]) -> list[dict]:
     ]
 
 
+def is_tool_available_for_user(
+    db: Session,
+    current_user: User,
+    tool: ToolSpec,
+) -> bool:
+    if tool.required_permission and not has_permission(
+        current_user,
+        tool.required_permission,
+        db,
+    ):
+        return False
+    if tool.name == "web_search" and not hermes_web_client.enabled:
+        return False
+    return True
+
+
+def get_available_tool_specs(
+    db: Session,
+    current_user: User,
+    tool_names: frozenset[str],
+) -> list[ToolSpec]:
+    return [
+        TOOL_CATALOG[name]
+        for name in TOOL_CATALOG
+        if name in tool_names
+        and is_tool_available_for_user(db, current_user, TOOL_CATALOG[name])
+    ]
+
+
 def get_tool_metadata() -> list[dict]:
     return [spec.metadata for spec in TOOL_CATALOG.values()]
+
+
+def get_available_tool_metadata(db: Session, current_user: User) -> list[dict]:
+    return [
+        spec.metadata
+        for spec in TOOL_CATALOG.values()
+        if is_tool_available_for_user(db, current_user, spec)
+    ]
