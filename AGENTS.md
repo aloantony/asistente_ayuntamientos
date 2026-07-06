@@ -69,10 +69,12 @@ Choose the base branch deliberately:
 
 - Keep branches short-lived and scoped to one task.
 - Prefer stacked PRs for large features instead of one large PR.
-- Use Conventional Commits, for example `fix: normalize assistant tool calls` or `feat: add geolocated information model`.
+- Use the project commit style from `CLAUDE.md`: English, imperative subject, no conventional-commit prefixes; detailed body that references ADRs when relevant. Module milestones follow the pattern `Add <module> v1`.
 - Stage only files that belong to the current task. Avoid `git add .` when unrelated changes exist.
 - Review `git diff --cached` before committing.
 - Do not commit `.hermes/` plans by default. Move durable team documentation to `docs/` if it should be versioned.
+- Every non-documentation commit must be followed by a scoped documentation commit that updates the relevant `docs/` living document, ADR, or `README.md` section. If no documentation change is warranted, create or update a docs note explaining why the code-only commit did not change user-facing behavior, architecture, operations, or requirements.
+- Keep documentation commits separate from feature/fix commits unless the user explicitly asks for a single combined commit; the normal stack is code/test commit first, docs sync commit immediately after.
 - Every PR/handoff must include a real test plan with commands actually run.
 
 ## Testing expectations

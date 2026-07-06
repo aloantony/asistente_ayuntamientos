@@ -211,3 +211,5 @@ git pull
 5. Run the validation commands relevant to the change.
 6. Inspect latest commits for schema, permission, API or frontend changes.
 7. Avoid deleting volumes, uploaded files or secrets.
+
+Commit hygiene is documented in `AGENTS.md`/`CLAUDE.md`: every non-documentation commit should be followed by a dedicated docs sync commit updating the relevant `docs/` living document, ADR or README section. If no user-facing, architectural, operational or requirements text changes, record that explicitly in the docs sync commit.

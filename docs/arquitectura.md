@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-06-15.
+Actualizado: 2026-06-25.
 
 ## Visión general
 
@@ -9,7 +9,8 @@ Aplicación multi-tenant con cuatro servicios en Docker Compose:
 - `backend`: API HTTP FastAPI (puerto 127.0.0.1:8000), monolito modular.
 - `frontend`: Next.js App Router (puerto 127.0.0.1:3000), consola de administración y trabajo.
 - `postgres`: PostgreSQL 17, interno (sin puerto publicado), con volumen persistente.
-- `redis`: Redis 7, interno, reservado para colas/caché futuras (sin consumidor todavía).
+- `redis`: Redis 7, interno, usado por RQ para trabajos de importación/comparación de ordenanzas y reservado también para caché futura.
+- `worker`: proceso RQ para importación jurídica supervisada y vectorización/revisión de ordenanzas.
 
 ## Modelo de dominio y tenancy
 
@@ -28,6 +29,7 @@ La distinción central del dominio:
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
+- Las ordenanzas importadas desde fuentes oficiales entran en `pending_review`; la aprobación final exige `ordinances.review` y no la realiza el agente automáticamente.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual.
 
 ## Documentos
@@ -36,12 +38,20 @@ La distinción central del dominio:
 - Subida en streaming con lista blanca de tipos, límite de tamaño, sha256 y claves de almacenamiento generadas en servidor (defensa contra path traversal y colisiones).
 - Archivado reversible vía estado; no hay borrado físico de documentos.
 
+## Ordenanzas e importación jurídica
+
+- Los trabajos de importación (`ordinance_import_jobs`) se ejecutan con Redis/RQ y se limitan a fuentes oficiales configuradas.
+- El texto legal se fragmenta en unidades citables y vectorizables; PostgreSQL sigue siendo el almacén único. Si `pgvector` está disponible se usa para búsqueda semántica; en desarrollo los embeddings deterministas locales (`EMBEDDINGS_RUNTIME=local_hash`) evitan llamadas externas.
+- La comparación expone una matriz temática entre municipios; cualquier salida jurídica queda supervisada y pendiente de revisión humana.
+
 ## IA (dirección)
 
 - La IA es central en la dirección del producto pero siempre supervisada: asiste, estructura y propone; no decide.
 - Toda llamada a APIs externas de IA o a un runtime privado de agentes pasa por el gateway interno (`app/assistant/gateway.py`, punto único de salida): solo viaja el texto de la conversación, memoria institucional aprobada y los campos que el usuario dicta; los documentos originales no salen del servidor y los logs registran solo metadatos (runtime, modelo, tokens), nunca contenido.
 - Primera pieza implementada: el asistente conversacional (`app/assistant/`) con registro declarativo de agentes (`requirements_intake` y `consultation`) y catálogo backend de herramientas. Cada turno selecciona un agente; si `ASSISTANT_PLANNER_RUNTIME=hermes_agent`, Hermes Agent puede actuar como planner/router privado, pero solo propone el agente. El backend filtra las herramientas permitidas por agente, ejecuta los mismos chequeos RBAC que las rutas REST y persiste `agent_key`, `routing` y el rastro JSON de herramientas. El bucle síncrono de tool-use usa el runtime configurado (`ASSISTANT_RUNTIME=anthropic` o `ASSISTANT_RUNTIME=hermes_agent`). En modo Hermes Agent, el backend llama al API Server privado compatible con OpenAI; Hermes Agent actúa como aplicación/runtime o planner, no como base de datos de memoria ni como autoridad de permisos. Los requisitos se crean siempre como borrador con `source_type=conversation`. Conversaciones y mensajes persisten en PostgreSQL y son privados de su autor. Sin configuración completa del runtime seleccionado, el módulo queda deshabilitado (503).
 - Memoria institucional controlada: el asistente puede proponer entradas (`assistant.memory.propose`), pero solo quedan reutilizables tras aprobación humana (`assistant.memory.review`). La reutilización exige `assistant.memory.view` en la organización y solo inyecta entradas `approved` como contexto delimitado.
+- La búsqueda web controlada usa una segunda instancia/perfil privado de Hermes Agent con solo el toolset `web`; el backend envía únicamente la consulta explícita y audita la acción. El permiso de producto es `assistant.web.search`.
+- Telegram funciona como canal adicional del asistente para usuarios ya existentes: el usuario vincula un chat con un código corto de un solo uso, las conversaciones quedan marcadas con canal separado y todas las acciones siguen ejecutándose con el RBAC del usuario vinculado.
 
 ## Frontend
 
