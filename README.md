@@ -6,7 +6,7 @@ Asistente Ayuntamientos is a FastAPI + Next.js application for municipal managem
 
 The project objective is: "A platform to help small and medium-sized municipalities manage documentation, requirements, ordinances and internal processes, with progressive support from AI."
 
-The current product space is municipal documentation, internal work tracking, requirements intake, ordinance management and comparative reference data. It is intended for technical development and operational use, not as a public marketing site.
+The current product space is municipal documentation, internal work tracking, requirements intake, ordinance management, municipal map/territorial information and comparative reference data. It is intended for technical development and operational use, not as a public marketing site.
 
 ## 2. Product objective and direction
 
@@ -18,6 +18,7 @@ The project is evolving toward a municipal management and automation platform wh
 - Documents are stored securely on our own server.
 - Requirements capture functional needs and product ideas from municipal stakeholders.
 - Ordinances provide the basis for a future comparative knowledge base of municipal regulations.
+- Map, plans and territorial information are a first-class product pillar alongside Anacleto, not a secondary add-on.
 
 AI is intended to be central to the product direction. The system should assist, compare, structure, propose and automate where appropriate, but AI must remain supervised by humans. It must not silently make final legal or administrative decisions.
 
@@ -61,8 +62,10 @@ Future priorities will be refined through Requirements Intake and through work w
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
 - Ordinance import and comparison: official-source import jobs run through a Redis/RQ worker, create pending-review ordinances, split legal text into reviewable/vectorized chunks and expose a thematic comparison matrix between municipalities.
+- Municipal map and territorial layer: shared `geo` domain, map permissions and entity locations for requirements and projects, exposed through `/mapa`.
 - AI Requirements Intake Assistant: conversational agent (Spanish) that captures stakeholder needs as draft requirements. It runs a synchronous tool-use loop through the internal Privacy/AI Gateway (`app/assistant/gateway.py`) using either Anthropic or a private Hermes Agent API Server (`ASSISTANT_RUNTIME=hermes_agent`). Its tools execute with the calling user's RBAC permissions, requirements are always created as drafts with `source_type=conversation`, and every tool call leaves an auditable JSON trail. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected runtime is configured.
 - Controlled institutional memory: the assistant can propose organization memory, but only entries reviewed by authorized users become reusable context. Proposing, viewing and reviewing are separated by `assistant.memory.propose`, `assistant.memory.view` and `assistant.memory.review`.
+- Agent office: supervised internal task layer for Anacleto, with task/routine endpoints, approval policies, scoped execution and `agent_office.*` permissions.
 - Telegram assistant channel: existing users can generate a short-lived one-use link code from the account page, link a Telegram chat and use the assistant through a separate audited conversation channel with the same RBAC permissions.
 
 ## 6. Architecture principles
@@ -188,15 +191,15 @@ must keep an `app_test` prefix.
 
 ## 11. Current roadmap
 
-The roadmap is technical and directional. Items are subject to refinement through Requirements Intake and stakeholder feedback.
+The roadmap is technical and directional. Items are subject to refinement through supervised needs capture and stakeholder feedback.
 
-- AI Requirements Intake Agent v1 (conversational; the first external user is a mayor who feeds requirements through it) — shipped, see Implemented modules
-- Privacy/AI Gateway — v1 shipped with the intake agent; filtering/pseudonymization hardening pending
-- Voice input for the intake agent
-- Ordinance Comparison v1
-- Ordinance AI Assistant v1
-- Draft Generator v1
-- Future AI-assisted municipal workflows
+Current priorities:
+
+1. Supervised needs capture with Anacleto: the next tranche focuses on the mayor and team dictating needs conversationally, with explicit confirmation before every write.
+2. Map, plans and territorial information: the geo/map area is a core product pillar and should progress alongside Anacleto.
+3. Mega-reorientation: the supervised-worker direction is kept as a future quarry for reports, comparisons, communications, web-knowledge proposals, declarative policies and quality gates; it has no integration date.
+4. Ordinances and documentary work: keep the current BOPBUR/corpus/comparison work alive, but do not make it the immediate priority.
+5. Privacy/AI hardening: D9 sensitive-content filtering is not implemented; review before external users, with no scheduled date yet.
 
 ## 12. Developer handoff checklist
 
