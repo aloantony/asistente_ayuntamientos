@@ -26,7 +26,6 @@ from app.assistant.models import (
 from app.assistant.planner import SemanticTurnPlan, choose_agent, plan_turn
 from app.assistant.tools import ToolContext, ToolSpec, execute_tool
 from app.core.config import settings
-from app.municipalities.models import Municipality
 from app.organizations.access import get_accessible_organizations_query
 from app.organizations.models import Organization
 from app.rbac.permissions import has_permission
@@ -46,35 +45,6 @@ REFUSAL_REPLY = (
 ERROR_REPLY = (
     "Ha habido un problema al contactar con el servicio de IA. Tu mensaje "
     "queda guardado; inténtalo de nuevo en unos minutos."
-)
-GLOBAL_CAPABILITIES_REPLY = (
-    "Puedo ayudarte a consultar información visible de la plataforma, como "
-    "organizaciones, proyectos, necesidades/requisitos y funcionalidades "
-    "transversales. También puedo ayudarte a convertir una conversación en "
-    "trabajo estructurado: crear o actualizar necesidades/requisitos como "
-    "borrador, añadir aclaraciones y preparar propuestas supervisadas cuando "
-    "tus permisos lo permitan. Si me pides buscar información pública actual, "
-    "puedo hacerlo sin enviar datos internos.\n\n"
-    "No apruebo trámites ni valido decisiones oficiales: dejo el trabajo "
-    "preparado para revisión humana."
-)
-GLOBAL_CAPABILITIES_READ_ONLY_REPLY = (
-    "Puedo ayudarte a consultar información visible de la plataforma, como "
-    "organizaciones, proyectos, necesidades/requisitos y funcionalidades "
-    "transversales. También puedo ayudarte a estructurar una necesidad para que "
-    "quede clara antes de revisarla con alguien con permisos de creación. Si me "
-    "pides buscar información pública actual, puedo hacerlo sin enviar datos "
-    "internos.\n\n"
-    "No apruebo trámites ni valido decisiones oficiales."
-)
-ORDINANCE_CAPABILITIES_REPLY = (
-    "Sí. Puedo consultar el corpus interno de ordenanzas y reglamentos "
-    "municipales ya cargados y aprobados, citando fragmentos y fuente cuando "
-    "haya cobertura suficiente.\n\n"
-    "Para buscar bien, dime un municipio y una materia concreta, por ejemplo "
-    "tasas, terrazas, residuos, agua, caminos o animales. Si quieres comparar "
-    "municipios, también puedo ayudarte a contrastar los resultados, siempre "
-    "como apoyo y no como revisión jurídica oficial."
 )
 
 COMMON_SYSTEM_PROMPT = """Eres el asistente municipal de Asistente Ayuntamientos, una plataforma de gestión para ayuntamientos pequeños y medianos.
@@ -194,25 +164,6 @@ FEEDBACK_IMPROVEMENT_MARKERS = {
     "me gustaría que",
     "mejorar",
     "sugerencia",
-}
-ORDINANCE_TOPIC_MARKERS = {
-    "agua": "agua",
-    "saneamiento": "agua",
-    "ibi": "ordenanzas fiscales",
-    "impuesto sobre bienes inmuebles": "ordenanzas fiscales",
-    "impuestos": "ordenanzas fiscales",
-    "tasas": "ordenanzas fiscales",
-    "terrazas": "terrazas",
-    "hosteleria": "terrazas",
-    "hostelería": "terrazas",
-    "residuos": "residuos",
-    "basuras": "residuos",
-    "animales": "animales",
-    "caminos": "caminos",
-    "vertidos": "aguas residuales",
-    "aguas residuales": "aguas residuales",
-    "lenas": "montes",
-    "leñas": "montes",
 }
 TEST_REQUIREMENT_DRAFT = {
     "title": "Requisito de prueba",
@@ -981,107 +932,6 @@ def is_ordinance_request(text: str) -> bool:
     )
 
 
-def is_ordinance_capability_question(text: str) -> bool:
-    normalized = normalize_text(text)
-    if not normalized or not is_ordinance_request(text):
-        return False
-    asks_availability = any(
-        marker in normalized
-        for marker in {
-            "cuentas con",
-            "cuenta con",
-            "dispone",
-            "dispones",
-            "existen",
-            "hay",
-            "teneis",
-            "tenéis",
-            "tenemos",
-            "tienes",
-        }
-    )
-    if not asks_availability:
-        return False
-    asks_for_search = any(
-        marker in normalized
-        for marker in {
-            "adaptar",
-            "adecuada",
-            "buscar",
-            "busca",
-            "comparar",
-            "consulta",
-            "consultar",
-            "contrastar",
-            "que dice",
-            "qué dice",
-            "sobre",
-            "verificar",
-        }
-    )
-    if asks_for_search:
-        return False
-    return not any(
-        normalize_text(marker) in normalized for marker in ORDINANCE_TOPIC_MARKERS
-    )
-
-
-def is_map_items_request(text: str) -> bool:
-    normalized = normalize_text(text)
-    if not normalized:
-        return False
-    mentions_map_context = any(
-        marker in normalized
-        for marker in {
-            "mapa",
-            "ubicacion",
-            "ubicaciones",
-            "ubicado",
-            "ubicada",
-            "localiza",
-            "localizar",
-            "donde esta",
-            "dónde está",
-        }
-    )
-    if not mentions_map_context:
-        return False
-    return any(
-        marker in normalized
-        for marker in {
-            "hay",
-            "ver",
-            "verlo",
-            "verla",
-            "muestra",
-            "muéstrame",
-            "mostrar",
-            "consulta",
-            "consultar",
-            "proyecto",
-            "proyectos",
-            "necesidad",
-            "necesidades",
-            "requisito",
-            "requisitos",
-            "elemento",
-            "elementos",
-        }
-    )
-
-
-def build_map_items_input(text: str, organization: Organization | None) -> dict:
-    normalized = normalize_text(text)
-    tool_input: dict[str, object] = {"limit": 5}
-    if any(word in normalized for word in {"proyecto", "proyectos"}):
-        tool_input["entity_type"] = "project"
-    elif mentions_need_or_requirement(normalized):
-        tool_input["entity_type"] = "requirement"
-    if organization is not None:
-        tool_input["organization_id"] = organization.id
-    return tool_input
-
-
 def is_empty_requirements_followup(text: str) -> bool:
     normalized = normalize_text(text)
     return mentions_need_or_requirement(normalized) and any(
@@ -1095,102 +945,6 @@ def is_empty_requirements_followup(text: str) -> bool:
             "lista vacía",
         }
     )
-
-
-def is_create_test_requirement_request(text: str) -> bool:
-    normalized = normalize_text(text)
-    has_create = any(word in normalized for word in {"crea", "crear", "creame"})
-    return has_create and mentions_need_or_requirement(normalized) and "prueba" in normalized
-
-
-def is_create_another_requirement_request(text: str) -> bool:
-    normalized = normalize_text(text)
-    has_create = any(word in normalized for word in {"crea", "crear", "creame"})
-    return (
-        has_create
-        and mentions_need_or_requirement(normalized)
-        and any(word in normalized for word in {"otro", "otra"})
-    )
-
-
-def is_requirement_capture_request(text: str) -> bool:
-    normalized = normalize_text(text)
-    if not normalized:
-        return False
-    has_work_language = mentions_need_or_requirement(normalized) or any(
-        marker in normalized
-        for marker in {
-            "funcionalidad",
-            "funcionalidades",
-            "en la app",
-            "en el sistema",
-            "en la plataforma",
-            "mapa",
-        }
-    )
-    if not has_work_language:
-        return False
-    return any(
-        marker in normalized
-        for marker in {
-            "quiero contarte",
-            "quiero decirte",
-            "me gustaria",
-            "me gustaría",
-            "querria",
-            "querría",
-            "tengo identificada",
-            "quiero que",
-            "queremos que",
-            "necesito que",
-            "necesitamos que",
-            "deberia",
-            "debería",
-            "pueda",
-            "puedan",
-            "permita",
-            "registrar cosas",
-        }
-    )
-
-
-def is_requirement_capture_intro(text: str) -> bool:
-    normalized = normalize_text(text)
-    if not mentions_need_or_requirement(normalized):
-        return False
-    has_setup_language = any(
-        marker in normalized
-        for marker in {
-            "hacer una prueba",
-            "vamos a hacer una prueba",
-            "como que soy",
-            "quiero contarte un nuevo requisito",
-            "quiero decirte algo que me gustaria",
-            "quiero decirte algo que me gustaría",
-            "registrar una necesidad",
-            "registrar una nueva necesidad",
-            "registrar un requisito",
-            "registrar un nuevo requisito",
-            "de acuerdo",
-        }
-    )
-    if not has_setup_language:
-        return False
-    has_concrete_work = any(
-        marker in normalized
-        for marker in {
-            "mapa",
-            "alguacil",
-            "pendiente",
-            "pendientes",
-            "registrar cosas",
-            "guardar",
-            "gestionar",
-            "consultar",
-            "actualizar",
-        }
-    )
-    return not has_concrete_work
 
 
 def is_user_delegating_content(text: str) -> bool:
@@ -1568,59 +1322,6 @@ def organization_municipality_name(organization: Organization | None) -> str | N
     return organization.name
 
 
-def extract_ordinance_filters(
-    db: Session,
-    text: str,
-    organization: Organization | None = None,
-) -> dict | None:
-    normalized = normalize_text(text)
-    if not normalized:
-        return None
-
-    municipality_name = None
-    municipalities = db.scalars(select(Municipality).order_by(Municipality.name)).all()
-    for municipality in municipalities:
-        candidate = normalize_text(municipality.name)
-        if candidate and candidate in normalized:
-            municipality_name = municipality.name
-            break
-    if municipality_name is None and any(
-        phrase in normalized
-        for phrase in {"mi municipio", "mi ayuntamiento", "nuestro municipio"}
-    ):
-        municipality_name = organization_municipality_name(organization)
-
-    topic = None
-    for marker, mapped_topic in ORDINANCE_TOPIC_MARKERS.items():
-        if normalize_text(marker) in normalized:
-            topic = mapped_topic
-            break
-
-    mentions_ordinance = any(
-        marker in normalized
-        for marker in {
-            "dice",
-            "ordenanza",
-            "ordenanzas",
-            "reglamento",
-            "reglamentos",
-            "regula",
-            "regulan",
-        }
-    )
-    if not mentions_ordinance and not (municipality_name and topic):
-        return None
-    if not mentions_ordinance and not municipality_name and not topic:
-        return None
-
-    tool_input: dict[str, object] = {"query": text.strip()}
-    if municipality_name:
-        tool_input["municipality_name"] = municipality_name
-    if topic:
-        tool_input["topic"] = topic
-    return tool_input
-
-
 def semantic_plan_ordinance_input(
     plan: SemanticTurnPlan,
     user_text: str,
@@ -1628,7 +1329,7 @@ def semantic_plan_ordinance_input(
 ) -> dict | None:
     if plan.intent != "read_ordinances":
         return None
-    if plan.action not in {"semantic_search_ordinances", "none"}:
+    if plan.action != "semantic_search_ordinances":
         return None
     if plan.confidence < 0.5:
         return None
@@ -1699,7 +1400,7 @@ def semantic_plan_requirements_organization(
 ) -> Organization | None:
     if plan.intent != "read_requirements":
         return None
-    if plan.action not in {"list_requirements", "none"}:
+    if plan.action != "list_requirements":
         return None
     if plan.confidence < 0.5:
         return None
@@ -1720,7 +1421,7 @@ def semantic_plan_capture_requirement_organization(
 ) -> Organization | None:
     if plan.intent != "capture_requirement":
         return None
-    if plan.action not in {"list_requirements", "capture_requirement", "none"}:
+    if plan.action != "list_requirements":
         return None
     if plan.confidence < 0.5:
         return None
@@ -1740,7 +1441,7 @@ def semantic_plan_map_items_input(
 ) -> dict | None:
     if plan.intent != "read_map_items":
         return None
-    if plan.action not in {"get_map_items", "none"}:
+    if plan.action != "get_map_items":
         return None
     if plan.confidence < 0.5:
         return None
@@ -1767,7 +1468,7 @@ def semantic_plan_create_requirement_target(
 ) -> tuple[Organization | None, dict] | None:
     if plan.intent != "create_requirement":
         return None
-    if plan.action not in {"create_requirement", "none"}:
+    if plan.action != "create_requirement":
         return None
     if plan.confidence < 0.5:
         return None
@@ -2327,6 +2028,42 @@ def handle_direct_list_requirements(
     )
 
 
+def remember_model_tool_result(
+    state: dict,
+    *,
+    tool_name: str,
+    tool_input: dict,
+    result_content: str,
+    ok: bool,
+    organizations: list[Organization],
+    use_needs: bool = False,
+) -> None:
+    if tool_name != "list_requirements":
+        return
+
+    organization = None
+    raw_organization_id = tool_input.get("organization_id")
+    if raw_organization_id is not None:
+        try:
+            organization = organization_by_id(organizations, int(raw_organization_id))
+        except (TypeError, ValueError):
+            organization = None
+    organization = organization or selected_or_single_organization(organizations, state)
+
+    result = decode_tool_json(result_content) if ok else None
+    result_count = len(result) if isinstance(result, list) else None
+    action_state = {
+        "type": "list_requirements",
+        "result_count": result_count,
+        "ok": ok,
+        "use_needs": use_needs,
+    }
+    if organization is not None:
+        action_state["organization_id"] = organization.id
+        record_selected_organization(state, organization)
+    state["last_direct_action"] = action_state
+
+
 def handle_direct_requirement_capture(
     db: Session,
     current_user: User,
@@ -2722,131 +2459,10 @@ def persist_direct_prompt(
     )
 
 
-def capability_agent_key(allowed_agents: list[AgentSpec]) -> str:
-    if allowed_agent_by_key(allowed_agents, "requirements_intake") is not None:
-        return "requirements_intake"
-    if allowed_agent_by_key(allowed_agents, "consultation") is not None:
-        return "consultation"
-    return allowed_agents[0].key
-
-
-def user_can_create_requirements(
-    db: Session,
-    current_user: User,
-    organizations: list[Organization],
-) -> bool:
-    return current_user.is_superuser or any(
-        has_permission(
-            current_user,
-            "requirements.create",
-            db,
-            organization_id=organization.id,
-        )
-        for organization in organizations
-    )
-
-
-def is_global_capability_question(text: str) -> bool:
-    normalized = normalize_text(text)
-    if any(
-        phrase in normalized
-        for phrase in {
-            "que puedes hacer",
-            "que puede hacer",
-            "para que sirves",
-            "en que ayudas",
-        }
-    ):
-        return True
-    asks_capability = any(
-        phrase in normalized
-        for phrase in {
-            "puedes",
-            "puede",
-            "podrias",
-            "podria",
-            "se puede",
-            "no puedes",
-            "no podeis",
-        }
-    )
-    mentions_create_work = any(
-        word in normalized
-        for word in {
-            "crear",
-            "crea",
-            "registrar",
-            "guardar",
-            "actualizar",
-            "modificar",
-        }
-    ) and mentions_need_or_requirement(normalized)
-    return asks_capability and mentions_create_work
-
-
 def classify_turn_intent(text: str) -> TurnIntent:
-    if is_global_capability_question(text):
-        return TurnIntent("global_capabilities", "global_capabilities")
-    if is_ordinance_capability_question(text):
-        return TurnIntent("global_capabilities", "ordinance_capabilities")
     if is_ordinance_request(text):
-        return TurnIntent("read_ordinances", "direct_ordinance_search")
-    if is_requirement_capture_intro(text):
-        return TurnIntent("capture_requirement_intro", "direct_capture_requirement_intro")
-    if is_map_items_request(text):
-        return TurnIntent("read_map_items", "direct_map_items")
-    if is_requirement_capture_request(text):
-        return TurnIntent("capture_requirement", "direct_capture_requirement")
-    if is_list_requirements_request(text):
-        return TurnIntent(
-            "read_requirements",
-            "direct_list_requirements",
-            use_needs=uses_need_language(text),
-        )
-    if is_create_another_requirement_request(text):
-        return TurnIntent("create_requirement", "direct_create_requirement")
-    if is_create_test_requirement_request(text):
-        return TurnIntent(
-            "create_test_requirement",
-            "direct_create_test_requirement",
-        )
-    return TurnIntent("unknown", "unclassified")
-
-
-def capture_requirement_intro_reply() -> str:
-    return (
-        "De acuerdo. Cuéntame la idea cuando quieras: qué te gustaría "
-        "que tuviera la app, quién lo usaría y qué problema resolvería. "
-        "Cuando haya contenido concreto, lo ordenamos y comprobamos si "
-        "conviene crear un borrador nuevo o ampliar algo existente."
-    )
-
-
-def handle_global_capabilities_question(
-    db: Session,
-    current_user: User,
-    conversation: AssistantConversation,
-    allowed_agents: list[AgentSpec],
-    state: dict,
-    organizations: list[Organization],
-    semantic_plan: SemanticTurnPlan | None = None,
-) -> AssistantMessage | None:
-    content = (
-        GLOBAL_CAPABILITIES_REPLY
-        if user_can_create_requirements(db, current_user, organizations)
-        else GLOBAL_CAPABILITIES_READ_ONLY_REPLY
-    )
-    return persist_direct_prompt(
-        db,
-        conversation,
-        allowed_agents,
-        state,
-        agent_key=capability_agent_key(allowed_agents),
-        content=content,
-        reason="global_capabilities",
-        intent="global_capabilities",
-        semantic_plan=semantic_plan,
-    )
+        return TurnIntent("unknown", "ordinance_model_decision")
+    return TurnIntent("unknown", "model_decision")
 
 
 def handle_direct_create_requirement_intent(
@@ -2914,200 +2530,6 @@ def handle_direct_create_requirement_intent(
         content=requirement_content_prompt(selected_organization, draft),
         reason=f"{reason}_needs_content",
         intent=intent,
-    )
-
-
-def try_handle_legacy_read_intent(
-    db: Session,
-    current_user: User,
-    conversation: AssistantConversation,
-    user_message: AssistantMessage,
-    user_text: str,
-    allowed_agents: list[AgentSpec],
-    state: dict,
-    organizations: list[Organization],
-    selected_organization: Organization | None,
-    turn_intent: TurnIntent,
-) -> AssistantMessage | None:
-    if turn_intent.kind == "read_requirements":
-        if selected_organization is not None:
-            return handle_direct_list_requirements(
-                db,
-                current_user,
-                conversation,
-                user_message,
-                allowed_agents,
-                state,
-                selected_organization,
-                reason=turn_intent.reason,
-                use_needs=turn_intent.use_needs,
-                intent=turn_intent.kind,
-            )
-        set_pending_action(
-            state,
-            {"type": "list_requirements", "use_needs": turn_intent.use_needs},
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="consultation",
-            content=organization_prompt(organizations, "list_requirements"),
-            reason="direct_list_requirements_needs_organization",
-            intent=turn_intent.kind,
-        )
-
-    if turn_intent.kind == "read_map_items":
-        return handle_direct_map_items(
-            db,
-            current_user,
-            conversation,
-            user_message,
-            allowed_agents,
-            state,
-            build_map_items_input(user_text, selected_organization),
-        )
-
-    return None
-
-
-def try_handle_legacy_requirement_intent(
-    db: Session,
-    current_user: User,
-    conversation: AssistantConversation,
-    user_message: AssistantMessage,
-    user_text: str,
-    allowed_agents: list[AgentSpec],
-    state: dict,
-    organizations: list[Organization],
-    selected_organization: Organization | None,
-    parsed_draft: dict,
-    turn_intent: TurnIntent,
-) -> AssistantMessage | None:
-    if turn_intent.kind == "capture_requirement_intro":
-        set_pending_action(
-            state,
-            {"type": "capture_requirement_intro"},
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="requirements_intake",
-            content=capture_requirement_intro_reply(),
-            reason=turn_intent.reason,
-            intent=turn_intent.kind,
-        )
-
-    has_prior_conversation_context = any(
-        message.id != user_message.id for message in conversation.messages
-    )
-    if turn_intent.kind == "capture_requirement" and has_prior_conversation_context:
-        if selected_organization is not None:
-            return handle_direct_requirement_capture(
-                db,
-                current_user,
-                conversation,
-                user_message,
-                allowed_agents,
-                state,
-                selected_organization,
-                user_text,
-                reason=turn_intent.reason,
-                intent=turn_intent.kind,
-            )
-        set_pending_action(
-            state,
-            {"type": "capture_requirement_organization"},
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="requirements_intake",
-            content=organization_prompt(organizations, "create_requirement"),
-            reason="direct_capture_requirement_needs_organization",
-            intent=turn_intent.kind,
-        )
-
-    if turn_intent.kind == "create_requirement":
-        return handle_direct_create_requirement_intent(
-            db,
-            current_user,
-            conversation,
-            user_message,
-            allowed_agents,
-            state,
-            organizations,
-            selected_organization,
-            parsed_draft,
-            reason=turn_intent.reason,
-            intent=turn_intent.kind,
-        )
-
-    return None
-
-
-def try_handle_legacy_test_requirement_intent(
-    db: Session,
-    conversation: AssistantConversation,
-    user_text: str,
-    allowed_agents: list[AgentSpec],
-    state: dict,
-    organizations: list[Organization],
-    selected_organization: Organization | None,
-    turn_intent: TurnIntent,
-) -> AssistantMessage | None:
-    if turn_intent.kind != "create_test_requirement":
-        return None
-
-    if selected_organization is None:
-        set_pending_action(
-            state,
-            {"type": "create_test_requirement_organization"},
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="requirements_intake",
-            content=organization_prompt(organizations, "create_requirement"),
-            reason="direct_create_test_requirement_needs_organization",
-        )
-
-    record_selected_organization(state, selected_organization)
-    if is_user_delegating_content(user_text):
-        set_pending_action(
-            state,
-            {
-                "type": "confirm_create_test_requirement",
-                "organization_id": selected_organization.id,
-            },
-        )
-        content = propose_test_requirement_reply(selected_organization)
-        reason = "direct_create_test_requirement_proposal"
-    else:
-        set_pending_action(
-            state,
-            {
-                "type": "create_test_requirement_content",
-                "organization_id": selected_organization.id,
-            },
-        )
-        content = ask_for_test_requirement_content_reply(selected_organization)
-        reason = "direct_create_test_requirement_needs_content"
-    return persist_direct_prompt(
-        db,
-        conversation,
-        allowed_agents,
-        state,
-        agent_key="requirements_intake",
-        content=content,
-        reason=reason,
     )
 
 
@@ -3285,73 +2707,7 @@ def try_handle_direct_turn(
                 intent="create_requirement",
             )
 
-    if is_ordinance_capability_question(user_text):
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key=(
-                "consultation"
-                if allowed_agent_by_key(allowed_agents, "consultation") is not None
-                else capability_agent_key(allowed_agents)
-            ),
-            content=ORDINANCE_CAPABILITIES_REPLY,
-            reason="ordinance_capabilities",
-            intent="global_capabilities",
-            semantic_plan=semantic_plan,
-        )
-
-    if turn_intent.kind == "global_capabilities" and not semantic_plan_blocks_legacy_routes(
-        semantic_plan
-    ):
-        return handle_global_capabilities_question(
-            db,
-            current_user,
-            conversation,
-            allowed_agents,
-            state,
-            organizations,
-        )
-
     if semantic_plan is not None:
-        if (
-            semantic_plan.intent == "global_capabilities"
-            and semantic_plan.action in {"", "none"}
-            and semantic_plan.confidence >= 0.5
-        ):
-            planned_global_message = handle_global_capabilities_question(
-                db,
-                current_user,
-                conversation,
-                allowed_agents,
-                state,
-                organizations,
-                semantic_plan=semantic_plan,
-            )
-            if planned_global_message is not None:
-                return planned_global_message
-
-        if (
-            semantic_plan.intent == "capture_requirement_intro"
-            and semantic_plan.action in {"", "none"}
-            and semantic_plan.confidence >= 0.5
-        ):
-            set_pending_action(state, {"type": "capture_requirement_intro"})
-            planned_intro_message = persist_direct_prompt(
-                db,
-                conversation,
-                allowed_agents,
-                state,
-                agent_key="requirements_intake",
-                content=capture_requirement_intro_reply(),
-                reason="action_policy_capture_requirement_intro",
-                intent=semantic_plan.intent,
-                semantic_plan=semantic_plan,
-            )
-            if planned_intro_message is not None:
-                return planned_intro_message
-
         planned_admin_feedback_input = semantic_plan_admin_feedback_input(
             semantic_plan,
             user_text,
@@ -3525,39 +2881,6 @@ def try_handle_direct_turn(
 
     if semantic_plan_blocks_legacy_routes(semantic_plan):
         return None
-
-    ordinance_tool_input = extract_ordinance_filters(db, user_text, selected_organization)
-    if ordinance_tool_input is not None:
-        direct_ordinance_message = handle_direct_ordinance_search(
-            db,
-            current_user,
-            conversation,
-            user_message,
-            allowed_agents,
-            state,
-            ordinance_tool_input,
-        )
-        if direct_ordinance_message is not None:
-            return direct_ordinance_message
-
-    if ambiguous_organizations:
-        set_pending_action(
-            state,
-            pending_action or {"type": "list_requirements"},
-        )
-        names = ", ".join(
-            f"“{organization.name}” (id {organization.id})"
-            for organization in ambiguous_organizations[:5]
-        )
-        return persist_direct_prompt(
-            db,
-            conversation,
-            allowed_agents,
-            state,
-            agent_key="consultation",
-            content=f"He encontrado varias organizaciones posibles: {names}. ¿Cuál consulto?",
-            reason="ambiguous_organization",
-        )
 
     if (
         pending_work
@@ -3883,25 +3206,6 @@ def try_handle_direct_turn(
                 reason="direct_create_test_requirement_cancelled",
             )
 
-    if pending_action is None and is_feedback_candidate(user_text):
-        agent = allowed_agent_by_key(allowed_agents, "requirements_intake")
-        if agent is not None:
-            tool_input = build_admin_feedback_input(user_text, selected_organization)
-            set_pending_action(
-                state,
-                {"type": "send_admin_feedback", "tool_input": tool_input},
-            )
-            return persist_direct_prompt(
-                db,
-                conversation,
-                allowed_agents,
-                state,
-                agent_key="requirements_intake",
-                content=build_admin_feedback_suggestion_reply(user_text, tool_input),
-                reason="direct_admin_feedback_suggested",
-                intent="suggest_admin_feedback",
-            )
-
     last_action = state.get("last_direct_action")
     if (
         isinstance(last_action, dict)
@@ -3947,50 +3251,6 @@ def try_handle_direct_turn(
             parsed_draft,
             reason="direct_create_requirement_content_followup",
         )
-
-    legacy_read_message = try_handle_legacy_read_intent(
-        db,
-        current_user,
-        conversation,
-        user_message,
-        user_text,
-        allowed_agents,
-        state,
-        organizations,
-        selected_organization,
-        turn_intent,
-    )
-    if legacy_read_message is not None:
-        return legacy_read_message
-
-    legacy_requirement_message = try_handle_legacy_requirement_intent(
-        db,
-        current_user,
-        conversation,
-        user_message,
-        user_text,
-        allowed_agents,
-        state,
-        organizations,
-        selected_organization,
-        parsed_draft,
-        turn_intent,
-    )
-    if legacy_requirement_message is not None:
-        return legacy_requirement_message
-
-    legacy_test_requirement_message = try_handle_legacy_test_requirement_intent(
-        db,
-        conversation,
-        user_text,
-        allowed_agents,
-        state,
-        organizations,
-        selected_organization,
-        turn_intent,
-    )
-    if legacy_test_requirement_message is not None:
-        return legacy_test_requirement_message
 
     return None
 
@@ -4049,6 +3309,8 @@ def run_agent_turn(
     agent_tools = get_agent_tools(agent)
     agent_tool_names = frozenset(tool.name for tool in agent_tools)
     tool_definitions = [tool.definition for tool in agent_tools]
+    organizations = accessible_organizations(db, current_user)
+    state = load_conversation_state(conversation)
 
     system = build_system_prompt(db, current_user, agent, agent_tools)
     messages = build_history(conversation)
@@ -4101,13 +3363,23 @@ def run_agent_turn(
                     ),
                     allowed=agent_tool_names,
                 )
+                tool_input = dict(block.input)
                 actions.append(
                     {
                         "tool": block.name,
                         "ok": result.ok,
-                        "input": dict(block.input),
+                        "input": tool_input,
                         "result": result.content[:MAX_TOOL_RESULT_CHARS],
                     }
+                )
+                remember_model_tool_result(
+                    state,
+                    tool_name=block.name,
+                    tool_input=tool_input,
+                    result_content=result.content,
+                    ok=result.ok,
+                    organizations=organizations,
+                    use_needs=uses_need_language(user_text),
                 )
                 tool_results.append(
                     {
@@ -4141,9 +3413,10 @@ def run_agent_turn(
     if not reply_text:
         reply_text = FALLBACK_REPLY
 
+    dump_conversation_state(conversation, state)
     update_pending_work_from_assistant_reply(
         conversation,
-        accessible_organizations(db, current_user),
+        organizations,
         user_text,
         reply_text,
     )

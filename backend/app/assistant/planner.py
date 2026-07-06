@@ -48,7 +48,11 @@ herramientas de producto. Devuelve siempre una llamada a plan_turn.
 
 Reglas:
 - Si pide comparar o consultar ordenanzas/reglamentos/normativa municipal, usa
-  intent=read_ordinances y action=semantic_search_ordinances.
+  intent=read_ordinances y action=semantic_search_ordinances solo cuando el
+  último mensaje aporte una consulta suficientemente concreta o parezca útil
+  recuperar corpus antes de responder. Si faltan datos básicos para una
+  comparación o consulta útil, deja action=none para que el asistente converse
+  y decida si pide aclaración o busca de forma amplia.
 - Si pide consultar elementos geolocalizados del mapa municipal, usa
   intent=read_map_items y action=get_map_items.
 - Si el usuario pide ver necesidades/requisitos ya registrados, usa intent=read_requirements.
@@ -177,16 +181,6 @@ def choose_agent(
             previous_agent_key=previous_agent_key,
         )
 
-    previous_agent = _agent_by_key(previous_agent_key, allowed_agents)
-    if previous_agent is not None and _is_short_followup(user_text):
-        return _decision(
-            previous_agent,
-            candidates=candidates,
-            source="shortcut",
-            reason="short_followup_previous_agent",
-            previous_agent_key=previous_agent_key,
-        )
-
     if not planner_enabled():
         return _fallback_decision(
             allowed_agents,
@@ -224,17 +218,6 @@ def choose_agent(
             previous_agent_key=previous_agent_key,
             raw_agent_key=routed_agent_key,
             user_text=user_text,
-        )
-
-    heuristic_agent = _heuristic_agent(user_text, allowed_agents)
-    if heuristic_agent is not None and heuristic_agent.key != routed_agent.key:
-        return _decision(
-            heuristic_agent,
-            candidates=candidates,
-            source="shortcut",
-            reason="heuristic_override",
-            previous_agent_key=previous_agent_key,
-            raw_agent_key=routed_agent_key,
         )
 
     return _decision(
@@ -569,7 +552,16 @@ def _heuristic_agent(
         "registrados",
         "hay",
     )
+    ordinance_markers = (
+        "ordenanza",
+        "ordenanzas",
+        "reglamento",
+        "reglamentos",
+        "normativa municipal",
+    )
     if _contains_marker(normalized, general_chat_markers):
+        return _agent_by_key("consultation", allowed_agents)
+    if _contains_marker(normalized, ordinance_markers):
         return _agent_by_key("consultation", allowed_agents)
     if _contains_marker(normalized, write_markers):
         return _agent_by_key("requirements_intake", allowed_agents)
