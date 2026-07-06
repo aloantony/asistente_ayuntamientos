@@ -798,6 +798,91 @@ def test_map_location_question_executes_map_tool_without_gateway(
     assert gateway.calls == []
 
 
+def test_broad_map_question_asks_preference_before_opening_map_action(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+):
+    user = make_user(full_name="Alcalde Mapa")
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "map.view", "map.edit", "projects.view_all"],
+    )
+    project = Project(
+        organization_id=organization.id,
+        name="Demo mapa municipal",
+        description="Proyecto con ubicación de prueba",
+        status="active",
+    )
+    db.add(project)
+    db.commit()
+    assert client.post(
+        "/geo/entity-locations",
+        json={
+            "entity_type": "project",
+            "entity_id": project.id,
+            "role": "primary",
+            "location": {
+                "label": "Plaza Mayor de Fuentelcésped",
+                "latitude": 41.5917,
+                "longitude": -3.6404,
+            },
+        },
+        headers=headers_for(user),
+    ).status_code == 201
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Puedes usar el mapa para ver proyectos o necesidades y decidir por dónde empezar?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_preference_choice"
+    assert assistant_message["routing"]["intent"] == "read_map_items"
+    assert assistant_message["actions"] == []
+    assert "qué prefieres" in assistant_message["content"].lower()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "action_preference_choice"
+    assert state["pending_action"]["intent"] == "read_map_items"
+    assert gateway.calls == []
+
+    followup = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Prefiero ver proyectos."},
+        headers=headers_for(user),
+    )
+
+    assert followup.status_code == 200
+    followup_message = followup.json()["messages"][-1]
+    assert followup_message["routing"]["reason"] == "action_policy_read_map_items"
+    assert [action["tool"] for action in followup_message["actions"]] == [
+        "get_map_items"
+    ]
+    assert followup_message["actions"][0]["input"]["entity_type"] == "project"
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    updated_state = json.loads(updated_conversation.state or "{}")
+    assert "pending_action" not in updated_state
+    assert gateway.calls == []
+
+
 def test_read_intents_are_backed_by_action_policies():
     expected = {
         "read_map_items": ("consultation", "get_map_items"),
@@ -910,6 +995,72 @@ def test_requirement_capture_without_matches_does_not_announce_empty_check(
     assert "he comprobado" not in normalized_content
     assert "0 en total" not in normalized_content
     assert "lo trabajamos como una idea nueva" in normalized_content
+    assert gateway.calls == []
+
+
+def test_broad_requirements_question_asks_preference_before_listing(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Plan de mantenimiento",
+        summary="Organizar tareas municipales pendientes.",
+        status="draft",
+        source_type="conversation",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    gateway = use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "content": "¿Puedes trabajar con las necesidades registradas para decidir por dónde empezar?"
+        },
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["reason"] == "action_preference_choice"
+    assert assistant_message["routing"]["intent"] == "read_requirements"
+    assert assistant_message["actions"] == []
+    assert "qué prefieres" in assistant_message["content"].lower()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "action_preference_choice"
+    assert state["pending_action"]["intent"] == "read_requirements"
+    assert gateway.calls == []
+
+    followup = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Primero lista las necesidades visibles."},
+        headers=headers_for(user),
+    )
+
+    assert followup.status_code == 200
+    followup_message = followup.json()["messages"][-1]
+    assert followup_message["routing"]["reason"] == "action_policy_read_requirements"
+    assert followup_message["routing"]["intent"] == "read_requirements"
+    assert [action["tool"] for action in followup_message["actions"]] == [
+        "list_requirements"
+    ]
+    assert "Plan de mantenimiento" in followup_message["content"]
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    updated_state = json.loads(updated_conversation.state or "{}")
+    assert "pending_action" not in updated_state
     assert gateway.calls == []
 
 
@@ -2562,7 +2713,7 @@ def test_agent_turn_searches_ordinances_with_structured_filters(
     assert gateway.calls == []
 
 
-def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
+def test_broad_ordinance_question_asks_preference_before_searching(
     client,
     db,
     make_user,
@@ -2600,17 +2751,44 @@ def test_broad_ordinance_question_uses_ordinance_policy_not_needs_listing(
 
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
-    assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert assistant_message["routing"]["reason"] == "ordinance_action_needs_choice"
     assert assistant_message["routing"]["intent"] == "read_ordinances"
-    assert [action["tool"] for action in assistant_message["actions"]] == [
+    assert assistant_message["actions"] == []
+    normalized_content = assistant_message["content"].lower()
+    assert "qué prefieres" in normalized_content
+    assert "ordenanzas" in normalized_content
+    assert "necesidades visibles" not in assistant_message["content"].lower()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "ordinance_action_choice"
+    assert state["pending_action"]["tool_input"]["municipality_name"] == "Fuentelcésped"
+    assert gateway.calls == []
+
+    followup = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Prefiero comparar por residuos."},
+        headers=headers_for(user),
+    )
+
+    assert followup.status_code == 200
+    followup_message = followup.json()["messages"][-1]
+    assert followup_message["routing"]["reason"] == "action_policy_read_ordinances"
+    assert [action["tool"] for action in followup_message["actions"]] == [
         "semantic_search_ordinances"
     ]
-    assert assistant_message["actions"][0]["input"]["municipality_name"] == "Fuentelcésped"
-    assert "necesidades visibles" not in assistant_message["content"].lower()
+    followup_input = followup_message["actions"][0]["input"]
+    assert followup_input["municipality_name"] == "Fuentelcésped"
+    assert followup_input["topic"] == "residuos"
+    assert "Preferencia del usuario" in followup_input["query"]
+    updated_conversation = db.get(AssistantConversation, conversation["id"])
+    assert updated_conversation is not None
+    updated_state = json.loads(updated_conversation.state or "{}")
+    assert "pending_action" not in updated_state
     assert gateway.calls == []
 
 
-def test_semantic_planner_ordinance_intent_executes_grounded_action(
+def test_semantic_planner_broad_ordinance_intent_asks_choice_before_action(
     client,
     db,
     make_user,
@@ -2662,14 +2840,80 @@ def test_semantic_planner_ordinance_intent_executes_grounded_action(
     assert response.status_code == 200
     assistant_message = response.json()["messages"][-1]
     assert assistant_message["routing"]["intent"] == "read_ordinances"
+    assert assistant_message["routing"]["reason"] == "ordinance_action_needs_choice"
+    assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
+    assert assistant_message["actions"] == []
+    assert "qué prefieres" in assistant_message["content"].lower()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert state["pending_action"]["type"] == "ordinance_action_choice"
+    assert state["pending_action"]["tool_input"] == {
+        "query": "normas comparables para adaptar al municipio",
+        "municipality_name": "Fuentelcésped",
+    }
+    assert gateway.calls == []
+
+
+def test_semantic_planner_specific_ordinance_intent_executes_grounded_action(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user = make_user(full_name="Alcalde Test")
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["assistant.use", "ordinances.compare"])
+    gateway = use_gateway(FakeGateway([]))
+    monkeypatch.setattr(
+        assistant_service,
+        "plan_turn",
+        lambda **kwargs: assistant_planner.SemanticTurnPlan(
+            intent="read_ordinances",
+            action="semantic_search_ordinances",
+            query="ordenanzas de residuos de Fuentelcésped",
+            target={"municipality_name": "Fuentelcésped", "topic": "residuos"},
+            confidence=0.92,
+            source="planner",
+        ),
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca ordenanzas de residuos de aquí."},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["routing"]["intent"] == "read_ordinances"
     assert assistant_message["routing"]["reason"] == "action_policy_read_ordinances"
     assert assistant_message["routing"]["semantic_plan"]["source"] == "planner"
     assert [action["tool"] for action in assistant_message["actions"]] == [
         "semantic_search_ordinances"
     ]
     assert assistant_message["actions"][0]["input"] == {
-        "query": "normas comparables para adaptar al municipio",
+        "query": "ordenanzas de residuos de Fuentelcésped",
         "municipality_name": "Fuentelcésped",
+        "topic": "residuos",
     }
     assert gateway.calls == []
 

@@ -58,6 +58,10 @@ Reglas:
   reference=last_admin_feedback.
 - Si pide reintentar una acción pendiente o fallida, usa intent=retry_pending_action.
 - Si solo pregunta qué puede hacer el asistente, usa intent=global_capabilities.
+- Si la petición es amplia y admite varias acciones razonables sin que el usuario
+  haya elegido alcance, objetivo o materia, no fuerces una acción concreta: usa
+  action=none con la intención más cercana para que el backend pregunte primero
+  qué prefiere hacer.
 - Si no hay intención de producto clara, usa intent=unknown y action=none.
 
 El backend decide permisos, visibilidad, duplicados y ejecución real.
