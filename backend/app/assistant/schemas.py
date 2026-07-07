@@ -61,28 +61,11 @@ class AssistantStatusRead(BaseModel):
     runtime: str
     model: str
     runtime_healthy: bool | None = None
-    planner: "AssistantPlannerStatusRead"
-    agents: list["AssistantAgentRead"] = []
     tools: list["AssistantToolRead"] = []
 
 
 class AssistantAudioTranscriptionRead(BaseModel):
     text: str
-
-
-class AssistantPlannerStatusRead(BaseModel):
-    runtime: str
-    enabled: bool
-    model: str | None = None
-    runtime_healthy: bool | None = None
-
-
-class AssistantAgentRead(BaseModel):
-    key: str
-    name: str
-    description: str
-    tool_names: list[str]
-    required_permission: str
 
 
 class AssistantToolRead(BaseModel):

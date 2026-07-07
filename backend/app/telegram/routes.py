@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.assistant.gateway import gateway
 from app.assistant.models import AssistantConversation
-from app.assistant.service import run_agent_turn
+from app.assistant.turn import run_agent_turn
 from app.assistant.speech import SpeechTranscriptionError, transcribe_audio_bytes
 from app.auth.dependencies import get_current_user
 from app.core.config import settings

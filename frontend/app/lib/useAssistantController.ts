@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import type {
+  AssistantAction,
   AssistantConversation,
   AssistantConversationDetail,
   AssistantConversationFolder,
@@ -10,8 +11,9 @@ import type {
   AssistantMemorySensitivity,
   AssistantMemoryStatus,
   AssistantStatus,
+  AssistantStreamToolActivity,
 } from "../components/types";
-import { adminRequest } from "./api";
+import { adminRequest, streamAssistantMessage } from "./api";
 
 type RequestErrorHandler = (
   requestError: unknown,
@@ -205,6 +207,8 @@ export function useAssistantController({
     setIsSendingMessage(true);
     setAssistantError("");
 
+    let streamedUserMessageId: number | null = null;
+
     // Optimistic echo so the user sees their message while the agent works.
     setSelectedConversation((current) =>
       current && current.id === conversationId
@@ -221,6 +225,15 @@ export function useAssistantController({
                 routing: null,
                 created_at: new Date().toISOString(),
               },
+              {
+                id: -2,
+                role: "assistant",
+                content: "",
+                actions: [],
+                agent_key: "anacleto",
+                routing: null,
+                created_at: new Date().toISOString(),
+              },
             ],
           }
         : current,
@@ -228,35 +241,94 @@ export function useAssistantController({
     setDraftMessage("");
 
     try {
-      const detail = await adminRequest<AssistantConversationDetail>(
-        `/assistant/conversations/${conversationId}/messages`,
-        getStoredToken(),
-        "El asistente no ha podido responder.",
-        { method: "POST", body: JSON.stringify({ content }) },
-      );
-      // Only replace the thread if the user is still on this conversation.
-      setSelectedConversation((current) =>
-        current && current.id === conversationId ? detail : current,
-      );
-      // Most recent activity goes to the head, matching the backend order.
-      setConversations((existing) => [
-        toSummary(detail),
-        ...existing.filter((conversation) => conversation.id !== detail.id),
-      ]);
-
-      const mutatingTools = new Set(
-        assistantStatus?.tools
-          .filter((tool) => !tool.read_only)
-          .map((tool) => tool.name) ?? [],
-      );
-      const hasMutatingAction = detail.messages.some((message) =>
-        message.actions.some(
-          (action) => action.ok && mutatingTools.has(action.tool),
-        ),
-      );
-      if (hasMutatingAction) {
-        onRequirementsChanged?.();
-      }
+      await streamAssistantMessage(conversationId, content, getStoredToken(), {
+        onMessageStart: (event) => {
+          streamedUserMessageId = event.user_message_id;
+          setSelectedConversation((current) =>
+            current && current.id === conversationId
+              ? {
+                  ...current,
+                  messages: current.messages.map((message) =>
+                    message.id === -1
+                      ? { ...message, id: event.user_message_id }
+                      : message,
+                  ),
+                }
+              : current,
+          );
+        },
+        onTextDelta: (text) => {
+          setSelectedConversation((current) =>
+            current && current.id === conversationId
+              ? {
+                  ...current,
+                  messages: current.messages.map((message) =>
+                    message.id === -2
+                      ? { ...message, content: `${message.content}${text}` }
+                      : message,
+                  ),
+                }
+              : current,
+          );
+        },
+        onToolActivity: (event) => {
+          setSelectedConversation((current) =>
+            current && current.id === conversationId
+              ? {
+                  ...current,
+                  messages: current.messages.map((message) =>
+                    message.id === -2
+                      ? {
+                          ...message,
+                          actions: updateStreamingActions(
+                            message.actions,
+                            event,
+                          ),
+                        }
+                      : message,
+                  ),
+                }
+              : current,
+          );
+        },
+        onDone: (event) => {
+          setSelectedConversation((current) =>
+            current && current.id === conversationId
+              ? {
+                  ...current,
+                  ...event.conversation,
+                  messages: [
+                    ...current.messages
+                      .filter((message) => message.id !== -2)
+                      .map((message) =>
+                        message.id === -1 && streamedUserMessageId !== null
+                          ? { ...message, id: streamedUserMessageId }
+                          : message,
+                      ),
+                    event.message,
+                  ],
+                }
+              : current,
+          );
+          setConversations((existing) => [
+            event.conversation,
+            ...existing.filter(
+              (conversation) => conversation.id !== event.conversation.id,
+            ),
+          ]);
+          const mutatingTools = new Set(
+            assistantStatus?.tools
+              .filter((tool) => !tool.read_only)
+              .map((tool) => tool.name) ?? [],
+          );
+          const hasMutatingAction = event.message.actions.some(
+            (action) => action.ok && mutatingTools.has(action.tool),
+          );
+          if (hasMutatingAction) {
+            onRequirementsChanged?.();
+          }
+        },
+      });
     } catch (requestError) {
       // Drop the optimistic echo from this conversation only; the backend
       // may have persisted the user message, so a reload shows it again.
@@ -264,12 +336,15 @@ export function useAssistantController({
         current && current.id === conversationId
           ? {
               ...current,
-              messages: current.messages.filter((message) => message.id !== -1),
+              messages: current.messages.filter(
+                (message) => message.id !== -1 && message.id !== -2,
+              ),
             }
           : current,
       );
       if (selectedIdRef.current === conversationId) {
         setDraftMessage(content);
+        void selectConversation(conversationId);
       }
       handleRequestError(
         requestError,
@@ -279,6 +354,45 @@ export function useAssistantController({
     } finally {
       setIsSendingMessage(false);
     }
+  }
+
+  function updateStreamingActions(
+    actions: AssistantAction[],
+    event: AssistantStreamToolActivity,
+  ): AssistantAction[] {
+    if (event.status === "started") {
+      return [
+        ...actions,
+        {
+          tool: event.tool,
+          ok: false,
+          input: event.input,
+          result: "",
+          status: "started",
+        },
+      ];
+    }
+
+    const next = [...actions];
+    let pendingIndex = -1;
+    for (let index = next.length - 1; index >= 0; index -= 1) {
+      if (next[index].tool === event.tool && next[index].status === "started") {
+        pendingIndex = index;
+        break;
+      }
+    }
+    const finishedAction: AssistantAction = {
+      tool: event.tool,
+      ok: Boolean(event.ok),
+      input: event.input,
+      result: event.result ?? "",
+      status: "finished",
+    };
+    if (pendingIndex >= 0) {
+      next[pendingIndex] = finishedAction;
+      return next;
+    }
+    return [...next, finishedAction];
   }
 
   async function transcribeAudio(audio: Blob) {

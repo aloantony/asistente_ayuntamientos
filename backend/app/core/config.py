@@ -24,10 +24,7 @@ class Settings(BaseSettings):
     assistant_model: str = "claude-opus-4-8"
     assistant_max_tokens: int = 16000
     assistant_max_tool_iterations: int = 8
-    assistant_planner_runtime: str = "hermes_agent"
-    assistant_planner_model: str = "hermes-agent"
-    assistant_planner_max_tokens: int = 256
-    assistant_planner_timeout_seconds: float = 30.0
+    assistant_history_max_messages: int = 40
     hermes_agent_base_url: str = "http://127.0.0.1:8642/v1"
     hermes_agent_api_key: str | None = None
     hermes_agent_model: str = "hermes-agent"
@@ -80,16 +77,6 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {"anthropic", "hermes_agent"}:
             raise ValueError("assistant_runtime must be 'anthropic' or 'hermes_agent'")
-        return normalized
-
-    @field_validator("assistant_planner_runtime")
-    @classmethod
-    def validate_assistant_planner_runtime(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        if normalized not in {"disabled", "hermes_agent"}:
-            raise ValueError(
-                "assistant_planner_runtime must be 'disabled' or 'hermes_agent'"
-            )
         return normalized
 
     @field_validator("embeddings_runtime")

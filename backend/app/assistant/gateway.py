@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any
 from urllib import error as urlerror
@@ -43,6 +44,11 @@ class AIUsage:
 class AITextBlock:
     text: str
     type: str = "text"
+
+
+@dataclass(frozen=True)
+class AITextDelta:
+    text: str
 
 
 @dataclass(frozen=True)
@@ -111,6 +117,29 @@ class AIGateway:
             )
         raise AssistantUnavailableError("Assistant runtime is not supported")
 
+    def complete_stream(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> Generator[AITextDelta, None, AICompletion]:
+        if settings.assistant_runtime == "anthropic":
+            completion = yield from self._complete_stream_anthropic(
+                system=system,
+                messages=messages,
+                tools=tools,
+            )
+            return completion
+        if settings.assistant_runtime == "hermes_agent":
+            completion = yield from self._complete_stream_hermes_agent(
+                system=system,
+                messages=messages,
+                tools=tools,
+            )
+            return completion
+        raise AssistantUnavailableError("Assistant runtime is not supported")
+
     def _complete_anthropic(
         self,
         *,
@@ -148,25 +177,56 @@ class AIGateway:
             response.usage.input_tokens,
             response.usage.output_tokens,
         )
-        return AICompletion(
-            model=response.model,
-            stop_reason=response.stop_reason,
-            content=[
-                AITextBlock(text=block.text)
-                if block.type == "text"
-                else AIToolUseBlock(
-                    id=block.id,
-                    name=block.name,
-                    input=dict(block.input),
-                )
-                for block in response.content
-                if block.type in {"text", "tool_use"}
-            ],
-            usage=AIUsage(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-            ),
+        return _from_anthropic_message(response)
+
+    def _complete_stream_anthropic(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> Generator[AITextDelta, None, AICompletion]:
+        client = self._get_anthropic_client()
+        try:
+            with client.messages.stream(
+                model=settings.assistant_model,
+                max_tokens=settings.assistant_max_tokens,
+                thinking={"type": "adaptive"},
+                system=system,
+                messages=_to_anthropic_messages(messages),
+                tools=tools,
+            ) as stream:
+                for event in stream:
+                    if getattr(event, "type", None) != "content_block_delta":
+                        continue
+                    delta = getattr(event, "delta", None)
+                    if getattr(delta, "type", None) == "text_delta":
+                        text = getattr(delta, "text", "")
+                        if text:
+                            yield AITextDelta(text=text)
+                response = stream.get_final_message()
+        except anthropic.APIStatusError as error:
+            logger.error(
+                "Assistant API error: status=%s type=%s",
+                error.status_code,
+                getattr(error, "type", None),
+            )
+            raise AssistantUnavailableError("Assistant API request failed") from error
+        except anthropic.APIConnectionError as error:
+            logger.error("Assistant API connection error")
+            raise AssistantUnavailableError(
+                "Assistant API connection failed"
+            ) from error
+
+        completion = _from_anthropic_message(response)
+        logger.info(
+            "Assistant completion: runtime=anthropic model=%s stop_reason=%s input_tokens=%s output_tokens=%s",
+            completion.model,
+            completion.stop_reason,
+            completion.usage.input_tokens,
+            completion.usage.output_tokens,
         )
+        return completion
 
     def _complete_hermes_agent(
         self,
@@ -188,6 +248,48 @@ class AIGateway:
             tool_choice="auto",
             log_context="assistant",
         )
+        logger.info(
+            "Assistant completion: runtime=hermes_agent model=%s stop_reason=%s input_tokens=%s output_tokens=%s",
+            completion.model,
+            completion.stop_reason,
+            completion.usage.input_tokens,
+            completion.usage.output_tokens,
+        )
+        return completion
+
+    def _complete_stream_hermes_agent(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> Generator[AITextDelta, None, AICompletion]:
+        try:
+            completion = yield from complete_hermes_agent_stream(
+                system=system,
+                messages=messages,
+                tools=tools,
+                model=settings.hermes_agent_model,
+                max_tokens=settings.assistant_max_tokens,
+                timeout=settings.hermes_agent_timeout_seconds,
+                tool_choice="auto",
+                log_context="assistant",
+            )
+        except AssistantUnavailableError:
+            completion = complete_hermes_agent(
+                system=system,
+                messages=messages,
+                tools=tools,
+                model=settings.hermes_agent_model,
+                max_tokens=settings.assistant_max_tokens,
+                timeout=settings.hermes_agent_timeout_seconds,
+                tool_choice="auto",
+                log_context="assistant_fallback",
+            )
+            text = _completion_text_for_delta(completion)
+            if text:
+                yield AITextDelta(text=text)
+
         logger.info(
             "Assistant completion: runtime=hermes_agent model=%s stop_reason=%s input_tokens=%s output_tokens=%s",
             completion.model,
@@ -279,6 +381,142 @@ def complete_hermes_agent(
     except (KeyError, TypeError, ValueError) as error:
         logger.error(
             "Hermes Agent API returned an invalid response: context=%s",
+            log_context,
+        )
+        raise AssistantUnavailableError(
+            "Assistant API returned an invalid response"
+        ) from error
+
+
+def complete_hermes_agent_stream(
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    model: str,
+    max_tokens: int,
+    timeout: float,
+    tool_choice: str | dict | None,
+    log_context: str,
+) -> Generator[AITextDelta, None, AICompletion]:
+    if not hermes_agent_enabled():
+        raise AssistantUnavailableError("Hermes Agent is not configured")
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _to_openai_messages(system, messages),
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    openai_tools = _to_openai_tools(tools)
+    if openai_tools:
+        payload["tools"] = openai_tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+
+    request = urlrequest.Request(
+        _hermes_agent_url("chat/completions"),
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_hermes_agent_headers(),
+        method="POST",
+    )
+
+    content_buffer = ""
+    emitted_text = ""
+    finish_reason: str | None = None
+    response_model = model
+    tool_calls: dict[int, dict] = {}
+    try:
+        with urlrequest.urlopen(request, timeout=timeout) as response:
+            while True:
+                raw_line = response.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line.removeprefix("data:").strip()
+                if data == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                response_model = chunk.get("model") or response_model
+                choice = (chunk.get("choices") or [{}])[0]
+                finish_reason = choice.get("finish_reason") or finish_reason
+                delta = choice.get("delta") or {}
+                content_delta = delta.get("content") or ""
+                if content_delta:
+                    content_buffer += content_delta
+                    safe_text, content_buffer = _pop_safe_hermes_text(content_buffer)
+                    emitted_text += safe_text
+                    if safe_text:
+                        yield AITextDelta(text=safe_text)
+                for tool_call_delta in delta.get("tool_calls") or []:
+                    index = int(tool_call_delta.get("index") or 0)
+                    accumulated = tool_calls.setdefault(
+                        index,
+                        {
+                            "id": tool_call_delta.get("id"),
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    if tool_call_delta.get("id"):
+                        accumulated["id"] = tool_call_delta["id"]
+                    function_delta = tool_call_delta.get("function") or {}
+                    if function_delta.get("name"):
+                        accumulated["function"]["name"] += function_delta["name"]
+                    if function_delta.get("arguments"):
+                        accumulated["function"]["arguments"] += function_delta[
+                            "arguments"
+                        ]
+    except urlerror.HTTPError as error:
+        logger.error(
+            "Hermes Agent stream API error: context=%s status=%s",
+            log_context,
+            error.code,
+        )
+        raise AssistantUnavailableError("Assistant API request failed") from error
+    except (urlerror.URLError, TimeoutError) as error:
+        logger.error("Hermes Agent stream API connection error: context=%s", log_context)
+        raise AssistantUnavailableError("Assistant API connection failed") from error
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        logger.error(
+            "Hermes Agent stream API returned an invalid response: context=%s",
+            log_context,
+        )
+        raise AssistantUnavailableError(
+            "Assistant API returned an invalid response"
+        ) from error
+
+    final_safe_text, held_text = _pop_safe_hermes_text(content_buffer, final=True)
+    emitted_text += final_safe_text
+    if final_safe_text:
+        yield AITextDelta(text=final_safe_text)
+
+    full_content = emitted_text + held_text
+    response_data = {
+        "model": response_model,
+        "choices": [
+            {
+                "finish_reason": finish_reason,
+                "message": {
+                    "role": "assistant",
+                    "content": full_content,
+                    "tool_calls": [
+                        tool_call
+                        for _, tool_call in sorted(tool_calls.items())
+                        if (tool_call.get("function") or {}).get("name")
+                    ],
+                },
+            }
+        ],
+        "usage": {},
+    }
+    try:
+        return _from_openai_response(response_data)
+    except (KeyError, TypeError, ValueError) as error:
+        logger.error(
+            "Hermes Agent stream API returned an invalid response: context=%s",
             log_context,
         )
         raise AssistantUnavailableError(
@@ -553,6 +791,56 @@ def _block_value(block, key: str):
     if isinstance(block, dict):
         return block.get(key)
     return getattr(block, key, None)
+
+
+def _from_anthropic_message(response) -> AICompletion:
+    return AICompletion(
+        model=response.model,
+        stop_reason=response.stop_reason,
+        content=[
+            AITextBlock(text=block.text)
+            if block.type == "text"
+            else AIToolUseBlock(
+                id=block.id,
+                name=block.name,
+                input=dict(block.input),
+            )
+            for block in response.content
+            if block.type in {"text", "tool_use"}
+        ],
+        usage=AIUsage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        ),
+    )
+
+
+def _completion_text_for_delta(completion: AICompletion) -> str:
+    if completion.stop_reason == "tool_use":
+        return ""
+    return "\n\n".join(
+        block.text for block in completion.content if block.type == "text"
+    ).strip()
+
+
+def _pop_safe_hermes_text(buffer: str, *, final: bool = False) -> tuple[str, str]:
+    marker = "<tool_call>"
+    partial_marker = "<tool_call"
+    marker_index = buffer.find(partial_marker)
+    if marker_index >= 0:
+        return buffer[:marker_index], buffer[marker_index:]
+
+    if final:
+        return buffer, ""
+
+    hold_length = 0
+    max_hold = min(len(buffer), len(marker) - 1)
+    for length in range(1, max_hold + 1):
+        if marker.startswith(buffer[-length:]):
+            hold_length = length
+    if hold_length == 0:
+        return buffer, ""
+    return buffer[:-hold_length], buffer[-hold_length:]
 
 
 gateway = AIGateway()

@@ -952,24 +952,7 @@ export type AssistantStatus = {
   runtime: string;
   model: string;
   runtime_healthy: boolean | null;
-  planner: AssistantPlannerStatus;
-  agents: AssistantAgent[];
   tools: AssistantTool[];
-};
-
-export type AssistantPlannerStatus = {
-  runtime: string;
-  enabled: boolean;
-  model: string | null;
-  runtime_healthy: boolean | null;
-};
-
-export type AssistantAgent = {
-  key: string;
-  name: string;
-  description: string;
-  tool_names: string[];
-  required_permission: string;
 };
 
 export type AssistantTool = {
@@ -1030,6 +1013,7 @@ export type AssistantAction = {
   ok: boolean;
   input: Record<string, unknown>;
   result: string;
+  status?: "started" | "finished";
 };
 
 export type AssistantMessage = {
@@ -1053,6 +1037,24 @@ export type AssistantConversation = {
 
 export type AssistantConversationDetail = AssistantConversation & {
   messages: AssistantMessage[];
+};
+
+export type AssistantStreamMessageStart = {
+  conversation_id: number;
+  user_message_id: number;
+};
+
+export type AssistantStreamToolActivity = {
+  tool: string;
+  status: "started" | "finished";
+  input: Record<string, unknown>;
+  ok?: boolean;
+  result?: string;
+};
+
+export type AssistantStreamDone = {
+  message: AssistantMessage;
+  conversation: AssistantConversation;
 };
 
 export type AssistantConversationFolder = {

@@ -1703,5 +1703,22 @@ def get_tool_definitions(tool_names: frozenset[str]) -> list[dict]:
     ]
 
 
+def get_available_tool_specs(
+    db: Session,
+    current_user: User,
+    tool_names: frozenset[str] | None = None,
+) -> list[ToolSpec]:
+    requested_tool_names = tool_names or frozenset(TOOL_CATALOG)
+    return [
+        spec
+        for name, spec in TOOL_CATALOG.items()
+        if name in requested_tool_names
+        and (
+            spec.required_permission is None
+            or has_permission(current_user, spec.required_permission, db)
+        )
+    ]
+
+
 def get_tool_metadata() -> list[dict]:
     return [spec.metadata for spec in TOOL_CATALOG.values()]

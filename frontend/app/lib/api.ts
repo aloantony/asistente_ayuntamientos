@@ -1,4 +1,9 @@
-import type { User } from "../components/types";
+import type {
+  AssistantStreamDone,
+  AssistantStreamMessageStart,
+  AssistantStreamToolActivity,
+  User,
+} from "../components/types";
 
 export class ApiRequestError extends Error {
   status: number;
@@ -330,6 +335,97 @@ export async function adminRequestWithTotal<T>(
       : 0;
 
   return { items, total };
+}
+
+type AssistantStreamHandlers = {
+  onMessageStart?: (event: AssistantStreamMessageStart) => void;
+  onTextDelta?: (text: string) => void;
+  onToolActivity?: (event: AssistantStreamToolActivity) => void;
+  onDone?: (event: AssistantStreamDone) => void;
+};
+
+export async function streamAssistantMessage(
+  conversationId: number,
+  content: string,
+  accessToken: string,
+  handlers: AssistantStreamHandlers,
+) {
+  const response = await performAdminRequest(
+    `/assistant/conversations/${conversationId}/messages/stream`,
+    accessToken,
+    "El asistente no ha podido responder.",
+    { method: "POST", body: JSON.stringify({ content }) },
+  );
+
+  if (!response.body) {
+    throw new ApiRequestError("El asistente no ha podido responder.", 0);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      dispatchAssistantStreamFrame(frame, handlers);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    dispatchAssistantStreamFrame(buffer, handlers);
+  }
+}
+
+function dispatchAssistantStreamFrame(
+  frame: string,
+  handlers: AssistantStreamHandlers,
+) {
+  let eventName = "message";
+  const dataLines: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) {
+      eventName = line.slice("event:".length).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trimStart());
+    }
+  }
+
+  const rawData = dataLines.join("\n");
+  const data = rawData ? (JSON.parse(rawData) as Record<string, unknown>) : {};
+  switch (eventName) {
+    case "message_start":
+      handlers.onMessageStart?.(data as AssistantStreamMessageStart);
+      break;
+    case "text_delta":
+      if (typeof data.text === "string") {
+        handlers.onTextDelta?.(data.text);
+      }
+      break;
+    case "tool_activity":
+      handlers.onToolActivity?.(data as AssistantStreamToolActivity);
+      break;
+    case "done":
+      handlers.onDone?.(data as AssistantStreamDone);
+      break;
+    case "error":
+      throw new ApiRequestError(
+        translateApiDetail(
+          typeof data.detail === "string" ? data.detail : "",
+          "El asistente no ha podido responder.",
+        ),
+        500,
+      );
+    default:
+      break;
+  }
 }
 
 export function getErrorMessage(error: unknown, fallback: string) {

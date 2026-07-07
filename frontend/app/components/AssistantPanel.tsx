@@ -16,6 +16,8 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   type DragEvent,
   type FormEvent,
@@ -293,6 +295,10 @@ function getActionIcon(tool: string): LucideIcon {
 }
 
 function getActionSummary(action: AssistantAction) {
+  if (action.status === "started") {
+    return "En curso.";
+  }
+
   if (!action.ok) {
     return "La herramienta devolvio un error.";
   }
@@ -435,18 +441,23 @@ function ActionTimeline({
         {actions.map((action, index) => {
           const Icon = getActionIcon(action.tool);
           const webResults = getWebResults(action);
+          const isPending = action.status === "started";
 
           return (
             <div
               className={
-                action.ok
+                isPending
+                  ? "assistant-action-event pending"
+                  : action.ok
                   ? "assistant-action-event ok"
                   : "assistant-action-event error"
               }
               key={`${action.tool}-${index}`}
             >
               <div className="assistant-action-marker">
-                {action.ok ? (
+                {isPending ? (
+                  <Loader2 aria-hidden className="spinning-icon" size={16} />
+                ) : action.ok ? (
                   <CheckCircle2 aria-hidden size={16} />
                 ) : (
                   <XCircle aria-hidden size={16} />
@@ -475,16 +486,58 @@ function ActionTimeline({
                     ))}
                   </div>
                 ) : null}
-                <details className="assistant-action-detail">
-                  <summary>Detalle tecnico</summary>
-                  <pre>{actionDetailText(action)}</pre>
-                </details>
+                {!isPending ? (
+                  <details className="assistant-action-detail">
+                    <summary>Detalle tecnico</summary>
+                    <pre>{actionDetailText(action)}</pre>
+                  </details>
+                ) : null}
               </div>
             </div>
           );
         })}
       </div>
     </details>
+  );
+}
+
+function AssistantMarkdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      allowedElements={[
+        "p",
+        "strong",
+        "em",
+        "ul",
+        "ol",
+        "li",
+        "blockquote",
+        "code",
+        "pre",
+        "a",
+        "h1",
+        "h2",
+        "h3",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "th",
+        "td",
+        "hr",
+        "br",
+      ]}
+      components={{
+        a: ({ href, children }) => (
+          <a href={href} rel="noreferrer" target="_blank">
+            {children}
+          </a>
+        ),
+      }}
+      remarkPlugins={[remarkGfm]}
+    >
+      {content}
+    </ReactMarkdown>
   );
 }
 
@@ -621,7 +674,15 @@ export function AssistantPanel({
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [selectedConversation?.messages.length, isSendingMessage]);
+  }, [
+    selectedConversation?.messages
+      .map(
+        (message) =>
+          `${message.id}:${message.content.length}:${message.actions.length}`,
+      )
+      .join("|"),
+    isSendingMessage,
+  ]);
 
   useEffect(() => {
     if (!conversationContextMenu) {
@@ -1529,16 +1590,20 @@ export function AssistantPanel({
                           <small>{formatDate(message.created_at)}</small>
                         </div>
                         <div className="assistant-message-bubble">
-                          <p className="assistant-message-content">
-                            {message.content}
-                          </p>
+                          {isAssistant ? (
+                            <div className="assistant-message-content markdown-content">
+                              <AssistantMarkdown content={message.content} />
+                            </div>
+                          ) : (
+                            <p className="assistant-message-content">
+                              {message.content}
+                            </p>
+                          )}
                         </div>
                         <AssistantMapActions actions={message.actions} />
-                        {message.actions.some((action) => action.tool === "web_search") ? (
+                        {message.actions.length > 0 ? (
                           <ActionTimeline
-                            actions={message.actions.filter(
-                              (action) => action.tool === "web_search",
-                            )}
+                            actions={message.actions}
                             toolLabels={toolLabels}
                           />
                         ) : null}
@@ -1564,7 +1629,13 @@ export function AssistantPanel({
                     </article>
                   );
                 })}
-                {isSendingMessage ? (
+                {isSendingMessage &&
+                !selectedConversation.messages.some(
+                  (message) =>
+                    message.id === -2 &&
+                    (message.content.trim().length > 0 ||
+                      message.actions.length > 0),
+                ) ? (
                   <article className="assistant-message assistant working">
                     <div className="assistant-message-avatar">
                       <AssistantSymbolIcon name="mark" size={16} />
