@@ -1,6 +1,6 @@
 # Requisitos
 
-Actualizado: 2026-06-15. Este documento refleja el estado actual del producto. La fuente de detalle operativo es `README.md`; los requisitos nuevos entran por el módulo de Requirements Intake.
+Actualizado: 2026-07-06. Este documento refleja el estado actual del producto. La fuente de detalle operativo es `README.md`; los requisitos nuevos entran por el asistente Anacleto y el módulo de Requirements Intake.
 
 ## Visión de producto
 
@@ -18,7 +18,7 @@ El primer usuario real es un alcalde (socio del proyecto) que comunicará las ne
 - Requirements Intake: captura estructurada de necesidades con flujo de estados, prioridades e hilo de mensajes.
 - Municipios: datos de referencia globales de municipios reales.
 - Ordenanzas: registros estructurados vinculados a municipio y opcionalmente a un documento.
-- Asistente de IA conversacional de intake de requisitos: el usuario conversa en español y el agente crea y actualiza requisitos en su nombre (siempre como borradores supervisables), respetando sus permisos RBAC y dejando rastro auditable de cada acción. Toda llamada a IA externa o runtime privado pasa por el gateway interno (ver restricciones). Puede ejecutarse con Anthropic o con Hermes Agent como aplicación/runtime privado. Permiso de acceso: `assistant.use`.
+- Asistente de IA conversacional Anacleto v2: el usuario conversa en español con un único asistente model-first, con streaming web y Markdown. El asistente consulta datos visibles, usa herramientas filtradas por permisos y puede crear requisitos solo como borradores supervisables. `create_requirement` exige confirmación humana en un turno posterior mediante guarda backend, no solo por prompt. Toda llamada a IA externa o runtime privado pasa por el gateway interno (ver restricciones). Puede ejecutarse con Anthropic o con Hermes Agent como aplicación/runtime privado. Permiso de acceso: `assistant.use`.
 - Memoria institucional controlada: el agente puede proponer conocimiento de organización, pero un responsable debe aprobarlo, editarlo, rechazarlo o bloquearlo antes de que sea reutilizable. La memoria oficial reside en PostgreSQL y se gobierna desde el backend propio, no en Hermes Agent. Permisos: `assistant.memory.propose`, `assistant.memory.view`, `assistant.memory.review`.
 
 ## Requisitos técnicos

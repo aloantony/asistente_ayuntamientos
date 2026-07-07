@@ -65,7 +65,7 @@ La rutina v1 es `daily_briefing`. Puede crear una tarea aprobada de informe diar
 - Sin Obsidian.
 - Hermes Agent o el modelo no deciden permisos.
 - Las herramientas reales siguen en el backend propio.
-- El texto libre no debe activar rutas de producto por marcadores como “ordenanza”, “mapa” o “necesidad”; esa decisión pertenece al planner semántico de Anacleto o a una acción estructurada.
+- El texto libre no debe activar rutas de producto por marcadores como “ordenanza”, “mapa” o “necesidad”; esa decisión pertenece al modelo de Anacleto dentro del motor conversacional o a una acción estructurada.
 - El usuario solicitante es el contexto de ejecución RBAC.
 - Las acciones que modifican datos requieren aprobación humana por defecto.
 - Los documentos originales siguen fuera de llamadas a IA.
