@@ -54,9 +54,7 @@ class Settings(BaseSettings):
     speech_transcription_max_bytes: int = 20 * 1024 * 1024
     nvidia_api_key: str | None = None
     nvidia_riva_server: str = "grpc.nvcf.nvidia.com:443"
-    nvidia_whisper_function_id: str | None = (
-        "b702f636-f60c-4a3d-a6f4-f3568c13bd7d"
-    )
+    nvidia_whisper_function_id: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
