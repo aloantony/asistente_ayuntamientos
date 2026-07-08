@@ -1,12 +1,13 @@
+import json
 from typing import Annotated
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status as http_status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.assistant.agents import get_allowed_agents
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
 from app.assistant.models import (
     AssistantAdminFeedback,
@@ -40,14 +41,9 @@ from app.assistant.schemas import (
     TransversalFeatureAdoptionStatus,
     TransversalFeatureStatus,
 )
-from app.assistant.service import run_agent_turn
+from app.assistant.turn import TurnEvent, run_agent_turn, run_agent_turn_events
 from app.assistant.speech import SpeechTranscriptionError, transcribe_audio_bytes
-from app.assistant.planner import (
-    effective_planner_runtime,
-    planner_enabled,
-    planner_healthy,
-)
-from app.assistant.tools import get_tool_metadata
+from app.assistant.tools import get_available_tool_specs
 from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
 from app.db.session import get_db
@@ -79,8 +75,6 @@ def get_assistant_status(
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
 ) -> AssistantStatusRead:
     require_assistant_use(db, current_user)
-    planner_runtime = effective_planner_runtime()
-    planner_is_enabled = planner_enabled()
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
         runtime=settings.assistant_runtime,
@@ -90,16 +84,7 @@ def get_assistant_status(
             else settings.assistant_model
         ),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
-        planner={
-            "runtime": planner_runtime,
-            "enabled": planner_is_enabled,
-            "model": settings.assistant_planner_model
-            if planner_runtime == "hermes_agent"
-            else None,
-            "runtime_healthy": planner_healthy(),
-        },
-        agents=[agent.metadata for agent in get_allowed_agents(db, current_user)],
-        tools=get_tool_metadata(),
+        tools=[tool.metadata for tool in get_available_tool_specs(db, current_user)],
     )
 
 
@@ -609,6 +594,58 @@ def send_message(
         ) from None
 
     return get_own_conversation(db, current_user, conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/messages/stream")
+def send_message_stream(
+    conversation_id: int,
+    payload: AssistantUserMessageCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
+) -> StreamingResponse:
+    require_assistant_use(db, current_user)
+    conversation = get_own_conversation(db, current_user, conversation_id)
+
+    if conversation.status != "active":
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="Conversation is archived",
+        )
+    if not agent_gateway.enabled:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Assistant is not configured",
+        )
+
+    def event_stream():
+        try:
+            for event in run_agent_turn_events(
+                db,
+                current_user,
+                conversation,
+                payload.content,
+                agent_gateway,
+            ):
+                yield format_sse_event(event)
+        except AssistantUnavailableError:
+            yield format_sse_event(
+                TurnEvent("error", {"detail": "Assistant request failed"})
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def format_sse_event(event: TurnEvent) -> str:
+    data = json.dumps(event.data, ensure_ascii=False)
+    return f"event: {event.type}\ndata: {data}\n\n"
 
 
 def get_own_conversation(

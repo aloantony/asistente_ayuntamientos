@@ -2323,6 +2323,84 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   line-height: 1.55;
 }
 
+.assistant-message-content.markdown-content {
+  white-space: normal;
+}
+
+.assistant-message-content.markdown-content > *:first-child {
+  margin-top: 0;
+}
+
+.assistant-message-content.markdown-content > *:last-child {
+  margin-bottom: 0;
+}
+
+.assistant-message-content.markdown-content p,
+.assistant-message-content.markdown-content ul,
+.assistant-message-content.markdown-content ol,
+.assistant-message-content.markdown-content h1,
+.assistant-message-content.markdown-content h2,
+.assistant-message-content.markdown-content h3,
+.assistant-message-content.markdown-content blockquote,
+.assistant-message-content.markdown-content pre,
+.assistant-message-content.markdown-content table {
+  margin: 0 0 10px;
+}
+
+.assistant-message-content.markdown-content h1,
+.assistant-message-content.markdown-content h2,
+.assistant-message-content.markdown-content h3 {
+  color: var(--text);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.assistant-message-content.markdown-content ul,
+.assistant-message-content.markdown-content ol {
+  padding-left: 22px;
+}
+
+.assistant-message-content.markdown-content code {
+  border-radius: 5px;
+  padding: 1px 5px;
+  background: var(--surface-muted);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.92em;
+}
+
+.assistant-message-content.markdown-content pre {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface-muted);
+}
+
+.assistant-message-content.markdown-content pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.assistant-message-content.markdown-content a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.assistant-message-content.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.assistant-message-content.markdown-content th,
+.assistant-message-content.markdown-content td {
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+}
+
 .assistant-message.working .assistant-message-main {
   padding-top: 2px;
 }
@@ -2424,6 +2502,15 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 .assistant-action-event.error .assistant-action-marker {
   color: var(--danger-fg);
   background: var(--danger-bg);
+}
+
+.assistant-action-event.pending .assistant-action-marker {
+  color: var(--text-muted);
+  background: var(--surface-muted);
+}
+
+.spinning-icon {
+  animation: assistant-spin 0.85s linear infinite;
 }
 
 .assistant-action-body {

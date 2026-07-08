@@ -136,8 +136,8 @@ class AssistantMessage(Base):
         index=True,
         nullable=True,
     )
-    # JSON-encoded routing metadata: candidates, chosen, source and fallback
-    # reason when the planner was disabled or unavailable.
+    # JSON-encoded routing metadata kept for historical messages. New
+    # Anacleto v2 messages use routing=None.
     routing: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
