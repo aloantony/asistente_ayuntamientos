@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     nvidia_api_key: str | None = None
     nvidia_riva_server: str = "grpc.nvcf.nvidia.com:443"
     nvidia_whisper_function_id: str | None = None
+    speech_synthesis_runtime: str = "disabled"
+    speech_synthesis_voice: str = "es-ES-ElviraNeural"
+    speech_synthesis_language_code: str = "es-ES"
+    speech_synthesis_max_chars: int = 3000
+    speech_synthesis_timeout_seconds: float = 30.0
+    azure_speech_key: str | None = None
+    azure_speech_region: str = "westeurope"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -95,6 +102,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "speech_transcription_runtime must be 'disabled' or 'nvidia_nim'"
             )
+        return normalized
+
+    @field_validator("speech_synthesis_runtime")
+    @classmethod
+    def validate_speech_synthesis_runtime(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"disabled", "azure"}:
+            raise ValueError("speech_synthesis_runtime must be 'disabled' or 'azure'")
         return normalized
 
     @property

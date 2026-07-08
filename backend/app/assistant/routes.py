@@ -1,8 +1,17 @@
 import json
-from typing import Annotated
 from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status as http_status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status as http_status,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +40,7 @@ from app.assistant.schemas import (
     AssistantConversationUpdate,
     AssistantMemoryEntryRead,
     AssistantMemoryEntryUpdate,
+    AssistantSpeechCreate,
     AssistantStatusRead,
     AssistantTransversalFeatureAdoptionRead,
     AssistantTransversalFeatureAdoptionUpdate,
@@ -42,7 +52,12 @@ from app.assistant.schemas import (
     TransversalFeatureStatus,
 )
 from app.assistant.turn import TurnEvent, run_agent_turn, run_agent_turn_events
-from app.assistant.speech import SpeechTranscriptionError, transcribe_audio_bytes
+from app.assistant.speech import (
+    SpeechSynthesisError,
+    SpeechTranscriptionError,
+    synthesize_speech_bytes,
+    transcribe_audio_bytes,
+)
 from app.assistant.tools import get_available_tool_specs
 from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
@@ -84,6 +99,9 @@ def get_assistant_status(
             else settings.assistant_model
         ),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
+        speech_transcription_enabled=settings.speech_transcription_runtime
+        != "disabled",
+        speech_synthesis_enabled=settings.speech_synthesis_runtime != "disabled",
         tools=[tool.metadata for tool in get_available_tool_specs(db, current_user)],
     )
 
@@ -112,6 +130,28 @@ async def transcribe_audio(
             detail="Audio transcription is not available",
         ) from None
     return AssistantAudioTranscriptionRead(text=text)
+
+
+@router.post("/speech")
+def synthesize_speech(
+    payload: AssistantSpeechCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    require_assistant_use(db, current_user)
+    if len(payload.text) > settings.speech_synthesis_max_chars:
+        raise HTTPException(
+            status_code=http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Speech text is too long",
+        )
+    try:
+        audio = synthesize_speech_bytes(payload.text)
+    except SpeechSynthesisError:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Speech synthesis is not available",
+        ) from None
+    return Response(content=audio, media_type="audio/mpeg")
 
 
 @router.get("/memory", response_model=list[AssistantMemoryEntryRead])
@@ -586,6 +626,7 @@ def send_message(
             conversation,
             payload.content,
             agent_gateway,
+            input_mode=payload.input_mode,
         )
     except AssistantUnavailableError:
         raise HTTPException(
@@ -626,6 +667,7 @@ def send_message_stream(
                 conversation,
                 payload.content,
                 agent_gateway,
+                input_mode=payload.input_mode,
             ):
                 yield format_sse_event(event)
         except AssistantUnavailableError:

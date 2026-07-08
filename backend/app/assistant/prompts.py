@@ -28,6 +28,10 @@ CONFIRMATION_REQUIRED_TOOL_RESULT = (
     "un mensaje posterior. No vuelvas a llamar a create_requirement en este "
     "mismo turno."
 )
+VOICE_MODE_PROMPT_BLOCK = """Modo voz:
+- El usuario está hablando por voz y escuchará tu respuesta en voz alta.
+- Responde en 2 a 4 frases naturales de estilo oral, sin Markdown: nada de listas, tablas, encabezados ni bloques de código.
+- Si el resultado es extenso o estructurado, resume lo esencial de palabra y termina indicando que dejas el detalle escrito en pantalla."""
 
 ANACLETO_SYSTEM_PROMPT = """Eres Anacleto, el asistente municipal de Asistente Ayuntamientos.
 
@@ -70,6 +74,7 @@ def build_system_prompt(
     db: Session,
     current_user: User,
     tools: list[ToolSpec],
+    input_mode: str = "text",
 ) -> str:
     organizations = db.scalars(
         get_accessible_organizations_query(current_user)
@@ -82,7 +87,7 @@ def build_system_prompt(
         for organization in organizations
     )
 
-    return (
+    system_prompt = (
         f"{ANACLETO_SYSTEM_PROMPT}\n\n"
         f"{build_ordinance_coverage_block(db)}\n\n"
         f"{build_tool_prompt_block(tools)}\n\n"
@@ -90,6 +95,9 @@ def build_system_prompt(
         f"Organizaciones del usuario:\n{organization_lines or '- (ninguna)'}"
         f"{build_approved_memory_block(db, current_user, organization_names)}"
     )
+    if input_mode == "voice":
+        return f"{system_prompt}\n\n{VOICE_MODE_PROMPT_BLOCK}"
+    return system_prompt
 
 
 def build_tool_prompt_block(tools: list[ToolSpec]) -> str:

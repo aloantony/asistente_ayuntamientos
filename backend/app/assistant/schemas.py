@@ -61,11 +61,19 @@ class AssistantStatusRead(BaseModel):
     runtime: str
     model: str
     runtime_healthy: bool | None = None
+    speech_transcription_enabled: bool = False
+    speech_synthesis_enabled: bool = False
     tools: list["AssistantToolRead"] = []
 
 
 class AssistantAudioTranscriptionRead(BaseModel):
     text: str
+
+
+class AssistantSpeechCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
 
 
 class AssistantToolRead(BaseModel):
@@ -168,6 +176,7 @@ class AssistantConversationFolderUpdate(BaseModel):
 
 class AssistantUserMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=20000)
+    input_mode: Literal["text", "voice"] = "text"
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
