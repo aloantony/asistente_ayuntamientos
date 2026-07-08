@@ -18,7 +18,11 @@ import {
   streamAssistantMessage,
   synthesizeAssistantSpeech,
 } from "./api";
-import { createSpeechPlayer, flattenMarkdownForSpeech } from "./voice";
+import {
+  createSentenceChunker,
+  createSpeechPlayer,
+  flattenMarkdownForSpeech,
+} from "./voice";
 
 type RequestErrorHandler = (
   requestError: unknown,
@@ -84,6 +88,12 @@ export function useAssistantController({
     }
     return window.localStorage.getItem("assistant.voice.mode") === "true";
   });
+  const [handsFreeEnabled, setHandsFreeEnabledState] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+    return window.localStorage.getItem("assistant.voice.handsfree") !== "false";
+  });
   const [isSpeaking, setIsSpeaking] = useState(false);
   // Mirrors the selected conversation id so async callbacks can check
   // whether the user navigated away while a request was in flight.
@@ -111,6 +121,13 @@ export function useAssistantController({
   }, [voiceModeEnabled]);
 
   useEffect(() => {
+    window.localStorage.setItem(
+      "assistant.voice.handsfree",
+      handsFreeEnabled ? "true" : "false",
+    );
+  }, [handsFreeEnabled]);
+
+  useEffect(() => {
     return () => {
       speechPlayerRef.current?.stop();
     };
@@ -136,6 +153,10 @@ export function useAssistantController({
 
   function stopSpeaking() {
     speechPlayerRef.current?.stop();
+  }
+
+  function setHandsFreeEnabled(enabled: boolean) {
+    setHandsFreeEnabledState(enabled);
   }
 
   function clearAssistantState() {
@@ -273,6 +294,25 @@ export function useAssistantController({
     setAssistantError("");
 
     let streamedUserMessageId: number | null = null;
+    const speakAssistantText = (text: string) => {
+      const speechText = flattenMarkdownForSpeech(text);
+      if (!speechText) {
+        return;
+      }
+      void speechPlayerRef.current?.speak(speechText).catch((speechError) => {
+        if (selectedIdRef.current === conversationId) {
+          handleRequestError(
+            speechError,
+            setAssistantError,
+            "No se pudo reproducir la voz del asistente.",
+          );
+        }
+      });
+    };
+    const sentenceChunker =
+      inputMode === "voice" && handsFreeEnabled
+        ? createSentenceChunker(speakAssistantText)
+        : null;
 
     // Optimistic echo so the user sees their message while the agent works.
     setSelectedConversation((current) =>
@@ -325,6 +365,7 @@ export function useAssistantController({
           );
         },
         onTextDelta: (text) => {
+          sentenceChunker?.push(text);
           setSelectedConversation((current) =>
             current && current.id === conversationId
               ? {
@@ -394,21 +435,10 @@ export function useAssistantController({
           if (hasMutatingAction) {
             onRequirementsChanged?.();
           }
-          if (inputMode === "voice") {
-            const speechText = flattenMarkdownForSpeech(event.message.content);
-            if (speechText) {
-              void speechPlayerRef.current
-                ?.speak(speechText)
-                .catch((speechError) => {
-                  if (selectedIdRef.current === conversationId) {
-                    handleRequestError(
-                      speechError,
-                      setAssistantError,
-                      "No se pudo reproducir la voz del asistente.",
-                    );
-                  }
-                });
-            }
+          if (sentenceChunker) {
+            sentenceChunker.flush();
+          } else if (inputMode === "voice") {
+            speakAssistantText(event.message.content);
           }
         },
       }, inputMode);
@@ -756,12 +786,14 @@ export function useAssistantController({
     draftMessage,
     includeArchivedConversations,
     voiceModeEnabled,
+    handsFreeEnabled,
     isLoadingAssistant,
     isSendingMessage,
     isSpeaking,
     assistantError,
     setDraftMessage,
     setVoiceModeEnabled,
+    setHandsFreeEnabled,
     loadAssistant,
     loadMemoryEntries,
     toggleIncludeArchivedConversations,

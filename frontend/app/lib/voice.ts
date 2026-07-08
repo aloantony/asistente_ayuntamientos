@@ -1,4 +1,12 @@
 const DETAIL_PLACEHOLDER = "Te dejo el detalle escrito en pantalla.";
+const SENTENCE_MIN_CHARS = 60;
+const SILENCE_CHECK_INTERVAL_MS = 100;
+const SILENCE_CALIBRATION_MS = 500;
+const SILENCE_AFTER_VOICE_MS = 1400;
+const NO_VOICE_TIMEOUT_MS = 15000;
+const MAX_UTTERANCE_MS = 60000;
+const MIN_RMS_THRESHOLD = 0.01;
+const NOISE_MULTIPLIER = 3;
 
 type SpeechPlayerListener = (speaking: boolean) => void;
 
@@ -6,6 +14,11 @@ type SpeechQueueItem = {
   text: string;
   resolve: () => void;
   reject: (error: unknown) => void;
+};
+
+type SilenceDetectorOptions = {
+  onSilence: () => void;
+  onTimeout: () => void;
 };
 
 function ensureSentenceEnding(text: string) {
@@ -187,4 +200,163 @@ export function createSpeechPlayer(deps: {
       };
     },
   };
+}
+
+export function createSentenceChunker(onSentence: (sentence: string) => void) {
+  let buffer = "";
+
+  function emitReadySentences(force = false) {
+    while (buffer.trim().length > 0) {
+      const boundary = findSentenceBoundary(buffer);
+      if (boundary === -1) {
+        break;
+      }
+      const sentence = buffer.slice(0, boundary).trim();
+      if (!force && sentence.length < SENTENCE_MIN_CHARS) {
+        break;
+      }
+      buffer = buffer.slice(boundary).trimStart();
+      if (sentence) {
+        onSentence(sentence);
+      }
+    }
+
+    if (force) {
+      const remaining = buffer.trim();
+      buffer = "";
+      if (remaining) {
+        onSentence(remaining);
+      }
+    }
+  }
+
+  return {
+    push(delta: string) {
+      buffer += delta;
+      emitReadySentences(false);
+    },
+    flush() {
+      emitReadySentences(true);
+    },
+  };
+}
+
+function findSentenceBoundary(text: string) {
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1] ?? "";
+    if (char === "\n") {
+      return index + 1;
+    }
+    if (".!?…".includes(char) && /\s/.test(next)) {
+      return index + 1;
+    }
+  }
+  return -1;
+}
+
+export function createSilenceDetector(
+  stream: MediaStream,
+  opts: SilenceDetectorOptions,
+) {
+  const AudioContextConstructor =
+    window.AudioContext ??
+    (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+  if (!AudioContextConstructor) {
+    const timeout = window.setTimeout(opts.onTimeout, NO_VOICE_TIMEOUT_MS);
+    return {
+      stop() {
+        window.clearTimeout(timeout);
+      },
+    };
+  }
+
+  const audioContext = new AudioContextConstructor();
+  const source = audioContext.createMediaStreamSource(stream);
+  const analyser = audioContext.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+
+  const samples = new Uint8Array(analyser.fftSize);
+  const startedAt = performance.now();
+  let calibrationTotal = 0;
+  let calibrationSamples = 0;
+  let threshold = MIN_RMS_THRESHOLD;
+  let heardVoice = false;
+  let lastVoiceAt = 0;
+  let finished = false;
+  let stopped = false;
+
+  function finish(callback: () => void) {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    stop();
+    callback();
+  }
+
+  function currentRms() {
+    analyser.getByteTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) {
+      const normalized = (sample - 128) / 128;
+      sum += normalized * normalized;
+    }
+    return Math.sqrt(sum / samples.length);
+  }
+
+  const interval = window.setInterval(() => {
+    const now = performance.now();
+    const elapsed = now - startedAt;
+    const rms = currentRms();
+
+    if (elapsed <= SILENCE_CALIBRATION_MS) {
+      calibrationTotal += rms;
+      calibrationSamples += 1;
+      return;
+    }
+
+    if (calibrationSamples > 0) {
+      threshold = Math.max(
+        MIN_RMS_THRESHOLD,
+        (calibrationTotal / calibrationSamples) * NOISE_MULTIPLIER,
+      );
+      calibrationSamples = 0;
+    }
+
+    if (rms >= threshold) {
+      heardVoice = true;
+      lastVoiceAt = now;
+      return;
+    }
+
+    if (!heardVoice && elapsed >= NO_VOICE_TIMEOUT_MS) {
+      finish(opts.onTimeout);
+      return;
+    }
+
+    if (heardVoice && now - lastVoiceAt >= SILENCE_AFTER_VOICE_MS) {
+      finish(opts.onSilence);
+      return;
+    }
+
+    if (heardVoice && elapsed >= MAX_UTTERANCE_MS) {
+      finish(opts.onSilence);
+    }
+  }, SILENCE_CHECK_INTERVAL_MS);
+
+  function stop() {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    window.clearInterval(interval);
+    source.disconnect();
+    analyser.disconnect();
+    void audioContext.close().catch(() => undefined);
+  }
+
+  return { stop };
 }

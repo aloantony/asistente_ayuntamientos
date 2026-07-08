@@ -143,6 +143,7 @@ function AsistentePageInner() {
         selectedConversation={assistantController.selectedConversation}
         draftMessage={assistantController.draftMessage}
         voiceModeEnabled={assistantController.voiceModeEnabled}
+        handsFreeEnabled={assistantController.handsFreeEnabled}
         isLoadingAssistant={assistantController.isLoadingAssistant}
         isSendingMessage={assistantController.isSendingMessage}
         isSpeaking={assistantController.isSpeaking}
@@ -152,6 +153,7 @@ function AsistentePageInner() {
         }
         onDraftMessageChange={assistantController.setDraftMessage}
         onVoiceModeChange={assistantController.setVoiceModeEnabled}
+        onHandsFreeChange={assistantController.setHandsFreeEnabled}
         onSelectConversation={handleSelectConversation}
         onStartConversation={assistantController.startConversation}
         onSendMessage={assistantController.sendMessage}
