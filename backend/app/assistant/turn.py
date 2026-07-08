@@ -95,6 +95,8 @@ def run_agent_turn_events(
     conversation: AssistantConversation,
     user_text: str,
     gateway: AIGateway,
+    *,
+    input_mode: str = "text",
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
     user_message = AssistantMessage(
@@ -121,7 +123,7 @@ def run_agent_turn_events(
     tools = get_available_tool_specs(db, current_user)
     tool_definitions = [tool.definition for tool in tools]
     tool_names = frozenset(tool.name for tool in tools)
-    system = build_system_prompt(db, current_user, tools)
+    system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
     messages = build_history(conversation)
 
     actions: list[dict] = []
@@ -272,6 +274,8 @@ def run_agent_turn(
     conversation: AssistantConversation,
     user_text: str,
     gateway: AIGateway,
+    *,
+    input_mode: str = "text",
 ) -> AssistantMessage:
     events = run_agent_turn_events(
         db,
@@ -279,6 +283,7 @@ def run_agent_turn(
         conversation,
         user_text,
         gateway,
+        input_mode=input_mode,
     )
     while True:
         try:

@@ -160,13 +160,22 @@ async def telegram_webhook(
         )
         return TelegramWebhookRead()
 
+    input_mode = "text"
     if not text and isinstance(voice, dict):
         text = transcribe_telegram_voice(chat_id, voice)
         if not text:
             return TelegramWebhookRead()
+        input_mode = "voice"
 
     conversation = get_or_create_telegram_conversation(db, link.user, chat_id)
-    reply = run_agent_turn(db, link.user, conversation, text, gateway)
+    reply = run_agent_turn(
+        db,
+        link.user,
+        conversation,
+        text,
+        gateway,
+        input_mode=input_mode,
+    )
     send_telegram_message(chat_id, reply.content)
     return TelegramWebhookRead()
 

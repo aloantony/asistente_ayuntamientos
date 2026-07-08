@@ -37,6 +37,7 @@ import {
   type AssistantStatus,
   type User,
 } from "./types";
+import { createSilenceDetector } from "../lib/voice";
 
 type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
@@ -45,14 +46,21 @@ type AssistantPanelProps = {
   currentUser: User;
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
+  voiceModeEnabled: boolean;
+  handsFreeEnabled: boolean;
   isLoadingAssistant: boolean;
   isSendingMessage: boolean;
+  isSpeaking: boolean;
   assistantError: string;
   includeArchivedConversations: boolean;
   onDraftMessageChange: (value: string) => void;
+  onVoiceModeChange: (enabled: boolean) => void;
+  onHandsFreeChange: (enabled: boolean) => void;
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
   onSendMessage: () => void;
+  onSendVoiceTranscript: (transcript: string) => void;
+  onStopSpeaking: () => void;
   onTranscribeAudio: (audio: Blob) => Promise<string>;
   onArchiveConversation: (conversationId: number) => void;
   onRestoreConversation: (conversationId: number) => void;
@@ -548,14 +556,21 @@ export function AssistantPanel({
   currentUser,
   selectedConversation,
   draftMessage,
+  voiceModeEnabled,
+  handsFreeEnabled,
   isLoadingAssistant,
   isSendingMessage,
+  isSpeaking,
   assistantError,
   includeArchivedConversations,
   onDraftMessageChange,
+  onVoiceModeChange,
+  onHandsFreeChange,
   onSelectConversation,
   onStartConversation,
   onSendMessage,
+  onSendVoiceTranscript,
+  onStopSpeaking,
   onTranscribeAudio,
   onArchiveConversation,
   onRestoreConversation,
@@ -605,6 +620,7 @@ export function AssistantPanel({
   const [isListening, setIsListening] = useState(false);
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
   const [voiceError, setVoiceError] = useState("");
+  const [voiceLoopActive, setVoiceLoopActive] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
   const [isConversationListOpen, setIsConversationListOpen] = useState(true);
@@ -636,10 +652,39 @@ export function AssistantPanel({
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const silenceDetectorRef = useRef<ReturnType<typeof createSilenceDetector> | null>(
+    null,
+  );
+  const discardNextAudioRef = useRef(false);
+  const wasSpeakingRef = useRef(false);
+  // Held synchronously across the getUserMedia await so a concurrent
+  // startListening (e.g. tap-to-interrupt firing alongside the isSpeaking
+  // re-arm effect) cannot open a second microphone before the recorder ref
+  // is set.
+  const isArmingMicRef = useRef(false);
+  const previousConversationIdRef = useRef<number | null>(
+    selectedConversation?.id ?? null,
+  );
   const audioChunksRef = useRef<Blob[]>([]);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const speechTranscriptionEnabled = Boolean(
+    assistantStatus?.speech_transcription_enabled,
+  );
+  const voiceDialogueAvailable =
+    speechTranscriptionEnabled &&
+    Boolean(assistantStatus?.speech_synthesis_enabled) &&
+    speechSupported;
+  const voiceStatus = isListening
+    ? "Escuchando…"
+    : isTranscribingVoice
+      ? "Transcribiendo…"
+      : voiceModeEnabled && isSendingMessage
+        ? "Pensando…"
+        : isSpeaking
+          ? "Hablando…"
+          : "";
 
   const filteredConversations = useMemo(() => {
     const query = conversationFilter.trim().toLowerCase();
@@ -731,19 +776,31 @@ export function AssistantPanel({
   }, []);
 
   function releaseAudioStream() {
+    silenceDetectorRef.current?.stop();
+    silenceDetectorRef.current = null;
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
   }
 
-  function stopListening() {
+  function stopListening(options: { discardAudio?: boolean } = {}) {
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") {
+      if (options.discardAudio) {
+        discardNextAudioRef.current = true;
+      }
       recorder.stop();
       return;
     }
+    discardNextAudioRef.current = false;
     mediaRecorderRef.current = null;
     releaseAudioStream();
     setIsListening(false);
+  }
+
+  function pauseVoiceLoop(discardAudio = true) {
+    setVoiceLoopActive(false);
+    stopListening({ discardAudio });
+    onStopSpeaking();
   }
 
   useEffect(() => {
@@ -756,6 +813,77 @@ export function AssistantPanel({
     };
   }, []);
 
+  useEffect(() => {
+    if (!voiceModeEnabled || assistantError) {
+      pauseVoiceLoop(true);
+      return;
+    }
+    if (!handsFreeEnabled) {
+      setVoiceLoopActive(false);
+      silenceDetectorRef.current?.stop();
+      silenceDetectorRef.current = null;
+    }
+  }, [assistantError, handsFreeEnabled, voiceModeEnabled]);
+
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        pauseVoiceLoop(true);
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const currentConversationId = selectedConversation?.id ?? null;
+    if (previousConversationIdRef.current === currentConversationId) {
+      return;
+    }
+    // Leaving a conversation cancels any in-flight dictation instead of
+    // auto-sending it to whatever conversation is now open.
+    previousConversationIdRef.current = currentConversationId;
+    setVoiceLoopActive(false);
+    stopListening({ discardAudio: true });
+  }, [selectedConversation?.id]);
+
+  useEffect(() => {
+    if (isSpeaking) {
+      wasSpeakingRef.current = true;
+      return;
+    }
+
+    if (!wasSpeakingRef.current) {
+      return;
+    }
+    wasSpeakingRef.current = false;
+
+    if (
+      voiceLoopActive &&
+      voiceModeEnabled &&
+      handsFreeEnabled &&
+      !isListening &&
+      !isTranscribingVoice &&
+      !isSendingMessage &&
+      !composerDisabled &&
+      document.visibilityState !== "hidden"
+    ) {
+      void startListening({ force: true, loop: true });
+    }
+  }, [
+    composerDisabled,
+    handsFreeEnabled,
+    isListening,
+    isSendingMessage,
+    isSpeaking,
+    isTranscribingVoice,
+    voiceLoopActive,
+    voiceModeEnabled,
+  ]);
+
   async function appendTranscribedAudio(audio: Blob) {
     if (audio.size === 0) {
       return;
@@ -767,12 +895,20 @@ export function AssistantPanel({
         setVoiceError("No he detectado texto en el audio. Prueba con una nota un poco más clara.");
         return;
       }
+      if (voiceModeEnabled) {
+        if (handsFreeEnabled) {
+          setVoiceLoopActive(true);
+        }
+        onSendVoiceTranscript(transcript);
+        return;
+      }
       const currentDraft = draftMessageRef.current;
       onDraftMessageChange(
         currentDraft ? `${currentDraft} ${transcript}` : transcript,
       );
       messageTextareaRef.current?.focus({ preventScroll: true });
     } catch (error) {
+      setVoiceLoopActive(false);
       setVoiceError(
         error instanceof Error
           ? error.message
@@ -783,12 +919,23 @@ export function AssistantPanel({
     }
   }
 
-  async function startListening() {
-    if (!speechSupported || mediaRecorderRef.current) {
+  async function startListening(
+    options: { force?: boolean; loop?: boolean } = {},
+  ) {
+    if (
+      !speechSupported ||
+      mediaRecorderRef.current ||
+      isArmingMicRef.current ||
+      (isSpeaking && !options.force)
+    ) {
       return;
     }
+    isArmingMicRef.current = true;
 
     setVoiceError("");
+    if (options.loop) {
+      setVoiceLoopActive(true);
+    }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -804,30 +951,56 @@ export function AssistantPanel({
         const audio = new Blob(audioChunksRef.current, {
           type: recorder.mimeType || "audio/webm",
         });
+        const shouldDiscardAudio = discardNextAudioRef.current;
+        discardNextAudioRef.current = false;
         audioChunksRef.current = [];
         mediaRecorderRef.current = null;
         releaseAudioStream();
         setIsListening(false);
-        void appendTranscribedAudio(audio);
+        if (!shouldDiscardAudio) {
+          void appendTranscribedAudio(audio);
+        }
       };
       mediaRecorderRef.current = recorder;
       recorder.start();
+      if (voiceModeEnabled && handsFreeEnabled) {
+        silenceDetectorRef.current = createSilenceDetector(stream, {
+          onSilence: () => stopListening(),
+          onTimeout: () => {
+            setVoiceError(
+              "No he detectado voz. Pulsa el micrófono cuando quieras continuar.",
+            );
+            pauseVoiceLoop(true);
+          },
+        });
+      }
       setIsListening(true);
     } catch {
       releaseAudioStream();
       mediaRecorderRef.current = null;
       setIsListening(false);
+      setVoiceLoopActive(false);
       setVoiceError(
         "No se pudo usar el microfono. Revisa los permisos del navegador.",
       );
+    } finally {
+      isArmingMicRef.current = false;
     }
   }
 
   function handleToggleListening() {
+    if (isSpeaking && voiceModeEnabled && handsFreeEnabled) {
+      onStopSpeaking();
+      setVoiceLoopActive(true);
+      void startListening({ force: true, loop: true });
+      return;
+    }
     if (isListening) {
       stopListening();
     } else {
-      void startListening();
+      void startListening({
+        loop: voiceModeEnabled && handsFreeEnabled,
+      });
     }
   }
 
@@ -1699,35 +1872,70 @@ export function AssistantPanel({
                   <div className="assistant-composer-foot">
                     <div className="assistant-composer-context" aria-hidden="true" />
                     <div className="assistant-composer-actions">
-                      <button
-                        type="button"
-                        className={
-                          isListening
-                            ? "assistant-mic recording"
-                            : "assistant-mic"
-                        }
-                        aria-label={
-                          isListening ? "Detener grabación" : "Grabar audio"
-                        }
-                        aria-pressed={isListening}
-                        onClick={handleToggleListening}
-                        disabled={
-                          !speechSupported || composerDisabled || isTranscribingVoice
-                        }
-                        title={
-                          speechSupported
-                            ? "Grabar audio y transcribirlo con Anacleto"
-                            : "Grabación de audio no disponible en este navegador"
-                        }
-                      >
-                        {isTranscribingVoice ? (
-                          <Loader2 aria-hidden size={18} />
-                        ) : isListening ? (
-                          <AssistantSymbolIcon name="mic" size={18} />
-                        ) : (
-                          <AssistantSymbolIcon name="mic" size={18} />
-                        )}
-                      </button>
+                      {voiceDialogueAvailable ? (
+                        <button
+                          type="button"
+                          className={
+                            voiceModeEnabled
+                              ? "voice-mode-toggle active"
+                              : "voice-mode-toggle"
+                          }
+                          aria-pressed={voiceModeEnabled}
+                          onClick={() => onVoiceModeChange(!voiceModeEnabled)}
+                          disabled={composerDisabled}
+                        >
+                          {voiceModeEnabled ? "Modo voz activado" : "Modo voz"}
+                        </button>
+                      ) : null}
+                      {voiceDialogueAvailable && voiceModeEnabled ? (
+                        <button
+                          type="button"
+                          className={
+                            handsFreeEnabled
+                              ? "voice-handsfree-toggle active"
+                              : "voice-handsfree-toggle"
+                          }
+                          aria-pressed={handsFreeEnabled}
+                          onClick={() => onHandsFreeChange(!handsFreeEnabled)}
+                          disabled={composerDisabled}
+                        >
+                          Autoescucha
+                        </button>
+                      ) : null}
+                      {speechTranscriptionEnabled ? (
+                        <button
+                          type="button"
+                          className={
+                            isListening
+                              ? "assistant-mic recording"
+                              : "assistant-mic"
+                          }
+                          aria-label={
+                            isListening ? "Detener grabación" : "Grabar audio"
+                          }
+                          aria-pressed={isListening}
+                          onClick={handleToggleListening}
+                          disabled={
+                            !speechSupported ||
+                            composerDisabled ||
+                            isTranscribingVoice ||
+                            (isSpeaking && !(voiceModeEnabled && handsFreeEnabled))
+                          }
+                          title={
+                            speechSupported
+                              ? "Grabar audio y transcribirlo con Anacleto"
+                              : "Grabación de audio no disponible en este navegador"
+                          }
+                        >
+                          {isTranscribingVoice ? (
+                            <Loader2 aria-hidden size={18} />
+                          ) : isListening ? (
+                            <AssistantSymbolIcon name="mic" size={18} />
+                          ) : (
+                            <AssistantSymbolIcon name="mic" size={18} />
+                          )}
+                        </button>
+                      ) : null}
                       <button
                         type="submit"
                         disabled={
@@ -1740,6 +1948,21 @@ export function AssistantPanel({
                     </div>
                   </div>
                 </form>
+
+                {voiceStatus ? (
+                  <div className="voice-status" role="status">
+                    <span>{voiceStatus}</span>
+                    {isSpeaking ? (
+                      <button
+                        type="button"
+                        className="voice-stop-button"
+                        onClick={onStopSpeaking}
+                      >
+                        Detener voz
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 {voiceError ? (
                   <p className="error-message assistant-voice-error">

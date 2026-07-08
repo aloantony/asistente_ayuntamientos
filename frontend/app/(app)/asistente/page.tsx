@@ -142,16 +142,28 @@ function AsistentePageInner() {
         currentUser={user}
         selectedConversation={assistantController.selectedConversation}
         draftMessage={assistantController.draftMessage}
+        voiceModeEnabled={assistantController.voiceModeEnabled}
+        handsFreeEnabled={assistantController.handsFreeEnabled}
         isLoadingAssistant={assistantController.isLoadingAssistant}
         isSendingMessage={assistantController.isSendingMessage}
+        isSpeaking={assistantController.isSpeaking}
         assistantError={assistantController.assistantError}
         includeArchivedConversations={
           assistantController.includeArchivedConversations
         }
         onDraftMessageChange={assistantController.setDraftMessage}
+        onVoiceModeChange={assistantController.setVoiceModeEnabled}
+        onHandsFreeChange={assistantController.setHandsFreeEnabled}
         onSelectConversation={handleSelectConversation}
         onStartConversation={assistantController.startConversation}
         onSendMessage={assistantController.sendMessage}
+        onSendVoiceTranscript={(transcript) =>
+          void assistantController.sendMessage({
+            contentOverride: transcript,
+            inputMode: "voice",
+          })
+        }
+        onStopSpeaking={assistantController.stopSpeaking}
         onTranscribeAudio={assistantController.transcribeAudio}
         onArchiveConversation={assistantController.archiveConversation}
         onRestoreConversation={assistantController.restoreConversation}

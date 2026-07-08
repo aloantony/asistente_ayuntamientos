@@ -1,6 +1,9 @@
 import logging
 import subprocess
 from typing import Protocol
+from urllib import error as urlerror
+from urllib import request as urlrequest
+from xml.sax.saxutils import escape
 
 from app.core.config import settings
 
@@ -11,14 +14,28 @@ class SpeechTranscriptionError(RuntimeError):
     """Raised when audio cannot be transcribed for the user-facing turn."""
 
 
+class SpeechSynthesisError(RuntimeError):
+    """Raised when text cannot be synthesized for the user-facing turn."""
+
+
 class SpeechTranscriber(Protocol):
     def transcribe(self, audio: bytes, *, language_code: str | None = None) -> str:
         """Return a text transcript for the supplied audio bytes."""
 
 
+class SpeechSynthesizer(Protocol):
+    def synthesize(self, text: str) -> bytes:
+        """Return audio bytes for the supplied text."""
+
+
 class DisabledSpeechTranscriber:
     def transcribe(self, audio: bytes, *, language_code: str | None = None) -> str:
         raise SpeechTranscriptionError("Speech transcription is disabled")
+
+
+class DisabledSpeechSynthesizer:
+    def synthesize(self, text: str) -> bytes:
+        raise SpeechSynthesisError("Speech synthesis is disabled")
 
 
 class NvidiaNimSpeechTranscriber:
@@ -68,14 +85,77 @@ class NvidiaNimSpeechTranscriber:
         return transcript
 
 
+class AzureSpeechSynthesizer:
+    def synthesize(self, text: str) -> bytes:
+        if not settings.azure_speech_key:
+            raise SpeechSynthesisError("Azure Speech key is not configured")
+
+        endpoint = (
+            f"https://{settings.azure_speech_region}."
+            "tts.speech.microsoft.com/cognitiveservices/v1"
+        )
+        ssml = build_azure_ssml(
+            text,
+            settings.speech_synthesis_voice,
+            settings.speech_synthesis_language_code,
+        )
+        request = urlrequest.Request(
+            endpoint,
+            data=ssml.encode("utf-8"),
+            headers={
+                "Ocp-Apim-Subscription-Key": settings.azure_speech_key,
+                "Content-Type": "application/ssml+xml",
+                "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+                "User-Agent": "asistente-ayuntamientos",
+            },
+            method="POST",
+        )
+        try:
+            with urlrequest.urlopen(
+                request,
+                timeout=settings.speech_synthesis_timeout_seconds,
+            ) as response:
+                audio = response.read()
+        except (urlerror.HTTPError, urlerror.URLError, TimeoutError) as exc:
+            logger.warning("Azure speech synthesis failed", exc_info=True)
+            raise SpeechSynthesisError("Speech synthesis failed") from exc
+
+        if not audio:
+            try:
+                raise ValueError("Azure speech synthesis returned no audio")
+            except ValueError as exc:
+                logger.warning("Azure speech synthesis failed", exc_info=True)
+                raise SpeechSynthesisError("Speech synthesis failed") from exc
+        return audio
+
+
+def build_azure_ssml(text: str, voice: str, language: str) -> str:
+    escaped_text = escape(text)
+    return (
+        f"<speak version='1.0' xml:lang='{language}'>"
+        f"<voice name='{voice}'>{escaped_text}</voice>"
+        "</speak>"
+    )
+
+
 def get_speech_transcriber() -> SpeechTranscriber:
     if settings.speech_transcription_runtime == "nvidia_nim":
         return NvidiaNimSpeechTranscriber()
     return DisabledSpeechTranscriber()
 
 
+def get_speech_synthesizer() -> SpeechSynthesizer:
+    if settings.speech_synthesis_runtime == "azure":
+        return AzureSpeechSynthesizer()
+    return DisabledSpeechSynthesizer()
+
+
 def transcribe_audio_bytes(audio: bytes, *, language_code: str | None = None) -> str:
     return get_speech_transcriber().transcribe(audio, language_code=language_code)
+
+
+def synthesize_speech_bytes(text: str) -> bytes:
+    return get_speech_synthesizer().synthesize(text)
 
 
 def prepare_audio_for_riva(audio: bytes) -> tuple[bytes, int, int]:

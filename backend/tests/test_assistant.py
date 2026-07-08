@@ -16,6 +16,7 @@ from app.assistant.models import (
     AssistantMemoryEntry,
     AssistantMessage,
 )
+from app.assistant.speech import SpeechTranscriptionError, build_azure_ssml
 from app.assistant.routes import get_gateway
 from app.assistant.turn import ERROR_REPLY, build_history
 from app.core.config import settings
@@ -136,6 +137,185 @@ def test_status_exposes_single_assistant_contract_and_filtered_tools(
     assert "web_search" not in tool_names
 
 
+def test_status_reports_speech_flags(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "speech_transcription_runtime", "nvidia_nim")
+    monkeypatch.setattr(settings, "speech_synthesis_runtime", "azure")
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["speech_transcription_enabled"] is True
+    assert body["speech_synthesis_enabled"] is True
+
+
+def test_transcribe_audio_returns_text(client, assistant_user, monkeypatch):
+    user, _ = assistant_user
+
+    monkeypatch.setattr(
+        "app.assistant.routes.transcribe_audio_bytes",
+        lambda audio, *, language_code=None: "hola",
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "hola"}
+
+
+def test_transcribe_audio_requires_assistant_use(client, make_user, monkeypatch):
+    user = make_user()
+
+    monkeypatch.setattr(
+        "app.assistant.routes.transcribe_audio_bytes",
+        lambda audio, *, language_code=None: "hola",
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: assistant.use"
+
+
+def test_transcribe_audio_rejects_large_file(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "speech_transcription_max_bytes", 10)
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"x" * 11, "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Audio file is too large"
+
+
+def test_transcribe_audio_unavailable_when_disabled(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+
+    def raise_unavailable(audio: bytes, *, language_code=None) -> str:
+        raise SpeechTranscriptionError("Speech transcription is disabled")
+
+    monkeypatch.setattr(
+        "app.assistant.routes.transcribe_audio_bytes",
+        raise_unavailable,
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Audio transcription is not available"
+
+
+def test_speech_synthesis_returns_audio(client, assistant_user, monkeypatch):
+    user, _ = assistant_user
+
+    monkeypatch.setattr(
+        "app.assistant.routes.synthesize_speech_bytes",
+        lambda text: b"mp3-bytes",
+    )
+
+    response = client.post(
+        "/assistant/speech",
+        json={"text": "Hola"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.content == b"mp3-bytes"
+
+
+def test_speech_synthesis_requires_assistant_use(client, make_user, monkeypatch):
+    user = make_user()
+
+    monkeypatch.setattr(
+        "app.assistant.routes.synthesize_speech_bytes",
+        lambda text: b"mp3-bytes",
+    )
+
+    response = client.post(
+        "/assistant/speech",
+        json={"text": "Hola"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: assistant.use"
+
+
+def test_speech_synthesis_rejects_long_text(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "speech_synthesis_max_chars", 5)
+
+    response = client.post(
+        "/assistant/speech",
+        json={"text": "demasiado largo"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Speech text is too long"
+
+
+def test_speech_synthesis_unavailable_when_disabled(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "speech_synthesis_runtime", "disabled")
+
+    response = client.post(
+        "/assistant/speech",
+        json={"text": "Hola"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Speech synthesis is not available"
+
+
+def test_azure_ssml_escapes_markup():
+    ssml = build_azure_ssml("<hola & adiós>", "es-ES-ElviraNeural", "es-ES")
+
+    assert "&lt;hola &amp; adiós&gt;" in ssml
+    assert "xml:lang='es-ES'" in ssml
+    assert "name='es-ES-ElviraNeural'" in ssml
+
+
 def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     client,
     assistant_user,
@@ -184,6 +364,56 @@ def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     stored = db.get(AssistantConversation, conversation["id"])
     assert stored is not None
     assert stored.title == "¿qué puedes hacer?"
+
+
+def test_voice_input_mode_adds_oral_style_prompt(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(
+        FakeGateway([fake_response("end_turn", [text_block("Te contesto breve.")])])
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Hola", "input_mode": "voice"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert "escuchará tu respuesta en voz alta" in gateway.calls[0]["system"]
+
+
+def test_text_input_mode_keeps_prompt_clean(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(
+        FakeGateway([fake_response("end_turn", [text_block("Te contesto.")])])
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Hola"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert "escuchará tu respuesta en voz alta" not in gateway.calls[0]["system"]
 
 
 def test_tool_loop_executes_available_tool_and_persists_action(

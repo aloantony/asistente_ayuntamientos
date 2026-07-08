@@ -140,9 +140,19 @@ def test_telegram_webhook_transcribes_voice_message_for_linked_user(
     db.commit()
 
     agent_inputs = []
+    input_modes = []
 
-    def fake_run_agent_turn(db_session, user_arg, conversation, content, agent_gateway):
+    def fake_run_agent_turn(
+        db_session,
+        user_arg,
+        conversation,
+        content,
+        agent_gateway,
+        *,
+        input_mode="text",
+    ):
         agent_inputs.append(content)
+        input_modes.append(input_mode)
         return SimpleNamespace(content="Respuesta desde Anacleto")
 
     monkeypatch.setattr(telegram_routes, "run_agent_turn", fake_run_agent_turn)
@@ -161,6 +171,7 @@ def test_telegram_webhook_transcribes_voice_message_for_linked_user(
 
     assert response.status_code == 200
     assert agent_inputs == ["Necesito revisar la ordenanza de terrazas"]
+    assert input_modes == ["voice"]
     assert sent_messages == [("12345", "Respuesta desde Anacleto")]
 
 
@@ -186,7 +197,9 @@ def test_telegram_webhook_reports_voice_transcription_unavailable(
     monkeypatch.setattr(
         telegram_routes,
         "run_agent_turn",
-        lambda *_: (_ for _ in ()).throw(AssertionError("agent should not run")),
+        lambda *_, **__: (_ for _ in ()).throw(
+            AssertionError("agent should not run")
+        ),
     )
 
     user = make_user()

@@ -28,7 +28,7 @@ Proyecto: asistente_ayuntamientos (FastAPI + Next.js, multi-tenant, RBAC usuario
 
 1. Documentos en v1: indiferente → aplicado v1.1 (arriba).
 2. Memoria efecto inmediato vs confirmación: "pronto para decidir" → aplicado efecto inmediato v1 + revisión obligatoria antes de usuarios externos.
-3. Dictado por voz: **APARCADO**. No invertir más en ADR-012 ni en el código de voz ⟦r⟧; la entrada será por teclado de momento.
+3. Diálogo por voz: reactivado como requisito indispensable; ver `docs/diseno-dialogo-voz.md` y ADR-021.
 4. Gobierno del discusor: sin respuesta → aplicado default: gobernado por `assistant.use` ⟦r⟧.
 
 ## Orden de implementación (los 4 primeros son imprescindibles) ⟦r⟧

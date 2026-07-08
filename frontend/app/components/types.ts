@@ -952,6 +952,8 @@ export type AssistantStatus = {
   runtime: string;
   model: string;
   runtime_healthy: boolean | null;
+  speech_transcription_enabled: boolean;
+  speech_synthesis_enabled: boolean;
   tools: AssistantTool[];
 };
 

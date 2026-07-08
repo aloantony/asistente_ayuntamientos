@@ -204,6 +204,12 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El asistente no está configurado en este servidor.";
     case "Assistant request failed":
       return "El asistente no ha podido procesar la petición. Inténtalo de nuevo.";
+    case "Audio transcription is not available":
+      return "La transcripción de voz no está disponible ahora mismo.";
+    case "Speech synthesis is not available":
+      return "La voz del asistente no está disponible ahora mismo.";
+    case "Speech text is too long":
+      return "La respuesta es demasiado larga para leerla en voz alta.";
     case "Conversation is archived":
       return "La conversación está archivada.";
     case "Conversation not found":
@@ -349,12 +355,13 @@ export async function streamAssistantMessage(
   content: string,
   accessToken: string,
   handlers: AssistantStreamHandlers,
+  inputMode: "text" | "voice" = "text",
 ) {
   const response = await performAdminRequest(
     `/assistant/conversations/${conversationId}/messages/stream`,
     accessToken,
     "El asistente no ha podido responder.",
-    { method: "POST", body: JSON.stringify({ content }) },
+    { method: "POST", body: JSON.stringify({ content, input_mode: inputMode }) },
   );
 
   if (!response.body) {
@@ -382,6 +389,21 @@ export async function streamAssistantMessage(
   if (buffer.trim()) {
     dispatchAssistantStreamFrame(buffer, handlers);
   }
+}
+
+export async function synthesizeAssistantSpeech(
+  text: string,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const response = await performAdminRequest(
+    "/assistant/speech",
+    accessToken,
+    "No se pudo generar la voz del asistente.",
+    { method: "POST", body: JSON.stringify({ text }), signal },
+  );
+
+  return response.blob();
 }
 
 function dispatchAssistantStreamFrame(
