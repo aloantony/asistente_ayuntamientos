@@ -45,14 +45,19 @@ type AssistantPanelProps = {
   currentUser: User;
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
+  voiceModeEnabled: boolean;
   isLoadingAssistant: boolean;
   isSendingMessage: boolean;
+  isSpeaking: boolean;
   assistantError: string;
   includeArchivedConversations: boolean;
   onDraftMessageChange: (value: string) => void;
+  onVoiceModeChange: (enabled: boolean) => void;
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
   onSendMessage: () => void;
+  onSendVoiceTranscript: (transcript: string) => void;
+  onStopSpeaking: () => void;
   onTranscribeAudio: (audio: Blob) => Promise<string>;
   onArchiveConversation: (conversationId: number) => void;
   onRestoreConversation: (conversationId: number) => void;
@@ -548,14 +553,19 @@ export function AssistantPanel({
   currentUser,
   selectedConversation,
   draftMessage,
+  voiceModeEnabled,
   isLoadingAssistant,
   isSendingMessage,
+  isSpeaking,
   assistantError,
   includeArchivedConversations,
   onDraftMessageChange,
+  onVoiceModeChange,
   onSelectConversation,
   onStartConversation,
   onSendMessage,
+  onSendVoiceTranscript,
+  onStopSpeaking,
   onTranscribeAudio,
   onArchiveConversation,
   onRestoreConversation,
@@ -640,6 +650,22 @@ export function AssistantPanel({
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const speechTranscriptionEnabled = Boolean(
+    assistantStatus?.speech_transcription_enabled,
+  );
+  const voiceDialogueAvailable =
+    speechTranscriptionEnabled &&
+    Boolean(assistantStatus?.speech_synthesis_enabled) &&
+    speechSupported;
+  const voiceStatus = isListening
+    ? "Escuchando…"
+    : isTranscribingVoice
+      ? "Transcribiendo…"
+      : voiceModeEnabled && isSendingMessage
+        ? "Pensando…"
+        : isSpeaking
+          ? "Hablando…"
+          : "";
 
   const filteredConversations = useMemo(() => {
     const query = conversationFilter.trim().toLowerCase();
@@ -767,6 +793,10 @@ export function AssistantPanel({
         setVoiceError("No he detectado texto en el audio. Prueba con una nota un poco más clara.");
         return;
       }
+      if (voiceModeEnabled) {
+        onSendVoiceTranscript(transcript);
+        return;
+      }
       const currentDraft = draftMessageRef.current;
       onDraftMessageChange(
         currentDraft ? `${currentDraft} ${transcript}` : transcript,
@@ -784,7 +814,7 @@ export function AssistantPanel({
   }
 
   async function startListening() {
-    if (!speechSupported || mediaRecorderRef.current) {
+    if (!speechSupported || mediaRecorderRef.current || isSpeaking) {
       return;
     }
 
@@ -1699,35 +1729,55 @@ export function AssistantPanel({
                   <div className="assistant-composer-foot">
                     <div className="assistant-composer-context" aria-hidden="true" />
                     <div className="assistant-composer-actions">
-                      <button
-                        type="button"
-                        className={
-                          isListening
-                            ? "assistant-mic recording"
-                            : "assistant-mic"
-                        }
-                        aria-label={
-                          isListening ? "Detener grabación" : "Grabar audio"
-                        }
-                        aria-pressed={isListening}
-                        onClick={handleToggleListening}
-                        disabled={
-                          !speechSupported || composerDisabled || isTranscribingVoice
-                        }
-                        title={
-                          speechSupported
-                            ? "Grabar audio y transcribirlo con Anacleto"
-                            : "Grabación de audio no disponible en este navegador"
-                        }
-                      >
-                        {isTranscribingVoice ? (
-                          <Loader2 aria-hidden size={18} />
-                        ) : isListening ? (
-                          <AssistantSymbolIcon name="mic" size={18} />
-                        ) : (
-                          <AssistantSymbolIcon name="mic" size={18} />
-                        )}
-                      </button>
+                      {voiceDialogueAvailable ? (
+                        <button
+                          type="button"
+                          className={
+                            voiceModeEnabled
+                              ? "voice-mode-toggle active"
+                              : "voice-mode-toggle"
+                          }
+                          aria-pressed={voiceModeEnabled}
+                          onClick={() => onVoiceModeChange(!voiceModeEnabled)}
+                          disabled={composerDisabled}
+                        >
+                          {voiceModeEnabled ? "Modo voz activado" : "Modo voz"}
+                        </button>
+                      ) : null}
+                      {speechTranscriptionEnabled ? (
+                        <button
+                          type="button"
+                          className={
+                            isListening
+                              ? "assistant-mic recording"
+                              : "assistant-mic"
+                          }
+                          aria-label={
+                            isListening ? "Detener grabación" : "Grabar audio"
+                          }
+                          aria-pressed={isListening}
+                          onClick={handleToggleListening}
+                          disabled={
+                            !speechSupported ||
+                            composerDisabled ||
+                            isTranscribingVoice ||
+                            isSpeaking
+                          }
+                          title={
+                            speechSupported
+                              ? "Grabar audio y transcribirlo con Anacleto"
+                              : "Grabación de audio no disponible en este navegador"
+                          }
+                        >
+                          {isTranscribingVoice ? (
+                            <Loader2 aria-hidden size={18} />
+                          ) : isListening ? (
+                            <AssistantSymbolIcon name="mic" size={18} />
+                          ) : (
+                            <AssistantSymbolIcon name="mic" size={18} />
+                          )}
+                        </button>
+                      ) : null}
                       <button
                         type="submit"
                         disabled={
@@ -1740,6 +1790,21 @@ export function AssistantPanel({
                     </div>
                   </div>
                 </form>
+
+                {voiceStatus ? (
+                  <div className="voice-status" role="status">
+                    <span>{voiceStatus}</span>
+                    {isSpeaking ? (
+                      <button
+                        type="button"
+                        className="voice-stop-button"
+                        onClick={onStopSpeaking}
+                      >
+                        Detener voz
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 {voiceError ? (
                   <p className="error-message assistant-voice-error">

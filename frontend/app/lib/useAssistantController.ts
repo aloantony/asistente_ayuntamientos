@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AssistantAction,
   AssistantConversation,
@@ -13,7 +13,12 @@ import type {
   AssistantStatus,
   AssistantStreamToolActivity,
 } from "../components/types";
-import { adminRequest, streamAssistantMessage } from "./api";
+import {
+  adminRequest,
+  streamAssistantMessage,
+  synthesizeAssistantSpeech,
+} from "./api";
+import { createSpeechPlayer, flattenMarkdownForSpeech } from "./voice";
 
 type RequestErrorHandler = (
   requestError: unknown,
@@ -29,6 +34,13 @@ type UseAssistantControllerArgs = {
 
 type AssistantAudioTranscription = {
   text: string;
+};
+
+type AssistantInputMode = "text" | "voice";
+
+type SendMessageOptions = {
+  contentOverride?: string;
+  inputMode?: AssistantInputMode;
 };
 
 function toSummary(detail: AssistantConversationDetail): AssistantConversation {
@@ -66,15 +78,64 @@ export function useAssistantController({
   const [isLoadingAssistant, setIsLoadingAssistant] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [assistantError, setAssistantError] = useState("");
+  const [voiceModeEnabled, setVoiceModeEnabledState] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return window.localStorage.getItem("assistant.voice.mode") === "true";
+  });
+  const [isSpeaking, setIsSpeaking] = useState(false);
   // Mirrors the selected conversation id so async callbacks can check
   // whether the user navigated away while a request was in flight.
   const selectedIdRef = useRef<number | null>(null);
+  const speechPlayerRef = useRef<ReturnType<typeof createSpeechPlayer> | null>(
+    null,
+  );
+
+  if (speechPlayerRef.current === null) {
+    speechPlayerRef.current = createSpeechPlayer({
+      synthesize: (text, signal) =>
+        synthesizeAssistantSpeech(text, getStoredToken(), signal),
+    });
+  }
+
+  useEffect(() => {
+    return speechPlayerRef.current?.subscribe(setIsSpeaking);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "assistant.voice.mode",
+      voiceModeEnabled ? "true" : "false",
+    );
+  }, [voiceModeEnabled]);
+
+  useEffect(() => {
+    return () => {
+      speechPlayerRef.current?.stop();
+    };
+  }, []);
 
   function applySelectedConversation(
     detail: AssistantConversationDetail | null,
   ) {
-    selectedIdRef.current = detail?.id ?? null;
+    const nextId = detail?.id ?? null;
+    if (selectedIdRef.current !== nextId) {
+      speechPlayerRef.current?.stop();
+    }
+    selectedIdRef.current = nextId;
     setSelectedConversation(detail);
+  }
+
+  function setVoiceModeEnabled(enabled: boolean) {
+    setVoiceModeEnabledState(enabled);
+    if (!enabled) {
+      speechPlayerRef.current?.stop();
+    }
+  }
+
+  function stopSpeaking() {
+    speechPlayerRef.current?.stop();
   }
 
   function clearAssistantState() {
@@ -88,6 +149,7 @@ export function useAssistantController({
     setIsLoadingAssistant(false);
     setIsSendingMessage(false);
     setAssistantError("");
+    speechPlayerRef.current?.stop();
   }
 
   async function loadAssistant(
@@ -197,13 +259,16 @@ export function useAssistantController({
     }
   }
 
-  async function sendMessage() {
-    const content = draftMessage.trim();
+  async function sendMessage(options: SendMessageOptions = {}) {
+    const content = (options.contentOverride ?? draftMessage).trim();
+    const inputMode = options.inputMode ?? "text";
+    const usesDraft = options.contentOverride === undefined;
     if (!content || !selectedConversation || isSendingMessage) {
       return;
     }
     const conversationId = selectedConversation.id;
 
+    speechPlayerRef.current?.stop();
     setIsSendingMessage(true);
     setAssistantError("");
 
@@ -238,7 +303,9 @@ export function useAssistantController({
           }
         : current,
     );
-    setDraftMessage("");
+    if (usesDraft) {
+      setDraftMessage("");
+    }
 
     try {
       await streamAssistantMessage(conversationId, content, getStoredToken(), {
@@ -327,8 +394,24 @@ export function useAssistantController({
           if (hasMutatingAction) {
             onRequirementsChanged?.();
           }
+          if (inputMode === "voice") {
+            const speechText = flattenMarkdownForSpeech(event.message.content);
+            if (speechText) {
+              void speechPlayerRef.current
+                ?.speak(speechText)
+                .catch((speechError) => {
+                  if (selectedIdRef.current === conversationId) {
+                    handleRequestError(
+                      speechError,
+                      setAssistantError,
+                      "No se pudo reproducir la voz del asistente.",
+                    );
+                  }
+                });
+            }
+          }
         },
-      });
+      }, inputMode);
     } catch (requestError) {
       // Drop the optimistic echo from this conversation only; the backend
       // may have persisted the user message, so a reload shows it again.
@@ -343,7 +426,9 @@ export function useAssistantController({
           : current,
       );
       if (selectedIdRef.current === conversationId) {
-        setDraftMessage(content);
+        if (usesDraft) {
+          setDraftMessage(content);
+        }
         void selectConversation(conversationId);
       }
       handleRequestError(
@@ -670,10 +755,13 @@ export function useAssistantController({
     selectedConversation,
     draftMessage,
     includeArchivedConversations,
+    voiceModeEnabled,
     isLoadingAssistant,
     isSendingMessage,
+    isSpeaking,
     assistantError,
     setDraftMessage,
+    setVoiceModeEnabled,
     loadAssistant,
     loadMemoryEntries,
     toggleIncludeArchivedConversations,
@@ -681,6 +769,7 @@ export function useAssistantController({
     deselectConversation,
     startConversation,
     sendMessage,
+    stopSpeaking,
     transcribeAudio,
     archiveConversation,
     restoreConversation,
