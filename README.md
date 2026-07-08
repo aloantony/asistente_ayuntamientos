@@ -21,7 +21,7 @@ The project is evolving toward a municipal management and automation platform wh
 
 AI is intended to be central to the product direction. The system should assist, compare, structure, propose and automate where appropriate, but AI must remain supervised by humans. It must not silently make final legal or administrative decisions.
 
-Future AI functionality must go through a Privacy/AI Gateway before any external API call. Original documents and sensitive municipal data must not be sent directly to external AI services. External AI APIs may be used in the future only after filtering, minimization and pseudonymization where needed.
+External AI calls must go through the Privacy/AI Gateway before any LLM API call; the voice pipeline (STT/TTS) egresses only through `app/assistant/speech.py` under the same discipline. Original documents and sensitive municipal data must not be sent directly to external AI services. External AI APIs may be used only after filtering, minimization and pseudonymization where needed.
 
 The assistant can run either against Anthropic directly or against a private/local Hermes Agent API Server. Hermes Agent is treated as an external runtime/app, not as the institutional memory store and not as the source of authorization decisions.
 
@@ -73,7 +73,7 @@ Future priorities will be refined through Requirements Intake and through work w
 - List endpoints for municipalities, ordinances, requirements and admin users are paginated (`limit` 1-200 default 100, `offset`) and expose the total via the `X-Total-Count` header. Ordinance listings omit `text_content`; the full legal text only travels on the detail endpoint.
 - Imported ordinances are never approved automatically: importer output enters `pending_review`, the review agent stores a checklist and score, and a user with `ordinances.review` must approve, reject or request changes.
 - Legal chunks are stored in PostgreSQL and use pgvector when available. Development uses deterministic local hash embeddings by default; production can switch to a configured OpenAI-compatible embeddings provider.
-- Assistant voice input uses the browser's on-device speech recognition only (`processLocally`); it is disabled rather than falling back to the browser's cloud service (see ADR-012).
+- Assistant voice capture and playback stay in the browser, but STT/TTS run only through backend endpoints in `app/assistant/speech.py`; there is no browser cloud recognition or `speechSynthesis` fallback (see ADR-021).
 - Uploaded documents are stored outside PostgreSQL.
 - PostgreSQL stores document metadata, ownership, status and relationships, not raw file bytes.
 - Uploaded files are stored in a persistent Docker volume.
@@ -112,7 +112,13 @@ Controlled web search uses a second local Hermes API Server instance/profile, se
 
 Ordinance import jobs use Redis/RQ. `docker compose up -d --build` starts the `worker` service; jobs can also be run inline from the admin UI in development. Search/crawl is restricted to configured official legal source domains. Configure embeddings with `EMBEDDINGS_RUNTIME`, `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY` and `EMBEDDINGS_MODEL` when moving beyond local hash embeddings.
 
-Telegram is disabled by default. To enable it, set `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, then configure the Telegram Bot API webhook to point to `/telegram/webhook` with the same secret token. Telegram text messages work without speech configuration. To accept Telegram voice notes and audio uploaded from the web app, enable transcription with `SPEECH_TRANSCRIPTION_RUNTIME=nvidia_nim`, set `NVIDIA_API_KEY`, and optionally override `NVIDIA_WHISPER_FUNCTION_ID`, `NVIDIA_RIVA_SERVER`, `SPEECH_TRANSCRIPTION_LANGUAGE_CODE` (`multi` by default) and `SPEECH_TRANSCRIPTION_MAX_BYTES`.
+### Voz (STT/TTS)
+
+Voice is disabled by default. To enable transcription, set `SPEECH_TRANSCRIPTION_RUNTIME=nvidia_nim`, `NVIDIA_API_KEY` and `NVIDIA_WHISPER_FUNCTION_ID`; optional STT settings are `NVIDIA_RIVA_SERVER`, `SPEECH_TRANSCRIPTION_LANGUAGE_CODE` and `SPEECH_TRANSCRIPTION_MAX_BYTES`. With `SPEECH_TRANSCRIPTION_RUNTIME=nvidia_nim`, `NVIDIA_WHISPER_FUNCTION_ID` is required or transcription returns 503.
+
+To enable synthesis, set `SPEECH_SYNTHESIS_RUNTIME=azure`, `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION`. Optional TTS settings are `SPEECH_SYNTHESIS_VOICE` (default `es-ES-ElviraNeural`), `SPEECH_SYNTHESIS_LANGUAGE_CODE`, `SPEECH_SYNTHESIS_MAX_CHARS` and `SPEECH_SYNTHESIS_TIMEOUT_SECONDS`. The Azure resource used for development/evaluation may live in Azure for Students, but production or real-data use requires recreating the Speech resource in a pay-as-you-go subscription and reviewing the provider DPA/ENS position; this is an environment-only change.
+
+Telegram is disabled by default. To enable it, set `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, then configure the Telegram Bot API webhook to point to `/telegram/webhook` with the same secret token. Telegram text messages work without speech configuration. Telegram voice notes use the STT settings above.
 
 Expected local split:
 
