@@ -16,6 +16,7 @@ from app.assistant.models import (
     AssistantMemoryEntry,
     AssistantMessage,
 )
+from app.assistant.speech import SpeechTranscriptionError
 from app.assistant.routes import get_gateway
 from app.assistant.turn import ERROR_REPLY, build_history
 from app.core.config import settings
@@ -134,6 +135,85 @@ def test_status_exposes_single_assistant_contract_and_filtered_tools(
     assert "create_requirement" in tool_names
     assert "list_requirements" in tool_names
     assert "web_search" not in tool_names
+
+
+def test_transcribe_audio_returns_text(client, assistant_user, monkeypatch):
+    user, _ = assistant_user
+
+    monkeypatch.setattr(
+        "app.assistant.routes.transcribe_audio_bytes",
+        lambda audio, *, language_code=None: "hola",
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "hola"}
+
+
+def test_transcribe_audio_requires_assistant_use(client, make_user, monkeypatch):
+    user = make_user()
+
+    monkeypatch.setattr(
+        "app.assistant.routes.transcribe_audio_bytes",
+        lambda audio, *, language_code=None: "hola",
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: assistant.use"
+
+
+def test_transcribe_audio_rejects_large_file(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "speech_transcription_max_bytes", 10)
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"x" * 11, "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Audio file is too large"
+
+
+def test_transcribe_audio_unavailable_when_disabled(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+
+    def raise_unavailable(audio: bytes, *, language_code=None) -> str:
+        raise SpeechTranscriptionError("Speech transcription is disabled")
+
+    monkeypatch.setattr(
+        "app.assistant.routes.transcribe_audio_bytes",
+        raise_unavailable,
+    )
+
+    response = client.post(
+        "/assistant/audio-transcriptions",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Audio transcription is not available"
 
 
 def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
