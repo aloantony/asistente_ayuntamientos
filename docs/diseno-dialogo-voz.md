@@ -1,6 +1,6 @@
 # Especificación de implementación — Diálogo por voz con Anacleto
 
-Actualizado: 2026-07-07 · Estado: **cerrado para implementación** · Ejecutor previsto: agente Codex · Aprobación del alcance: Anthony
+Actualizado: 2026-07-08 · Estado: **implementado** · Ejecutor: agente Codex · Aprobación del alcance: Anthony
 
 Este documento es una especificación ejecutable: todas las decisiones están tomadas (§2) y los contratos son literales (§4). El implementador no debe reabrir decisiones; si algo resulta inviable tal cual está escrito, debe pararse y reportarlo, no improvisar una alternativa.
 
