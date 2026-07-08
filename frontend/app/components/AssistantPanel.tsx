@@ -657,6 +657,14 @@ export function AssistantPanel({
   );
   const discardNextAudioRef = useRef(false);
   const wasSpeakingRef = useRef(false);
+  // Held synchronously across the getUserMedia await so a concurrent
+  // startListening (e.g. tap-to-interrupt firing alongside the isSpeaking
+  // re-arm effect) cannot open a second microphone before the recorder ref
+  // is set.
+  const isArmingMicRef = useRef(false);
+  const previousConversationIdRef = useRef<number | null>(
+    selectedConversation?.id ?? null,
+  );
   const audioChunksRef = useRef<Blob[]>([]);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -831,6 +839,18 @@ export function AssistantPanel({
   }, []);
 
   useEffect(() => {
+    const currentConversationId = selectedConversation?.id ?? null;
+    if (previousConversationIdRef.current === currentConversationId) {
+      return;
+    }
+    // Leaving a conversation cancels any in-flight dictation instead of
+    // auto-sending it to whatever conversation is now open.
+    previousConversationIdRef.current = currentConversationId;
+    setVoiceLoopActive(false);
+    stopListening({ discardAudio: true });
+  }, [selectedConversation?.id]);
+
+  useEffect(() => {
     if (isSpeaking) {
       wasSpeakingRef.current = true;
       return;
@@ -905,10 +925,12 @@ export function AssistantPanel({
     if (
       !speechSupported ||
       mediaRecorderRef.current ||
+      isArmingMicRef.current ||
       (isSpeaking && !options.force)
     ) {
       return;
     }
+    isArmingMicRef.current = true;
 
     setVoiceError("");
     if (options.loop) {
@@ -961,6 +983,8 @@ export function AssistantPanel({
       setVoiceError(
         "No se pudo usar el microfono. Revisa los permisos del navegador.",
       );
+    } finally {
+      isArmingMicRef.current = false;
     }
   }
 
