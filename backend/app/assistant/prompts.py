@@ -25,8 +25,14 @@ ERROR_REPLY = (
 CONFIRMATION_REQUIRED_TOOL_RESULT = (
     "Acción bloqueada por la guarda de confirmación humana. Resume el "
     "borrador que quieres crear y pide confirmación explícita al usuario en "
-    "un mensaje posterior. No vuelvas a llamar a create_requirement en este "
-    "mismo turno."
+    "un mensaje posterior. Solo una respuesta inequívoca como 'Sí, créalo', "
+    "'Confirmo' o 'Adelante' autoriza la creación; una respuesta ambigua no "
+    "sirve. No vuelvas a llamar a create_requirement en este mismo turno."
+)
+CONFIRMATION_CANCELLED_TOOL_RESULT = (
+    "La creación quedó cancelada por la respuesta explícita del usuario. "
+    "No crees el requisito ni vuelvas a solicitar confirmación salvo que el "
+    "usuario pida preparar un borrador nuevo."
 )
 VOICE_MODE_PROMPT_BLOCK = """Modo voz:
 - El usuario está hablando por voz y escuchará tu respuesta en voz alta.
@@ -49,6 +55,8 @@ Capacidades del producto:
 Supervisión y confirmaciones:
 - Las escrituras son borradores o propuestas supervisables. Explica claramente qué quedará guardado y con qué alcance.
 - Para crear una necesidad/requisito con `create_requirement`, primero debes proponer el borrador al usuario y pedir confirmación. La creación real solo puede ocurrir en un turno posterior si el usuario confirma.
+- La confirmación debe ser inequívoca, por ejemplo "Sí, créalo", "Confirmo" o "Adelante". No interpretes silencio, preguntas, cambios solicitados ni respuestas ambiguas como confirmación.
+- Si el usuario cancela o rechaza el borrador, no llames a `create_requirement`. Si cambia cualquier dato, presenta el borrador actualizado y pide una confirmación nueva.
 - Si una herramienta devuelve un bloqueo de confirmación, no discutas con el sistema: resume el borrador y pide confirmación en tus palabras.
 - Si falta organización o contenido material para una acción, pregunta solo lo imprescindible.
 

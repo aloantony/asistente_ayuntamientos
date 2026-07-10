@@ -1,15 +1,17 @@
 # Arquitectura
 
-Actualizado: 2026-07-08.
+Actualizado: 2026-07-10.
 
 ## Visión general
 
-Aplicación multi-tenant con cuatro servicios en Docker Compose:
+Aplicación multi-tenant con cinco servicios principales y uno opcional en Docker Compose:
 
 - `backend`: API HTTP FastAPI (puerto 127.0.0.1:8000), monolito modular.
 - `frontend`: Next.js App Router (puerto 127.0.0.1:3000), consola de administración y trabajo.
 - `postgres`: PostgreSQL 17, interno (sin puerto publicado), con volumen persistente.
-- `redis`: Redis 7, interno, reservado para colas/caché futuras (sin consumidor todavía).
+- `redis`: Redis 7, almacén compartido para rate limiting y cola RQ.
+- `worker`: consumidor RQ de trabajos de importación jurídica.
+- `bop-archive-proxy`: perfil opcional de egreso para el BOP Burgos legacy; recibe solo sus credenciales, corre sin root/capacidades y conserva el archivo firmado en un volumen dedicado.
 
 ## Modelo de dominio y tenancy
 
@@ -23,11 +25,12 @@ La distinción central del dominio:
 
 ## Control de acceso
 
-- Autenticación: JWT HS256 de acceso (60 min, con `iat`) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia y exige sesión); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id, nunca recortadas; cambio self-service (`POST /auth/change-password`, reemite la cookie) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios); ambos revocan los tokens emitidos antes (`iat` vs `users.password_changed_at`, ADR-015). Rate limiting en memoria por cliente+cuenta en login y cambio de contraseña: solo los intentos fallidos consumen cupo.
+- Autenticación: JWT HS256 de acceso (60 min, con `iat`) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia y exige sesión); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id, nunca recortadas; cambio self-service (`POST /auth/change-password`, reemite la cookie) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios); ambos revocan los tokens emitidos antes (`iat` vs `users.password_changed_at`, ADR-015). Rate limiting Redis por cliente+cuenta en login y por usuario en cambio de contraseña: Lua reserva y reembolsa cupo atómicamente entre workers, y solo los intentos fallidos lo consumen (ADR-025).
 - Autorización: cadena RBAC usuario → grupo → rol → permiso. Los permisos de un grupo solo cuentan si el usuario es además miembro de la organización del grupo, lo que hace el modelo consciente del tenant.
 - `is_superuser` puentea todos los chequeos. Conceder o retirar superusuario es operación de superusuarios.
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
+- Las invitaciones tenant solo conceden membresía: el token es de un uso, pero su aceptación exige además una sesión activa con el mismo email. Nunca crean ni modifican identidades globales.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
 - El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con la visibilidad normal de la necesidad/proyecto, para que la capa geográfica no filtre trabajo inaccesible por otra ruta.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.
@@ -42,7 +45,8 @@ La distinción central del dominio:
 
 - La IA es central en la dirección del producto pero siempre supervisada: asiste, estructura y propone; no decide.
 - Toda llamada a APIs externas de IA o a un runtime privado de agentes pasa por el gateway interno (`app/assistant/gateway.py`); el pipeline de voz STT/TTS egresa solo por `app/assistant/speech.py` bajo la misma disciplina (ADR-021). Solo viaja el texto de la conversación, memoria institucional aprobada, campos que el usuario dicta, audio del turno y texto de respuesta sintetizable; los documentos originales no salen del servidor y los logs registran solo metadatos (runtime, modelo, tokens, bytes/duración/idioma), nunca contenido.
-- Primera pieza implementada: Anacleto v2 (`app/assistant/`) es un único asistente model-first. No hay planner/router ni handlers de plantillas: el modelo redacta desde un system prompt con contrato de producto, organizaciones visibles, memoria aprobada, cobertura de ordenanzas y herramientas filtradas por permisos. El backend ejecuta las herramientas con los mismos chequeos RBAC que las rutas REST, persiste `agent_key="anacleto"`, `routing=null` y el rastro JSON de herramientas. Las escrituras siguen siendo supervisables: `create_requirement` tiene una guarda en código que exige confirmación en un turno posterior antes de crear el borrador. El bucle de tool-use usa el runtime configurado (`ASSISTANT_RUNTIME=anthropic` o `ASSISTANT_RUNTIME=hermes_agent`) y el egreso LLM pasa por `gateway.py`. Sin configuración completa del runtime seleccionado, el módulo queda deshabilitado (503).
+- El gateway es una frontera estable de seguridad y observabilidad, no una dependencia de proveedores externos. Si el producto alcanza escala suficiente, el runtime preferente podrá ser un servidor de inferencia propio con modelos propios o abiertos, desplegado en red privada y conectado detrás del mismo contrato. RBAC, tenancy, memoria, auditoría, confirmaciones y filtrado de herramientas permanecen siempre en esta aplicación (ADR-022).
+- Primera pieza implementada: Anacleto v2 (`app/assistant/`) es un único asistente model-first. No hay planner/router ni handlers de plantillas: el modelo redacta desde un system prompt con contrato de producto, organizaciones visibles, memoria aprobada, cobertura de ordenanzas y herramientas filtradas por permisos. El backend ejecuta las herramientas con los mismos chequeos RBAC que las rutas REST, persiste `agent_key="anacleto"`, `routing=null` y el rastro JSON de herramientas. Las escrituras siguen siendo supervisables: `create_requirement` tiene una guarda en código que exige confirmación en un turno posterior antes de crear el borrador. El bucle de tool-use usa el runtime configurado (`anthropic`, `hermes_agent` o `self_hosted`) y el egreso LLM pasa por `gateway.py`. Sin configuración completa del runtime seleccionado, el módulo queda deshabilitado (503).
 - Streaming web: el endpoint SSE `/assistant/conversations/{id}/messages/stream` emite deltas de texto y actividad de herramientas; el POST clásico queda para compatibilidad y Telegram.
 - Diálogo por voz web: el navegador captura con `MediaRecorder` y reproduce con `<audio>`. La transcripción usa `POST /assistant/audio-transcriptions` (runtime `disabled|nvidia_nim`) y la síntesis `POST /assistant/speech` (runtime `disabled|azure`, MP3 `audio/mpeg`). `/assistant/status` expone las banderas de STT/TTS para que el frontend oculte el modo voz cuando falte alguna. `input_mode="voice"` añade un bloque de estilo oral al prompt por turno, sin columnas nuevas. La web implementa un modo por turnos y un modo manos libres con parada por silencio, síntesis por frases, re-escucha opcional y pausa al ocultar la pestaña.
 - Feedback interno del asistente: Anacleto puede usar `send_admin_feedback` cuando el usuario lo pida o confirme, siempre como herramienta auditada y con los permisos del usuario.
@@ -55,6 +59,7 @@ La distinción central del dominio:
 - Para recargar el corpus demo en una DB local ya migrada: `cd backend && DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/app PYTHONPATH=. python -m app.ordinances.demo_bootstrap`. El comando es idempotente por URL oficial.
 - Go/no-go antes de una demo: verificar BOPBUR en `official_legal_sources`, ordenanzas BOPBUR aprobadas, chunks `review_status='approved'`, embeddings `embedding_status='ready'` y búsquedas positivas con `semantic_search_ordinances`. Las búsquedas aceptan filtros estructurados por `municipality_id`/`municipality_name` y `topic`; Anacleto recibe la cobertura disponible en el prompt y debe usar `semantic_search_ordinances` para contenido normativo. Si no hay chunk aprobado para un municipio/materia, debe reconocer falta de cobertura sin inventar normativa.
 - Sprint 1 empieza la cobertura Burgos reproducible con un conector determinista BOPBUR en `backend/app/ordinances/bop_burgos.py`: consulta el formulario oficial `/busqueda`, parsea anuncios/PDFs oficiales sin recurrir a búsqueda web general, alimenta `ordinance_import_jobs` cuando la fuente activa es `bopbur.diputaciondeburgos.es`, trocea textos por artículos cuando existen marcadores legales y expone `GET /ordinances/coverage/burgos` como reporte operativo de municipios, ordenanzas, chunks listos, fallos de importación/OCR y fallos de embeddings. El reporte agrupa por nombre de municipio para evitar que altas duplicadas locales distorsionen la cobertura lógica. Los embeddings fallidos de Burgos se pueden reintentar de forma acotada con `POST /ordinances/coverage/burgos/retry-embeddings`.
+- A 2026-07-10, el host BOPBUR solo ofrece HTTP o TLS obsoleto incompatible con clientes modernos. Es la única excepción legacy y nunca la consume directamente el backend: `archive_proxy_service.py` restringe host, puertos y redirecciones, fija la IP pública, conserva objetos y versiones por SHA-256 y persiste un manifiesto HMAC que verifica antes de servir. En producción, backend y proxy se comunican exclusivamente por HTTPS. La primera adquisición sigue sin autenticidad criptográfica de origen por la limitación del BOP, de modo que toda ordenanza entra en revisión humana y debe contrastarse con boletín/CVE.
 
 ## Frontend
 
@@ -73,7 +78,6 @@ La distinción central del dominio:
 ## Carencias conocidas (deuda aceptada conscientemente)
 
 - Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
-- Los rate limiters (login, cambio de contraseña) son por proceso; al pasar a varios workers deben moverse a Redis (y valorar entonces un límite secundario por cuenta frente a password spraying, ADR-015).
+- El límite de login por cliente+cuenta no agrega todavía un segundo presupuesto por cliente para detectar password spraying entre muchas cuentas; debe calibrarse con datos operativos para no convertir proxies municipales compartidos en un bloqueo global (ADR-025).
 - El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
-- Sin pipeline de CI; validación local según README §9.
-- Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.
+- Backend y worker siguen sin hardening completo de producción (root, un worker, sin TLS); el proxy BOP sí aplica usuario no-root, capacidades mínimas y filesystem raíz de solo lectura. El despliegue público requiere completar este aislamiento y terminar TLS en una frontera controlada.

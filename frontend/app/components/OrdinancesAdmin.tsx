@@ -164,6 +164,9 @@ export function OrdinancesAdmin({
   const canArchive =
     userHasPermission(currentUser, "ordinances.archive") ||
     userHasPermission(currentUser, "ordinances.manage");
+  const canReview =
+    userHasPermission(currentUser, "ordinances.review") ||
+    userHasPermission(currentUser, "ordinances.manage");
 
   // La lista renderiza exactamente lo que devolvió el servidor; el filtrado
   // se hace con los parámetros de consulta del backend.
@@ -403,7 +406,7 @@ export function OrdinancesAdmin({
                           )}
                         </td>
                         <td>
-                          {isRowEditing ? (
+                          {isRowEditing && canReview ? (
                             <select
                               aria-label={`Revisión de ${ordinance.title}`}
                               className="table-input"
@@ -729,6 +732,7 @@ export function OrdinancesAdmin({
           <h4>Nueva ordenanza</h4>
           <div className="form-grid">
             <OrdinanceFormFields
+              canReview={canReview}
               edit={newOrdinance}
               municipalities={activeMunicipalityOptions}
               onUpdate={onUpdateNewOrdinance}
@@ -838,10 +842,12 @@ function EditableTextareaCell({
 }
 
 function OrdinanceFormFields({
+  canReview,
   edit,
   municipalities,
   onUpdate,
 }: {
+  canReview: boolean;
   edit: OrdinanceEditState;
   municipalities: ReturnType<typeof getMunicipalityOptions>;
   onUpdate: (updates: Partial<OrdinanceEditState>) => void;
@@ -930,6 +936,7 @@ function OrdinanceFormFields({
       <label>
         Revisión
         <select
+          disabled={!canReview}
           onChange={(event) =>
             onUpdate({
               curation_status: event.target.value as OrdinanceCurationStatus,

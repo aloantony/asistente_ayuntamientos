@@ -1,5 +1,6 @@
 from urllib import parse as urlparse
 
+from app.core.config import settings
 from app.ordinances import import_service
 from app.ordinances.demo_bootstrap import (
     BOP_BURGOS_DOMAIN,
@@ -23,7 +24,20 @@ def test_bootstrap_burgos_demo_ordinances_imports_and_approves_real_source_metad
     db,
     monkeypatch,
 ):
-    def fake_fetch(url):
+    monkeypatch.setattr(
+        settings,
+        "bop_archive_proxy_base_url",
+        "http://127.0.0.1:8650",
+    )
+    monkeypatch.setattr(settings, "bop_archive_proxy_api_key", "test-api-key")
+    monkeypatch.setattr(
+        settings,
+        "bop_archive_proxy_signing_key",
+        "test-signing-key",
+    )
+
+    def fake_fetch(url, *, allowed_domains=None):
+        assert allowed_domains == {BOP_BURGOS_DOMAIN}
         source = next(
             source for source in DEMO_ORDINANCE_SOURCES if source.source_url == url
         )
@@ -45,6 +59,11 @@ def test_bootstrap_burgos_demo_ordinances_imports_and_approves_real_source_metad
 
     monkeypatch.setattr(import_service, "_fetch_source", fake_fetch)
     monkeypatch.setattr(import_service, "_extract_text", fake_extract_text)
+    monkeypatch.setattr(
+        import_service,
+        "search_bop_burgos_announcements",
+        lambda *_args, **_kwargs: [],
+    )
 
     summary = bootstrap_burgos_demo_ordinances(db)
     second_summary = bootstrap_burgos_demo_ordinances(db)

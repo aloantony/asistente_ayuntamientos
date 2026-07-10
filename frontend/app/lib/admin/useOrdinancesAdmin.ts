@@ -84,7 +84,7 @@ const EMPTY_ORDINANCE_FORM: OrdinanceEditState = {
   publication_date: "",
   effective_date: "",
   status: "unknown",
-  curation_status: "approved",
+  curation_status: "pending_review",
   text_content: "",
   notes: "",
   legal_review_notes: "",

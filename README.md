@@ -23,7 +23,7 @@ AI is intended to be central to the product direction. The system should assist,
 
 External AI calls must go through the Privacy/AI Gateway before any LLM API call; the voice pipeline (STT/TTS) egresses only through `app/assistant/speech.py` under the same discipline. Original documents and sensitive municipal data must not be sent directly to external AI services. External AI APIs may be used only after filtering, minimization and pseudonymization where needed.
 
-The assistant can run either against Anthropic directly or against a private/local Hermes Agent API Server. Hermes Agent is treated as an external runtime/app, not as the institutional memory store and not as the source of authorization decisions.
+The assistant can run against Anthropic, a private/local Hermes Agent API Server, or a self-hosted OpenAI-compatible inference server. Runtimes are never the institutional memory store or the source of authorization decisions.
 
 Future priorities will be refined through Requirements Intake and through work with municipal stakeholders and developers. The exact first commercial module and user persona are intentionally still open.
 
@@ -32,7 +32,7 @@ Future priorities will be refined through Requirements Intake and through work w
 - Backend: FastAPI
 - Frontend: Next.js
 - Database: PostgreSQL
-- Redis: declared in Docker Compose and reserved for future workers/cache; no backend code consumes it yet
+- Redis: shared rate limits and RQ background jobs
 - Local orchestration: Docker Compose
 - ORM: SQLAlchemy
 - Migrations: Alembic
@@ -51,7 +51,7 @@ Future priorities will be refined through Requirements Intake and through work w
 
 ## 5. Implemented modules
 
-- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, per-IP login rate limiting, `/auth/me` session restoration and first-admin bootstrap.
+- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, distributed login/password rate limiting, `/auth/me` session restoration and first-admin bootstrap.
 - Users and groups: administrative management. Deletion is physical (hard delete) but guarded: the last active superuser and your own account cannot be deleted, and association rows are cleaned up explicitly.
 - Roles and permissions: RBAC model for administrative and functional capabilities. The permission catalog is seeded automatically and idempotently on backend startup.
 - Organizations: tenant foundation for client entities using the application.
@@ -69,10 +69,11 @@ Future priorities will be refined through Requirements Intake and through work w
 ## 6. Architecture principles
 
 - Access control is tenant-aware through `Organization`.
-- Privileged platform operations are superuser-only: granting or revoking superuser status, creating organizations (tenants), and mutating the global roles/permissions catalog. `users.manage` only reaches users who share an organization where the admin holds the permission.
+- Privileged platform operations are superuser-only: creating, updating or deleting global user identities; creating organizations (tenants); and mutating the global roles/permissions catalog. Tenant admins cannot choose another person's password or reserve a global email. They can issue organization-bound, one-use membership invitations, but only an active session whose email matches the invitation may accept one; creating a new global identity remains blocked until server-side email delivery or an IdP is available.
 - Municipalities are global reference data, separate from tenant organizations. Linking a document to an ordinance requires access to that document.
 - List endpoints for municipalities, ordinances, requirements and admin users are paginated (`limit` 1-200 default 100, `offset`) and expose the total via the `X-Total-Count` header. Ordinance listings omit `text_content`; the full legal text only travels on the detail endpoint.
 - Imported ordinances are never approved automatically: importer output enters `pending_review`, the review agent stores a checklist and score, and a user with `ordinances.review` must approve, reject or request changes.
+- Official-source downloads require HTTPS, validate every redirect and connect only to the public IPs resolved during validation. BOP Burgos is the sole legacy exception: its HTTP URLs are accepted only when the authenticated archive proxy is configured; the backend verifies the archived SHA-256 and HMAC manifest before parsing.
 - Legal chunks are stored in PostgreSQL and use pgvector when available. Development uses deterministic local hash embeddings by default; production can switch to a configured OpenAI-compatible embeddings provider.
 - Assistant voice capture and playback stay in the browser, but STT/TTS run only through backend endpoints in `app/assistant/speech.py`; there is no browser cloud recognition or `speechSynthesis` fallback (see ADR-021).
 - Uploaded documents are stored outside PostgreSQL.
@@ -103,15 +104,17 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings.
+Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, `REDIS_URL`, rate-limit settings, database settings and document storage settings. `RATE_LIMIT_BACKEND=redis` is mandatory in production; `memory` is an explicit development/test fallback only. A remote production Redis endpoint must use authenticated `rediss://` on a private network, a password of at least 16 decoded characters, and the exact query `?ssl_cert_reqs=required&ssl_check_hostname=true`; other URL query parameters are rejected so they cannot override the fail-closed timeouts. Plain `redis://` is accepted only on loopback for a single-host deployment.
 
-To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately, set `ASSISTANT_RUNTIME=hermes_agent`, `HERMES_AGENT_BASE_URL`, `HERMES_AGENT_API_KEY` and `HERMES_AGENT_MODEL`. In production, Hermes Agent stays disabled for real data unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. Without a complete runtime configuration, assistant endpoints return 503 and the UI shows the assistant as not configured.
+To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately and configure the `HERMES_AGENT_*` variables; in production, real data remains blocked unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. For an owned inference service, use `ASSISTANT_RUNTIME=self_hosted` with `SELF_HOSTED_AI_BASE_URL`, `SELF_HOSTED_AI_MODEL` and, in production, an HTTPS endpoint plus `SELF_HOSTED_AI_API_KEY` of at least 32 characters. The gateway never redirects requests or falls back to a different provider. Without a complete selected runtime, assistant endpoints return 503.
 
 Anacleto v2 is model-first: the backend no longer runs a semantic planner/router or deterministic answer templates. Each turn calls the configured runtime through `gateway.py`, injects only the user-visible context and filtered tool list, and executes tools with backend RBAC/tenancy checks. Web clients should use `POST /assistant/conversations/{id}/messages/stream` for SSE frames (`message_start`, `text_delta`, `tool_activity`, `done`); the classic `POST /assistant/conversations/{id}/messages` remains available for synchronous clients and Telegram. `ASSISTANT_HISTORY_MAX_MESSAGES` controls the recent message window sent to the model.
 
 Controlled web search uses a second local Hermes API Server instance/profile, separate from the main assistant runtime. Configure `HERMES_WEB_BASE_URL`, `HERMES_WEB_API_KEY`, `HERMES_WEB_MODEL` and grant `assistant.web.search` only to users who may search the public web from the assistant. The main Hermes API server should keep native toolsets disabled for `api_server`; the web Hermes instance should expose only the `web` toolset. The backend sends only the explicit search query to this instance and records the call in the assistant action audit trail.
 
 Ordinance import jobs use Redis/RQ. `docker compose up -d --build` starts the `worker` service; jobs can also be run inline from the admin UI in development. Search/crawl is restricted to configured official legal source domains. Configure embeddings with `EMBEDDINGS_RUNTIME`, `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY` and `EMBEDDINGS_MODEL` when moving beyond local hash embeddings.
+
+BOP Burgos currently exposes only legacy HTTP. Generate two different random secrets for `BOP_ARCHIVE_PROXY_API_KEY` and `BOP_ARCHIVE_PROXY_SIGNING_KEY`, configure `BOP_ARCHIVE_PROXY_BASE_URL`, and start the local archival service with `docker compose --profile bop-archive up -d bop-archive-proxy`. It pins the resolved public IP, archives immutable PDF objects by SHA-256, persists a signed manifest for each acquisition and preserves every refreshed search-page version. The Compose profile runs with only the two BOP secrets, as a numeric non-root user, with no Linux capabilities and a read-only root filesystem on an isolated bridge network. In production the proxy must be a separately controlled HTTPS service and its archive volume needs an operational storage quota and backups. This protects integrity after acquisition; because the original hop is HTTP, legal review and cross-checking against the bulletin/CVE remain mandatory.
 
 ### Voz (STT/TTS)
 
@@ -163,6 +166,9 @@ Run the relevant checks before handing off code changes:
 
 ```bash
 python3 -m compileall -q backend/app backend/alembic
+npm --prefix frontend ci --no-audit --no-fund
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
 npm --prefix frontend run build
 docker compose build backend
 docker compose build frontend
@@ -182,6 +188,37 @@ above installs dev-only dependencies in a disposable container. Unless
 `TEST_DATABASE_URL` is explicitly set, the test harness creates a unique
 `app_test_<uuid>` database and drops it after the run. Custom test databases
 must keep an `app_test` prefix.
+
+### GitHub CI and equivalent local checks
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`.
+It checks the complete backend suite against PostgreSQL/pgvector and Redis,
+applies the Alembic chain and checks model drift, then type-checks, lints and
+builds the frontend from the lockfile. Third-party actions and service images
+are pinned to immutable commits or image digests.
+
+The equivalent local checks are:
+
+```bash
+docker compose up -d postgres redis
+docker compose build backend
+docker compose run --rm -T backend \
+  sh -c "pip install -q -r requirements-dev.txt && \
+    python -m compileall -q app alembic && \
+    alembic upgrade head && \
+    alembic check && \
+    python -m pytest tests -q"
+
+npm --prefix frontend ci --no-audit --no-fund
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend run build
+git diff --check
+```
+
+To make CI a merge requirement, protect `main` with a GitHub ruleset that
+requires pull requests and the stable `CI / CI gate` status check. Repository
+workflows cannot create or enforce that server-side ruleset themselves.
 
 ## 10. Operational cautions
 

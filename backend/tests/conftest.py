@@ -6,6 +6,8 @@ from collections.abc import Callable, Generator
 # Configure the environment BEFORE importing the app so module-level
 # singletons (settings, storage service) pick up test values.
 os.environ["DOCUMENT_STORAGE_ROOT"] = "/tmp/test-document-storage"
+os.environ["ENVIRONMENT"] = "test"
+os.environ["RATE_LIMIT_BACKEND"] = "memory"
 
 import pytest
 from fastapi.testclient import TestClient

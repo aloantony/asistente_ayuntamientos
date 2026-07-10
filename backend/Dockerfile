@@ -16,6 +16,9 @@ COPY alembic.ini .
 COPY alembic ./alembic
 COPY app ./app
 
+RUN mkdir -p /var/lib/asistente_ayuntamientos/bop_archive \
+    && chown -R 10001:10001 /var/lib/asistente_ayuntamientos/bop_archive
+
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
