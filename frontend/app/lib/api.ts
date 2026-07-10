@@ -102,6 +102,18 @@ function translateApiDetail(detail: string, fallback: string) {
       return "Solo un superusuario puede modificar los datos globales de una cuenta.";
     case "Only superusers can delete user accounts":
       return "Solo un superusuario puede eliminar cuentas de usuario.";
+    case "Invitation already pending":
+      return "Ya hay una invitación pendiente para ese email en la organización.";
+    case "Invitation is not available":
+      return "La invitación ha caducado, ya se utilizó o fue revocada.";
+    case "Registration details required":
+      return "Completa el nombre y la contraseña para crear la cuenta.";
+    case "Could not create invitation":
+      return "No se pudo crear una invitación segura. Inténtalo de nuevo.";
+    case "Invitation not found":
+      return "No se encontró la invitación indicada.";
+    case "Accepted invitation cannot be revoked":
+      return "No se puede revocar una invitación ya aceptada.";
     case "Inactive user":
       return "El usuario está inactivo.";
     case "Could not validate credentials":

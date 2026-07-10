@@ -151,3 +151,11 @@ El Privacy/AI Gateway nació para controlar el tratamiento de datos y se mantien
 Autoalojar inferencia no traslada autoridad al modelo. El backend conserva RBAC multi-tenant, selección y minimización de contexto, memoria institucional aprobada, confirmaciones de un solo uso, auditoría y validación de resultados. El runtime privado recibe únicamente el contexto permitido y devuelve texto/tool calls no confiables que vuelven a pasar por guardas deterministas.
 
 La decisión de operar modelos propios se tomará por volumen sostenido, residencia de datos, latencia y coste total, incluyendo GPU, alta disponibilidad, parches, evaluación, observabilidad y guardias operativas. No habrá fallback silencioso desde el runtime privado a un proveedor externo con datos reales: cualquier fallback deberá ser explícito, estar configurado por entorno y respetar la misma política de egreso.
+
+## ADR-023: El alta tenant se realiza mediante invitaciones de un solo uso (2026-07-10)
+
+Un administrador con `users.manage` dentro de una organización puede invitar un email a esa organización, pero no crear ni modificar por ello una identidad global. El endpoint administrativo responde igual exista o no la identidad, y comprueba el permiso antes de consultar la organización para no convertirlo en un oráculo entre tenants. Los superusuarios conservan alcance de plataforma.
+
+Cada invitación usa 32 bytes aleatorios, caduca por configuración y guarda únicamente el digest SHA-256. El enlace entrega el secreto en el fragmento de URL (`#token`), que el navegador no envía al servidor frontend ni como referencia; la pantalla lo retira del historial antes de consultar el backend. Hasta incorporar un proveedor de correo transaccional, el administrador recibe el enlace una sola vez para remitirlo por un canal acordado.
+
+La aceptación bloquea la invitación en PostgreSQL, crea la identidad solo si no existe, inserta la membresía y marca el token como consumido en una transacción. Dos consumidores del mismo token no pueden usarlo dos veces; dos invitaciones concurrentes al mismo email convergen en la identidad global única. Una identidad preexistente conserva contraseña, nombre, estado y condición de superusuario: la invitación solo añade la membresía autorizada.

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { InvitationsAdmin } from "../../../components/InvitationsAdmin";
 import { UsersAdmin } from "../../../components/UsersAdmin";
 import { userHasPermission } from "../../../components/types";
 import { useUsersAdmin } from "../../../lib/admin/useUsersAdmin";
@@ -56,6 +57,12 @@ export default function AdminUsuariosPage() {
       {usersAdmin.usersError ? (
         <p className="error-message">{usersAdmin.usersError}</p>
       ) : null}
+
+      <InvitationsAdmin
+        currentUser={user}
+        getStoredToken={getStoredToken}
+        handleRequestError={handleRequestError}
+      />
 
       <UsersAdmin
         currentUser={user}

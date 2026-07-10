@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     secret_key: str = "change-me-in-development"
     access_token_expire_minutes: int = 60
+    organization_invitation_expire_hours: int = Field(default=72, ge=1, le=720)
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
     bootstrap_admin_token: str | None = None
