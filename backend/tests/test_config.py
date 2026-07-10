@@ -10,6 +10,13 @@ from app.core.config import Settings
 
 @pytest.fixture(autouse=True)
 def isolate_security_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "REDIS_URL",
+        (
+            "rediss://:a-test-redis-password@redis.internal:6379/0"
+            "?ssl_cert_reqs=required&ssl_check_hostname=true"
+        ),
+    )
     for variable in (
         "ENVIRONMENT",
         "SECRET_KEY",
@@ -182,6 +189,75 @@ def test_production_rejects_memory_rate_limit_backend() -> None:
             cors_allowed_origins="https://municipal.example",
             rate_limit_backend="memory",
         )
+
+
+@pytest.mark.parametrize(
+    "redis_url",
+    [
+        "redis://redis.internal:6379/0",
+        "rediss://redis.internal:6379/0",
+        "rediss://:short@redis.internal:6379/0",
+        (
+            "rediss://:a-long-enough-password@redis.internal:6379/0"
+            "?ssl_cert_reqs=none"
+        ),
+        (
+            "rediss://:a-long-enough-password@redis.internal:6379/0"
+            "?ssl_cert_reqs=none&ssl_cert_reqs=required"
+            "&ssl_check_hostname=true"
+        ),
+        (
+            "rediss://:a-long-enough-password@redis.internal:6379/0"
+            "?ssl_cert_reqs=required&ssl_check_hostname=false"
+        ),
+        (
+            "rediss://:a-long-enough-password@redis.internal:6379/0"
+            "?ssl_cert_reqs=required&ssl_check_hostname=true"
+            "&socket_timeout=300"
+        ),
+        (
+            "rediss://:%61%61%61%61%61%61@redis.internal:6379/0"
+            "?ssl_cert_reqs=required&ssl_check_hostname=true"
+        ),
+        "redis://127.0.0.1:6379/0?socket_connect_timeout=300",
+    ],
+)
+def test_production_rejects_insecure_remote_redis(redis_url: str) -> None:
+    with pytest.raises(ValidationError, match="production Redis"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            secret_key="a-production-secret-with-at-least-32-characters",
+            cors_allowed_origins="https://municipal.example",
+            redis_url=redis_url,
+        )
+
+
+def test_production_accepts_loopback_redis_for_single_host_deployment() -> None:
+    configured = Settings(
+        _env_file=None,
+        environment="production",
+        secret_key="a-production-secret-with-at-least-32-characters",
+        cors_allowed_origins="https://municipal.example",
+        redis_url="redis://127.0.0.1:6379/0",
+    )
+
+    assert configured.redis_url.startswith("redis://127.0.0.1")
+
+
+def test_production_accepts_remote_redis_with_verified_tls() -> None:
+    configured = Settings(
+        _env_file=None,
+        environment="production",
+        secret_key="a-production-secret-with-at-least-32-characters",
+        cors_allowed_origins="https://municipal.example",
+        redis_url=(
+            "rediss://:a-long-enough-password@redis.internal:6379/0"
+            "?ssl_cert_reqs=required&ssl_check_hostname=true"
+        ),
+    )
+
+    assert configured.redis_url.startswith("rediss://")
 
 
 @pytest.mark.parametrize("environment", ["development", "test"])

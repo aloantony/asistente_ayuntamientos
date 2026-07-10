@@ -2,13 +2,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
 
+import pytest
 from fastapi import HTTPException
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.security import hash_password, verify_password
+from app.core.security import hash_password
 from app.invitations.models import OrganizationInvitation
-from app.invitations.schemas import InvitationAcceptRequest
 from app.invitations.service import (
     accept_invitation,
     create_invitation,
@@ -31,10 +32,11 @@ def invite(client, actor, organization, email: str):
     )
 
 
-def accept(client, token: str, **registration):
+def accept(client, token: str, actor):
     return client.post(
         "/auth/invitations/accept",
-        json={"token": token, **registration},
+        json={"token": token},
+        headers=headers_for(actor),
     )
 
 
@@ -151,7 +153,7 @@ def test_raw_token_is_returned_once_and_only_hash_is_persisted(
     )
     assert listed.status_code == 200
     assert "token" not in listed.json()[0]
-    assert listed.headers.get("Cache-Control") is None
+    assert listed.headers["Cache-Control"] == "no-store"
     assert response.headers["Cache-Control"] == "no-store"
 
 
@@ -169,6 +171,132 @@ def test_duplicate_pending_invitation_is_case_insensitive(
     assert first.json()["email"] == "person@example.com"
     assert duplicate.status_code == 409
     assert duplicate.json() == {"detail": "Invitation already pending"}
+
+
+def test_pending_invitation_limit_is_enforced_per_organization(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+):
+    admin = make_user()
+    organization = make_organization()
+    grant_permissions(admin, organization, ["users.manage"])
+    monkeypatch.setattr(
+        "app.invitations.service.settings.organization_invitation_max_pending_per_organization",
+        1,
+    )
+
+    first = invite(client, admin, organization, "first-limit@example.com")
+    blocked = invite(client, admin, organization, "second-limit@example.com")
+
+    assert first.status_code == 201
+    assert blocked.status_code == 429
+    assert blocked.json() == {"detail": "Organization invitation limit reached"}
+
+
+def test_concurrent_invitation_creations_cannot_exceed_pending_limit(
+    engine,
+    monkeypatch,
+):
+    suffix = unique_suffix()
+    monkeypatch.setattr(
+        "app.invitations.service.settings.organization_invitation_max_pending_per_organization",
+        1,
+    )
+    with Session(engine, expire_on_commit=False) as session:
+        admin = User(
+            email=f"quota-admin-{suffix}@example.com",
+            hashed_password=hash_password("password-123"),
+            full_name="Quota Admin",
+            is_active=True,
+            is_superuser=True,
+        )
+        organization = Organization(name=f"Quota Org {suffix}")
+        session.add_all([admin, organization])
+        session.commit()
+        admin_id = admin.id
+        organization_id = organization.id
+
+    barrier = Barrier(2)
+
+    def create_once(index: int) -> int:
+        with Session(engine) as session:
+            barrier.wait()
+            try:
+                create_invitation(
+                    session,
+                    organization_id=organization_id,
+                    email=f"quota-{index}-{suffix}@example.com",
+                    invited_by_user_id=admin_id,
+                )
+                return 201
+            except HTTPException as exc:
+                return exc.status_code
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(create_once, range(2)))
+
+        assert sorted(results) == [201, 429]
+        with Session(engine) as session:
+            pending_count = session.scalar(
+                select(func.count(OrganizationInvitation.id)).where(
+                    OrganizationInvitation.organization_id == organization_id,
+                    OrganizationInvitation.accepted_at.is_(None),
+                    OrganizationInvitation.revoked_at.is_(None),
+                )
+            )
+            assert pending_count == 1
+    finally:
+        with Session(engine) as session:
+            session.execute(
+                delete(Organization).where(Organization.id == organization_id)
+            )
+            session.execute(delete(User).where(User.id == admin_id))
+            session.commit()
+
+
+def test_invitation_listing_is_paginated(
+    client, make_user, make_organization, grant_permissions
+):
+    admin = make_user()
+    organization = make_organization()
+    grant_permissions(admin, organization, ["users.manage"])
+    invite(client, admin, organization, "first-page@example.com")
+    invite(client, admin, organization, "second-page@example.com")
+
+    response = client.get(
+        f"/organizations/{organization.id}/invitations",
+        headers=headers_for(admin),
+        params={"limit": 1, "offset": 0},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    assert response.headers["X-Total-Count"] == "2"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_database_rejects_non_normalized_invitation_email(
+    db, make_user, make_organization
+):
+    inviter = make_user()
+    organization = make_organization()
+
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                OrganizationInvitation(
+                    organization_id=organization.id,
+                    email="MixedCase@example.com",
+                    token_hash="a" * 64,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    invited_by_user_id=inviter.id,
+                )
+            )
+            db.flush()
 
 
 def test_token_hash_collision_is_retried_without_overwriting_invitation(
@@ -202,7 +330,8 @@ def test_expired_invitation_cannot_be_previewed_or_accepted(
     admin = make_user()
     organization = make_organization()
     grant_permissions(admin, organization, ["users.manage"])
-    created = invite(client, admin, organization, "expired@example.com").json()
+    invited = make_user(email="expired@example.com")
+    created = invite(client, admin, organization, invited.email).json()
     invitation = db.get(OrganizationInvitation, created["id"])
     assert invitation is not None
     invitation.expires_at = datetime.now(UTC) - timedelta(seconds=1)
@@ -212,48 +341,44 @@ def test_expired_invitation_cannot_be_previewed_or_accepted(
         "/auth/invitations/preview",
         json={"token": created["token"]},
     )
-    accepted = accept(
-        client,
-        created["token"],
-        full_name="Expired Person",
-        password="password-123",
-    )
+    accepted = accept(client, created["token"], invited)
 
     assert preview.status_code == accepted.status_code == 410
     assert preview.json() == accepted.json() == {"detail": UNAVAILABLE_DETAIL}
-    assert get_user_by_email(db, "expired@example.com") is None
+    assert membership_count(db, organization.id, invited.id) == 0
 
 
-def test_acceptance_creates_identity_and_membership_atomically(
+def test_acceptance_requires_matching_authenticated_identity(
     client, db, make_user, make_organization, grant_permissions
 ):
     admin = make_user()
+    attacker = make_user(email="attacker@example.com")
     organization = make_organization()
     grant_permissions(admin, organization, ["users.manage"])
     created = invite(client, admin, organization, "new-person@example.com").json()
 
-    missing_profile = accept(client, created["token"])
-    successful = accept(
-        client,
-        created["token"],
-        full_name="New Person",
-        password="new-password-123",
+    unauthenticated = client.post(
+        "/auth/invitations/accept",
+        json={"token": created["token"]},
+    )
+    mismatched = accept(client, created["token"], attacker)
+    registration_attempt = client.post(
+        "/auth/invitations/accept",
+        headers=headers_for(attacker),
+        json={
+            "token": created["token"],
+            "full_name": "Pre-hijacked Person",
+            "password": "attacker-password",
+        },
     )
 
-    assert missing_profile.status_code == 400
-    assert missing_profile.json() == {"detail": "Registration details required"}
-    assert successful.status_code == 200
-    user = get_user_by_email(db, "new-person@example.com")
-    assert user is not None
-    assert user.full_name == "New Person"
-    assert verify_password("new-password-123", user.hashed_password)
-    assert user.is_active is True
-    assert user.is_superuser is False
-    assert membership_count(db, organization.id, user.id) == 1
-    invitation = db.get(OrganizationInvitation, created["id"])
-    assert invitation is not None
-    assert invitation.accepted_by_user_id == user.id
-    assert invitation.accepted_at is not None
+    assert unauthenticated.status_code == 401
+    assert mismatched.status_code == 403
+    assert mismatched.json() == {
+        "detail": "Invitation does not match authenticated user"
+    }
+    assert registration_attempt.status_code == 422
+    assert get_user_by_email(db, "new-person@example.com") is None
 
 
 def test_acceptance_links_existing_identity_without_changing_global_fields(
@@ -270,7 +395,7 @@ def test_acceptance_links_existing_identity_without_changing_global_fields(
         email="existing-person@example.com",
         password="existing-password",
         full_name="Existing Name",
-        is_active=False,
+        is_active=True,
         is_superuser=True,
     )
     password_hash = existing.hashed_password
@@ -280,15 +405,15 @@ def test_acceptance_links_existing_identity_without_changing_global_fields(
         json={"token": created["token"]},
     )
 
-    response = accept(client, created["token"])
+    response = accept(client, created["token"], existing)
 
     assert preview.status_code == 200
-    assert preview.json()["requires_registration"] is False
+    assert "requires_registration" not in preview.json()
     assert response.status_code == 200
     db.refresh(existing)
     assert existing.full_name == "Existing Name"
     assert existing.hashed_password == password_hash
-    assert existing.is_active is False
+    assert existing.is_active is True
     assert existing.is_superuser is True
     assert membership_count(db, organization.id, existing.id) == 1
 
@@ -297,31 +422,18 @@ def test_accepted_invitation_cannot_be_replayed(
     client, db, make_user, make_organization, grant_permissions
 ):
     admin = make_user()
+    invited = make_user(email="single-use@example.com", full_name="Single Use")
     organization = make_organization()
     grant_permissions(admin, organization, ["users.manage"])
-    created = invite(client, admin, organization, "single-use@example.com").json()
+    created = invite(client, admin, organization, invited.email).json()
 
-    first = accept(
-        client,
-        created["token"],
-        full_name="Single Use",
-        password="password-123",
-    )
-    replay = accept(
-        client,
-        created["token"],
-        full_name="Changed Name",
-        password="changed-password",
-    )
+    first = accept(client, created["token"], invited)
+    replay = accept(client, created["token"], invited)
 
     assert first.status_code == 200
     assert replay.status_code == 410
     assert replay.json() == {"detail": UNAVAILABLE_DETAIL}
-    user = get_user_by_email(db, "single-use@example.com")
-    assert user is not None
-    assert user.full_name == "Single Use"
-    assert verify_password("password-123", user.hashed_password)
-    assert membership_count(db, organization.id, user.id) == 1
+    assert membership_count(db, organization.id, invited.id) == 1
 
 
 def test_invitation_listing_and_revocation_are_tenant_isolated(
@@ -378,7 +490,14 @@ def _seed_committed_invitations(engine, *, invitation_count: int):
             Organization(name=f"Concurrent Org {suffix} {index}")
             for index in range(invitation_count)
         ]
-        session.add_all([admin, *organizations])
+        invited = User(
+            email=email,
+            hashed_password=hash_password("password-123"),
+            full_name="Concurrent User",
+            is_active=True,
+            is_superuser=False,
+        )
+        session.add_all([admin, invited, *organizations])
         session.commit()
         tokens = [
             create_invitation(
@@ -392,6 +511,7 @@ def _seed_committed_invitations(engine, *, invitation_count: int):
         return (
             email,
             admin.id,
+            invited.id,
             [organization.id for organization in organizations],
             tokens,
         )
@@ -413,25 +533,29 @@ def _cleanup_committed_invitations(
 
 
 def test_concurrent_consumers_cannot_replay_same_token(engine):
-    email, admin_id, organization_ids, tokens = _seed_committed_invitations(
-        engine,
-        invitation_count=1,
+    (
+        email,
+        admin_id,
+        invited_id,
+        organization_ids,
+        tokens,
+    ) = _seed_committed_invitations(
+        engine, invitation_count=1
     )
     barrier = Barrier(2)
 
     def consume_once():
         with Session(engine, expire_on_commit=False) as session:
+            invited = session.get(User, invited_id)
+            assert invited is not None
             barrier.wait()
             try:
-                invitation, user = accept_invitation(
+                invitation = accept_invitation(
                     session,
-                    InvitationAcceptRequest(
-                        token=tokens[0],
-                        full_name="Concurrent User",
-                        password="password-123",
-                    ),
+                    token=tokens[0],
+                    current_user=invited,
                 )
-                return "accepted", invitation.id, user.id
+                return "accepted", invitation.id, invited.id
             except HTTPException as exc:
                 return "rejected", exc.status_code, exc.detail
 
@@ -452,25 +576,29 @@ def test_concurrent_consumers_cannot_replay_same_token(engine):
         _cleanup_committed_invitations(engine, admin_id, organization_ids, email)
 
 
-def test_concurrent_invitations_share_one_global_identity(engine):
-    email, admin_id, organization_ids, tokens = _seed_committed_invitations(
-        engine,
-        invitation_count=2,
+def test_concurrent_invitations_link_same_authenticated_identity(engine):
+    (
+        email,
+        admin_id,
+        invited_id,
+        organization_ids,
+        tokens,
+    ) = _seed_committed_invitations(
+        engine, invitation_count=2
     )
     barrier = Barrier(2)
 
     def consume(index: int):
         with Session(engine, expire_on_commit=False) as session:
+            invited = session.get(User, invited_id)
+            assert invited is not None
             barrier.wait()
-            invitation, user = accept_invitation(
+            invitation = accept_invitation(
                 session,
-                InvitationAcceptRequest(
-                    token=tokens[index],
-                    full_name="Concurrent Identity",
-                    password="password-123",
-                ),
+                token=tokens[index],
+                current_user=invited,
             )
-            return invitation.id, user.id
+            return invitation.id, invited.id
 
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:

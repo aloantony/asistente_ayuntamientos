@@ -1,7 +1,7 @@
 import re
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -36,6 +36,37 @@ def _is_secure_service_url(url: str) -> bool:
     )
 
 
+def _is_secure_redis_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        parsed.port
+        query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    if parsed.scheme == "unix":
+        return bool(parsed.path) and not query and not parsed.fragment
+    if parsed.hostname in {"127.0.0.1", "::1", "localhost"}:
+        return parsed.scheme == "redis" and not query and not parsed.fragment
+
+    certificate_modes = [
+        value.lower() for key, value in query if key == "ssl_cert_reqs"
+    ]
+    hostname_checks = [
+        value.lower() for key, value in query if key == "ssl_check_hostname"
+    ]
+    allowed_query_keys = {"ssl_cert_reqs", "ssl_check_hostname"}
+    return (
+        parsed.scheme == "rediss"
+        and parsed.hostname is not None
+        and parsed.password is not None
+        and len(unquote(parsed.password)) >= 16
+        and not parsed.fragment
+        and all(key in allowed_query_keys for key, _value in query)
+        and certificate_modes == ["required"]
+        and hostname_checks == ["true"]
+    )
+
+
 class Settings(BaseSettings):
     app_name: str = "Asistente Ayuntamientos"
     app_version: str = "0.1.0"
@@ -45,6 +76,11 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-development"
     access_token_expire_minutes: int = 60
     organization_invitation_expire_hours: int = Field(default=72, ge=1, le=720)
+    organization_invitation_max_pending_per_organization: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+    )
     login_rate_limit_attempts: int = Field(default=10, gt=0)
     login_rate_limit_window_seconds: int = Field(default=60, gt=0)
     rate_limit_backend: Literal["redis", "memory"] = "redis"
@@ -196,6 +232,10 @@ class Settings(BaseSettings):
             )
         if self.rate_limit_backend != "redis":
             raise ValueError("production requires RATE_LIMIT_BACKEND=redis")
+        if not _is_secure_redis_url(self.redis_url):
+            raise ValueError(
+                "production Redis must use local transport or authenticated TLS"
+            )
 
         if self.assistant_runtime == "self_hosted":
             if not self.self_hosted_ai_base_url or not _is_secure_service_url(

@@ -108,10 +108,10 @@ def test_login_fails_closed_when_shared_rate_limiter_is_unavailable(
     monkeypatch,
 ):
     class UnavailableRateLimiter:
-        def try_acquire(self, _key: str) -> bool:
+        def try_acquire(self, _key: str) -> str | None:
             raise RateLimitUnavailable from RedisConnectionError()
 
-        def refund(self, _key: str) -> None:
+        def refund(self, _key: str, _reservation_id: str) -> None:
             raise AssertionError("refund must not run without an acquired slot")
 
         def reset(self) -> None:

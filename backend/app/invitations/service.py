@@ -3,21 +3,20 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.core.security import hash_password
 from app.invitations.models import OrganizationInvitation
-from app.invitations.schemas import InvitationAcceptRequest
-from app.organizations.models import organization_users
+from app.organizations.models import Organization, organization_users
 from app.users.models import User
 
 INVITATION_UNAVAILABLE = "Invitation is not available"
 INVITATION_ALREADY_PENDING = "Invitation already pending"
-REGISTRATION_DETAILS_REQUIRED = "Registration details required"
+INVITATION_IDENTITY_MISMATCH = "Invitation does not match authenticated user"
+INVITATION_PENDING_LIMIT = "Organization invitation limit reached"
 TOKEN_GENERATION_FAILED = "Could not create invitation"
 TOKEN_BYTES = 32
 TOKEN_GENERATION_ATTEMPTS = 5
@@ -36,6 +35,29 @@ def create_invitation(
 ) -> tuple[OrganizationInvitation, str]:
     now = datetime.now(UTC)
     normalized_email = email.strip().lower()
+    organization = db.scalar(
+        select(Organization)
+        .where(Organization.id == organization_id)
+        .with_for_update()
+    )
+    if organization is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+    pending_count = db.scalar(
+        select(func.count(OrganizationInvitation.id)).where(
+            OrganizationInvitation.organization_id == organization_id,
+            OrganizationInvitation.accepted_at.is_(None),
+            OrganizationInvitation.revoked_at.is_(None),
+            OrganizationInvitation.expires_at > now,
+        )
+    ) or 0
+    if pending_count >= settings.organization_invitation_max_pending_per_organization:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=INVITATION_PENDING_LIMIT,
+        )
     existing = db.scalar(
         select(OrganizationInvitation)
         .where(
@@ -128,45 +150,22 @@ def get_available_invitation(
 
 def accept_invitation(
     db: Session,
-    payload: InvitationAcceptRequest,
-) -> tuple[OrganizationInvitation, User]:
-    invitation = get_available_invitation(db, payload.token, lock=True)
-    user = db.scalar(
-        select(User).where(User.email == invitation.email).with_for_update()
-    )
-
-    if user is None:
-        if payload.full_name is None or payload.password is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=REGISTRATION_DETAILS_REQUIRED,
-            )
-
-        candidate = User(
-            email=invitation.email,
-            hashed_password=hash_password(payload.password),
-            full_name=payload.full_name,
+    *,
+    token: str,
+    current_user: User,
+) -> OrganizationInvitation:
+    invitation = get_available_invitation(db, token, lock=True)
+    if current_user.email.strip().lower() != invitation.email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=INVITATION_IDENTITY_MISMATCH,
         )
-        try:
-            with db.begin_nested():
-                db.add(candidate)
-                db.flush()
-        except IntegrityError:
-            # Two invitations for the same address may be accepted in
-            # parallel. The global identity is unique; the loser links it.
-            user = db.scalar(
-                select(User).where(User.email == invitation.email).with_for_update()
-            )
-            if user is None:
-                raise
-        else:
-            user = candidate
 
     db.execute(
         insert(organization_users)
         .values(
             organization_id=invitation.organization_id,
-            user_id=user.id,
+            user_id=current_user.id,
         )
         .on_conflict_do_nothing(
             index_elements=[
@@ -176,7 +175,7 @@ def accept_invitation(
         )
     )
     invitation.accepted_at = datetime.now(UTC)
-    invitation.accepted_by_user_id = user.id
+    invitation.accepted_by_user_id = current_user.id
     db.commit()
     db.refresh(invitation)
-    return invitation, user
+    return invitation

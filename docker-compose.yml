@@ -39,6 +39,7 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       SECRET_KEY: archive-proxy-does-not-expose-auth-routes-2026
       CORS_ALLOWED_ORIGINS: https://archive-proxy.invalid
+      REDIS_URL: redis://127.0.0.1:6379/0
       BOP_ARCHIVE_PROXY_API_KEY: ${BOP_ARCHIVE_PROXY_API_KEY:-}
       BOP_ARCHIVE_PROXY_SIGNING_KEY: ${BOP_ARCHIVE_PROXY_SIGNING_KEY:-}
       BOP_ARCHIVE_PROXY_STORAGE_ROOT: /var/lib/asistente_ayuntamientos/bop_archive

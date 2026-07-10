@@ -37,7 +37,7 @@ def list_users(
     current_user: Annotated[User, Depends(get_current_user)],
     response: Response,
     page: Annotated[PageParams, Depends(page_params)],
-) -> list[User]:
+) -> list[AdminUserRead]:
     query = (
         select(User)
         .options(
@@ -46,8 +46,11 @@ def list_users(
         )
         .order_by(User.id)
     )
+    visible_organization_ids: set[int] | None = None
     if not current_user.is_superuser:
-        visible_organization_ids = get_visible_user_organization_ids(db, current_user)
+        visible_organization_ids = set(
+            get_visible_user_organization_ids(db, current_user)
+        )
         if not visible_organization_ids:
             raise_permission_required("users.manage")
 
@@ -62,7 +65,11 @@ def list_users(
             .distinct()
         )
 
-    return list(db.scalars(paginate(db, query, page, response)))
+    users = list(db.scalars(paginate(db, query, page, response)))
+    return [
+        serialize_admin_user(user, visible_organization_ids)
+        for user in users
+    ]
 
 
 @router.post("", response_model=AdminUserRead, status_code=status.HTTP_201_CREATED)
@@ -70,7 +77,7 @@ def create_admin_user(
     payload: AdminUserCreate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> User:
+) -> AdminUserRead:
     require_users_manage(db, current_user)
     if not current_user.is_superuser:
         raise HTTPException(
@@ -114,6 +121,7 @@ def get_admin_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+    visible_organization_ids: set[int] | None = None
     if not current_user.is_superuser:
         visible_organization_ids = set(
             get_visible_user_organization_ids(db, current_user)
@@ -123,10 +131,10 @@ def get_admin_user(
             for organization in user.organizations
         ):
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="User access denied",
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
             )
-    return user
+    return serialize_admin_user(user, visible_organization_ids)
 
 
 @router.patch("/{user_id}", response_model=AdminUserRead)
@@ -286,6 +294,29 @@ def get_visible_user_organization_ids(db: Session, current_user: User) -> list[i
             )
         )
     ]
+
+
+def serialize_admin_user(
+    user: User,
+    visible_organization_ids: set[int] | None,
+) -> AdminUserRead:
+    serialized = AdminUserRead.model_validate(user)
+    if visible_organization_ids is None:
+        return serialized
+    return serialized.model_copy(
+        update={
+            "organizations": [
+                organization
+                for organization in serialized.organizations
+                if organization.id in visible_organization_ids
+            ],
+            "groups": [
+                group
+                for group in serialized.groups
+                if group.organization.id in visible_organization_ids
+            ],
+        }
+    )
 
 
 def require_users_manage(db: Session, current_user: User) -> None:

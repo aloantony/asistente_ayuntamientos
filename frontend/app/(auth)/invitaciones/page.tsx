@@ -1,15 +1,23 @@
 "use client";
 
-import Link from "next/link";
 import Image from "next/image";
-import { useEffect, useState, type FormEvent } from "react";
-import { adminRequest, getErrorMessage } from "../../lib/api";
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import {
+  adminRequest,
+  API_BASE_URL,
+  ApiRequestError,
+  getErrorMessage,
+  isAuthError,
+} from "../../lib/api";
+import { useSession } from "../../lib/session";
+
+const INVITATION_TOKEN_STORAGE_KEY = "organization-invitation-token";
 
 type InvitationPreview = {
   email: string;
   organization_name: string;
   expires_at: string;
-  requires_registration: boolean;
 };
 
 type InvitationAccepted = {
@@ -19,27 +27,35 @@ type InvitationAccepted = {
 };
 
 export default function AcceptInvitationPage() {
+  const { user, setUser, isLoadingSession } = useSession();
   const [token, setToken] = useState("");
   const [preview, setPreview] = useState<InvitationPreview | null>(null);
-  const [fullName, setFullName] = useState("");
-  const [password, setPassword] = useState("");
   const [acceptedOrganization, setAcceptedOrganization] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
+  const [canRetryPreview, setCanRetryPreview] = useState(false);
 
   useEffect(() => {
     const fragmentToken = window.location.hash.slice(1);
     if (fragmentToken) {
       window.history.replaceState(null, "", "/invitaciones");
-    }
-    if (fragmentToken) {
       try {
-        setToken(decodeURIComponent(fragmentToken));
+        const decodedToken = decodeURIComponent(fragmentToken);
+        sessionStorage.setItem(INVITATION_TOKEN_STORAGE_KEY, decodedToken);
+        setToken(decodedToken);
       } catch {
+        sessionStorage.removeItem(INVITATION_TOKEN_STORAGE_KEY);
         setError("La invitación no está disponible.");
         setIsLoading(false);
       }
+      return;
+    }
+
+    const storedToken = sessionStorage.getItem(INVITATION_TOKEN_STORAGE_KEY);
+    if (storedToken) {
+      setToken(storedToken);
       return;
     }
     setError("La invitación no está disponible.");
@@ -53,6 +69,7 @@ export default function AcceptInvitationPage() {
     let isActive = true;
     setIsLoading(true);
     setError("");
+    setCanRetryPreview(false);
     adminRequest<InvitationPreview>(
       "/auth/invitations/preview",
       "",
@@ -69,6 +86,13 @@ export default function AcceptInvitationPage() {
       })
       .catch((previewError) => {
         if (isActive) {
+          const isTerminalError =
+            previewError instanceof ApiRequestError &&
+            [410, 422].includes(previewError.status);
+          if (isTerminalError) {
+            sessionStorage.removeItem(INVITATION_TOKEN_STORAGE_KEY);
+          }
+          setCanRetryPreview(!isTerminalError);
           setError(
             getErrorMessage(previewError, "La invitación no está disponible."),
           );
@@ -83,11 +107,10 @@ export default function AcceptInvitationPage() {
     return () => {
       isActive = false;
     };
-  }, [token]);
+  }, [previewAttempt, token]);
 
-  async function handleAccept(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!preview) {
+  async function handleAccept() {
+    if (!preview || !user) {
       return;
     }
     setError("");
@@ -100,18 +123,23 @@ export default function AcceptInvitationPage() {
         "No se pudo aceptar la invitación.",
         {
           method: "POST",
-          body: JSON.stringify({
-            token,
-            ...(preview.requires_registration
-              ? { full_name: fullName, password }
-              : {}),
-          }),
+          body: JSON.stringify({ token }),
         },
       );
       setAcceptedOrganization(accepted.organization_name);
-      setPassword("");
+      sessionStorage.removeItem(INVITATION_TOKEN_STORAGE_KEY);
       window.history.replaceState(null, "", "/invitaciones");
     } catch (acceptError) {
+      if (isAuthError(acceptError)) {
+        setUser(null);
+      }
+      if (
+        acceptError instanceof ApiRequestError &&
+        [410, 422].includes(acceptError.status)
+      ) {
+        sessionStorage.removeItem(INVITATION_TOKEN_STORAGE_KEY);
+        setPreview(null);
+      }
       setError(
         getErrorMessage(acceptError, "No se pudo aceptar la invitación."),
       );
@@ -119,6 +147,27 @@ export default function AcceptInvitationPage() {
       setIsSubmitting(false);
     }
   }
+
+  async function switchAccount() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!response.ok && response.status !== 401) {
+        throw new Error("logout failed");
+      }
+      setUser(null);
+      window.location.assign("/login?next=%2Finvitaciones");
+    } catch {
+      setError("No se pudo cerrar la sesión activa.");
+    }
+  }
+
+  const identityMatches =
+    user && preview
+      ? user.email.trim().toLowerCase() === preview.email.trim().toLowerCase()
+      : false;
 
   return (
     <main className="page">
@@ -142,11 +191,15 @@ export default function AcceptInvitationPage() {
             <p className="success-message" role="status">
               Tu acceso a la organización ya está preparado.
             </p>
-            <Link className="auth-action-link" href="/login">
-              Iniciar sesión
-            </Link>
+            <button
+              className="auth-action-link"
+              onClick={() => window.location.assign("/")}
+              type="button"
+            >
+              Continuar
+            </button>
           </>
-        ) : isLoading ? (
+        ) : isLoading || isLoadingSession ? (
           <>
             <p className="eyebrow">Acceso municipal</p>
             <h1>Comprobando invitación</h1>
@@ -155,49 +208,44 @@ export default function AcceptInvitationPage() {
           <>
             <p className="eyebrow">Invitación a organización</p>
             <h1>{preview.organization_name}</h1>
-            <form className="login-form" onSubmit={handleAccept}>
+            <div className="login-form">
               <label>
-                Email
+                Email invitado
                 <input readOnly type="email" value={preview.email} />
               </label>
 
-              {preview.requires_registration ? (
+              {!user ? (
+                <Link
+                  className="auth-action-link"
+                  href="/login?next=%2Finvitaciones"
+                >
+                  Iniciar sesión para aceptar
+                </Link>
+              ) : !identityMatches ? (
                 <>
-                  <label>
-                    Nombre completo
-                    <input
-                      autoComplete="name"
-                      maxLength={255}
-                      onChange={(event) => setFullName(event.target.value)}
-                      required
-                      type="text"
-                      value={fullName}
-                    />
-                  </label>
-                  <label>
-                    Contraseña
-                    <input
-                      autoComplete="new-password"
-                      maxLength={1024}
-                      minLength={8}
-                      onChange={(event) => setPassword(event.target.value)}
-                      required
-                      type="password"
-                      value={password}
-                    />
-                  </label>
+                  <p className="error-message" role="alert">
+                    La sesión activa no corresponde al email invitado.
+                  </p>
+                  <button onClick={() => void switchAccount()} type="button">
+                    Cambiar de cuenta
+                  </button>
                 </>
-              ) : null}
+              ) : (
+                <button
+                  disabled={isSubmitting}
+                  onClick={() => void handleAccept()}
+                  type="button"
+                >
+                  {isSubmitting ? "Aceptando..." : "Aceptar invitación"}
+                </button>
+              )}
 
               {error ? (
                 <p className="error-message" role="alert">
                   {error}
                 </p>
               ) : null}
-              <button disabled={isSubmitting} type="submit">
-                {isSubmitting ? "Aceptando..." : "Aceptar invitación"}
-              </button>
-            </form>
+            </div>
           </>
         ) : (
           <>
@@ -207,6 +255,15 @@ export default function AcceptInvitationPage() {
               <p className="error-message" role="alert">
                 {error}
               </p>
+            ) : null}
+            {canRetryPreview ? (
+              <button
+                className="auth-action-link"
+                onClick={() => setPreviewAttempt((current) => current + 1)}
+                type="button"
+              >
+                Reintentar
+              </button>
             ) : null}
             <Link className="auth-action-link" href="/login">
               Ir al inicio de sesión

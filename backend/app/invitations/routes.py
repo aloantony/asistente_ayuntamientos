@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
+from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.invitations.models import OrganizationInvitation
 from app.invitations.schemas import (
@@ -39,16 +40,18 @@ def list_invitations(
     organization_id: int,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
 ) -> list[OrganizationInvitation]:
     require_invitation_management(db, current_user, organization_id)
     ensure_organization_exists(db, organization_id)
-    return list(
-        db.scalars(
-            select(OrganizationInvitation)
-            .where(OrganizationInvitation.organization_id == organization_id)
-            .order_by(OrganizationInvitation.id.desc())
-        )
+    query = (
+        select(OrganizationInvitation)
+        .where(OrganizationInvitation.organization_id == organization_id)
+        .order_by(OrganizationInvitation.id.desc())
     )
+    response.headers["Cache-Control"] = "no-store"
+    return list(db.scalars(paginate(db, query, page, response)))
 
 
 @admin_router.post(
@@ -122,15 +125,11 @@ def preview_invitation(
     db: Annotated[Session, Depends(get_db)],
 ) -> InvitationPreview:
     invitation = get_available_invitation(db, payload.token)
-    requires_registration = db.scalar(
-        select(User.id).where(User.email == invitation.email)
-    ) is None
     response.headers["Cache-Control"] = "no-store"
     return InvitationPreview(
         email=invitation.email,
         organization_name=invitation.organization.name,
         expires_at=invitation.expires_at,
-        requires_registration=requires_registration,
     )
 
 
@@ -139,8 +138,13 @@ def accept_organization_invitation(
     payload: InvitationAcceptRequest,
     response: Response,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> InvitationAccepted:
-    invitation, _user = accept_invitation(db, payload)
+    invitation = accept_invitation(
+        db,
+        token=payload.token,
+        current_user=current_user,
+    )
     response.headers["Cache-Control"] = "no-store"
     return InvitationAccepted(
         detail="Invitation accepted",

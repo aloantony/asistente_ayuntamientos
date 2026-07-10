@@ -18,6 +18,10 @@ class OrganizationInvitation(TimestampMixin, Base):
             "accepted_at is null or revoked_at is null",
             name="ck_organization_invitations_single_terminal_state",
         ),
+        CheckConstraint(
+            "email = lower(email)",
+            name="ck_organization_invitations_email_normalized",
+        ),
         Index(
             "uq_organization_invitations_pending_email",
             "organization_id",

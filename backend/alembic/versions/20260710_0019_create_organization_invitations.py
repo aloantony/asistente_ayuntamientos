@@ -44,6 +44,10 @@ def upgrade() -> None:
             "accepted_at is null or revoked_at is null",
             name="ck_organization_invitations_single_terminal_state",
         ),
+        sa.CheckConstraint(
+            "email = lower(email)",
+            name="ck_organization_invitations_email_normalized",
+        ),
         sa.ForeignKeyConstraint(
             ["organization_id"],
             ["organizations.id"],

@@ -106,8 +106,10 @@ function translateApiDetail(detail: string, fallback: string) {
       return "Ya hay una invitación pendiente para ese email en la organización.";
     case "Invitation is not available":
       return "La invitación ha caducado, ya se utilizó o fue revocada.";
-    case "Registration details required":
-      return "Completa el nombre y la contraseña para crear la cuenta.";
+    case "Invitation does not match authenticated user":
+      return "La sesión activa no corresponde al email invitado.";
+    case "Organization invitation limit reached":
+      return "La organización ha alcanzado el límite de invitaciones pendientes.";
     case "Could not create invitation":
       return "No se pudo crear una invitación segura. Inténtalo de nuevo.";
     case "Invitation not found":

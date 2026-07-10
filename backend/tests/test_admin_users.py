@@ -509,6 +509,59 @@ def test_list_users_scoped_to_admin_organizations(
     assert orgless_user.id not in listed_ids
 
 
+def test_tenant_admin_user_response_hides_foreign_memberships(
+    client, make_user, make_organization, grant_permissions
+):
+    admin = make_user()
+    visible_organization = make_organization()
+    foreign_organization = make_organization()
+    grant_permissions(admin, visible_organization, ["users.manage"])
+    target = make_user()
+    grant_permissions(target, visible_organization, ["documents.view"])
+    grant_permissions(target, foreign_organization, ["documents.view"])
+
+    listed = client.get("/admin/users", headers=headers_for(admin))
+    detail = client.get(
+        f"/admin/users/{target.id}",
+        headers=headers_for(admin),
+    )
+
+    assert listed.status_code == detail.status_code == 200
+    listed_target = next(item for item in listed.json() if item["id"] == target.id)
+    for payload in (listed_target, detail.json()):
+        assert [organization["id"] for organization in payload["organizations"]] == [
+            visible_organization.id
+        ]
+        assert {group["organization"]["id"] for group in payload["groups"]} == {
+            visible_organization.id
+        }
+
+
+def test_tenant_admin_cannot_distinguish_foreign_user_from_missing_id(
+    client, make_user, make_organization, grant_permissions, add_member
+):
+    admin = make_user()
+    managed_organization = make_organization()
+    foreign_organization = make_organization()
+    grant_permissions(admin, managed_organization, ["users.manage"])
+    foreign_user = make_user()
+    add_member(foreign_user, foreign_organization)
+
+    responses = [
+        client.get(
+            f"/admin/users/{user_id}",
+            headers=headers_for(admin),
+        )
+        for user_id in (foreign_user.id, 999_999_999)
+    ]
+
+    assert [response.status_code for response in responses] == [404, 404]
+    assert [response.json() for response in responses] == [
+        {"detail": "User not found"},
+        {"detail": "User not found"},
+    ]
+
+
 def test_list_users_as_superuser_returns_everyone(
     client, superuser, make_user, make_organization, add_member
 ):

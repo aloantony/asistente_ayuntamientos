@@ -34,7 +34,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 ACCESS_TOKEN_COOKIE = "access_token"
 
 
-def acquire_rate_limit_slot(limiter: RateLimiter, key: str) -> bool:
+def acquire_rate_limit_slot(limiter: RateLimiter, key: str) -> str | None:
     try:
         return limiter.try_acquire(key)
     except RateLimitUnavailable:
@@ -44,9 +44,13 @@ def acquire_rate_limit_slot(limiter: RateLimiter, key: str) -> bool:
         ) from None
 
 
-def refund_rate_limit_slot(limiter: RateLimiter, key: str) -> None:
+def refund_rate_limit_slot(
+    limiter: RateLimiter,
+    key: str,
+    reservation_id: str,
+) -> None:
     try:
-        limiter.refund(key)
+        limiter.refund(key, reservation_id)
     except RateLimitUnavailable:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -81,7 +85,8 @@ def login(
     # success: only failed attempts end up consuming quota.
     client_host = request.client.host if request.client else "unknown"
     rate_key = f"{client_host}:{str(payload.email).lower()}"
-    if not acquire_rate_limit_slot(login_rate_limiter, rate_key):
+    reservation_id = acquire_rate_limit_slot(login_rate_limiter, rate_key)
+    if reservation_id is None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts",
@@ -94,7 +99,7 @@ def login(
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    refund_rate_limit_slot(login_rate_limiter, rate_key)
+    refund_rate_limit_slot(login_rate_limiter, rate_key, reservation_id)
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -130,7 +135,8 @@ def change_password(
     # session; without an attempt limit it would be brute-forceable. The slot
     # is reserved atomically and refunded only when the check passes.
     rate_key = str(current_user.id)
-    if not acquire_rate_limit_slot(change_password_rate_limiter, rate_key):
+    reservation_id = acquire_rate_limit_slot(change_password_rate_limiter, rate_key)
+    if reservation_id is None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many password attempts",
@@ -140,7 +146,11 @@ def change_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
         )
-    refund_rate_limit_slot(change_password_rate_limiter, rate_key)
+    refund_rate_limit_slot(
+        change_password_rate_limiter,
+        rate_key,
+        reservation_id,
+    )
 
     current_user.hashed_password = hash_password(payload.new_password)
     current_user.password_changed_at = datetime.now(UTC)

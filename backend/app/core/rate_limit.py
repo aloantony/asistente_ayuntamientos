@@ -43,11 +43,8 @@ local now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time
 local cutoff_ms = now_ms - window_ms
 
 redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff_ms - 1)
-local removed = redis.call('ZPOPMAX', key, 1)
-if #removed == 0 then
-    redis.call('DEL', key)
-    return 0
-end
+local reservation_id = ARGV[2]
+local removed = redis.call('ZREM', key, reservation_id)
 
 local newest = redis.call('ZREVRANGE', key, 0, 0, 'WITHSCORES')
 if #newest == 0 then
@@ -60,7 +57,7 @@ else
         redis.call('DEL', key)
     end
 end
-return 1
+return removed
 """
 
 
@@ -77,9 +74,9 @@ class RedisClient(Protocol):
 
 
 class RateLimiter(Protocol):
-    def try_acquire(self, key: str) -> bool: ...
+    def try_acquire(self, key: str) -> str | None: ...
 
-    def refund(self, key: str) -> None: ...
+    def refund(self, key: str, reservation_id: str) -> None: ...
 
     def reset(self) -> None: ...
 
@@ -105,47 +102,53 @@ class InMemorySlidingWindowRateLimiter:
         self.window_seconds = window_seconds
         self.namespace = namespace
         self._key_secret = key_secret.encode()
-        self._attempts: dict[str, deque[float]] = {}
+        self._attempts: dict[str, deque[tuple[float, str]]] = {}
         self._operations = 0
         self._lock = threading.Lock()
 
-    def _prune(self, key: str, now: float) -> deque[float] | None:
+    def _prune(
+        self,
+        key: str,
+        now: float,
+    ) -> deque[tuple[float, str]] | None:
         attempts = self._attempts.get(key)
         if attempts is None:
             return None
-        while attempts and now - attempts[0] > self.window_seconds:
+        while attempts and now - attempts[0][0] > self.window_seconds:
             attempts.popleft()
         if not attempts:
             del self._attempts[key]
             return None
         return attempts
 
-    def try_acquire(self, key: str) -> bool:
+    def try_acquire(self, key: str) -> str | None:
         key = self.storage_key(key)
         now = time.monotonic()
+        reservation_id = uuid.uuid4().hex
         with self._lock:
             attempts = self._prune(key, now)
             if attempts is not None and len(attempts) >= self.max_attempts:
-                return False
+                return None
             if attempts is None:
                 attempts = deque()
                 self._attempts[key] = attempts
-            attempts.append(now)
+            attempts.append((now, reservation_id))
 
             self._operations += 1
             if self._operations % SWEEP_EVERY_OPERATIONS == 0:
                 for stale_key in list(self._attempts):
                     self._prune(stale_key, now)
-            return True
+            return reservation_id
 
-    def refund(self, key: str) -> None:
+    def refund(self, key: str, reservation_id: str) -> None:
         key = self.storage_key(key)
         with self._lock:
             attempts = self._attempts.get(key)
             if attempts:
-                # Timestamps are fungible: releasing the newest entry returns
-                # exactly one slot to the window.
-                attempts.pop()
+                for attempt in attempts:
+                    if attempt[1] == reservation_id:
+                        attempts.remove(attempt)
+                        break
                 if not attempts:
                     del self._attempts[key]
 
@@ -183,7 +186,8 @@ class RedisSlidingWindowRateLimiter:
         digest = hmac.new(self._key_secret, key.encode(), hashlib.sha256).hexdigest()
         return f"{self.key_prefix}:{self.namespace}:{digest}"
 
-    def try_acquire(self, key: str) -> bool:
+    def try_acquire(self, key: str) -> str | None:
+        reservation_id = uuid.uuid4().hex
         try:
             result = self._client.eval(
                 ACQUIRE_SCRIPT,
@@ -191,7 +195,7 @@ class RedisSlidingWindowRateLimiter:
                 self.storage_key(key),
                 self.max_attempts,
                 self.window_ms,
-                uuid.uuid4().hex,
+                reservation_id,
             )
         except RedisError:
             # Authentication must stop when the distributed budget cannot be
@@ -199,15 +203,16 @@ class RedisSlidingWindowRateLimiter:
             raise RateLimitUnavailable(
                 "The shared authentication rate limiter is unavailable"
             ) from None
-        return bool(result)
+        return reservation_id if result else None
 
-    def refund(self, key: str) -> None:
+    def refund(self, key: str, reservation_id: str) -> None:
         try:
             self._client.eval(
                 REFUND_SCRIPT,
                 1,
                 self.storage_key(key),
                 self.window_ms,
+                reservation_id,
             )
         except RedisError:
             raise RateLimitUnavailable(

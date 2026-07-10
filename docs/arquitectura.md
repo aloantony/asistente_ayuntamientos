@@ -30,6 +30,7 @@ La distinción central del dominio:
 - `is_superuser` puentea todos los chequeos. Conceder o retirar superusuario es operación de superusuarios.
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
+- Las invitaciones tenant solo conceden membresía: el token es de un uso, pero su aceptación exige además una sesión activa con el mismo email. Nunca crean ni modifican identidades globales.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
 - El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con la visibilidad normal de la necesidad/proyecto, para que la capa geográfica no filtre trabajo inaccesible por otra ruta.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.
@@ -79,5 +80,4 @@ La distinción central del dominio:
 - Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
 - El límite de login por cliente+cuenta no agrega todavía un segundo presupuesto por cliente para detectar password spraying entre muchas cuentas; debe calibrarse con datos operativos para no convertir proxies municipales compartidos en un bloqueo global (ADR-025).
 - El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
-- Sin pipeline de CI; validación local según README §9.
-- Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.
+- Backend y worker siguen sin hardening completo de producción (root, un worker, sin TLS); el proxy BOP sí aplica usuario no-root, capacidades mínimas y filesystem raíz de solo lectura. El despliegue público requiere completar este aislamiento y terminar TLS en una frontera controlada.

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class InvitationCreate(BaseModel):
@@ -28,24 +28,17 @@ class InvitationCreated(InvitationAdminRead):
 class InvitationPreviewRequest(BaseModel):
     token: str = Field(min_length=40, max_length=200)
 
+    model_config = ConfigDict(extra="forbid")
+
 
 class InvitationPreview(BaseModel):
     email: EmailStr
     organization_name: str
     expires_at: datetime
-    requires_registration: bool
 
 
 class InvitationAcceptRequest(InvitationPreviewRequest):
-    full_name: str | None = Field(default=None, min_length=1, max_length=255)
-    password: str | None = Field(default=None, min_length=8, max_length=1024)
-
-    @field_validator("full_name", mode="before")
-    @classmethod
-    def strip_full_name(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.strip()
-        return value
+    pass
 
 
 class InvitationAccepted(BaseModel):
