@@ -8,11 +8,11 @@ search page, parses official announcement links, and reports local DB coverage.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
 from urllib import parse as urlparse
-from urllib import request as urlrequest
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -21,7 +21,7 @@ from app.municipalities.models import Municipality
 from app.ordinances.embeddings import EmbeddingsUnavailableError, embed_text
 from app.ordinances.models import Ordinance, OrdinanceImportItem, OrdinanceLegalChunk
 
-BOP_BURGOS_BASE_URL = "http://bopbur.diputaciondeburgos.es"
+BOP_BURGOS_BASE_URL = "https://bopbur.diputaciondeburgos.es"
 BOP_BURGOS_DOMAIN = "bopbur.diputaciondeburgos.es"
 BOP_BURGOS_SEARCH_PATH = "/busqueda"
 BOP_BURGOS_PROVINCE = "Burgos"
@@ -46,6 +46,7 @@ class BopBurgosAnnouncement:
 def search_bop_burgos_announcements(
     query: str,
     *,
+    fetch_html: Callable[[str], str],
     year: int | None = None,
     limit: int = 20,
 ) -> list[BopBurgosAnnouncement]:
@@ -62,13 +63,7 @@ def search_bop_burgos_announcements(
     if year is not None:
         params["field_bop_anio_numero[value][date]"] = str(year)
     url = f"{BOP_BURGOS_BASE_URL}{BOP_BURGOS_SEARCH_PATH}?{urlparse.urlencode(params)}"
-    request = urlrequest.Request(
-        url,
-        headers={"User-Agent": "AsistenteAyuntamientos/0.1 bopbur-connector"},
-        method="GET",
-    )
-    with urlrequest.urlopen(request, timeout=30) as response:
-        html = response.read().decode("utf-8", errors="ignore")
+    html = fetch_html(url)
     return parse_bop_burgos_search_results(html, limit=limit)
 
 
@@ -382,7 +377,11 @@ def _extract_cve(text: str) -> str | None:
 
 
 def _absolute_bopbur_url(href: str) -> str:
-    return urlparse.urljoin(BOP_BURGOS_BASE_URL, href)
+    absolute_url = urlparse.urljoin(BOP_BURGOS_BASE_URL, href)
+    parsed = urlparse.urlparse(absolute_url)
+    if parsed.hostname == BOP_BURGOS_DOMAIN and parsed.scheme == "http":
+        return parsed._replace(scheme="https").geturl()
+    return absolute_url
 
 
 def _is_bopbur_url(url: str) -> bool:

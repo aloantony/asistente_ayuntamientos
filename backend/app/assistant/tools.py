@@ -984,6 +984,13 @@ def _semantic_search_ordinances(
             detail="Permission required: ordinances.compare",
         )
 
+    include_pending = bool(tool_input.get("include_pending") or False)
+    if include_pending and not has_permission(current_user, "ordinances.review", db):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.review",
+        )
+
     query_text = str(tool_input["query"]).strip()
     if not query_text:
         raise ValueError("query no puede estar vacío")
@@ -1001,7 +1008,6 @@ def _semantic_search_ordinances(
     if embedding_status != "ready" or query_vector is None:
         return {"query": query_text, "limit": limit, "results": []}
 
-    include_pending = bool(tool_input.get("include_pending") or False)
     query = (
         select(OrdinanceLegalChunk)
         .join(OrdinanceLegalChunk.ordinance)

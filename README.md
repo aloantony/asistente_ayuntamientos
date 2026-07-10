@@ -69,10 +69,11 @@ Future priorities will be refined through Requirements Intake and through work w
 ## 6. Architecture principles
 
 - Access control is tenant-aware through `Organization`.
-- Privileged platform operations are superuser-only: granting or revoking superuser status, creating organizations (tenants), and mutating the global roles/permissions catalog. `users.manage` only reaches users who share an organization where the admin holds the permission.
+- Privileged platform operations are superuser-only: creating, updating or deleting global user identities; creating organizations (tenants); and mutating the global roles/permissions catalog. Tenant admins cannot choose another person's password or reserve a global email; a future tenant onboarding flow must use an organization-bound, one-use invitation.
 - Municipalities are global reference data, separate from tenant organizations. Linking a document to an ordinance requires access to that document.
 - List endpoints for municipalities, ordinances, requirements and admin users are paginated (`limit` 1-200 default 100, `offset`) and expose the total via the `X-Total-Count` header. Ordinance listings omit `text_content`; the full legal text only travels on the detail endpoint.
 - Imported ordinances are never approved automatically: importer output enters `pending_review`, the review agent stores a checklist and score, and a user with `ordinances.review` must approve, reject or request changes.
+- Official-source downloads require HTTPS, validate every redirect and connect only to the public IPs resolved during validation. BOP Burgos currently exposes only HTTP/obsolete TLS, so live ingestion fails closed until a secure official endpoint or integrity-preserving controlled archive proxy is available.
 - Legal chunks are stored in PostgreSQL and use pgvector when available. Development uses deterministic local hash embeddings by default; production can switch to a configured OpenAI-compatible embeddings provider.
 - Assistant voice capture and playback stay in the browser, but STT/TTS run only through backend endpoints in `app/assistant/speech.py`; there is no browser cloud recognition or `speechSynthesis` fallback (see ADR-021).
 - Uploaded documents are stored outside PostgreSQL.

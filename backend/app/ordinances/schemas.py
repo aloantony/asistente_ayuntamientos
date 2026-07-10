@@ -141,7 +141,7 @@ class OrdinanceCreate(BaseModel):
     publication_date: date | None = None
     effective_date: date | None = None
     status: OrdinanceStatus = "unknown"
-    curation_status: OrdinanceCurationStatus = "approved"
+    curation_status: OrdinanceCurationStatus = "pending_review"
     text_content: str | None = None
     notes: str | None = None
     legal_review_notes: str | None = None

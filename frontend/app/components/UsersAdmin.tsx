@@ -65,6 +65,8 @@ export function UsersAdmin({
   onUpdateUserPasswordReset,
   onResetUserPassword,
 }: UsersAdminProps) {
+  const canManageGlobalIdentity = currentUser.is_superuser;
+
   return (
     <div className="admin-section">
       <div className="section-header">
@@ -85,8 +87,12 @@ export function UsersAdmin({
               <th>Grupos</th>
               <th>Activo</th>
               <th>Superusuario</th>
-              <th>Restablecer contraseña</th>
-              <th>Acción</th>
+              {canManageGlobalIdentity ? (
+                <>
+                  <th>Restablecer contraseña</th>
+                  <th>Acción</th>
+                </>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -106,17 +112,21 @@ export function UsersAdmin({
                     <td>{adminUser.id}</td>
                     <td>{adminUser.email}</td>
                     <td>
-                      <input
-                        aria-label={`Nombre completo de ${adminUser.email}`}
-                        className="table-input"
-                        onChange={(event) =>
-                          onUpdateUserEdit(adminUser.id, {
-                            full_name: event.target.value,
-                          })
-                        }
-                        type="text"
-                        value={edit.full_name}
-                      />
+                      {canManageGlobalIdentity ? (
+                        <input
+                          aria-label={`Nombre completo de ${adminUser.email}`}
+                          className="table-input"
+                          onChange={(event) =>
+                            onUpdateUserEdit(adminUser.id, {
+                              full_name: event.target.value,
+                            })
+                          }
+                          type="text"
+                          value={edit.full_name}
+                        />
+                      ) : (
+                        adminUser.full_name
+                      )}
                     </td>
                     <td>
                       {assignedOrganizations.length > 0 ? (
@@ -145,111 +155,131 @@ export function UsersAdmin({
                       )}
                     </td>
                     <td>
-                      <label className="table-checkbox">
-                        <input
-                          checked={edit.is_active}
-                          onChange={(event) =>
-                            onUpdateUserEdit(adminUser.id, {
-                              is_active: event.target.checked,
-                            })
-                          }
-                          type="checkbox"
-                        />
-                        Activo
-                      </label>
+                      {canManageGlobalIdentity ? (
+                        <label className="table-checkbox">
+                          <input
+                            checked={edit.is_active}
+                            onChange={(event) =>
+                              onUpdateUserEdit(adminUser.id, {
+                                is_active: event.target.checked,
+                              })
+                            }
+                            type="checkbox"
+                          />
+                          Activo
+                        </label>
+                      ) : adminUser.is_active ? (
+                        "Sí"
+                      ) : (
+                        "No"
+                      )}
                     </td>
                     <td>
-                      <label className="table-checkbox">
-                        <input
-                          checked={edit.is_superuser}
-                          onChange={(event) =>
-                            onUpdateUserEdit(adminUser.id, {
-                              is_superuser: event.target.checked,
-                            })
-                          }
-                          type="checkbox"
-                        />
-                        Superusuario
-                      </label>
+                      {canManageGlobalIdentity ? (
+                        <label className="table-checkbox">
+                          <input
+                            checked={edit.is_superuser}
+                            onChange={(event) =>
+                              onUpdateUserEdit(adminUser.id, {
+                                is_superuser: event.target.checked,
+                              })
+                            }
+                            type="checkbox"
+                          />
+                          Superusuario
+                        </label>
+                      ) : adminUser.is_superuser ? (
+                        "Sí"
+                      ) : (
+                        "No"
+                      )}
                     </td>
-                    <td>
-                      <div className="table-actions">
-                        <input
-                          aria-label={`Nueva contraseña de ${adminUser.email}`}
-                          autoComplete="new-password"
-                          className="table-input"
-                          minLength={8}
-                          onChange={(event) =>
-                            onUpdateUserPasswordReset(
-                              adminUser.id,
-                              event.target.value,
-                            )
-                          }
-                          placeholder="Nueva contraseña"
-                          type="password"
-                          value={userPasswordResets[adminUser.id] ?? ""}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => onResetUserPassword(adminUser.id)}
-                          disabled={
-                            (userPasswordResets[adminUser.id] ?? "").length <
-                              8 ||
-                            resettingPasswordUserId === adminUser.id ||
-                            updatingUserId === adminUser.id ||
-                            deletingUserId === adminUser.id ||
-                            isLoadingAdmin
-                          }
-                        >
-                          {resettingPasswordUserId === adminUser.id
-                            ? "Restableciendo..."
-                            : "Restablecer contraseña"}
-                        </button>
-                      </div>
-                    </td>
-                    <td>
-                      <div className="table-actions">
-                        <button
-                          type="button"
-                          onClick={() => onUpdateUser(adminUser.id)}
-                          disabled={
-                            updatingUserId === adminUser.id ||
-                            deletingUserId === adminUser.id ||
-                            isLoadingAdmin
-                          }
-                        >
-                          {updatingUserId === adminUser.id
-                            ? "Guardando..."
-                            : "Guardar"}
-                        </button>
-                        <button
-                          className="danger-button"
-                          type="button"
-                          onClick={() => onDeleteUser(adminUser)}
-                          disabled={
-                            isCurrentUser ||
-                            deletingUserId === adminUser.id ||
-                            updatingUserId === adminUser.id ||
-                            isLoadingAdmin
-                          }
-                          title={
-                            isCurrentUser
-                              ? "No puedes eliminar la cuenta de la sesión actual"
-                              : undefined
-                          }
-                        >
-                          {deletingUserId === adminUser.id
-                            ? "Eliminando..."
-                            : "Eliminar"}
-                        </button>
-                      </div>
-                    </td>
+                    {canManageGlobalIdentity ? (
+                      <>
+                        <td>
+                          <div className="table-actions">
+                            <input
+                              aria-label={`Nueva contraseña de ${adminUser.email}`}
+                              autoComplete="new-password"
+                              className="table-input"
+                              minLength={8}
+                              onChange={(event) =>
+                                onUpdateUserPasswordReset(
+                                  adminUser.id,
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="Nueva contraseña"
+                              type="password"
+                              value={userPasswordResets[adminUser.id] ?? ""}
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onResetUserPassword(adminUser.id)
+                              }
+                              disabled={
+                                (userPasswordResets[adminUser.id] ?? "")
+                                  .length < 8 ||
+                                resettingPasswordUserId === adminUser.id ||
+                                updatingUserId === adminUser.id ||
+                                deletingUserId === adminUser.id ||
+                                isLoadingAdmin
+                              }
+                            >
+                              {resettingPasswordUserId === adminUser.id
+                                ? "Restableciendo..."
+                                : "Restablecer contraseña"}
+                            </button>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="table-actions">
+                            <button
+                              type="button"
+                              onClick={() => onUpdateUser(adminUser.id)}
+                              disabled={
+                                updatingUserId === adminUser.id ||
+                                deletingUserId === adminUser.id ||
+                                isLoadingAdmin
+                              }
+                            >
+                              {updatingUserId === adminUser.id
+                                ? "Guardando..."
+                                : "Guardar"}
+                            </button>
+                            <button
+                              className="danger-button"
+                              type="button"
+                              onClick={() => onDeleteUser(adminUser)}
+                              disabled={
+                                isCurrentUser ||
+                                deletingUserId === adminUser.id ||
+                                updatingUserId === adminUser.id ||
+                                isLoadingAdmin
+                              }
+                              title={
+                                isCurrentUser
+                                  ? "No puedes eliminar la cuenta de la sesión actual"
+                                  : undefined
+                              }
+                            >
+                              {deletingUserId === adminUser.id
+                                ? "Eliminando..."
+                                : "Eliminar"}
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    ) : null}
                   </tr>
                 );
               })
             ) : (
               <tr>
-                <td colSpan={9}>No hay usuarios para mostrar.</td>
+                <td colSpan={canManageGlobalIdentity ? 9 : 7}>
+                  No hay usuarios para mostrar.
+                </td>
               </tr>
             )}
           </tbody>
@@ -261,75 +291,83 @@ export function UsersAdmin({
         <p className="success-message">{userEditMessage}</p>
       ) : null}
 
-      <form className="admin-form" onSubmit={onCreateUser}>
-        <h4>Crear usuario</h4>
-        <div className="form-grid">
-          <label>
-            Email
-            <input
-              autoComplete="email"
-              name="new-user-email"
-              onChange={(event) => onNewUserEmailChange(event.target.value)}
-              required
-              type="email"
-              value={newUserEmail}
-            />
-          </label>
+      {canManageGlobalIdentity ? (
+        <form className="admin-form" onSubmit={onCreateUser}>
+          <h4>Crear usuario</h4>
+          <div className="form-grid">
+            <label>
+              Email
+              <input
+                autoComplete="email"
+                name="new-user-email"
+                onChange={(event) => onNewUserEmailChange(event.target.value)}
+                required
+                type="email"
+                value={newUserEmail}
+              />
+            </label>
 
-          <label>
-            Contraseña
-            <input
-              autoComplete="new-password"
-              minLength={8}
-              name="new-user-password"
-              onChange={(event) => onNewUserPasswordChange(event.target.value)}
-              required
-              type="password"
-              value={newUserPassword}
-            />
-          </label>
+            <label>
+              Contraseña
+              <input
+                autoComplete="new-password"
+                minLength={8}
+                name="new-user-password"
+                onChange={(event) =>
+                  onNewUserPasswordChange(event.target.value)
+                }
+                required
+                type="password"
+                value={newUserPassword}
+              />
+            </label>
 
-          <label>
-            Nombre completo
-            <input
-              name="new-user-full-name"
-              onChange={(event) => onNewUserFullNameChange(event.target.value)}
-              required
-              type="text"
-              value={newUserFullName}
-            />
-          </label>
-        </div>
+            <label>
+              Nombre completo
+              <input
+                name="new-user-full-name"
+                onChange={(event) =>
+                  onNewUserFullNameChange(event.target.value)
+                }
+                required
+                type="text"
+                value={newUserFullName}
+              />
+            </label>
+          </div>
 
-        <div className="checkbox-row">
-          <label className="checkbox-label">
-            <input
-              checked={newUserIsActive}
-              onChange={(event) => onNewUserIsActiveChange(event.target.checked)}
-              type="checkbox"
-            />
-            Activo
-          </label>
-          <label className="checkbox-label">
-            <input
-              checked={newUserIsSuperuser}
-              onChange={(event) =>
-                onNewUserIsSuperuserChange(event.target.checked)
-              }
-              type="checkbox"
-            />
-            Superusuario
-          </label>
-        </div>
+          <div className="checkbox-row">
+            <label className="checkbox-label">
+              <input
+                checked={newUserIsActive}
+                onChange={(event) =>
+                  onNewUserIsActiveChange(event.target.checked)
+                }
+                type="checkbox"
+              />
+              Activo
+            </label>
+            <label className="checkbox-label">
+              <input
+                checked={newUserIsSuperuser}
+                onChange={(event) =>
+                  onNewUserIsSuperuserChange(event.target.checked)
+                }
+                type="checkbox"
+              />
+              Superusuario
+            </label>
+          </div>
 
-        {userFormError ? (
-          <p className="error-message">{userFormError}</p>
-        ) : null}
+          {userFormError ? (
+            <p className="error-message">{userFormError}</p>
+          ) : null}
 
-        <button type="submit" disabled={isCreatingUser}>
-          {isCreatingUser ? "Creando..." : "Crear usuario"}
-        </button>
-      </form>
+          <button type="submit" disabled={isCreatingUser}>
+            {isCreatingUser ? "Creando..." : "Crear usuario"}
+          </button>
+        </form>
+      ) : null}
     </div>
   );
 }

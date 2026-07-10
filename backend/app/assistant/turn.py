@@ -18,7 +18,12 @@ from app.assistant.gateway import (
     AIGateway,
     AssistantUnavailableError,
 )
-from app.assistant.guards import check_tool_confirmation
+from app.assistant.guards import (
+    check_tool_confirmation,
+    lock_conversation_for_confirmation,
+    process_pending_confirmation_response,
+    release_unconsumed_confirmation_response,
+)
 from app.assistant.models import AssistantConversation, AssistantMessage
 from app.assistant.prompts import (
     ERROR_REPLY,
@@ -99,6 +104,9 @@ def run_agent_turn_events(
     input_mode: str = "text",
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
+    # Lock before inserting the message: concurrent FK inserts followed by a
+    # row-lock upgrade can deadlock. The first commit releases this short lock.
+    conversation = lock_conversation_for_confirmation(db, conversation.id)
     user_message = AssistantMessage(
         conversation=conversation,
         role="user",
@@ -108,6 +116,8 @@ def run_agent_turn_events(
     if conversation.title == "Conversación":
         conversation.title = user_text[:255]
     conversation.updated_at = func.now()
+    db.flush()
+    process_pending_confirmation_response(db, conversation, user_message)
     db.commit()
     db.refresh(user_message)
     db.refresh(conversation)
@@ -171,6 +181,7 @@ def run_agent_turn_events(
                     },
                 )
                 guarded_result = check_tool_confirmation(
+                    db,
                     conversation,
                     user_message,
                     block.name,
@@ -236,6 +247,8 @@ def run_agent_turn_events(
 
     if not reply_text:
         reply_text = FALLBACK_REPLY
+
+    release_unconsumed_confirmation_response(db, conversation, user_message)
 
     assistant_message = AssistantMessage(
         conversation=conversation,

@@ -70,7 +70,7 @@ DEMO_ORDINANCE_SOURCES: tuple[DemoOrdinanceSource, ...] = (
         bulletin_number="BOPBUR-2025-04362",
         publication_date_label="BOP Burgos núm. 177, 19/09/2025",
         source_url=(
-            "http://bopbur.diputaciondeburgos.es/sites/default/files/private/"
+            "https://bopbur.diputaciondeburgos.es/sites/default/files/private/"
             "publicado/bopbur-2025-177/bopbur-2025-177-anuncio-202504362.pdf"
         ),
     ),
@@ -85,7 +85,7 @@ DEMO_ORDINANCE_SOURCES: tuple[DemoOrdinanceSource, ...] = (
         bulletin_number="BOPBUR-2025-01057",
         publication_date_label="BOP Burgos núm. 44, 05/03/2025",
         source_url=(
-            "http://bopbur.diputaciondeburgos.es/sites/default/files/private/"
+            "https://bopbur.diputaciondeburgos.es/sites/default/files/private/"
             "publicado/bopbur-2025-044/bopbur-2025-044-anuncio-202501057.pdf"
         ),
     ),
@@ -100,7 +100,7 @@ DEMO_ORDINANCE_SOURCES: tuple[DemoOrdinanceSource, ...] = (
         bulletin_number="BOPBUR-2024-06870",
         publication_date_label="BOP Burgos núm. 7, 13/01/2025",
         source_url=(
-            "http://bopbur.diputaciondeburgos.es/sites/default/files/private/"
+            "https://bopbur.diputaciondeburgos.es/sites/default/files/private/"
             "publicado/bopbur-2025-007/bopbur-2025-007-anuncio-202406870.pdf"
         ),
     ),

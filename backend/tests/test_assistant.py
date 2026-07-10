@@ -1,9 +1,14 @@
 import json
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
+from app.assistant import guards as assistant_guards
 from app.assistant import tools as assistant_tools
 from app.assistant.gateway import (
     AITextDelta,
@@ -22,6 +27,7 @@ from app.assistant.turn import ERROR_REPLY, build_history
 from app.core.config import settings
 from app.main import app
 from app.requirements.models import Requirement
+from app.users.models import User
 from conftest import headers_for
 
 
@@ -464,7 +470,15 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     assert gateway.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
 
 
-def test_create_requirement_is_blocked_until_a_later_user_confirmation(
+def get_pending_confirmation(db, conversation_id: int) -> dict:
+    db.expire_all()
+    conversation = db.get(AssistantConversation, conversation_id)
+    assert conversation is not None
+    state = json.loads(conversation.state or "{}")
+    return state["pending_confirmation"]
+
+
+def test_create_requirement_requires_matching_explicit_confirmation(
     client,
     assistant_user,
     db,
@@ -518,15 +532,13 @@ def test_create_requirement_is_blocked_until_a_later_user_confirmation(
     assert first_action["ok"] is False
     assert "confirmación" in first_action["result"].lower()
     assert db.scalar(select(Requirement)) is None
-    db.expire_all()
-    stored_conversation = db.get(AssistantConversation, conversation["id"])
-    assert stored_conversation is not None
-    state = json.loads(stored_conversation.state or "{}")
-    assert state["pending_confirmation"]["tool"] == "create_requirement"
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert pending["tool"] == "create_requirement"
+    assert pending["confirmation_id"]
 
     second = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "sí, créalo"},
+        json={"content": "Sí, créalo"},
         headers=headers_for(user),
     )
 
@@ -545,7 +557,117 @@ def test_create_requirement_is_blocked_until_a_later_user_confirmation(
     assert len(gateway.calls) == 4
 
 
-def test_create_requirement_material_change_restarts_confirmation(
+def test_create_requirement_cancellation_does_not_authorize_tool(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Portal ciudadano",
+        "problem": "El alta de solicitudes se hace por correo.",
+    }
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_1", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("Confirma el borrador.")]),
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_2", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("De acuerdo, no lo creo.")]),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Propón una necesidad"},
+        headers=headers_for(user),
+    )
+    second = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "No, cancela la creación"},
+        headers=headers_for(user),
+    )
+
+    assert second.status_code == 200
+    action = second.json()["messages"][-1]["actions"][0]
+    assert action["ok"] is False
+    assert "cancel" in action["result"].lower()
+    assert db.scalar(select(Requirement)) is None
+
+
+def test_create_requirement_ambiguous_response_does_not_authorize_tool(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Portal ciudadano",
+        "problem": "El alta de solicitudes se hace por correo.",
+    }
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_1", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("Confirma el borrador.")]),
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_2", "create_requirement", tool_input)],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("Necesito confirmación explícita.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Propón una necesidad"},
+        headers=headers_for(user),
+    )
+    original = get_pending_confirmation(db, conversation["id"])
+    second = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Qué datos se van a guardar?"},
+        headers=headers_for(user),
+    )
+
+    assert second.status_code == 200
+    action = second.json()["messages"][-1]["actions"][0]
+    assert action["ok"] is False
+    assert "confirmación" in action["result"].lower()
+    assert db.scalar(select(Requirement)) is None
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert pending["confirmation_id"] == original["confirmation_id"]
+
+
+def test_create_requirement_any_payload_change_restarts_confirmation(
     client,
     assistant_user,
     db,
@@ -559,8 +681,8 @@ def test_create_requirement_material_change_restarts_confirmation(
     }
     changed_input = {
         "organization_id": organization.id,
-        "title": "Portal tributario",
-        "problem": "El alta de solicitudes se hace por correo.",
+        "title": "Portal ciudadano",
+        "problem": "El alta de solicitudes ahora se hace por teléfono.",
     }
     use_gateway(
         FakeGateway(
@@ -589,9 +711,10 @@ def test_create_requirement_material_change_restarts_confirmation(
         json={"content": "Propón una necesidad"},
         headers=headers_for(user),
     )
+    pending = get_pending_confirmation(db, conversation["id"])
     second = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "sí"},
+        json={"content": "Sí, créalo"},
         headers=headers_for(user),
     )
 
@@ -603,7 +726,256 @@ def test_create_requirement_material_change_restarts_confirmation(
     stored_conversation = db.get(AssistantConversation, conversation["id"])
     assert stored_conversation is not None
     pending = json.loads(stored_conversation.state or "{}")["pending_confirmation"]
-    assert pending["input"]["title"] == "Portal tributario"
+    assert pending["input"]["title"] == "Portal ciudadano"
+    assert pending["input"]["problem"] == changed_input["problem"]
+    assert pending["confirmation_id"]
+
+
+def test_create_requirement_confirmation_cannot_be_replayed(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Portal ciudadano",
+        "problem": "El alta de solicitudes se hace por correo.",
+    }
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_1", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("Confirma el borrador.")]),
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_2", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("Borrador creado.")]),
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_3", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("Necesito otra confirmación.")]),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Propón una necesidad"},
+        headers=headers_for(user),
+    )
+    pending = get_pending_confirmation(db, conversation["id"])
+    confirmation_text = "Sí, créalo"
+
+    confirmed = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": confirmation_text},
+        headers=headers_for(user),
+    )
+    replayed = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": confirmation_text},
+        headers=headers_for(user),
+    )
+
+    assert confirmed.json()["messages"][-1]["actions"][0]["ok"] is True
+    replay_action = replayed.json()["messages"][-1]["actions"][0]
+    assert replay_action["ok"] is False
+    assert "confirmación" in replay_action["result"].lower()
+    assert len(list(db.scalars(select(Requirement)))) == 1
+    replacement = get_pending_confirmation(db, conversation["id"])
+    assert replacement["confirmation_id"] != pending["confirmation_id"]
+
+
+def test_create_requirement_confirmation_stays_consumed_after_tool_rollback(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Portal ciudadano",
+        "problem": "El alta de solicitudes se hace por correo.",
+        "priority": "imposible",
+    }
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_1", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("Confirma el borrador.")]),
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_2", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("No se pudo crear.")]),
+                fake_response(
+                    "tool_use",
+                    [tool_use_block("call_3", "create_requirement", tool_input)],
+                ),
+                fake_response("end_turn", [text_block("Confirma de nuevo.")]),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Propón una necesidad"},
+        headers=headers_for(user),
+    )
+    pending = get_pending_confirmation(db, conversation["id"])
+
+    failed = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Sí, créalo"},
+        headers=headers_for(user),
+    )
+
+    assert failed.status_code == 200
+    failed_action = failed.json()["messages"][-1]["actions"][0]
+    assert failed_action["ok"] is False
+    assert "priority inválida" in failed_action["result"]
+    db.expire_all()
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    state = json.loads(stored_conversation.state or "{}")
+    assert "pending_confirmation" not in state
+    assert (
+        state["last_consumed_confirmation"]["confirmation_id"]
+        == pending["confirmation_id"]
+    )
+
+    replayed = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Sí, créalo"},
+        headers=headers_for(user),
+    )
+
+    replay_action = replayed.json()["messages"][-1]["actions"][0]
+    assert replay_action["ok"] is False
+    assert "confirmación" in replay_action["result"].lower()
+    replacement = get_pending_confirmation(db, conversation["id"])
+    assert replacement["confirmation_id"] != pending["confirmation_id"]
+
+
+def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
+    suffix = uuid.uuid4().hex
+    tool_input = {
+        "organization_id": 1,
+        "title": "Portal ciudadano",
+        "problem": "El alta de solicitudes se hace por correo.",
+    }
+    with Session(engine, expire_on_commit=False) as seed_db:
+        user = User(
+            email=f"confirmation-{suffix}@example.com",
+            hashed_password="not-used",
+            full_name="Confirmation Concurrency Test",
+        )
+        conversation = AssistantConversation(
+            title="Confirmación concurrente",
+            status="active",
+            channel="web",
+            created_by=user,
+        )
+        proposed_message = AssistantMessage(
+            conversation=conversation,
+            role="user",
+            content="Propón una necesidad",
+        )
+        confirmation_message = AssistantMessage(
+            conversation=conversation,
+            role="user",
+            content="Sí, créalo",
+        )
+        seed_db.add_all([user, conversation, proposed_message, confirmation_message])
+        seed_db.flush()
+        assistant_guards.record_pending_confirmation(
+            conversation,
+            proposed_message,
+            "create_requirement",
+            tool_input,
+        )
+        seed_db.flush()
+        assistant_guards.process_pending_confirmation_response(
+            seed_db,
+            conversation,
+            confirmation_message,
+        )
+        pending = assistant_guards.load_conversation_state(conversation)[
+            "pending_confirmation"
+        ]
+        conversation_id = conversation.id
+        confirmation_message_id = confirmation_message.id
+        user_id = user.id
+        seed_db.commit()
+
+    barrier = threading.Barrier(2)
+
+    def attempt_consumption() -> bool:
+        with Session(engine, expire_on_commit=False) as candidate_db:
+            candidate_conversation = candidate_db.get(
+                AssistantConversation,
+                conversation_id,
+            )
+            candidate_message = candidate_db.get(
+                AssistantMessage,
+                confirmation_message_id,
+            )
+            assert candidate_conversation is not None
+            assert candidate_message is not None
+            barrier.wait(timeout=5)
+            result = assistant_guards.check_tool_confirmation(
+                candidate_db,
+                candidate_conversation,
+                candidate_message,
+                "create_requirement",
+                tool_input,
+            )
+            return result is None
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: attempt_consumption(), range(2)))
+
+        assert results.count(True) == 1
+        assert results.count(False) == 1
+        with Session(engine) as verification_db:
+            stored_conversation = verification_db.get(
+                AssistantConversation,
+                conversation_id,
+            )
+            assert stored_conversation is not None
+            state = assistant_guards.load_conversation_state(stored_conversation)
+            assert (
+                state["last_consumed_confirmation"]["confirmation_id"]
+                == pending["confirmation_id"]
+            )
+    finally:
+        with Session(engine) as cleanup_db:
+            stored_user = cleanup_db.get(User, user_id)
+            if stored_user is not None:
+                cleanup_db.delete(stored_user)
+                cleanup_db.commit()
 
 
 def test_system_prompt_includes_approved_memory(
@@ -815,6 +1187,25 @@ def test_execute_tool_still_rejects_tools_outside_allowed_set(db, assistant_user
 
     assert result.ok is False
     assert "Herramienta no disponible" in result.content
+
+
+def test_assistant_pending_ordinance_search_requires_review_permission(
+    db,
+    assistant_user,
+    grant_permissions,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["ordinances.compare"])
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "residuos", "include_pending": True},
+    )
+
+    assert result.ok is False
+    assert "Permission required: ordinances.review" in result.content
 
 
 def test_openai_response_parses_inline_tool_call():

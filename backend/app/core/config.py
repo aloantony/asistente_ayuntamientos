@@ -1,13 +1,28 @@
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _is_secure_origin(origin: str) -> bool:
+    parsed = urlsplit(origin)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname is not None
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 class Settings(BaseSettings):
     app_name: str = "Asistente Ayuntamientos"
     app_version: str = "0.1.0"
-    environment: str = "development"
+    environment: Literal["development", "test", "production"] = "development"
     database_url: str = "postgresql+psycopg://app:app@postgres:5432/app"
     redis_url: str = "redis://redis:6379/0"
     secret_key: str = "change-me-in-development"
@@ -111,6 +126,34 @@ class Settings(BaseSettings):
         if normalized not in {"disabled", "azure"}:
             raise ValueError("speech_synthesis_runtime must be 'disabled' or 'azure'")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        if self.environment != "production":
+            return self
+
+        if (
+            self.secret_key
+            in {
+                "change-me-in-development",
+                "change-this-secret-key-in-real-environments",
+            }
+            or len(self.secret_key) < 32
+        ):
+            raise ValueError(
+                "production requires a non-default SECRET_KEY of at least 32 characters"
+            )
+        if self.bootstrap_admin_token and len(self.bootstrap_admin_token) < 32:
+            raise ValueError(
+                "production BOOTSTRAP_ADMIN_TOKEN must contain at least 32 characters"
+            )
+
+        origins = self.cors_origins
+        if not origins or any(not _is_secure_origin(origin) for origin in origins):
+            raise ValueError(
+                "production CORS_ALLOWED_ORIGINS must contain only explicit HTTPS origins"
+            )
+        return self
 
     @property
     def cors_origins(self) -> list[str]:

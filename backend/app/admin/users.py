@@ -72,10 +72,10 @@ def create_admin_user(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> User:
     require_users_manage(db, current_user)
-    if payload.is_superuser and not current_user.is_superuser:
+    if not current_user.is_superuser:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only superusers can change superuser status",
+            detail="Only superusers can create global user accounts",
         )
 
     try:
@@ -155,17 +155,16 @@ def update_admin_user(
 
     require_users_manage_for_target(db, current_user, user)
 
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superusers can update global user accounts",
+        )
+
     updates = payload.model_dump(exclude_unset=True)
 
     new_password = updates.pop("password", None)
     if new_password is not None:
-        # Resetting a superuser's password would be an account takeover; the
-        # same boundary as granting superuser status applies.
-        if user.is_superuser and not current_user.is_superuser:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only superusers can reset a superuser password",
-            )
         user.hashed_password = hash_password(new_password)
         # Revoke tokens issued before the reset (e.g. the sessions of a
         # compromised account whose password is being rotated).
@@ -175,16 +174,6 @@ def update_admin_user(
             # would revoke their own session mid-flight; refresh the cookie
             # like the self-service change does.
             set_session_cookie(response, create_access_token(subject=str(user.id)))
-
-    if (
-        "is_superuser" in updates
-        and updates["is_superuser"] != user.is_superuser
-        and not current_user.is_superuser
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only superusers can change superuser status",
-        )
 
     if (
         user.is_active
@@ -227,6 +216,21 @@ def delete_admin_user(
 ) -> AdminUserDeleteResponse:
     require_users_manage(db, current_user)
 
+    user = db.scalar(select(User).where(User.id == user_id).with_for_update())
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    require_users_manage_for_target(db, current_user, user)
+
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superusers can delete user accounts",
+        )
+
     active_superuser_ids = list(
         db.scalars(
             select(User.id)
@@ -238,15 +242,6 @@ def delete_admin_user(
             .with_for_update()
         )
     )
-
-    user = db.scalar(select(User).where(User.id == user_id).with_for_update())
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    require_users_manage_for_target(db, current_user, user)
 
     if user.is_active and user.is_superuser and len(active_superuser_ids) <= 1:
         raise HTTPException(

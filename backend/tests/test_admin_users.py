@@ -1,8 +1,13 @@
 """Tests for the /admin/users endpoints (app/admin/users.py)."""
 
+import pytest
+
+from app.users.crud import get_user_by_email
 from conftest import headers_for, unique_suffix
 
-SUPERUSER_CHANGE_DETAIL = "Only superusers can change superuser status"
+GLOBAL_CREATE_DETAIL = "Only superusers can create global user accounts"
+GLOBAL_UPDATE_DETAIL = "Only superusers can update global user accounts"
+GLOBAL_DELETE_DETAIL = "Only superusers can delete user accounts"
 LAST_SUPERUSER_PATCH_DETAIL = "Cannot demote the last active superuser"
 LAST_SUPERUSER_DELETE_DETAIL = "Cannot delete the last active superuser"
 PERMISSION_DETAIL = "Permission required: users.manage"
@@ -24,8 +29,8 @@ def user_payload(**overrides) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_admin_with_users_manage_can_create_regular_user(
-    client, make_user, make_organization, grant_permissions
+def test_org_admin_cannot_create_global_user_account(
+    client, db, make_user, make_organization, grant_permissions
 ):
     admin = make_user()
     org = make_organization()
@@ -36,12 +41,25 @@ def test_admin_with_users_manage_can_create_regular_user(
         "/admin/users", json=payload, headers=headers_for(admin)
     )
 
+    assert response.status_code == 403
+    assert response.json()["detail"] == GLOBAL_CREATE_DETAIL
+    assert get_user_by_email(db, payload["email"]) is None
+
+
+def test_superuser_can_create_regular_user(client, db, superuser):
+    payload = user_payload()
+
+    response = client.post(
+        "/admin/users", json=payload, headers=headers_for(superuser)
+    )
+
     assert response.status_code == 201
     body = response.json()
     assert body["email"] == payload["email"]
     assert body["full_name"] == payload["full_name"]
     assert body["is_active"] is True
     assert body["is_superuser"] is False
+    assert get_user_by_email(db, payload["email"]) is not None
 
 
 def test_admin_cannot_create_superuser(
@@ -58,7 +76,40 @@ def test_admin_cannot_create_superuser(
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == SUPERUSER_CHANGE_DETAIL
+    assert response.json()["detail"] == GLOBAL_CREATE_DETAIL
+
+
+def test_org_admin_cannot_probe_global_email_collisions(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    add_member,
+):
+    admin = make_user()
+    managed_org = make_organization()
+    other_org = make_organization()
+    grant_permissions(admin, managed_org, ["users.manage"])
+    existing = make_user(email="existing-in-other-org@example.com")
+    add_member(existing, other_org)
+    unused_email = "unused-global-email@example.com"
+
+    responses = [
+        client.post(
+            "/admin/users",
+            json=user_payload(email=email),
+            headers=headers_for(admin),
+        )
+        for email in (existing.email, unused_email)
+    ]
+
+    assert [response.status_code for response in responses] == [403, 403]
+    assert [response.json() for response in responses] == [
+        {"detail": GLOBAL_CREATE_DETAIL},
+        {"detail": GLOBAL_CREATE_DETAIL},
+    ]
+    assert get_user_by_email(db, unused_email) is None
 
 
 def test_superuser_can_create_superuser(client, superuser):
@@ -93,7 +144,7 @@ def test_admin_cannot_promote_user_in_own_org_to_superuser(
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == SUPERUSER_CHANGE_DETAIL
+    assert response.json()["detail"] == GLOBAL_UPDATE_DETAIL
 
 
 def test_superuser_can_promote_user_via_patch(client, superuser, make_user):
@@ -167,7 +218,84 @@ def test_admin_cannot_delete_user_of_other_org(
     assert response.json()["detail"] == PERMISSION_DETAIL
 
 
-def test_admin_can_patch_user_of_own_org(
+@pytest.mark.parametrize(
+    ("payload", "unchanged_attribute"),
+    [
+        pytest.param(
+            {"password": "attacker-password"},
+            "hashed_password",
+            id="password",
+        ),
+        pytest.param({"is_active": False}, "is_active", id="active-status"),
+        pytest.param(
+            {"is_superuser": True},
+            "is_superuser",
+            id="superuser-status",
+        ),
+        pytest.param(
+            {"full_name": "Changed By Other Tenant"},
+            "full_name",
+            id="full-name",
+        ),
+    ],
+)
+def test_org_admin_cannot_update_shared_users_global_identity(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    add_member,
+    payload,
+    unchanged_attribute,
+):
+    admin = make_user()
+    managed_org = make_organization()
+    other_org = make_organization()
+    grant_permissions(admin, managed_org, ["users.manage"])
+    target = make_user(full_name="Shared User")
+    add_member(target, managed_org)
+    add_member(target, other_org)
+    original_value = getattr(target, unchanged_attribute)
+
+    response = client.patch(
+        f"/admin/users/{target.id}",
+        json=payload,
+        headers=headers_for(admin),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == GLOBAL_UPDATE_DETAIL
+    db.refresh(target)
+    assert getattr(target, unchanged_attribute) == original_value
+
+
+def test_org_admin_cannot_delete_user_shared_with_another_organization(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    add_member,
+):
+    admin = make_user()
+    managed_org = make_organization()
+    other_org = make_organization()
+    grant_permissions(admin, managed_org, ["users.manage"])
+    target = make_user()
+    add_member(target, managed_org)
+    add_member(target, other_org)
+
+    response = client.delete(
+        f"/admin/users/{target.id}", headers=headers_for(admin)
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == GLOBAL_DELETE_DETAIL
+    assert db.get(type(target), target.id) is not None
+
+
+def test_org_admin_cannot_patch_global_identity_of_user_in_own_org(
     client, make_user, make_organization, grant_permissions, add_member
 ):
     admin = make_user()
@@ -182,14 +310,12 @@ def test_admin_can_patch_user_of_own_org(
         headers=headers_for(admin),
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["id"] == target.id
-    assert body["full_name"] == "After Rename"
+    assert response.status_code == 403
+    assert response.json()["detail"] == GLOBAL_UPDATE_DETAIL
 
 
-def test_admin_can_delete_user_of_own_org(
-    client, make_user, make_organization, grant_permissions, add_member
+def test_org_admin_cannot_delete_global_account_of_user_in_own_org(
+    client, db, make_user, make_organization, grant_permissions, add_member
 ):
     admin = make_user()
     org = make_organization()
@@ -201,10 +327,9 @@ def test_admin_can_delete_user_of_own_org(
         f"/admin/users/{target.id}", headers=headers_for(admin)
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["user_id"] == target.id
-    assert body["detail"] == "User deleted"
+    assert response.status_code == 403
+    assert response.json()["detail"] == GLOBAL_DELETE_DETAIL
+    assert db.get(type(target), target.id) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -315,15 +440,10 @@ def test_patch_deactivating_superuser_succeeds_with_two_active(
 
 
 def test_delete_last_active_superuser_conflicts(
-    client, superuser, make_user, make_organization, grant_permissions, add_member
+    client, superuser
 ):
-    admin = make_user()
-    org = make_organization()
-    grant_permissions(admin, org, ["users.manage"])
-    add_member(superuser, org)
-
     response = client.delete(
-        f"/admin/users/{superuser.id}", headers=headers_for(admin)
+        f"/admin/users/{superuser.id}", headers=headers_for(superuser)
     )
 
     assert response.status_code == 409
@@ -349,14 +469,12 @@ def test_delete_superuser_succeeds_with_two_active(
 
 
 def test_cannot_delete_own_account(
-    client, make_user, make_organization, grant_permissions
+    client, superuser, make_user
 ):
-    admin = make_user()
-    org = make_organization()
-    grant_permissions(admin, org, ["users.manage"])
+    make_user(is_superuser=True)
 
     response = client.delete(
-        f"/admin/users/{admin.id}", headers=headers_for(admin)
+        f"/admin/users/{superuser.id}", headers=headers_for(superuser)
     )
 
     assert response.status_code == 400

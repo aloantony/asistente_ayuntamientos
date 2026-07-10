@@ -1,7 +1,6 @@
 import json
 from datetime import UTC, datetime
 from typing import Annotated
-from urllib import parse as urlparse
 
 from fastapi import (
     APIRouter,
@@ -26,7 +25,13 @@ from app.ordinances.bop_burgos import (
     retry_failed_burgos_embeddings,
 )
 from app.ordinances.embeddings import embed_text, vector_similarity
-from app.ordinances.import_service import run_import_job
+from app.ordinances.import_service import (
+    ImportSourceError,
+    rebuild_ordinance_chunks,
+    run_import_job,
+    source_url_allowed,
+    validate_official_source_configuration,
+)
 from app.ordinances.models import (
     OfficialLegalSource,
     Ordinance,
@@ -135,6 +140,8 @@ def create_ordinance(
     require_ordinance_permission(db, current_user, "ordinances.create")
     if payload.status == "archived":
         require_ordinance_permission(db, current_user, "ordinances.archive")
+    if payload.curation_status != "pending_review":
+        require_ordinance_permission(db, current_user, "ordinances.review")
     ensure_active_municipality(db, payload.municipality_id)
     ensure_document_access(db, current_user, payload.document_id)
 
@@ -199,8 +206,13 @@ def create_official_source(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> OfficialLegalSource:
-    require_ordinance_permission(db, current_user, "ordinances.import")
-    source = OfficialLegalSource(**payload.model_dump())
+    require_superuser(current_user)
+    values = payload.model_dump()
+    values["domain"] = validated_official_source_domain(
+        values["base_url"],
+        values["domain"],
+    )
+    source = OfficialLegalSource(**values)
     db.add(source)
     db.commit()
     db.refresh(source)
@@ -217,14 +229,18 @@ def update_official_source(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> OfficialLegalSource:
-    require_ordinance_permission(db, current_user, "ordinances.import")
+    require_superuser(current_user)
     source = db.get(OfficialLegalSource, source_id)
     if source is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Official legal source not found",
         )
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    base_url = updates.get("base_url", source.base_url)
+    domain = updates.get("domain", source.domain)
+    updates["domain"] = validated_official_source_domain(base_url, domain)
+    for field, value in updates.items():
         setattr(source, field, value)
     db.commit()
     db.refresh(source)
@@ -242,7 +258,7 @@ def create_import_job(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     require_ordinance_permission(db, current_user, "ordinances.import")
-    validate_import_job_payload(db, payload)
+    official_source_ids, source_urls = validate_import_job_payload(db, payload)
     job = OrdinanceImportJob(
         title=payload.title,
         description=payload.description,
@@ -250,9 +266,9 @@ def create_import_job(
         subtopic=payload.subtopic,
         search_query=payload.search_query,
         municipality_ids_json=json.dumps(payload.municipality_ids),
-        official_source_ids_json=json.dumps(payload.official_source_ids),
+        official_source_ids_json=json.dumps(official_source_ids),
         source_urls_json=json.dumps(
-            [source.model_dump() for source in payload.source_urls],
+            source_urls,
             ensure_ascii=False,
         ),
         review_criteria=payload.review_criteria,
@@ -408,6 +424,8 @@ def compare_ordinances(
     include_pending: bool = False,
 ) -> dict:
     require_ordinance_permission(db, current_user, "ordinances.compare")
+    if include_pending:
+        require_ordinance_permission(db, current_user, "ordinances.review")
     query = (
         select_ordinances_with_summaries()
         .where(Ordinance.municipality_id.in_(municipality_ids))
@@ -465,6 +483,8 @@ def semantic_search_ordinances(
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> list[dict]:
     require_ordinance_permission(db, current_user, "ordinances.compare")
+    if include_pending:
+        require_ordinance_permission(db, current_user, "ordinances.review")
     query_vector, _, status = embed_text(q)
     if status != "ready" or query_vector is None:
         return []
@@ -569,8 +589,25 @@ def update_ordinance(
         require_ordinance_permission(db, current_user, "ordinances.edit")
     if updates.get("status") == "archived":
         require_ordinance_permission(db, current_user, "ordinances.archive")
-    if "curation_status" in updates:
+    curation_changed = (
+        "curation_status" in updates
+        and updates["curation_status"] != ordinance.curation_status
+    )
+    review_notes_changed = (
+        "legal_review_notes" in updates
+        and updates["legal_review_notes"] != ordinance.legal_review_notes
+    )
+    if curation_changed or review_notes_changed:
         require_ordinance_permission(db, current_user, "ordinances.review")
+
+    review_neutral_fields = {"curation_status", "legal_review_notes", "notes"}
+    material_changes = {
+        field
+        for field, value in updates.items()
+        if field not in review_neutral_fields and value != getattr(ordinance, field)
+    }
+    if material_changes:
+        updates["curation_status"] = "pending_review"
 
     requested_municipality_id = updates.get("municipality_id")
     if (
@@ -586,8 +623,62 @@ def update_ordinance(
         setattr(ordinance, field, value)
     ordinance.updated_by_id = current_user.id
 
+    if material_changes and "text_content" in material_changes:
+        rebuild_ordinance_chunks(db, ordinance)
+    if material_changes:
+        synchronize_ordinance_review_state(db, ordinance)
+    elif curation_changed:
+        synchronize_ordinance_review_state(db, ordinance, reviewer=current_user)
+
     db.commit()
     return get_existing_ordinance(db, ordinance_id)
+
+
+def synchronize_ordinance_review_state(
+    db: Session,
+    ordinance: Ordinance,
+    *,
+    reviewer: User | None = None,
+) -> None:
+    chunk_status = {
+        "approved": "approved",
+        "rejected": "rejected",
+    }.get(ordinance.curation_status, "pending_review")
+    for chunk in db.scalars(
+        select(OrdinanceLegalChunk).where(
+            OrdinanceLegalChunk.ordinance_id == ordinance.id
+        )
+    ):
+        chunk.review_status = chunk_status
+        chunk.source_url = ordinance.source_url
+
+    item_status = {
+        "approved": "approved",
+        "rejected": "rejected",
+    }.get(ordinance.curation_status, "pending_review")
+    for item in db.scalars(
+        select(OrdinanceImportItem).where(
+            OrdinanceImportItem.ordinance_id == ordinance.id
+        )
+    ):
+        item.status = item_status
+
+    report = db.scalar(
+        select(OrdinanceReviewReport)
+        .where(OrdinanceReviewReport.ordinance_id == ordinance.id)
+        .order_by(OrdinanceReviewReport.created_at.desc())
+        .limit(1)
+    )
+    if report is None:
+        return
+    report.status = {
+        "approved": "human_approved",
+        "rejected": "human_rejected",
+    }.get(ordinance.curation_status, "superseded")
+    if reviewer is not None:
+        report.reviewed_by_agent = False
+        report.reviewed_by_id = reviewer.id
+        report.reviewed_at = datetime.now(UTC)
 
 
 def select_ordinances_with_summaries():
@@ -676,7 +767,7 @@ def reject_null_required_fields(updates: dict[str, object]) -> None:
 def validate_import_job_payload(
     db: Session,
     payload: OrdinanceImportJobCreate,
-) -> None:
+) -> tuple[list[int], list[dict]]:
     if not payload.source_urls and not (
         payload.search_query and payload.municipality_ids
     ):
@@ -712,24 +803,54 @@ def validate_import_job_payload(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Import job needs active official sources",
         )
+
+    requested_source_ids = set(payload.official_source_ids)
+    available_source_ids = {source.id for source in sources}
+    if requested_source_ids and requested_source_ids != available_source_ids:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Import job contains unavailable official sources",
+        )
+
+    normalized_source_urls: list[dict] = []
     if payload.source_urls:
         for source_input in payload.source_urls:
-            if not url_allowed(source_input.url, sources):
+            matching_sources = [
+                source
+                for source in sources
+                if source_url_allowed(source_input.url, [source])
+            ]
+            if not matching_sources:
                 raise HTTPException(
                     status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail="Import source URL is not official",
                 )
 
+            if source_input.official_source_id is not None:
+                matched_source = next(
+                    (
+                        source
+                        for source in matching_sources
+                        if source.id == source_input.official_source_id
+                    ),
+                    None,
+                )
+                if matched_source is None:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="Import source attribution does not match its URL",
+                    )
+            else:
+                matched_source = max(
+                    matching_sources,
+                    key=lambda source: len(source.domain),
+                )
 
-def url_allowed(url: str, sources: list[OfficialLegalSource]) -> bool:
-    host = (urlparse.urlparse(url).hostname or "").lower()
-    if not host:
-        return False
-    for source in sources:
-        domain = source.domain.lower()
-        if host == domain or host.endswith(f".{domain}"):
-            return True
-    return False
+            normalized = source_input.model_dump()
+            normalized["official_source_id"] = matched_source.id
+            normalized_source_urls.append(normalized)
+
+    return sorted(available_source_ids), normalized_source_urls
 
 
 def get_existing_import_job(db: Session, job_id: int) -> OrdinanceImportJob:
@@ -902,3 +1023,21 @@ def require_ordinance_permission(
         status_code=http_status.HTTP_403_FORBIDDEN,
         detail=f"Permission required: {permission_code}",
     )
+
+
+def require_superuser(current_user: User) -> None:
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="Superuser privileges required",
+        )
+
+
+def validated_official_source_domain(base_url: str, domain: str) -> str:
+    try:
+        return validate_official_source_configuration(base_url, domain)
+    except ImportSourceError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(error),
+        ) from error

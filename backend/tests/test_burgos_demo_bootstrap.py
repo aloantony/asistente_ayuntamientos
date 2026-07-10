@@ -13,7 +13,7 @@ def test_burgos_demo_sources_are_official_bopbur_urls():
     assert len(DEMO_ORDINANCE_SOURCES) >= 3
     for source in DEMO_ORDINANCE_SOURCES:
         parsed = urlparse.urlparse(source.source_url)
-        assert parsed.scheme == "http"
+        assert parsed.scheme == "https"
         assert parsed.hostname == BOP_BURGOS_DOMAIN
         assert source.bulletin_number.startswith("BOPBUR-")
         assert "ordenanza" in source.title.lower()
@@ -23,7 +23,8 @@ def test_bootstrap_burgos_demo_ordinances_imports_and_approves_real_source_metad
     db,
     monkeypatch,
 ):
-    def fake_fetch(url):
+    def fake_fetch(url, *, allowed_domains=None):
+        assert allowed_domains == {BOP_BURGOS_DOMAIN}
         source = next(
             source for source in DEMO_ORDINANCE_SOURCES if source.source_url == url
         )
@@ -45,6 +46,11 @@ def test_bootstrap_burgos_demo_ordinances_imports_and_approves_real_source_metad
 
     monkeypatch.setattr(import_service, "_fetch_source", fake_fetch)
     monkeypatch.setattr(import_service, "_extract_text", fake_extract_text)
+    monkeypatch.setattr(
+        import_service,
+        "search_bop_burgos_announcements",
+        lambda *_args, **_kwargs: [],
+    )
 
     summary = bootstrap_burgos_demo_ordinances(db)
     second_summary = bootstrap_burgos_demo_ordinances(db)

@@ -606,16 +606,18 @@ export function OrdinanceImportAdmin({
                   value={comparisonTopic}
                 />
               </label>
-              <label className="checkbox-label">
-                <input
-                  checked={comparisonIncludePending}
-                  onChange={(event) =>
-                    setComparisonIncludePending(event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                Incluir pendientes
-              </label>
+              {canReview ? (
+                <label className="checkbox-label">
+                  <input
+                    checked={comparisonIncludePending}
+                    onChange={(event) =>
+                      setComparisonIncludePending(event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  Incluir pendientes
+                </label>
+              ) : null}
             </div>
             {comparisonError ? (
               <p className="error-message">{comparisonError}</p>

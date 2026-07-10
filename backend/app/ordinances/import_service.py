@@ -1,6 +1,9 @@
 import hashlib
+import http.client
+import ipaddress
 import json
 import re
+import socket
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from html.parser import HTMLParser
@@ -53,6 +56,313 @@ class SourceCandidate:
 
 class ImportSourceError(Exception):
     pass
+
+
+def validate_source_url(
+    url: str,
+    *,
+    allowed_domains: set[str] | None = None,
+    require_https: bool = True,
+    resolve_dns: bool = True,
+) -> str:
+    """Validate an outbound ordinance URL before any network access."""
+    try:
+        parsed = urlparse.urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        raise ImportSourceError("La URL de la fuente no es válida.") from error
+
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ImportSourceError("La URL de la fuente debe usar HTTP o HTTPS.")
+    if require_https and scheme != "https":
+        raise ImportSourceError("La fuente oficial debe usar HTTPS.")
+    if parsed.username is not None or parsed.password is not None:
+        raise ImportSourceError("La URL de la fuente no puede incluir credenciales.")
+    if parsed.hostname is None:
+        raise ImportSourceError("La URL de la fuente debe incluir un dominio.")
+
+    host = _normalize_hostname(parsed.hostname)
+    if _is_local_hostname(host):
+        raise ImportSourceError("La URL de la fuente apunta a una red no permitida.")
+
+    if allowed_domains is not None:
+        normalized_domains = {_normalize_hostname(domain) for domain in allowed_domains}
+        if not any(
+            host == domain or host.endswith(f".{domain}")
+            for domain in normalized_domains
+        ):
+            raise ImportSourceError(
+                "La URL no pertenece a una fuente oficial permitida."
+            )
+
+    literal_address = _parse_ip_address(host)
+    if literal_address is not None:
+        _ensure_public_address(literal_address)
+    elif resolve_dns:
+        _validated_host_addresses(
+            host,
+            port or (443 if scheme == "https" else 80),
+        )
+
+    return url
+
+
+def validate_official_source_configuration(base_url: str, domain: str) -> str:
+    """Validate and normalize a superuser-configured official source."""
+    normalized_domain = _normalize_official_domain(domain)
+    validate_source_url(
+        base_url,
+        allowed_domains={normalized_domain},
+        require_https=True,
+        resolve_dns=False,
+    )
+    return normalized_domain
+
+
+def source_url_allowed(
+    url: str,
+    official_sources: list[OfficialLegalSource],
+) -> bool:
+    try:
+        validate_source_url(
+            url,
+            allowed_domains={source.domain for source in official_sources},
+            resolve_dns=False,
+        )
+    except ImportSourceError:
+        return False
+    return True
+
+
+def _normalize_official_domain(domain: str) -> str:
+    raw_domain = domain.strip()
+    if not raw_domain or any(character in raw_domain for character in "/@?#"):
+        raise ImportSourceError("El dominio de la fuente oficial no es válido.")
+    normalized = _normalize_hostname(raw_domain)
+    if ":" in raw_domain or _parse_ip_address(normalized) is not None:
+        raise ImportSourceError(
+            "El dominio de la fuente oficial debe ser un nombre DNS público."
+        )
+    if _is_local_hostname(normalized):
+        raise ImportSourceError("El dominio de la fuente oficial no es público.")
+    labels = normalized.split(".")
+    if len(labels) < 2 or any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or re.fullmatch(r"[a-z0-9-]+", label) is None
+        for label in labels
+    ):
+        raise ImportSourceError("El dominio de la fuente oficial no es válido.")
+    return normalized
+
+
+def _normalize_hostname(host: str) -> str:
+    normalized = host.strip().rstrip(".")
+    try:
+        return normalized.encode("idna").decode("ascii").lower()
+    except UnicodeError as error:
+        raise ImportSourceError("El dominio de la fuente no es válido.") from error
+
+
+def _is_local_hostname(host: str) -> bool:
+    return host == "localhost" or host.endswith(
+        (".localhost", ".local", ".internal", ".home.arpa")
+    )
+
+
+def _parse_ip_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def _ensure_public_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> None:
+    if not address.is_global:
+        raise ImportSourceError("La URL de la fuente apunta a una red no permitida.")
+
+
+def _resolve_host_addresses(host: str, port: int) -> set[str]:
+    try:
+        return {
+            address[4][0]
+            for address in socket.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except OSError as error:
+        raise ImportSourceError("No se pudo resolver el dominio de la fuente.") from error
+
+
+def _validated_host_addresses(host: str, port: int) -> tuple[str, ...]:
+    literal_address = _parse_ip_address(host)
+    if literal_address is not None:
+        _ensure_public_address(literal_address)
+        return (str(literal_address),)
+
+    addresses = _resolve_host_addresses(host, port)
+    if not addresses:
+        raise ImportSourceError("No se pudo resolver el dominio de la fuente.")
+    for address in addresses:
+        try:
+            parsed_address = ipaddress.ip_address(address)
+        except ValueError as error:
+            raise ImportSourceError(
+                "El dominio de la fuente devolvió una dirección no válida."
+            ) from error
+        _ensure_public_address(parsed_address)
+    return tuple(sorted(addresses))
+
+
+def _connect_to_resolved_addresses(
+    addresses: tuple[str, ...],
+    port: int,
+    timeout: float | object,
+    source_address: tuple[str, int] | None,
+):
+    last_error: OSError | None = None
+    for address in addresses:
+        parsed_address = ipaddress.ip_address(address)
+        family = socket.AF_INET6 if parsed_address.version == 6 else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            destination = (
+                (address, port, 0, 0)
+                if family == socket.AF_INET6
+                else (address, port)
+            )
+            sock.connect(destination)
+            return sock
+        except OSError as error:
+            last_error = error
+            sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError("No public source addresses are available")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, resolved_addresses: tuple[str, ...], **kwargs):
+        self._resolved_addresses = resolved_addresses
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = _connect_to_resolved_addresses(
+            self._resolved_addresses,
+            self.port,
+            self.timeout,
+            self.source_address,
+        )
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, resolved_addresses: tuple[str, ...], **kwargs):
+        self._resolved_addresses = resolved_addresses
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = _connect_to_resolved_addresses(
+            self._resolved_addresses,
+            self.port,
+            self.timeout,
+            self.source_address,
+        )
+        server_hostname = self.host
+        if self._tunnel_host:
+            self._tunnel()
+            server_hostname = self._tunnel_host
+        self.sock = self._context.wrap_socket(
+            self.sock,
+            server_hostname=server_hostname,
+        )
+
+
+class _PinnedHTTPHandler(urlrequest.HTTPHandler):
+    def __init__(self, allowed_domains: set[str]):
+        super().__init__()
+        self.allowed_domains = allowed_domains
+
+    def http_open(self, req):
+        addresses = _connection_addresses(req.full_url, self.allowed_domains)
+
+        def connection_factory(host, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, **kwargs):
+            return _PinnedHTTPConnection(
+                host,
+                timeout=timeout,
+                resolved_addresses=addresses,
+                **kwargs,
+            )
+
+        return self.do_open(connection_factory, req)
+
+
+class _PinnedHTTPSHandler(urlrequest.HTTPSHandler):
+    def __init__(self, allowed_domains: set[str]):
+        super().__init__()
+        self.allowed_domains = allowed_domains
+
+    def https_open(self, req):
+        addresses = _connection_addresses(req.full_url, self.allowed_domains)
+
+        def connection_factory(host, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, **kwargs):
+            return _PinnedHTTPSConnection(
+                host,
+                timeout=timeout,
+                resolved_addresses=addresses,
+                **kwargs,
+            )
+
+        return self.do_open(
+            connection_factory,
+            req,
+            context=self._context,
+        )
+
+
+def _connection_addresses(url: str, allowed_domains: set[str]) -> tuple[str, ...]:
+    validate_source_url(
+        url,
+        allowed_domains=allowed_domains,
+        resolve_dns=False,
+    )
+    parsed = urlparse.urlsplit(url)
+    host = _normalize_hostname(parsed.hostname or "")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    return _validated_host_addresses(host, port)
+
+
+class _SafeRedirectHandler(urlrequest.HTTPRedirectHandler):
+    def __init__(self, allowed_domains: set[str]):
+        super().__init__()
+        self.allowed_domains = allowed_domains
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirect_url = urlparse.urljoin(req.full_url, newurl)
+        validate_source_url(
+            redirect_url,
+            allowed_domains=self.allowed_domains,
+        )
+        return super().redirect_request(
+            req,
+            fp,
+            code,
+            msg,
+            headers,
+            redirect_url,
+        )
 
 
 def run_import_job(job_id: int, db: Session | None = None) -> None:
@@ -197,7 +507,7 @@ def _discover_candidates(
                 return candidates
             for result in results:
                 url = str(result.get("url") or "").strip()
-                if url and _url_allowed(url, official_sources):
+                if url and source_url_allowed(url, official_sources):
                     candidates.append(
                         SourceCandidate(
                             url=url,
@@ -222,6 +532,7 @@ def _discover_bop_burgos_candidates(
         query = f"{query_base} {municipality.name}".strip()
         announcements = search_bop_burgos_announcements(
             query,
+            fetch_html=_fetch_bop_burgos_html,
             limit=settings.ordinance_import_search_limit,
         )
         for announcement in announcements:
@@ -234,6 +545,14 @@ def _discover_bop_burgos_candidates(
                 )
             )
     return candidates
+
+
+def _fetch_bop_burgos_html(url: str) -> str:
+    fetched = _fetch_source(url, allowed_domains={BOP_BURGOS_DOMAIN})
+    try:
+        return fetched.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return fetched.content.decode("latin-1", errors="ignore")
 
 
 def _create_items(
@@ -288,12 +607,15 @@ def _process_item(
     if item is None:
         return
     try:
-        if not _url_allowed(item.source_url, official_sources):
+        if not source_url_allowed(item.source_url, official_sources):
             raise ImportSourceError("La URL no pertenece a una fuente oficial permitida.")
         item.status = "fetching"
         db.commit()
 
-        fetched = _fetch_source(item.source_url)
+        fetched = _fetch_source(
+            item.source_url,
+            allowed_domains={source.domain for source in official_sources},
+        )
         text = _extract_text(fetched.content, fetched.content_type, item.source_url)
         if len(text.strip()) < 80:
             raise ImportSourceError("No se pudo extraer texto suficiente de la fuente.")
@@ -322,7 +644,12 @@ def _process_item(
         item.confidence_score = ordinance.confidence_score
         db.commit()
 
-        _create_chunks(db, ordinance, item)
+        _replace_chunks(
+            db,
+            ordinance,
+            import_item_id=item.id,
+            source_url=item.source_url,
+        )
         _create_review_report(db, ordinance, item)
         db.commit()
     except Exception as error:
@@ -337,14 +664,37 @@ class FetchedSource:
     content_type: str
 
 
-def _fetch_source(url: str) -> FetchedSource:
+def _fetch_source(
+    url: str,
+    *,
+    allowed_domains: set[str] | None = None,
+) -> FetchedSource:
+    initial_host = _normalize_hostname(urlparse.urlsplit(url).hostname or "")
+    effective_domains = (
+        allowed_domains if allowed_domains is not None else {initial_host}
+    )
+    validate_source_url(
+        url,
+        allowed_domains=effective_domains,
+        resolve_dns=False,
+    )
     request = urlrequest.Request(
         url,
         headers={"User-Agent": "AsistenteAyuntamientos/0.1 ordinance-import"},
         method="GET",
     )
+    opener = urlrequest.build_opener(
+        urlrequest.ProxyHandler({}),
+        _PinnedHTTPHandler(effective_domains),
+        _PinnedHTTPSHandler(effective_domains),
+        _SafeRedirectHandler(effective_domains),
+    )
     try:
-        with urlrequest.urlopen(request, timeout=30) as response:
+        with opener.open(request, timeout=30) as response:
+            validate_source_url(
+                response.geturl(),
+                allowed_domains=effective_domains,
+            )
             content_type = (response.headers.get("content-type") or "").lower()
             chunks: list[bytes] = []
             size = 0
@@ -440,10 +790,27 @@ def _create_pending_ordinance(
     return ordinance
 
 
-def _create_chunks(
+def rebuild_ordinance_chunks(db: Session, ordinance: Ordinance) -> None:
+    import_item_id = db.scalar(
+        select(OrdinanceImportItem.id)
+        .where(OrdinanceImportItem.ordinance_id == ordinance.id)
+        .order_by(OrdinanceImportItem.id.desc())
+        .limit(1)
+    )
+    _replace_chunks(
+        db,
+        ordinance,
+        import_item_id=import_item_id,
+        source_url=ordinance.source_url,
+    )
+
+
+def _replace_chunks(
     db: Session,
     ordinance: Ordinance,
-    item: OrdinanceImportItem,
+    *,
+    import_item_id: int | None,
+    source_url: str | None,
 ) -> None:
     for chunk in list(
         db.scalars(
@@ -453,7 +820,11 @@ def _create_chunks(
         )
     ):
         db.delete(chunk)
-    chunks = _split_chunks(ordinance.text_content or "")
+    db.flush()
+    text_content = (ordinance.text_content or "").strip()
+    if not text_content:
+        return
+    chunks = _split_chunks(text_content)
     for index, text in enumerate(chunks[: settings.ordinance_import_max_chunks]):
         embedding = None
         embedding_model = None
@@ -468,12 +839,12 @@ def _create_chunks(
         db.add(
             OrdinanceLegalChunk(
                 ordinance_id=ordinance.id,
-                import_item_id=item.id,
+                import_item_id=import_item_id,
                 chunk_index=index,
                 heading=_chunk_heading(text),
                 citation=f"Fragmento {index + 1}",
                 text=text,
-                source_url=item.source_url,
+                source_url=source_url,
                 source_locator=f"fragmento-{index + 1}",
                 review_status="pending_review",
                 embedding_model=embedding_model,
@@ -643,17 +1014,6 @@ def _split_oversized_chunk(text: str) -> list[str]:
 def _chunk_heading(text: str) -> str | None:
     first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
     return first_line[:500] if first_line else None
-
-
-def _url_allowed(url: str, official_sources: list[OfficialLegalSource]) -> bool:
-    host = (urlparse.urlparse(url).hostname or "").lower()
-    if not host:
-        return False
-    for source in official_sources:
-        domain = source.domain.lower()
-        if host == domain or host.endswith(f".{domain}"):
-            return True
-    return False
 
 
 def _json_list(value: str | None) -> list:

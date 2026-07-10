@@ -1,5 +1,7 @@
 from conftest import headers_for
 
+GLOBAL_UPDATE_DETAIL = "Only superusers can update global user accounts"
+
 
 def test_login_sets_httponly_cookie_usable_for_session(client, make_user):
     make_user(email="cookie@example.com", password="password-123")
@@ -97,23 +99,17 @@ def test_login_rate_limit_returns_429(client, make_user):
     assert blocked.json()["detail"] == "Too many login attempts"
 
 
-def test_admin_can_reset_member_password(
+def test_superuser_can_reset_member_password(
     client,
+    superuser,
     make_user,
-    make_organization,
-    grant_permissions,
-    add_member,
 ):
-    admin = make_user()
     member = make_user(email="member-reset@example.com", password="password-123")
-    organization = make_organization()
-    grant_permissions(admin, organization, ["users.manage"])
-    add_member(member, organization)
 
     response = client.patch(
         f"/admin/users/{member.id}",
         json={"password": "reset-password-9"},
-        headers=headers_for(admin),
+        headers=headers_for(superuser),
     )
     assert response.status_code == 200
 
@@ -209,25 +205,19 @@ def test_successful_logins_do_not_consume_rate_limit(client, make_user):
         assert response.status_code == 200
 
 
-def test_admin_password_reset_invalidates_member_tokens(
+def test_superuser_password_reset_invalidates_member_tokens(
     client,
+    superuser,
     make_user,
-    make_organization,
-    grant_permissions,
-    add_member,
 ):
-    admin = make_user()
     member = make_user(email="locked-out@example.com", password="password-123")
-    organization = make_organization()
-    grant_permissions(admin, organization, ["users.manage"])
-    add_member(member, organization)
     member_headers = headers_for(member)
     assert client.get("/auth/me", headers=member_headers).status_code == 200
 
     response = client.patch(
         f"/admin/users/{member.id}",
         json={"password": "rotated-password-9"},
-        headers=headers_for(admin),
+        headers=headers_for(superuser),
     )
     assert response.status_code == 200
 
@@ -235,7 +225,7 @@ def test_admin_password_reset_invalidates_member_tokens(
     assert client.get("/auth/me", headers=member_headers).status_code == 401
 
 
-def test_admin_resetting_own_password_keeps_session(
+def test_org_admin_uses_self_service_to_change_own_password(
     client,
     make_user,
     make_organization,
@@ -255,29 +245,33 @@ def test_admin_resetting_own_password_keeps_session(
         f"/admin/users/{admin.id}",
         json={"password": "rotated-password-9"},
     )
+    assert response.status_code == 403
+    assert response.json()["detail"] == GLOBAL_UPDATE_DETAIL
+
+    response = client.post(
+        "/auth/change-password",
+        json={
+            "current_password": "password-123",
+            "new_password": "rotated-password-9",
+        },
+    )
     assert response.status_code == 200
     # The refreshed cookie keeps the admin signed in despite the revocation.
     assert "access_token=" in response.headers.get("set-cookie", "")
     assert client.get("/auth/me").status_code == 200
 
 
-def test_admin_password_reset_preserves_whitespace(
+def test_superuser_password_reset_preserves_whitespace(
     client,
+    superuser,
     make_user,
-    make_organization,
-    grant_permissions,
-    add_member,
 ):
-    admin = make_user()
     member = make_user(email="spaced@example.com", password="password-123")
-    organization = make_organization()
-    grant_permissions(admin, organization, ["users.manage"])
-    add_member(member, organization)
 
     response = client.patch(
         f"/admin/users/{member.id}",
         json={"password": "  spaced-secret-9  "},
-        headers=headers_for(admin),
+        headers=headers_for(superuser),
     )
     assert response.status_code == 200
 
@@ -315,4 +309,4 @@ def test_non_superuser_cannot_reset_superuser_password(
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Only superusers can reset a superuser password"
+    assert response.json()["detail"] == GLOBAL_UPDATE_DETAIL
