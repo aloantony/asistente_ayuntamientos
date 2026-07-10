@@ -966,6 +966,7 @@ def test_seed_initial_official_sources_includes_bop_burgos(db):
     assert "bopbur.diputaciondeburgos.es" in created
     assert source is not None
     assert source.name == "Boletín Oficial de la Provincia de Burgos"
+    assert source.base_url == "http://bopbur.diputaciondeburgos.es/"
     assert source.source_type == "bop"
     assert source.status == "active"
 
@@ -995,6 +996,23 @@ def test_import_job_rejects_non_official_seed_url(
 
     assert response.status_code == 422
     assert response.json()["detail"] == "Import source URL is not official"
+
+
+def test_import_job_rejects_more_than_one_hundred_seed_urls(client, superuser):
+    response = client.post(
+        "/ordinances/import-jobs",
+        headers=headers_for(superuser),
+        json={
+            "title": "Importación excesiva",
+            "source_urls": [
+                {"url": f"https://bop.example.gov/{index}.pdf"}
+                for index in range(101)
+            ],
+            "review_criteria": "Solo fuentes oficiales.",
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_import_job_rejects_mismatched_source_attribution(
@@ -1276,7 +1294,7 @@ def test_parse_bop_burgos_search_results_extracts_official_pdf_metadata():
     assert result.bulletin_number == "núm. 177"
     assert result.bulletin_date == "viernes, 19 de septiembre de 2025"
     assert result.cve == "BOPBUR-2025-04362"
-    assert result.pdf_url.startswith("https://")
+    assert result.pdf_url.startswith("http://")
     assert result.pdf_url.endswith("bopbur-2025-177-anuncio-202504362.pdf")
     assert "recogida de basuras" in result.title
 
@@ -1296,7 +1314,7 @@ def test_bop_burgos_search_uses_injected_safe_fetcher():
 
     assert len(results) == 1
     assert fetched_urls[0].startswith(
-        "https://bopbur.diputaciondeburgos.es/busqueda?"
+        "http://bopbur.diputaciondeburgos.es/busqueda?"
     )
 
 

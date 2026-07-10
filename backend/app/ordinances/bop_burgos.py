@@ -21,7 +21,7 @@ from app.municipalities.models import Municipality
 from app.ordinances.embeddings import EmbeddingsUnavailableError, embed_text
 from app.ordinances.models import Ordinance, OrdinanceImportItem, OrdinanceLegalChunk
 
-BOP_BURGOS_BASE_URL = "https://bopbur.diputaciondeburgos.es"
+BOP_BURGOS_BASE_URL = "http://bopbur.diputaciondeburgos.es"
 BOP_BURGOS_DOMAIN = "bopbur.diputaciondeburgos.es"
 BOP_BURGOS_SEARCH_PATH = "/busqueda"
 BOP_BURGOS_PROVINCE = "Burgos"
@@ -377,11 +377,7 @@ def _extract_cve(text: str) -> str | None:
 
 
 def _absolute_bopbur_url(href: str) -> str:
-    absolute_url = urlparse.urljoin(BOP_BURGOS_BASE_URL, href)
-    parsed = urlparse.urlparse(absolute_url)
-    if parsed.hostname == BOP_BURGOS_DOMAIN and parsed.scheme == "http":
-        return parsed._replace(scheme="https").geturl()
-    return absolute_url
+    return urlparse.urljoin(BOP_BURGOS_BASE_URL, href)
 
 
 def _is_bopbur_url(url: str) -> bool:

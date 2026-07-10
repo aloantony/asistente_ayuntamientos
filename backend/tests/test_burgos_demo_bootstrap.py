@@ -1,5 +1,6 @@
 from urllib import parse as urlparse
 
+from app.core.config import settings
 from app.ordinances import import_service
 from app.ordinances.demo_bootstrap import (
     BOP_BURGOS_DOMAIN,
@@ -13,7 +14,7 @@ def test_burgos_demo_sources_are_official_bopbur_urls():
     assert len(DEMO_ORDINANCE_SOURCES) >= 3
     for source in DEMO_ORDINANCE_SOURCES:
         parsed = urlparse.urlparse(source.source_url)
-        assert parsed.scheme == "https"
+        assert parsed.scheme == "http"
         assert parsed.hostname == BOP_BURGOS_DOMAIN
         assert source.bulletin_number.startswith("BOPBUR-")
         assert "ordenanza" in source.title.lower()
@@ -23,6 +24,18 @@ def test_bootstrap_burgos_demo_ordinances_imports_and_approves_real_source_metad
     db,
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        settings,
+        "bop_archive_proxy_base_url",
+        "http://127.0.0.1:8650",
+    )
+    monkeypatch.setattr(settings, "bop_archive_proxy_api_key", "test-api-key")
+    monkeypatch.setattr(
+        settings,
+        "bop_archive_proxy_signing_key",
+        "test-signing-key",
+    )
+
     def fake_fetch(url, *, allowed_domains=None):
         assert allowed_domains == {BOP_BURGOS_DOMAIN}
         source = next(

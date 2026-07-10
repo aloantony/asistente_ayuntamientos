@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     ordinance_import_search_limit: int = 5
     ordinance_import_max_chunks: int = 200
     ordinance_chunk_chars: int = 1400
+    bop_archive_proxy_base_url: str | None = None
+    bop_archive_proxy_api_key: str | None = None
+    bop_archive_proxy_signing_key: str | None = None
+    bop_archive_proxy_timeout_seconds: float = 45.0
+    bop_archive_proxy_storage_root: str = (
+        "/var/lib/asistente_ayuntamientos/bop_archive"
+    )
     embeddings_runtime: str = "local_hash"
     embeddings_base_url: str | None = None
     embeddings_api_key: str | None = None
@@ -183,6 +190,40 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "production SELF_HOSTED_AI_API_KEY must contain at least "
                     "32 characters"
+                )
+
+        bop_proxy_values = (
+            self.bop_archive_proxy_base_url,
+            self.bop_archive_proxy_api_key,
+            self.bop_archive_proxy_signing_key,
+        )
+        if any(bop_proxy_values):
+            if self.bop_archive_proxy_base_url and not _is_secure_service_url(
+                self.bop_archive_proxy_base_url
+            ):
+                raise ValueError(
+                    "production BOP archive proxy requires an explicit HTTPS "
+                    "base URL"
+                )
+            if not self.bop_archive_proxy_api_key or not (
+                self.bop_archive_proxy_signing_key
+            ):
+                raise ValueError(
+                    "production BOP archive proxy requires both API and signing keys"
+                )
+            if len(self.bop_archive_proxy_api_key) < 32:
+                raise ValueError(
+                    "production BOP_ARCHIVE_PROXY_API_KEY must contain at least "
+                    "32 characters"
+                )
+            if len(self.bop_archive_proxy_signing_key) < 32:
+                raise ValueError(
+                    "production BOP_ARCHIVE_PROXY_SIGNING_KEY must contain at "
+                    "least 32 characters"
+                )
+            if self.bop_archive_proxy_api_key == self.bop_archive_proxy_signing_key:
+                raise ValueError(
+                    "production BOP archive proxy API and signing keys must differ"
                 )
 
         origins = self.cors_origins

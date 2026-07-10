@@ -151,3 +151,11 @@ El Privacy/AI Gateway nació para controlar el tratamiento de datos y se mantien
 Autoalojar inferencia no traslada autoridad al modelo. El backend conserva RBAC multi-tenant, selección y minimización de contexto, memoria institucional aprobada, confirmaciones de un solo uso, auditoría y validación de resultados. El runtime privado recibe únicamente el contexto permitido y devuelve texto/tool calls no confiables que vuelven a pasar por guardas deterministas.
 
 La decisión de operar modelos propios se tomará por volumen sostenido, residencia de datos, latencia y coste total, incluyendo GPU, alta disponibilidad, parches, evaluación, observabilidad y guardias operativas. No habrá fallback silencioso desde el runtime privado a un proveedor externo con datos reales: cualquier fallback deberá ser explícito, estar configurado por entorno y respetar la misma política de egreso.
+
+## ADR-024: Archivo firmado para el transporte legacy de BOP Burgos (2026-07-10)
+
+El host oficial BOPBUR no ofrece TLS compatible con clientes modernos. No se rebaja la política HTTPS del importador general ni se permite HTTP configurable por tenant. La única excepción es el dominio fijo `bopbur.diputaciondeburgos.es`, y solo cuando el backend tiene configurado el proxy de archivo controlado.
+
+El proxy es un servicio separado y autenticado. Resuelve y valida IPs públicas antes de conectar, bloquea saltos fuera del dominio, limita tamaño, conserva cada objeto por SHA-256 y mantiene un historial de manifiestos para las páginas que deben refrescarse. Devuelve contenido, fecha, tipo y digest firmados con HMAC; el backend recalcula digest y firma antes de extraer texto. El enlace backend-proxy exige HTTPS y secretos de al menos 32 caracteres en producción.
+
+Esta arquitectura evita SSRF, cambios silenciosos posteriores y manipulación entre proxy y backend, pero no puede demostrar criptográficamente que la primera respuesta HTTP no sufrió interferencia antes de archivarse. Por ello el flujo normal conserva `pending_review`, exige validación humana y debe contrastar CVE, número y boletín completo. Si BOPBUR publica un endpoint TLS moderno, se retira la excepción y se vuelve al transporte HTTPS directo.

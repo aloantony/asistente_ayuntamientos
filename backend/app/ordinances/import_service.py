@@ -111,10 +111,15 @@ def validate_source_url(
 def validate_official_source_configuration(base_url: str, domain: str) -> str:
     """Validate and normalize a superuser-configured official source."""
     normalized_domain = _normalize_official_domain(domain)
+    allow_legacy_bop = (
+        normalized_domain == BOP_BURGOS_DOMAIN
+        and _is_legacy_bop_url(base_url)
+        and bop_archive_proxy_enabled()
+    )
     validate_source_url(
         base_url,
         allowed_domains={normalized_domain},
-        require_https=True,
+        require_https=not allow_legacy_bop,
         resolve_dns=False,
     )
     return normalized_domain
@@ -125,14 +130,40 @@ def source_url_allowed(
     official_sources: list[OfficialLegalSource],
 ) -> bool:
     try:
+        allow_legacy_bop = _is_legacy_bop_url(url) and bop_archive_proxy_enabled()
         validate_source_url(
             url,
             allowed_domains={source.domain for source in official_sources},
+            require_https=not allow_legacy_bop,
             resolve_dns=False,
         )
+        if allow_legacy_bop:
+            _ensure_exact_source_domain(
+                url,
+                {source.domain for source in official_sources},
+            )
     except ImportSourceError:
         return False
     return True
+
+
+def bop_archive_proxy_enabled() -> bool:
+    return bool(
+        settings.bop_archive_proxy_base_url
+        and settings.bop_archive_proxy_api_key
+        and settings.bop_archive_proxy_signing_key
+    )
+
+
+def _is_legacy_bop_url(url: str) -> bool:
+    try:
+        parsed = urlparse.urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "http"
+        and _normalize_hostname(parsed.hostname or "") == BOP_BURGOS_DOMAIN
+    )
 
 
 def _normalize_official_domain(domain: str) -> str:
@@ -291,12 +322,17 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 class _PinnedHTTPHandler(urlrequest.HTTPHandler):
-    def __init__(self, allowed_domains: set[str]):
+    def __init__(self, allowed_domains: set[str], *, require_https: bool):
         super().__init__()
         self.allowed_domains = allowed_domains
+        self.require_https = require_https
 
     def http_open(self, req):
-        addresses = _connection_addresses(req.full_url, self.allowed_domains)
+        addresses = _connection_addresses(
+            req.full_url,
+            self.allowed_domains,
+            require_https=self.require_https,
+        )
 
         def connection_factory(host, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, **kwargs):
             return _PinnedHTTPConnection(
@@ -310,12 +346,17 @@ class _PinnedHTTPHandler(urlrequest.HTTPHandler):
 
 
 class _PinnedHTTPSHandler(urlrequest.HTTPSHandler):
-    def __init__(self, allowed_domains: set[str]):
+    def __init__(self, allowed_domains: set[str], *, require_https: bool):
         super().__init__()
         self.allowed_domains = allowed_domains
+        self.require_https = require_https
 
     def https_open(self, req):
-        addresses = _connection_addresses(req.full_url, self.allowed_domains)
+        addresses = _connection_addresses(
+            req.full_url,
+            self.allowed_domains,
+            require_https=self.require_https,
+        )
 
         def connection_factory(host, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, **kwargs):
             return _PinnedHTTPSConnection(
@@ -332,10 +373,16 @@ class _PinnedHTTPSHandler(urlrequest.HTTPSHandler):
         )
 
 
-def _connection_addresses(url: str, allowed_domains: set[str]) -> tuple[str, ...]:
+def _connection_addresses(
+    url: str,
+    allowed_domains: set[str],
+    *,
+    require_https: bool = True,
+) -> tuple[str, ...]:
     validate_source_url(
         url,
         allowed_domains=allowed_domains,
+        require_https=require_https,
         resolve_dns=False,
     )
     parsed = urlparse.urlsplit(url)
@@ -345,16 +392,27 @@ def _connection_addresses(url: str, allowed_domains: set[str]) -> tuple[str, ...
 
 
 class _SafeRedirectHandler(urlrequest.HTTPRedirectHandler):
-    def __init__(self, allowed_domains: set[str]):
+    def __init__(
+        self,
+        allowed_domains: set[str],
+        *,
+        require_https: bool,
+        exact_domains: bool,
+    ):
         super().__init__()
         self.allowed_domains = allowed_domains
+        self.require_https = require_https
+        self.exact_domains = exact_domains
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         redirect_url = urlparse.urljoin(req.full_url, newurl)
         validate_source_url(
             redirect_url,
             allowed_domains=self.allowed_domains,
+            require_https=self.require_https,
         )
+        if self.exact_domains:
+            _ensure_exact_source_domain(redirect_url, self.allowed_domains)
         return super().redirect_request(
             req,
             fp,
@@ -669,6 +727,49 @@ def _fetch_source(
     *,
     allowed_domains: set[str] | None = None,
 ) -> FetchedSource:
+    if _is_legacy_bop_url(url):
+        effective_domains = (
+            allowed_domains if allowed_domains is not None else {BOP_BURGOS_DOMAIN}
+        )
+        validate_source_url(
+            url,
+            allowed_domains=effective_domains,
+            require_https=False,
+            resolve_dns=False,
+        )
+        _ensure_exact_source_domain(url, effective_domains)
+        if not bop_archive_proxy_enabled():
+            raise ImportSourceError(
+                "La fuente BOP legacy requiere el proxy de archivo seguro."
+            )
+        from app.ordinances.archive_proxy import (
+            ArchiveProxyError,
+            fetch_archived_source,
+        )
+
+        try:
+            archived = fetch_archived_source(url)
+        except ArchiveProxyError as error:
+            raise ImportSourceError(str(error)) from error
+        return FetchedSource(
+            content=archived.content,
+            content_type=archived.content_type,
+        )
+
+    return _fetch_direct_source(
+        url,
+        allowed_domains=allowed_domains,
+        require_https=True,
+    )
+
+
+def _fetch_direct_source(
+    url: str,
+    *,
+    allowed_domains: set[str] | None = None,
+    require_https: bool,
+    exact_domains: bool = False,
+) -> FetchedSource:
     initial_host = _normalize_hostname(urlparse.urlsplit(url).hostname or "")
     effective_domains = (
         allowed_domains if allowed_domains is not None else {initial_host}
@@ -676,8 +777,11 @@ def _fetch_source(
     validate_source_url(
         url,
         allowed_domains=effective_domains,
+        require_https=require_https,
         resolve_dns=False,
     )
+    if exact_domains:
+        _ensure_exact_source_domain(url, effective_domains)
     request = urlrequest.Request(
         url,
         headers={"User-Agent": "AsistenteAyuntamientos/0.1 ordinance-import"},
@@ -685,16 +789,26 @@ def _fetch_source(
     )
     opener = urlrequest.build_opener(
         urlrequest.ProxyHandler({}),
-        _PinnedHTTPHandler(effective_domains),
-        _PinnedHTTPSHandler(effective_domains),
-        _SafeRedirectHandler(effective_domains),
+        _PinnedHTTPHandler(effective_domains, require_https=require_https),
+        _PinnedHTTPSHandler(effective_domains, require_https=require_https),
+        _SafeRedirectHandler(
+            effective_domains,
+            require_https=require_https,
+            exact_domains=exact_domains,
+        ),
     )
     try:
         with opener.open(request, timeout=30) as response:
             validate_source_url(
                 response.geturl(),
                 allowed_domains=effective_domains,
+                require_https=require_https,
             )
+            if exact_domains:
+                _ensure_exact_source_domain(
+                    response.geturl(),
+                    effective_domains,
+                )
             content_type = (response.headers.get("content-type") or "").lower()
             chunks: list[bytes] = []
             size = 0
@@ -708,6 +822,27 @@ def _fetch_source(
     except (urlerror.URLError, TimeoutError) as error:
         raise ImportSourceError("No se pudo descargar la fuente.") from error
     return FetchedSource(content=b"".join(chunks), content_type=content_type)
+
+
+def _ensure_exact_source_domain(url: str, allowed_domains: set[str]) -> None:
+    try:
+        parsed = urlparse.urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        raise ImportSourceError("La URL de la fuente no es válida.") from error
+    host = _normalize_hostname(parsed.hostname or "")
+    normalized_domains = {
+        _normalize_official_domain(domain) for domain in allowed_domains
+    }
+    if host not in normalized_domains:
+        raise ImportSourceError(
+            "La URL no pertenece al host oficial exacto permitido."
+        )
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    if (port is not None and port != default_port) or parsed.fragment:
+        raise ImportSourceError(
+            "La URL usa un puerto o fragmento no permitido para la fuente oficial."
+        )
 
 
 def _extract_text(content: bytes, content_type: str, url: str) -> str:

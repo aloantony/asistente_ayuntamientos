@@ -239,7 +239,10 @@ class OrdinanceImportJobCreate(BaseModel):
     search_query: str | None = None
     municipality_ids: list[int] = Field(default_factory=list)
     official_source_ids: list[int] = Field(default_factory=list)
-    source_urls: list[OrdinanceImportSourceInput] = Field(default_factory=list)
+    source_urls: list[OrdinanceImportSourceInput] = Field(
+        default_factory=list,
+        max_length=100,
+    )
     review_criteria: str = Field(min_length=1)
 
     model_config = ConfigDict(str_strip_whitespace=True)

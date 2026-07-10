@@ -4,12 +4,13 @@ Actualizado: 2026-07-08.
 
 ## Visión general
 
-Aplicación multi-tenant con cuatro servicios en Docker Compose:
+Aplicación multi-tenant con cuatro servicios principales y un servicio opcional en Docker Compose:
 
 - `backend`: API HTTP FastAPI (puerto 127.0.0.1:8000), monolito modular.
 - `frontend`: Next.js App Router (puerto 127.0.0.1:3000), consola de administración y trabajo.
 - `postgres`: PostgreSQL 17, interno (sin puerto publicado), con volumen persistente.
 - `redis`: Redis 7, interno, reservado para colas/caché futuras (sin consumidor todavía).
+- `bop-archive-proxy`: perfil opcional de egreso para el BOP Burgos legacy; recibe solo sus credenciales, corre sin root/capacidades y conserva el archivo firmado en un volumen dedicado.
 
 ## Modelo de dominio y tenancy
 
@@ -56,7 +57,7 @@ La distinción central del dominio:
 - Para recargar el corpus demo en una DB local ya migrada: `cd backend && DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/app PYTHONPATH=. python -m app.ordinances.demo_bootstrap`. El comando es idempotente por URL oficial.
 - Go/no-go antes de una demo: verificar BOPBUR en `official_legal_sources`, ordenanzas BOPBUR aprobadas, chunks `review_status='approved'`, embeddings `embedding_status='ready'` y búsquedas positivas con `semantic_search_ordinances`. Las búsquedas aceptan filtros estructurados por `municipality_id`/`municipality_name` y `topic`; Anacleto recibe la cobertura disponible en el prompt y debe usar `semantic_search_ordinances` para contenido normativo. Si no hay chunk aprobado para un municipio/materia, debe reconocer falta de cobertura sin inventar normativa.
 - Sprint 1 empieza la cobertura Burgos reproducible con un conector determinista BOPBUR en `backend/app/ordinances/bop_burgos.py`: consulta el formulario oficial `/busqueda`, parsea anuncios/PDFs oficiales sin recurrir a búsqueda web general, alimenta `ordinance_import_jobs` cuando la fuente activa es `bopbur.diputaciondeburgos.es`, trocea textos por artículos cuando existen marcadores legales y expone `GET /ordinances/coverage/burgos` como reporte operativo de municipios, ordenanzas, chunks listos, fallos de importación/OCR y fallos de embeddings. El reporte agrupa por nombre de municipio para evitar que altas duplicadas locales distorsionen la cobertura lógica. Los embeddings fallidos de Burgos se pueden reintentar de forma acotada con `POST /ordinances/coverage/burgos/retry-embeddings`.
-- A 2026-07-10, el host BOPBUR solo ofrece HTTP o TLS obsoleto incompatible con clientes modernos. El importador exige HTTPS y falla cerrado; la ingestión en vivo queda bloqueada hasta disponer de un endpoint oficial moderno o un proxy de archivo controlado con trazabilidad e integridad verificable. El corpus ya almacenado sigue disponible, pero no debe confundirse con cobertura actualizada.
+- A 2026-07-10, el host BOPBUR solo ofrece HTTP o TLS obsoleto incompatible con clientes modernos. Es la única excepción legacy y nunca la consume directamente el backend: `archive_proxy_service.py` restringe host, puertos y redirecciones, fija la IP pública, conserva objetos y versiones por SHA-256 y persiste un manifiesto HMAC que verifica antes de servir. En producción, backend y proxy se comunican exclusivamente por HTTPS. La primera adquisición sigue sin autenticidad criptográfica de origen por la limitación del BOP, de modo que toda ordenanza entra en revisión humana y debe contrastarse con boletín/CVE.
 
 ## Frontend
 

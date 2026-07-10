@@ -17,6 +17,9 @@ def isolate_security_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "CORS_ALLOWED_ORIGINS",
         "SELF_HOSTED_AI_BASE_URL",
         "SELF_HOSTED_AI_API_KEY",
+        "BOP_ARCHIVE_PROXY_BASE_URL",
+        "BOP_ARCHIVE_PROXY_API_KEY",
+        "BOP_ARCHIVE_PROXY_SIGNING_KEY",
     ):
         monkeypatch.delenv(variable, raising=False)
 
@@ -123,6 +126,50 @@ def test_production_accepts_secure_self_hosted_runtime() -> None:
     )
 
     assert configured.assistant_runtime == "self_hosted"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "api_key", "signing_key"),
+    [
+        ("http://archive.internal", "a" * 40, "s" * 40),
+        ("https://archive.internal", "short", "s" * 40),
+        ("https://archive.internal", "a" * 40, "short"),
+        (None, "short", "s" * 40),
+        (None, "a" * 40, "short"),
+        (None, "a" * 40, None),
+        (None, "same-key" * 5, "same-key" * 5),
+    ],
+)
+def test_production_rejects_unsafe_bop_archive_proxy(
+    base_url: str | None,
+    api_key: str | None,
+    signing_key: str | None,
+) -> None:
+    with pytest.raises(ValidationError, match="BOP archive|BOP_ARCHIVE"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            secret_key="a-production-secret-with-at-least-32-characters",
+            cors_allowed_origins="https://municipal.example",
+            bop_archive_proxy_base_url=base_url,
+            bop_archive_proxy_api_key=api_key,
+            bop_archive_proxy_signing_key=signing_key,
+        )
+
+
+def test_production_accepts_standalone_bop_archive_credentials() -> None:
+    configured = Settings(
+        _env_file=None,
+        environment="production",
+        secret_key="a-production-secret-with-at-least-32-characters",
+        cors_allowed_origins="https://municipal.example",
+        bop_archive_proxy_api_key="a-proxy-api-key-with-at-least-32-characters",
+        bop_archive_proxy_signing_key=(
+            "a-distinct-signing-key-with-at-least-32-characters"
+        ),
+    )
+
+    assert configured.bop_archive_proxy_base_url is None
 
 
 def test_production_settings_initialize_during_module_import() -> None:

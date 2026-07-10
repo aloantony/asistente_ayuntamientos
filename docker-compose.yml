@@ -31,6 +31,41 @@ services:
       redis:
         condition: service_started
 
+  bop-archive-proxy:
+    profiles: ["bop-archive"]
+    build:
+      context: ./backend
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      SECRET_KEY: archive-proxy-does-not-expose-auth-routes-2026
+      CORS_ALLOWED_ORIGINS: https://archive-proxy.invalid
+      BOP_ARCHIVE_PROXY_API_KEY: ${BOP_ARCHIVE_PROXY_API_KEY:-}
+      BOP_ARCHIVE_PROXY_SIGNING_KEY: ${BOP_ARCHIVE_PROXY_SIGNING_KEY:-}
+      BOP_ARCHIVE_PROXY_STORAGE_ROOT: /var/lib/asistente_ayuntamientos/bop_archive
+      ORDINANCE_IMPORT_MAX_FETCH_BYTES: ${ORDINANCE_IMPORT_MAX_FETCH_BYTES:-15728640}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    ports:
+      - "127.0.0.1:8650:8650"
+    networks:
+      - bop_egress
+    command:
+      [
+        "uvicorn",
+        "app.ordinances.archive_proxy_service:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8650",
+      ]
+    volumes:
+      - bop_archive:/var/lib/asistente_ayuntamientos/bop_archive
+
   frontend:
     build:
       context: ./frontend
@@ -67,3 +102,8 @@ services:
 volumes:
   postgres_data:
   document_storage:
+  bop_archive:
+
+networks:
+  bop_egress:
+    driver: bridge
