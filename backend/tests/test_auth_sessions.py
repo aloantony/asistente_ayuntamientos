@@ -1,4 +1,8 @@
 from conftest import headers_for
+from redis.exceptions import ConnectionError as RedisConnectionError
+
+from app.api.routes import auth as auth_routes
+from app.core.rate_limit import RateLimitUnavailable
 
 GLOBAL_UPDATE_DETAIL = "Only superusers can update global user accounts"
 
@@ -97,6 +101,35 @@ def test_login_rate_limit_returns_429(client, make_user):
     )
     assert blocked.status_code == 429
     assert blocked.json()["detail"] == "Too many login attempts"
+
+
+def test_login_fails_closed_when_shared_rate_limiter_is_unavailable(
+    client,
+    monkeypatch,
+):
+    class UnavailableRateLimiter:
+        def try_acquire(self, _key: str) -> bool:
+            raise RateLimitUnavailable from RedisConnectionError()
+
+        def refund(self, _key: str) -> None:
+            raise AssertionError("refund must not run without an acquired slot")
+
+        def reset(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        auth_routes,
+        "login_rate_limiter",
+        UnavailableRateLimiter(),
+    )
+
+    response = client.post(
+        "/auth/login",
+        json={"email": "private@example.com", "password": "never-logged"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Authentication temporarily unavailable"}
 
 
 def test_superuser_can_reset_member_password(

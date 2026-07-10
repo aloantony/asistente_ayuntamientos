@@ -15,6 +15,7 @@ def isolate_security_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "SECRET_KEY",
         "BOOTSTRAP_ADMIN_TOKEN",
         "CORS_ALLOWED_ORIGINS",
+        "RATE_LIMIT_BACKEND",
     ):
         monkeypatch.delenv(variable, raising=False)
 
@@ -83,6 +84,30 @@ def test_production_accepts_strong_secret_key() -> None:
     )
 
     assert settings.environment == "production"
+
+
+def test_production_rejects_memory_rate_limit_backend() -> None:
+    with pytest.raises(ValidationError, match="RATE_LIMIT_BACKEND=redis"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            secret_key="a-production-secret-with-at-least-32-characters",
+            cors_allowed_origins="https://municipal.example",
+            rate_limit_backend="memory",
+        )
+
+
+@pytest.mark.parametrize("environment", ["development", "test"])
+def test_non_production_can_explicitly_use_memory_rate_limit_backend(
+    environment: str,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        environment=environment,
+        rate_limit_backend="memory",
+    )
+
+    assert settings.rate_limit_backend == "memory"
 
 
 def test_production_settings_initialize_during_module_import() -> None:

@@ -1,8 +1,9 @@
+import re
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,8 +28,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     secret_key: str = "change-me-in-development"
     access_token_expire_minutes: int = 60
-    login_rate_limit_attempts: int = 10
-    login_rate_limit_window_seconds: int = 60
+    login_rate_limit_attempts: int = Field(default=10, gt=0)
+    login_rate_limit_window_seconds: int = Field(default=60, gt=0)
+    rate_limit_backend: Literal["redis", "memory"] = "redis"
+    rate_limit_redis_timeout_seconds: float = Field(default=0.5, gt=0)
+    rate_limit_key_prefix: str = "asistente:rate-limit"
     bootstrap_admin_token: str | None = None
     jwt_algorithm: str = "HS256"
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -91,6 +95,17 @@ class Settings(BaseSettings):
             return value.replace("postgresql://", "postgresql+psycopg://", 1)
         return value
 
+    @field_validator("rate_limit_key_prefix")
+    @classmethod
+    def validate_rate_limit_key_prefix(cls, value: str) -> str:
+        normalized = value.strip().strip(":")
+        if not re.fullmatch(r"[A-Za-z0-9:_-]+", normalized):
+            raise ValueError(
+                "rate_limit_key_prefix may only contain letters, numbers, "
+                "':', '_' and '-'"
+            )
+        return normalized
+
     @field_validator("assistant_runtime")
     @classmethod
     def validate_assistant_runtime(cls, value: str) -> str:
@@ -147,6 +162,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "production BOOTSTRAP_ADMIN_TOKEN must contain at least 32 characters"
             )
+        if self.rate_limit_backend != "redis":
+            raise ValueError("production requires RATE_LIMIT_BACKEND=redis")
 
         origins = self.cors_origins
         if not origins or any(not _is_secure_origin(origin) for origin in origins):

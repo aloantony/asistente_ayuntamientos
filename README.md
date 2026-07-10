@@ -32,7 +32,7 @@ Future priorities will be refined through Requirements Intake and through work w
 - Backend: FastAPI
 - Frontend: Next.js
 - Database: PostgreSQL
-- Redis: declared in Docker Compose and reserved for future workers/cache; no backend code consumes it yet
+- Redis: shared rate limits and RQ background jobs
 - Local orchestration: Docker Compose
 - ORM: SQLAlchemy
 - Migrations: Alembic
@@ -51,7 +51,7 @@ Future priorities will be refined through Requirements Intake and through work w
 
 ## 5. Implemented modules
 
-- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, per-IP login rate limiting, `/auth/me` session restoration and first-admin bootstrap.
+- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, distributed login/password rate limiting, `/auth/me` session restoration and first-admin bootstrap.
 - Users and groups: administrative management. Deletion is physical (hard delete) but guarded: the last active superuser and your own account cannot be deleted, and association rows are cleaned up explicitly.
 - Roles and permissions: RBAC model for administrative and functional capabilities. The permission catalog is seeded automatically and idempotently on backend startup.
 - Organizations: tenant foundation for client entities using the application.
@@ -104,7 +104,7 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings.
+Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, `REDIS_URL`, rate-limit settings, database settings and document storage settings. `RATE_LIMIT_BACKEND=redis` is mandatory in production; `memory` is an explicit development/test fallback only.
 
 To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately, set `ASSISTANT_RUNTIME=hermes_agent`, `HERMES_AGENT_BASE_URL`, `HERMES_AGENT_API_KEY` and `HERMES_AGENT_MODEL`. In production, Hermes Agent stays disabled for real data unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. Without a complete runtime configuration, assistant endpoints return 503 and the UI shows the assistant as not configured.
 
