@@ -19,6 +19,22 @@ def _is_secure_origin(origin: str) -> bool:
     )
 
 
+def _is_secure_service_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname is not None
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
 class Settings(BaseSettings):
     app_name: str = "Asistente Ayuntamientos"
     app_version: str = "0.1.0"
@@ -46,6 +62,11 @@ class Settings(BaseSettings):
     hermes_agent_real_data_allowed: bool = False
     hermes_agent_timeout_seconds: float = 120.0
     hermes_agent_health_timeout_seconds: float = 3.0
+    self_hosted_ai_base_url: str | None = None
+    self_hosted_ai_api_key: str | None = None
+    self_hosted_ai_model: str = "municipal-assistant"
+    self_hosted_ai_timeout_seconds: float = 120.0
+    self_hosted_ai_health_timeout_seconds: float = 3.0
     hermes_web_base_url: str = "http://127.0.0.1:8643/v1"
     hermes_web_api_key: str | None = None
     hermes_web_model: str = "hermes-agent"
@@ -95,8 +116,11 @@ class Settings(BaseSettings):
     @classmethod
     def validate_assistant_runtime(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"anthropic", "hermes_agent"}:
-            raise ValueError("assistant_runtime must be 'anthropic' or 'hermes_agent'")
+        if normalized not in {"anthropic", "hermes_agent", "self_hosted"}:
+            raise ValueError(
+                "assistant_runtime must be 'anthropic', 'hermes_agent' or "
+                "'self_hosted'"
+            )
         return normalized
 
     @field_validator("embeddings_runtime")
@@ -147,6 +171,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "production BOOTSTRAP_ADMIN_TOKEN must contain at least 32 characters"
             )
+
+        if self.assistant_runtime == "self_hosted":
+            if not self.self_hosted_ai_base_url or not _is_secure_service_url(
+                self.self_hosted_ai_base_url
+            ):
+                raise ValueError(
+                    "production self-hosted AI requires an explicit HTTPS base URL"
+                )
+            if not self.self_hosted_ai_api_key or len(self.self_hosted_ai_api_key) < 32:
+                raise ValueError(
+                    "production SELF_HOSTED_AI_API_KEY must contain at least "
+                    "32 characters"
+                )
 
         origins = self.cors_origins
         if not origins or any(not _is_secure_origin(origin) for origin in origins):

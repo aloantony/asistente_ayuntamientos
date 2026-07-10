@@ -146,7 +146,7 @@ El estilo oral se decide por turno con `input_mode` (web y Telegram) y solo alte
 
 ## ADR-022: El gateway permanece al autoalojar modelos (2026-07-10)
 
-El Privacy/AI Gateway nació para controlar el tratamiento de datos y se mantiene también si el producto escala hasta operar infraestructura y modelos propios. No representa «usar nube externa»: es la capa anticorrupción entre el dominio y cualquier runtime de inferencia. El MVP puede usar un proveedor gestionado; Hermes ya permite un runtime privado compatible con OpenAI; una fase posterior podrá apuntar a un clúster propio mediante ese contrato o un adaptador adicional, sin cambiar el motor conversacional ni las herramientas.
+El Privacy/AI Gateway nació para controlar el tratamiento de datos y se mantiene también si el producto escala hasta operar infraestructura y modelos propios. No representa «usar nube externa»: es la capa anticorrupción entre el dominio y cualquier runtime de inferencia. El MVP puede usar un proveedor gestionado; Hermes permite un runtime privado; y `ASSISTANT_RUNTIME=self_hosted` apunta a un servidor de inferencia propio OpenAI-compatible sin cambiar el motor conversacional ni las herramientas. En producción este runtime exige HTTPS y autenticación, bloquea redirecciones y nunca cae silenciosamente a otro proveedor.
 
 Autoalojar inferencia no traslada autoridad al modelo. El backend conserva RBAC multi-tenant, selección y minimización de contexto, memoria institucional aprobada, confirmaciones de un solo uso, auditoría y validación de resultados. El runtime privado recibe únicamente el contexto permitido y devuelve texto/tool calls no confiables que vuelven a pasar por guardas deterministas.
 

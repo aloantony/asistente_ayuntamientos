@@ -96,7 +96,11 @@ def get_assistant_status(
         model=(
             settings.hermes_agent_model
             if settings.assistant_runtime == "hermes_agent"
-            else settings.assistant_model
+            else (
+                settings.self_hosted_ai_model
+                if settings.assistant_runtime == "self_hosted"
+                else settings.assistant_model
+            )
         ),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
         speech_transcription_enabled=settings.speech_transcription_runtime

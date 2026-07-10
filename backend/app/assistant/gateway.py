@@ -67,6 +67,16 @@ class AICompletion:
     usage: AIUsage
 
 
+@dataclass(frozen=True)
+class OpenAICompatibleRuntime:
+    name: str
+    base_url: str
+    api_key: str | None
+    model: str
+    timeout: float
+    health_timeout: float
+
+
 class AIGateway:
     def __init__(self) -> None:
         self._anthropic_client: anthropic.Anthropic | None = None
@@ -77,15 +87,18 @@ class AIGateway:
             return bool(settings.anthropic_api_key)
         if settings.assistant_runtime == "hermes_agent":
             return hermes_agent_enabled()
+        if settings.assistant_runtime == "self_hosted":
+            return self_hosted_ai_enabled()
         return False
 
     @property
     def runtime_healthy(self) -> bool | None:
-        if settings.assistant_runtime != "hermes_agent":
+        if settings.assistant_runtime not in {"hermes_agent", "self_hosted"}:
             return None
         if not self.enabled:
             return False
-        return hermes_agent_healthy(timeout=settings.hermes_agent_health_timeout_seconds)
+        runtime = _openai_compatible_runtime(settings.assistant_runtime)
+        return openai_compatible_runtime_healthy(runtime)
 
     def _get_anthropic_client(self) -> anthropic.Anthropic:
         if not self.enabled:
@@ -115,6 +128,12 @@ class AIGateway:
                 messages=messages,
                 tools=tools,
             )
+        if settings.assistant_runtime == "self_hosted":
+            return self._complete_self_hosted(
+                system=system,
+                messages=messages,
+                tools=tools,
+            )
         raise AssistantUnavailableError("Assistant runtime is not supported")
 
     def complete_stream(
@@ -133,6 +152,13 @@ class AIGateway:
             return completion
         if settings.assistant_runtime == "hermes_agent":
             completion = yield from self._complete_stream_hermes_agent(
+                system=system,
+                messages=messages,
+                tools=tools,
+            )
+            return completion
+        if settings.assistant_runtime == "self_hosted":
+            completion = yield from self._complete_stream_self_hosted(
                 system=system,
                 messages=messages,
                 tools=tools,
@@ -299,6 +325,90 @@ class AIGateway:
         )
         return completion
 
+    def _complete_self_hosted(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> AICompletion:
+        runtime = _openai_compatible_runtime("self_hosted")
+        completion = complete_openai_compatible(
+            runtime,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=settings.assistant_max_tokens,
+            tool_choice="auto",
+            log_context="assistant",
+        )
+        _log_openai_compatible_completion(runtime.name, completion)
+        return completion
+
+    def _complete_stream_self_hosted(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> Generator[AITextDelta, None, AICompletion]:
+        runtime = _openai_compatible_runtime("self_hosted")
+        try:
+            completion = yield from complete_openai_compatible_stream(
+                runtime,
+                system=system,
+                messages=messages,
+                tools=tools,
+                max_tokens=settings.assistant_max_tokens,
+                tool_choice="auto",
+                log_context="assistant",
+            )
+        except AssistantUnavailableError:
+            completion = complete_openai_compatible(
+                runtime,
+                system=system,
+                messages=messages,
+                tools=tools,
+                max_tokens=settings.assistant_max_tokens,
+                tool_choice="auto",
+                log_context="assistant_same_runtime_non_streaming",
+            )
+            text = _completion_text_for_delta(completion)
+            if text:
+                yield AITextDelta(text=text)
+        _log_openai_compatible_completion(runtime.name, completion)
+        return completion
+
+
+class _NoRedirectHandler(urlrequest.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENAI_COMPATIBLE_OPENER = urlrequest.build_opener(_NoRedirectHandler())
+
+
+def _openai_compatible_runtime(name: str) -> OpenAICompatibleRuntime:
+    if name == "hermes_agent":
+        return OpenAICompatibleRuntime(
+            name=name,
+            base_url=settings.hermes_agent_base_url,
+            api_key=settings.hermes_agent_api_key,
+            model=settings.hermes_agent_model,
+            timeout=settings.hermes_agent_timeout_seconds,
+            health_timeout=settings.hermes_agent_health_timeout_seconds,
+        )
+    if name == "self_hosted":
+        return OpenAICompatibleRuntime(
+            name=name,
+            base_url=settings.self_hosted_ai_base_url or "",
+            api_key=settings.self_hosted_ai_api_key,
+            model=settings.self_hosted_ai_model,
+            timeout=settings.self_hosted_ai_timeout_seconds,
+            health_timeout=settings.self_hosted_ai_health_timeout_seconds,
+        )
+    raise AssistantUnavailableError("OpenAI-compatible runtime is not supported")
+
 
 def hermes_agent_enabled() -> bool:
     if not settings.hermes_agent_base_url or not settings.hermes_agent_api_key:
@@ -309,14 +419,42 @@ def hermes_agent_enabled() -> bool:
     )
 
 
+def self_hosted_ai_enabled() -> bool:
+    if not settings.self_hosted_ai_base_url or not settings.self_hosted_ai_model:
+        return False
+    return settings.environment != "production" or bool(
+        settings.self_hosted_ai_api_key
+    )
+
+
+def _openai_compatible_runtime_enabled(name: str) -> bool:
+    if name == "hermes_agent":
+        return hermes_agent_enabled()
+    if name == "self_hosted":
+        return self_hosted_ai_enabled()
+    return False
+
+
 def hermes_agent_healthy(*, timeout: float) -> bool:
+    runtime = _openai_compatible_runtime("hermes_agent")
+    return openai_compatible_runtime_healthy(runtime, timeout=timeout)
+
+
+def openai_compatible_runtime_healthy(
+    runtime: OpenAICompatibleRuntime,
+    *,
+    timeout: float | None = None,
+) -> bool:
     request = urlrequest.Request(
-        _hermes_agent_url("health"),
-        headers=_hermes_agent_headers(),
+        _openai_compatible_url(runtime.base_url, "health"),
+        headers=_openai_compatible_headers(runtime.api_key),
         method="GET",
     )
     try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
+        with _OPENAI_COMPATIBLE_OPENER.open(
+            request,
+            timeout=timeout or runtime.health_timeout,
+        ) as response:
             return 200 <= response.status < 300
     except (urlerror.HTTPError, urlerror.URLError, TimeoutError):
         return False
@@ -333,11 +471,43 @@ def complete_hermes_agent(
     tool_choice: str | dict | None,
     log_context: str,
 ) -> AICompletion:
-    if not hermes_agent_enabled():
-        raise AssistantUnavailableError("Hermes Agent is not configured")
+    runtime = _openai_compatible_runtime("hermes_agent")
+    runtime = OpenAICompatibleRuntime(
+        name=runtime.name,
+        base_url=runtime.base_url,
+        api_key=runtime.api_key,
+        model=model,
+        timeout=timeout,
+        health_timeout=runtime.health_timeout,
+    )
+    return complete_openai_compatible(
+        runtime,
+        system=system,
+        messages=messages,
+        tools=tools,
+        max_tokens=max_tokens,
+        tool_choice=tool_choice,
+        log_context=log_context,
+    )
+
+
+def complete_openai_compatible(
+    runtime: OpenAICompatibleRuntime,
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    max_tokens: int,
+    tool_choice: str | dict | None,
+    log_context: str,
+) -> AICompletion:
+    if not _openai_compatible_runtime_enabled(runtime.name):
+        raise AssistantUnavailableError(
+            f"Assistant runtime {runtime.name} is not configured"
+        )
 
     payload: dict[str, Any] = {
-        "model": model,
+        "model": runtime.model,
         "messages": _to_openai_messages(system, messages),
         "max_tokens": max_tokens,
     }
@@ -348,28 +518,38 @@ def complete_hermes_agent(
             payload["tool_choice"] = tool_choice
 
     request = urlrequest.Request(
-        _hermes_agent_url("chat/completions"),
+        _openai_compatible_url(runtime.base_url, "chat/completions"),
         data=json.dumps(payload).encode("utf-8"),
-        headers=_hermes_agent_headers(),
+        headers=_openai_compatible_headers(runtime.api_key),
         method="POST",
     )
 
     try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
+        with _OPENAI_COMPATIBLE_OPENER.open(
+            request,
+            timeout=runtime.timeout,
+        ) as response:
             response_data = json.loads(response.read().decode("utf-8"))
     except urlerror.HTTPError as error:
         logger.error(
-            "Hermes Agent API error: context=%s status=%s",
+            "OpenAI-compatible API error: runtime=%s context=%s status=%s",
+            runtime.name,
             log_context,
             error.code,
         )
         raise AssistantUnavailableError("Assistant API request failed") from error
     except (urlerror.URLError, TimeoutError) as error:
-        logger.error("Hermes Agent API connection error: context=%s", log_context)
+        logger.error(
+            "OpenAI-compatible API connection error: runtime=%s context=%s",
+            runtime.name,
+            log_context,
+        )
         raise AssistantUnavailableError("Assistant API connection failed") from error
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         logger.error(
-            "Hermes Agent API returned an invalid response: context=%s",
+            "OpenAI-compatible API returned an invalid response: "
+            "runtime=%s context=%s",
+            runtime.name,
             log_context,
         )
         raise AssistantUnavailableError(
@@ -377,10 +557,15 @@ def complete_hermes_agent(
         ) from error
 
     try:
-        return _from_openai_response(response_data)
+        return _from_openai_response(
+            response_data,
+            fallback_model=runtime.model,
+        )
     except (KeyError, TypeError, ValueError) as error:
         logger.error(
-            "Hermes Agent API returned an invalid response: context=%s",
+            "OpenAI-compatible API returned an invalid response: "
+            "runtime=%s context=%s",
+            runtime.name,
             log_context,
         )
         raise AssistantUnavailableError(
@@ -399,11 +584,44 @@ def complete_hermes_agent_stream(
     tool_choice: str | dict | None,
     log_context: str,
 ) -> Generator[AITextDelta, None, AICompletion]:
-    if not hermes_agent_enabled():
-        raise AssistantUnavailableError("Hermes Agent is not configured")
+    configured = _openai_compatible_runtime("hermes_agent")
+    runtime = OpenAICompatibleRuntime(
+        name=configured.name,
+        base_url=configured.base_url,
+        api_key=configured.api_key,
+        model=model,
+        timeout=timeout,
+        health_timeout=configured.health_timeout,
+    )
+    completion = yield from complete_openai_compatible_stream(
+        runtime,
+        system=system,
+        messages=messages,
+        tools=tools,
+        max_tokens=max_tokens,
+        tool_choice=tool_choice,
+        log_context=log_context,
+    )
+    return completion
+
+
+def complete_openai_compatible_stream(
+    runtime: OpenAICompatibleRuntime,
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    max_tokens: int,
+    tool_choice: str | dict | None,
+    log_context: str,
+) -> Generator[AITextDelta, None, AICompletion]:
+    if not _openai_compatible_runtime_enabled(runtime.name):
+        raise AssistantUnavailableError(
+            f"Assistant runtime {runtime.name} is not configured"
+        )
 
     payload: dict[str, Any] = {
-        "model": model,
+        "model": runtime.model,
         "messages": _to_openai_messages(system, messages),
         "max_tokens": max_tokens,
         "stream": True,
@@ -415,19 +633,22 @@ def complete_hermes_agent_stream(
             payload["tool_choice"] = tool_choice
 
     request = urlrequest.Request(
-        _hermes_agent_url("chat/completions"),
+        _openai_compatible_url(runtime.base_url, "chat/completions"),
         data=json.dumps(payload).encode("utf-8"),
-        headers=_hermes_agent_headers(),
+        headers=_openai_compatible_headers(runtime.api_key),
         method="POST",
     )
 
     content_buffer = ""
     emitted_text = ""
     finish_reason: str | None = None
-    response_model = model
+    response_model = runtime.model
     tool_calls: dict[int, dict] = {}
     try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
+        with _OPENAI_COMPATIBLE_OPENER.open(
+            request,
+            timeout=runtime.timeout,
+        ) as response:
             while True:
                 raw_line = response.readline()
                 if not raw_line:
@@ -446,7 +667,7 @@ def complete_hermes_agent_stream(
                 content_delta = delta.get("content") or ""
                 if content_delta:
                     content_buffer += content_delta
-                    safe_text, content_buffer = _pop_safe_hermes_text(content_buffer)
+                    safe_text, content_buffer = _pop_safe_openai_text(content_buffer)
                     emitted_text += safe_text
                     if safe_text:
                         yield AITextDelta(text=safe_text)
@@ -471,24 +692,32 @@ def complete_hermes_agent_stream(
                         ]
     except urlerror.HTTPError as error:
         logger.error(
-            "Hermes Agent stream API error: context=%s status=%s",
+            "OpenAI-compatible stream API error: runtime=%s context=%s "
+            "status=%s",
+            runtime.name,
             log_context,
             error.code,
         )
         raise AssistantUnavailableError("Assistant API request failed") from error
     except (urlerror.URLError, TimeoutError) as error:
-        logger.error("Hermes Agent stream API connection error: context=%s", log_context)
+        logger.error(
+            "OpenAI-compatible stream connection error: runtime=%s context=%s",
+            runtime.name,
+            log_context,
+        )
         raise AssistantUnavailableError("Assistant API connection failed") from error
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         logger.error(
-            "Hermes Agent stream API returned an invalid response: context=%s",
+            "OpenAI-compatible stream returned an invalid response: "
+            "runtime=%s context=%s",
+            runtime.name,
             log_context,
         )
         raise AssistantUnavailableError(
             "Assistant API returned an invalid response"
         ) from error
 
-    final_safe_text, held_text = _pop_safe_hermes_text(content_buffer, final=True)
+    final_safe_text, held_text = _pop_safe_openai_text(content_buffer, final=True)
     emitted_text += final_safe_text
     if final_safe_text:
         yield AITextDelta(text=final_safe_text)
@@ -513,10 +742,15 @@ def complete_hermes_agent_stream(
         "usage": {},
     }
     try:
-        return _from_openai_response(response_data)
+        return _from_openai_response(
+            response_data,
+            fallback_model=runtime.model,
+        )
     except (KeyError, TypeError, ValueError) as error:
         logger.error(
-            "Hermes Agent stream API returned an invalid response: context=%s",
+            "OpenAI-compatible stream returned an invalid response: "
+            "runtime=%s context=%s",
+            runtime.name,
             log_context,
         )
         raise AssistantUnavailableError(
@@ -524,21 +758,29 @@ def complete_hermes_agent_stream(
         ) from error
 
 
-def _hermes_agent_url(path: str) -> str:
-    base_url = settings.hermes_agent_base_url.rstrip("/")
+def _openai_compatible_url(base_url: str, path: str) -> str:
+    normalized_base_url = base_url.rstrip("/")
     clean_path = path.strip("/")
     if clean_path.startswith("health"):
-        health_base_url = base_url.removesuffix("/v1")
+        health_base_url = normalized_base_url.removesuffix("/v1")
         return f"{health_base_url}/{clean_path}"
-    if base_url.endswith("/v1"):
-        return f"{base_url}/{clean_path}"
-    return f"{base_url}/v1/{clean_path}"
+    if normalized_base_url.endswith("/v1"):
+        return f"{normalized_base_url}/{clean_path}"
+    return f"{normalized_base_url}/v1/{clean_path}"
+
+
+def _hermes_agent_url(path: str) -> str:
+    return _openai_compatible_url(settings.hermes_agent_base_url, path)
 
 
 def _hermes_agent_headers() -> dict[str, str]:
+    return _openai_compatible_headers(settings.hermes_agent_api_key)
+
+
+def _openai_compatible_headers(api_key: str | None) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    if settings.hermes_agent_api_key:
-        headers["Authorization"] = f"Bearer {settings.hermes_agent_api_key}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     return headers
 
 
@@ -655,7 +897,11 @@ def _to_openai_tools(tools: list[dict]) -> list[dict]:
     ]
 
 
-def _from_openai_response(response_data: dict) -> AICompletion:
+def _from_openai_response(
+    response_data: dict,
+    *,
+    fallback_model: str | None = None,
+) -> AICompletion:
     choice = response_data["choices"][0]
     message = choice["message"]
     raw_content = message.get("content") or ""
@@ -687,7 +933,11 @@ def _from_openai_response(response_data: dict) -> AICompletion:
     )
     usage = response_data.get("usage") or {}
     return AICompletion(
-        model=response_data.get("model") or settings.hermes_agent_model,
+        model=(
+            response_data.get("model")
+            or fallback_model
+            or settings.hermes_agent_model
+        ),
         stop_reason=stop_reason,
         content=content,
         usage=AIUsage(
@@ -823,7 +1073,22 @@ def _completion_text_for_delta(completion: AICompletion) -> str:
     ).strip()
 
 
-def _pop_safe_hermes_text(buffer: str, *, final: bool = False) -> tuple[str, str]:
+def _log_openai_compatible_completion(
+    runtime: str,
+    completion: AICompletion,
+) -> None:
+    logger.info(
+        "Assistant completion: runtime=%s model=%s stop_reason=%s "
+        "input_tokens=%s output_tokens=%s",
+        runtime,
+        completion.model,
+        completion.stop_reason,
+        completion.usage.input_tokens,
+        completion.usage.output_tokens,
+    )
+
+
+def _pop_safe_openai_text(buffer: str, *, final: bool = False) -> tuple[str, str]:
     marker = "<tool_call>"
     partial_marker = "<tool_call"
     marker_index = buffer.find(partial_marker)

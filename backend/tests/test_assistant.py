@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 from app.assistant import guards as assistant_guards
 from app.assistant import tools as assistant_tools
 from app.assistant.gateway import (
+    AIGateway,
     AITextDelta,
     AssistantUnavailableError,
     _from_openai_response,
     _hermes_agent_url,
+    _openai_compatible_url,
 )
 from app.assistant.models import (
     AssistantConversation,
@@ -1237,6 +1239,161 @@ def test_hermes_agent_url_normalizes_v1(monkeypatch):
         "http://127.0.0.1:8642/v1/chat/completions"
     )
     assert _hermes_agent_url("health") == "http://127.0.0.1:8642/health"
+
+
+def test_self_hosted_gateway_uses_configured_openai_endpoint(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(
+                {
+                    "model": "municipal-model-v1",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "Hola"},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+                }
+            ).encode("utf-8")
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["url"] = request.full_url
+            captured["authorization"] = request.get_header("Authorization")
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "environment", "test")
+    monkeypatch.setattr(settings, "assistant_runtime", "self_hosted")
+    monkeypatch.setattr(
+        settings,
+        "self_hosted_ai_base_url",
+        "http://127.0.0.1:8655/v1",
+    )
+    monkeypatch.setattr(settings, "self_hosted_ai_api_key", "private-key")
+    monkeypatch.setattr(settings, "self_hosted_ai_model", "municipal-model-v1")
+    monkeypatch.setattr(settings, "self_hosted_ai_timeout_seconds", 17.0)
+    monkeypatch.setattr(
+        "app.assistant.gateway._OPENAI_COMPATIBLE_OPENER",
+        FakeOpener(),
+    )
+
+    completion = AIGateway().complete(
+        system="Solo datos autorizados.",
+        messages=[{"role": "user", "content": "Hola"}],
+        tools=[
+            {
+                "name": "list_requirements",
+                "description": "Lista requisitos",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+    )
+
+    assert captured == {
+        "url": "http://127.0.0.1:8655/v1/chat/completions",
+        "authorization": "Bearer private-key",
+        "payload": {
+            "model": "municipal-model-v1",
+            "messages": [
+                {"role": "system", "content": "Solo datos autorizados."},
+                {"role": "user", "content": "Hola"},
+            ],
+            "max_tokens": settings.assistant_max_tokens,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_requirements",
+                        "description": "Lista requisitos",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+        },
+        "timeout": 17.0,
+    }
+    assert completion.model == "municipal-model-v1"
+    assert completion.content[0].text == "Hola"
+
+
+def test_self_hosted_gateway_streams_from_same_runtime(monkeypatch):
+    class FakeStreamingResponse:
+        status = 200
+
+        def __init__(self):
+            self.lines = iter(
+                [
+                    b'data: {"model":"own-model","choices":[{"delta":{"content":"Hola"},"finish_reason":null}]}\n',
+                    b'data: {"choices":[{"delta":{"content":" mundo"},"finish_reason":"stop"}]}\n',
+                    b"data: [DONE]\n",
+                ]
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def readline(self):
+            return next(self.lines, b"")
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            assert json.loads(request.data.decode("utf-8"))["stream"] is True
+            assert timeout == 9.0
+            return FakeStreamingResponse()
+
+    monkeypatch.setattr(settings, "environment", "test")
+    monkeypatch.setattr(settings, "assistant_runtime", "self_hosted")
+    monkeypatch.setattr(settings, "self_hosted_ai_base_url", "http://runtime/v1")
+    monkeypatch.setattr(settings, "self_hosted_ai_api_key", None)
+    monkeypatch.setattr(settings, "self_hosted_ai_model", "own-model")
+    monkeypatch.setattr(settings, "self_hosted_ai_timeout_seconds", 9.0)
+    monkeypatch.setattr(
+        "app.assistant.gateway._OPENAI_COMPATIBLE_OPENER",
+        FakeOpener(),
+    )
+
+    stream = AIGateway().complete_stream(
+        system="Sistema",
+        messages=[{"role": "user", "content": "Hola"}],
+        tools=[],
+    )
+    deltas = []
+    while True:
+        try:
+            deltas.append(next(stream).text)
+        except StopIteration as stopped:
+            completion = stopped.value
+            break
+
+    assert deltas == ["Hola", " mundo"]
+    assert completion.model == "own-model"
+    assert completion.content[0].text == "Hola mundo"
+
+
+def test_openai_compatible_url_normalizes_version_and_health():
+    assert _openai_compatible_url("https://runtime.internal/v1", "models") == (
+        "https://runtime.internal/v1/models"
+    )
+    assert _openai_compatible_url("https://runtime.internal/v1", "health") == (
+        "https://runtime.internal/health"
+    )
 
 
 def parse_sse(body: str) -> list[dict]:

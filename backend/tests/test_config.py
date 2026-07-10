@@ -15,6 +15,8 @@ def isolate_security_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "SECRET_KEY",
         "BOOTSTRAP_ADMIN_TOKEN",
         "CORS_ALLOWED_ORIGINS",
+        "SELF_HOSTED_AI_BASE_URL",
+        "SELF_HOSTED_AI_API_KEY",
     ):
         monkeypatch.delenv(variable, raising=False)
 
@@ -83,6 +85,44 @@ def test_production_accepts_strong_secret_key() -> None:
     )
 
     assert settings.environment == "production"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "api_key"),
+    [
+        ("http://inference.internal/v1", "x" * 40),
+        ("https://inference.internal/v1", "too-short"),
+        (None, "x" * 40),
+    ],
+)
+def test_production_rejects_unsafe_self_hosted_runtime(
+    base_url: str | None,
+    api_key: str,
+) -> None:
+    with pytest.raises(ValidationError, match="production self-hosted|API_KEY"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            secret_key="a-production-secret-with-at-least-32-characters",
+            cors_allowed_origins="https://municipal.example",
+            assistant_runtime="self_hosted",
+            self_hosted_ai_base_url=base_url,
+            self_hosted_ai_api_key=api_key,
+        )
+
+
+def test_production_accepts_secure_self_hosted_runtime() -> None:
+    configured = Settings(
+        _env_file=None,
+        environment="production",
+        secret_key="a-production-secret-with-at-least-32-characters",
+        cors_allowed_origins="https://municipal.example",
+        assistant_runtime="self_hosted",
+        self_hosted_ai_base_url="https://inference.internal/v1",
+        self_hosted_ai_api_key="a-private-runtime-key-with-at-least-32-chars",
+    )
+
+    assert configured.assistant_runtime == "self_hosted"
 
 
 def test_production_settings_initialize_during_module_import() -> None:

@@ -23,7 +23,7 @@ AI is intended to be central to the product direction. The system should assist,
 
 External AI calls must go through the Privacy/AI Gateway before any LLM API call; the voice pipeline (STT/TTS) egresses only through `app/assistant/speech.py` under the same discipline. Original documents and sensitive municipal data must not be sent directly to external AI services. External AI APIs may be used only after filtering, minimization and pseudonymization where needed.
 
-The assistant can run either against Anthropic directly or against a private/local Hermes Agent API Server. Hermes Agent is treated as an external runtime/app, not as the institutional memory store and not as the source of authorization decisions.
+The assistant can run against Anthropic, a private/local Hermes Agent API Server, or a self-hosted OpenAI-compatible inference server. Runtimes are never the institutional memory store or the source of authorization decisions.
 
 Future priorities will be refined through Requirements Intake and through work with municipal stakeholders and developers. The exact first commercial module and user persona are intentionally still open.
 
@@ -106,7 +106,7 @@ cp .env.example .env
 
 Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings.
 
-To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately, set `ASSISTANT_RUNTIME=hermes_agent`, `HERMES_AGENT_BASE_URL`, `HERMES_AGENT_API_KEY` and `HERMES_AGENT_MODEL`. In production, Hermes Agent stays disabled for real data unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. Without a complete runtime configuration, assistant endpoints return 503 and the UI shows the assistant as not configured.
+To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use Hermes Agent, run its API Server privately and configure the `HERMES_AGENT_*` variables; in production, real data remains blocked unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. For an owned inference service, use `ASSISTANT_RUNTIME=self_hosted` with `SELF_HOSTED_AI_BASE_URL`, `SELF_HOSTED_AI_MODEL` and, in production, an HTTPS endpoint plus `SELF_HOSTED_AI_API_KEY` of at least 32 characters. The gateway never redirects requests or falls back to a different provider. Without a complete selected runtime, assistant endpoints return 503.
 
 Anacleto v2 is model-first: the backend no longer runs a semantic planner/router or deterministic answer templates. Each turn calls the configured runtime through `gateway.py`, injects only the user-visible context and filtered tool list, and executes tools with backend RBAC/tenancy checks. Web clients should use `POST /assistant/conversations/{id}/messages/stream` for SSE frames (`message_start`, `text_delta`, `tool_activity`, `done`); the classic `POST /assistant/conversations/{id}/messages` remains available for synchronous clients and Telegram. `ASSISTANT_HISTORY_MAX_MESSAGES` controls the recent message window sent to the model.
 
