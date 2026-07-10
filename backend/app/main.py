@@ -14,6 +14,8 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
 from app.geo.routes import router as geo_router
+from app.invitations.routes import admin_router as invitation_admin_router
+from app.invitations.routes import public_router as invitation_public_router
 from app.municipalities.routes import router as municipalities_router
 from app.ordinances.routes import router as ordinances_router
 from app.ordinances.seed import ensure_initial_official_legal_sources
@@ -60,10 +62,12 @@ app.add_middleware(
 
 for app_router in (
     auth_router,
+    invitation_public_router,
     health_router,
     municipalities_router,
     ordinances_router,
     organizations_router,
+    invitation_admin_router,
     admin_router,
     projects_router,
     documents_router,

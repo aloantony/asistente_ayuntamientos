@@ -152,6 +152,14 @@ Autoalojar inferencia no traslada autoridad al modelo. El backend conserva RBAC 
 
 La decisión de operar modelos propios se tomará por volumen sostenido, residencia de datos, latencia y coste total, incluyendo GPU, alta disponibilidad, parches, evaluación, observabilidad y guardias operativas. No habrá fallback silencioso desde el runtime privado a un proveedor externo con datos reales: cualquier fallback deberá ser explícito, estar configurado por entorno y respetar la misma política de egreso.
 
+## ADR-023: El alta tenant se realiza mediante invitaciones de un solo uso (2026-07-10)
+
+Un administrador con `users.manage` dentro de una organización puede invitar un email a esa organización, pero no crear ni modificar por ello una identidad global. El endpoint administrativo responde igual exista o no la identidad, y comprueba el permiso antes de consultar la organización para no convertirlo en un oráculo entre tenants. Los superusuarios conservan alcance de plataforma.
+
+Cada invitación usa 32 bytes aleatorios, caduca por configuración y guarda únicamente el digest SHA-256. El enlace entrega el secreto en el fragmento de URL (`#token`), que el navegador no envía al servidor frontend ni como referencia; la pantalla lo retira del historial antes de consultar el backend. Hasta incorporar un proveedor de correo transaccional, el administrador recibe el enlace una sola vez para remitirlo por un canal acordado.
+
+La aceptación bloquea la invitación en PostgreSQL, crea la identidad solo si no existe, inserta la membresía y marca el token como consumido en una transacción. Dos consumidores del mismo token no pueden usarlo dos veces; dos invitaciones concurrentes al mismo email convergen en la identidad global única. Una identidad preexistente conserva contraseña, nombre, estado y condición de superusuario: la invitación solo añade la membresía autorizada.
+
 ## ADR-024: Archivo firmado para el transporte legacy de BOP Burgos (2026-07-10)
 
 El host oficial BOPBUR no ofrece TLS compatible con clientes modernos. No se rebaja la política HTTPS del importador general ni se permite HTTP configurable por tenant. La única excepción es el dominio fijo `bopbur.diputaciondeburgos.es`, y solo cuando el backend tiene configurado el proxy de archivo controlado.

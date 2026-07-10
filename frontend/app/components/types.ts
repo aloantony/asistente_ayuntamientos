@@ -174,6 +174,19 @@ export type Organization = OrganizationSummary & {
   updated_at: string;
 };
 
+export type OrganizationInvitationCreated = {
+  id: number;
+  organization_id: number;
+  email: string;
+  token: string;
+  expires_at: string;
+  accepted_at: string | null;
+  revoked_at: string | null;
+  invited_by_user_id: number | null;
+  accepted_by_user_id: number | null;
+  created_at: string;
+};
+
 export type User = {
   id: number;
   email: string;
