@@ -166,6 +166,9 @@ Run the relevant checks before handing off code changes:
 
 ```bash
 python3 -m compileall -q backend/app backend/alembic
+npm --prefix frontend ci --no-audit --no-fund
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
 npm --prefix frontend run build
 docker compose build backend
 docker compose build frontend
@@ -185,6 +188,37 @@ above installs dev-only dependencies in a disposable container. Unless
 `TEST_DATABASE_URL` is explicitly set, the test harness creates a unique
 `app_test_<uuid>` database and drops it after the run. Custom test databases
 must keep an `app_test` prefix.
+
+### GitHub CI and equivalent local checks
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`.
+It checks the complete backend suite against PostgreSQL/pgvector and Redis,
+applies the Alembic chain and checks model drift, then type-checks, lints and
+builds the frontend from the lockfile. Third-party actions and service images
+are pinned to immutable commits or image digests.
+
+The equivalent local checks are:
+
+```bash
+docker compose up -d postgres redis
+docker compose build backend
+docker compose run --rm -T backend \
+  sh -c "pip install -q -r requirements-dev.txt && \
+    python -m compileall -q app alembic && \
+    alembic upgrade head && \
+    alembic check && \
+    python -m pytest tests -q"
+
+npm --prefix frontend ci --no-audit --no-fund
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend run build
+git diff --check
+```
+
+To make CI a merge requirement, protect `main` with a GitHub ruleset that
+requires pull requests and the stable `CI / CI gate` status check. Repository
+workflows cannot create or enforce that server-side ruleset themselves.
 
 ## 10. Operational cautions
 
