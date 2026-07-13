@@ -98,6 +98,7 @@ class AzureSpeechSynthesizer:
             text,
             settings.speech_synthesis_voice,
             settings.speech_synthesis_language_code,
+            settings.speech_synthesis_rate,
         )
         request = urlrequest.Request(
             endpoint,
@@ -105,7 +106,7 @@ class AzureSpeechSynthesizer:
             headers={
                 "Ocp-Apim-Subscription-Key": settings.azure_speech_key,
                 "Content-Type": "application/ssml+xml",
-                "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+                "X-Microsoft-OutputFormat": settings.speech_synthesis_output_format,
                 "User-Agent": "asistente-ayuntamientos",
             },
             method="POST",
@@ -129,11 +130,15 @@ class AzureSpeechSynthesizer:
         return audio
 
 
-def build_azure_ssml(text: str, voice: str, language: str) -> str:
+def build_azure_ssml(text: str, voice: str, language: str, rate: str = "") -> str:
     escaped_text = escape(text)
+    inner = escaped_text
+    if rate:
+        escaped_rate = escape(rate, {"'": "&apos;", '"': "&quot;"})
+        inner = f"<prosody rate='{escaped_rate}'>{escaped_text}</prosody>"
     return (
         f"<speak version='1.0' xml:lang='{language}'>"
-        f"<voice name='{voice}'>{escaped_text}</voice>"
+        f"<voice name='{voice}'>{inner}</voice>"
         "</speak>"
     )
 

@@ -2703,8 +2703,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   animation: mic-pulse 1.4s ease-in-out infinite;
 }
 
-.voice-mode-toggle,
-.voice-handsfree-toggle {
+.voice-mode-toggle {
   min-height: 34px;
   max-width: 170px;
   border: 1px solid var(--border);
@@ -2717,8 +2716,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   white-space: nowrap;
 }
 
-.voice-mode-toggle.active,
-.voice-handsfree-toggle.active {
+.voice-mode-toggle.active {
   border-color: var(--accent);
   color: var(--accent-contrast);
   background: var(--accent);

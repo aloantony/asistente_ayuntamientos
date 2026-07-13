@@ -40,6 +40,11 @@ from app.assistant.schemas import (
     AssistantConversationUpdate,
     AssistantMemoryEntryRead,
     AssistantMemoryEntryUpdate,
+    AssistantRealtimeSessionRead,
+    AssistantRealtimeToolCallCreate,
+    AssistantRealtimeToolCallRead,
+    AssistantRealtimeTurnCreate,
+    AssistantRealtimeTurnRead,
     AssistantSpeechCreate,
     AssistantStatusRead,
     AssistantTransversalFeatureAdoptionRead,
@@ -51,7 +56,15 @@ from app.assistant.schemas import (
     TransversalFeatureAdoptionStatus,
     TransversalFeatureStatus,
 )
+from app.assistant.realtime import (
+    AssistantRealtimeUnavailableError,
+    create_realtime_client_secret,
+    execute_realtime_tool_call,
+    persist_realtime_turn,
+    realtime_voice_enabled,
+)
 from app.assistant.turn import TurnEvent, run_agent_turn, run_agent_turn_events
+from app.assistant.voice import run_voice_turn_events
 from app.assistant.speech import (
     SpeechSynthesisError,
     SpeechTranscriptionError,
@@ -102,6 +115,11 @@ def get_assistant_status(
         speech_transcription_enabled=settings.speech_transcription_runtime
         != "disabled",
         speech_synthesis_enabled=settings.speech_synthesis_runtime != "disabled",
+        realtime_voice_enabled=realtime_voice_enabled(),
+        realtime_voice_provider="openai" if realtime_voice_enabled() else None,
+        realtime_voice_model=(
+            settings.assistant_realtime_model if realtime_voice_enabled() else None
+        ),
         tools=[tool.metadata for tool in get_available_tool_specs(db, current_user)],
     )
 
@@ -683,6 +701,161 @@ def send_message_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/conversations/{conversation_id}/voice-turns/stream")
+async def send_voice_turn_stream(
+    conversation_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
+    file: Annotated[UploadFile, File()],
+) -> StreamingResponse:
+    require_assistant_use(db, current_user)
+    conversation = get_own_conversation(db, current_user, conversation_id)
+
+    if conversation.status != "active":
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="Conversation is archived",
+        )
+    if not agent_gateway.enabled:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Assistant is not configured",
+        )
+
+    audio = await file.read(settings.speech_transcription_max_bytes + 1)
+    if len(audio) > settings.speech_transcription_max_bytes:
+        raise HTTPException(
+            status_code=http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Audio file is too large",
+        )
+
+    def event_stream():
+        try:
+            for event in run_voice_turn_events(
+                db,
+                current_user,
+                conversation,
+                audio,
+                agent_gateway,
+            ):
+                yield format_sse_event(event)
+        except AssistantUnavailableError:
+            yield format_sse_event(
+                TurnEvent("error", {"detail": "Assistant request failed"})
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/realtime/session",
+    response_model=AssistantRealtimeSessionRead,
+)
+def create_realtime_voice_session(
+    conversation_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AssistantRealtimeSessionRead:
+    require_assistant_use(db, current_user)
+    conversation = get_own_conversation(db, current_user, conversation_id)
+
+    if conversation.status != "active":
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="Conversation is archived",
+        )
+
+    try:
+        client_secret = create_realtime_client_secret(db, current_user, conversation)
+    except AssistantRealtimeUnavailableError:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Realtime voice is not configured",
+        ) from None
+
+    return AssistantRealtimeSessionRead(
+        client_secret=client_secret["value"],
+        client_secret_expires_at=client_secret.get("expires_at"),
+        model=settings.assistant_realtime_model,
+        voice=settings.assistant_realtime_voice,
+        realtime_url=settings.assistant_realtime_url,
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/realtime/tool-calls",
+    response_model=AssistantRealtimeToolCallRead,
+)
+def execute_realtime_voice_tool_call(
+    conversation_id: int,
+    payload: AssistantRealtimeToolCallCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_assistant_use(db, current_user)
+    conversation = get_own_conversation(db, current_user, conversation_id)
+
+    if conversation.status != "active":
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="Conversation is archived",
+        )
+
+    action, output, user_message = execute_realtime_tool_call(
+        db,
+        current_user,
+        conversation,
+        payload,
+    )
+    return {
+        "call_id": payload.call_id,
+        "ok": action["ok"],
+        "output": output,
+        "action": action,
+        "user_message": user_message,
+    }
+
+
+@router.post(
+    "/conversations/{conversation_id}/realtime/turns",
+    response_model=AssistantRealtimeTurnRead,
+)
+def persist_realtime_voice_turn(
+    conversation_id: int,
+    payload: AssistantRealtimeTurnCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_assistant_use(db, current_user)
+    conversation = get_own_conversation(db, current_user, conversation_id)
+
+    if conversation.status != "active":
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="Conversation is archived",
+        )
+
+    user_message, assistant_message = persist_realtime_turn(
+        db,
+        current_user,
+        conversation,
+        payload,
+    )
+    return {
+        "conversation": conversation,
+        "user_message": user_message,
+        "assistant_message": assistant_message,
+    }
 
 
 def format_sse_event(event: TurnEvent) -> str:

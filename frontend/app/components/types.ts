@@ -954,6 +954,9 @@ export type AssistantStatus = {
   runtime_healthy: boolean | null;
   speech_transcription_enabled: boolean;
   speech_synthesis_enabled: boolean;
+  realtime_voice_enabled: boolean;
+  realtime_voice_provider: "openai" | null;
+  realtime_voice_model: string | null;
   tools: AssistantTool[];
 };
 
@@ -1057,6 +1060,66 @@ export type AssistantStreamToolActivity = {
 export type AssistantStreamDone = {
   message: AssistantMessage;
   conversation: AssistantConversation;
+};
+
+export type AssistantVoiceState =
+  | "idle"
+  | "connecting"
+  | "listening"
+  | "user_speaking"
+  | "transcribing"
+  | "thinking"
+  | "tool_running"
+  | "responding"
+  | "done"
+  | "interrupted"
+  | "error";
+
+export type AssistantStreamVoiceState = {
+  state: AssistantVoiceState;
+};
+
+export type AssistantStreamTranscriptFinal = {
+  text: string;
+};
+
+export type AssistantRealtimeSession = {
+  client_secret: string;
+  client_secret_expires_at: number | null;
+  provider: "openai";
+  model: string;
+  voice: string;
+  realtime_url: string;
+};
+
+export type AssistantRealtimeToolCallRequest = {
+  call_id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  user_transcript?: string | null;
+  user_message_id?: number | null;
+};
+
+export type AssistantRealtimeToolCallResult = {
+  call_id: string;
+  ok: boolean;
+  output: string;
+  action: AssistantAction;
+  user_message: AssistantMessage;
+};
+
+export type AssistantRealtimeTurnRequest = {
+  user_text?: string | null;
+  assistant_text?: string | null;
+  actions: AssistantAction[];
+  user_message_id?: number | null;
+  interrupted?: boolean;
+};
+
+export type AssistantRealtimeTurnResult = {
+  conversation: AssistantConversation;
+  user_message: AssistantMessage | null;
+  assistant_message: AssistantMessage | null;
 };
 
 export type AssistantConversationFolder = {

@@ -63,6 +63,9 @@ class AssistantStatusRead(BaseModel):
     runtime_healthy: bool | None = None
     speech_transcription_enabled: bool = False
     speech_synthesis_enabled: bool = False
+    realtime_voice_enabled: bool = False
+    realtime_voice_provider: Literal["openai"] | None = None
+    realtime_voice_model: str | None = None
     tools: list["AssistantToolRead"] = []
 
 
@@ -134,6 +137,49 @@ class AssistantConversationRead(BaseModel):
 
 class AssistantConversationDetail(AssistantConversationRead):
     messages: list[AssistantMessageRead]
+
+
+class AssistantRealtimeSessionRead(BaseModel):
+    client_secret: str
+    client_secret_expires_at: int | None = None
+    provider: Literal["openai"] = "openai"
+    model: str
+    voice: str
+    realtime_url: str
+
+
+class AssistantRealtimeToolCallCreate(BaseModel):
+    call_id: str = Field(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
+    arguments: dict = {}
+    user_transcript: str | None = Field(default=None, max_length=20000)
+    user_message_id: int | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantRealtimeToolCallRead(BaseModel):
+    call_id: str
+    ok: bool
+    output: str
+    action: AssistantActionRead
+    user_message: AssistantMessageRead
+
+
+class AssistantRealtimeTurnCreate(BaseModel):
+    user_text: str | None = Field(default=None, max_length=20000)
+    assistant_text: str | None = Field(default=None, max_length=20000)
+    actions: list[AssistantActionRead] = []
+    user_message_id: int | None = None
+    interrupted: bool = False
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantRealtimeTurnRead(BaseModel):
+    conversation: AssistantConversationRead
+    user_message: AssistantMessageRead | None = None
+    assistant_message: AssistantMessageRead | None = None
 
 
 class AssistantConversationCreate(BaseModel):

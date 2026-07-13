@@ -35,6 +35,21 @@ class Settings(BaseSettings):
     hermes_web_api_key: str | None = None
     hermes_web_model: str = "hermes-agent"
     hermes_web_timeout_seconds: float = 60.0
+    openai_api_key: str | None = None
+    assistant_realtime_enabled: bool = True
+    assistant_realtime_model: str = "gpt-realtime-2.1"
+    assistant_realtime_voice: str = "marin"
+    assistant_realtime_url: str = "https://api.openai.com/v1/realtime/calls"
+    assistant_realtime_client_secret_url: str = (
+        "https://api.openai.com/v1/realtime/client_secrets"
+    )
+    assistant_realtime_timeout_seconds: float = 20.0
+    assistant_realtime_language_code: str = "es"
+    assistant_realtime_transcription_model: str = "gpt-realtime-whisper"
+    assistant_realtime_transcription_delay: str = "low"
+    assistant_realtime_vad_threshold: float = 0.5
+    assistant_realtime_vad_prefix_padding_ms: int = 300
+    assistant_realtime_vad_silence_duration_ms: int = 500
     ordinance_import_max_fetch_bytes: int = 15 * 1024 * 1024
     ordinance_import_search_limit: int = 5
     ordinance_import_max_chunks: int = 200
@@ -56,8 +71,14 @@ class Settings(BaseSettings):
     nvidia_riva_server: str = "grpc.nvcf.nvidia.com:443"
     nvidia_whisper_function_id: str | None = None
     speech_synthesis_runtime: str = "disabled"
-    speech_synthesis_voice: str = "es-ES-ElviraNeural"
+    speech_synthesis_voice: str = "es-ES-DarioNeural"
     speech_synthesis_language_code: str = "es-ES"
+    # Azure output format. 48 kHz / 96 kbps sounds noticeably fuller than the
+    # older 24 kHz / 48 kbps default; tune via SPEECH_SYNTHESIS_OUTPUT_FORMAT.
+    speech_synthesis_output_format: str = "audio-48khz-96kbitrate-mono-mp3"
+    # SSML prosody rate, e.g. "+0%" (normal), "+12%" (a bit faster). Empty
+    # string disables the prosody wrapper. Tune via SPEECH_SYNTHESIS_RATE.
+    speech_synthesis_rate: str = "+12%"
     speech_synthesis_max_chars: int = 3000
     speech_synthesis_timeout_seconds: float = 30.0
     azure_speech_key: str | None = None

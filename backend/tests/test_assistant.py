@@ -79,6 +79,37 @@ class FakeGateway:
         return response
 
 
+def parse_sse_events(payload: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for frame in payload.strip().split("\n\n"):
+        if not frame.strip():
+            continue
+        event_name = "message"
+        data_lines: list[str] = []
+        for line in frame.splitlines():
+            if line.startswith("event:"):
+                event_name = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").strip())
+        data = json.loads("\n".join(data_lines)) if data_lines else {}
+        events.append((event_name, data))
+    return events
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
 @pytest.fixture()
 def use_gateway(client):
     def _use(gateway: FakeGateway) -> FakeGateway:
@@ -154,6 +185,27 @@ def test_status_reports_speech_flags(
     body = response.json()
     assert body["speech_transcription_enabled"] is True
     assert body["speech_synthesis_enabled"] is True
+
+
+def test_status_reports_realtime_voice_flags(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "assistant_realtime_enabled", True)
+    monkeypatch.setattr(settings, "assistant_realtime_model", "gpt-realtime-2.1")
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["realtime_voice_enabled"] is True
+    assert body["realtime_voice_provider"] == "openai"
+    assert body["realtime_voice_model"] == "gpt-realtime-2.1"
 
 
 def test_transcribe_audio_returns_text(client, assistant_user, monkeypatch):
@@ -235,6 +287,243 @@ def test_transcribe_audio_unavailable_when_disabled(
     assert response.json()["detail"] == "Audio transcription is not available"
 
 
+def test_voice_turn_stream_transcribes_runs_agent_and_persists_reply(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Claro, te ayudo con la consulta.")],
+                    deltas=["Claro, ", "te ayudo con la consulta."],
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "app.assistant.voice.transcribe_audio_bytes",
+        lambda audio, *, language_code=None: "Hola por voz",
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/voice-turns/stream",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    event_names = [name for name, _ in events]
+    assert event_names[:3] == [
+        "voice_state",
+        "transcript_final",
+        "voice_state",
+    ]
+    assert events[0][1] == {"state": "transcribing"}
+    assert events[1][1] == {"text": "Hola por voz"}
+    assert events[2][1] == {"state": "thinking"}
+    assert ("text_delta", {"text": "Claro, "}) in events
+    assert ("text_delta", {"text": "te ayudo con la consulta."}) in events
+    done = next(data for name, data in events if name == "done")
+    assert done["message"]["content"] == "Claro, te ayudo con la consulta."
+    assert done["message"]["role"] == "assistant"
+    assert gateway.calls[0]["messages"][-1] == {
+        "role": "user",
+        "content": "Hola por voz",
+    }
+    assert "escuchará tu respuesta en voz alta" in gateway.calls[0]["system"]
+
+
+def test_voice_turn_stream_rejects_large_audio(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "speech_transcription_max_bytes", 10)
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/voice-turns/stream",
+        files={"file": ("audio.webm", b"x" * 11, "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Audio file is too large"
+
+
+def test_voice_turn_stream_reports_transcription_unavailable(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+
+    def raise_unavailable(audio: bytes, *, language_code=None) -> str:
+        raise SpeechTranscriptionError("Speech transcription is disabled")
+
+    monkeypatch.setattr(
+        "app.assistant.voice.transcribe_audio_bytes",
+        raise_unavailable,
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/voice-turns/stream",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert parse_sse_events(response.text) == [
+        ("voice_state", {"state": "transcribing"}),
+        ("error", {"detail": "Audio transcription is not available"}),
+    ]
+
+
+def test_realtime_session_creates_openai_client_secret(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    captured = {}
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "assistant_realtime_enabled", True)
+    monkeypatch.setattr(settings, "assistant_realtime_model", "gpt-realtime-2.1")
+    monkeypatch.setattr(settings, "assistant_realtime_voice", "marin")
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
+
+    monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/realtime/session",
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "client_secret": "ek_test",
+        "client_secret_expires_at": 123,
+        "provider": "openai",
+        "model": "gpt-realtime-2.1",
+        "voice": "marin",
+        "realtime_url": settings.assistant_realtime_url,
+    }
+    assert captured["url"] == settings.assistant_realtime_client_secret_url
+    session = captured["payload"]["session"]
+    assert session["type"] == "realtime"
+    assert session["model"] == "gpt-realtime-2.1"
+    assert session["audio"]["output"]["voice"] == "marin"
+    assert (
+        session["audio"]["input"]["turn_detection"]["interrupt_response"]
+        is True
+    )
+    assert "conversación hablada" in session["instructions"]
+    tool_names = {tool["name"] for tool in session["tools"]}
+    assert "list_requirements" in tool_names
+    assert "create_requirement" in tool_names
+
+
+def test_realtime_tool_call_and_turn_persistence_reuse_backend_tools(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    use_gateway(FakeGateway([]))
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Actualizar inventario",
+        summary="Inventario de luminarias",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    tool_response = client.post(
+        f"/assistant/conversations/{conversation['id']}/realtime/tool-calls",
+        json={
+            "call_id": "call_1",
+            "name": "list_requirements",
+            "arguments": {"organization_id": organization.id},
+            "user_transcript": "Lista las necesidades abiertas",
+        },
+        headers=headers_for(user),
+    )
+
+    assert tool_response.status_code == 200
+    tool_body = tool_response.json()
+    assert tool_body["call_id"] == "call_1"
+    assert tool_body["ok"] is True
+    assert tool_body["action"]["tool"] == "list_requirements"
+    assert "Actualizar inventario" in tool_body["output"]
+    assert tool_body["user_message"]["content"] == "Lista las necesidades abiertas"
+
+    turn_response = client.post(
+        f"/assistant/conversations/{conversation['id']}/realtime/turns",
+        json={
+            "user_message_id": tool_body["user_message"]["id"],
+            "user_text": "Lista las necesidades abiertas",
+            "assistant_text": "Hay una necesidad abierta: actualizar inventario.",
+            "actions": [tool_body["action"]],
+        },
+        headers=headers_for(user),
+    )
+
+    assert turn_response.status_code == 200
+    turn_body = turn_response.json()
+    assert turn_body["user_message"]["id"] == tool_body["user_message"]["id"]
+    assert turn_body["assistant_message"]["content"].startswith("Hay una")
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert [message.role for message in stored_messages] == ["user", "assistant"]
+
+
 def test_speech_synthesis_returns_audio(client, assistant_user, monkeypatch):
     user, _ = assistant_user
 
@@ -314,6 +603,12 @@ def test_azure_ssml_escapes_markup():
     assert "&lt;hola &amp; adiós&gt;" in ssml
     assert "xml:lang='es-ES'" in ssml
     assert "name='es-ES-ElviraNeural'" in ssml
+
+
+def test_azure_ssml_supports_optional_prosody_rate():
+    ssml = build_azure_ssml("hola", "es-ES-DarioNeural", "es-ES", "+12%")
+
+    assert "<prosody rate='+12%'>hola</prosody>" in ssml
 
 
 def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
