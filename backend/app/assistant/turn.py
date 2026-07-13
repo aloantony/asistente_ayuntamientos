@@ -18,7 +18,16 @@ from app.assistant.gateway import (
     AIGateway,
     AssistantUnavailableError,
 )
-from app.assistant.guards import check_tool_confirmation
+from app.assistant.guards import (
+    CONFIRMATION_REQUIRED_TOOLS,
+    ConfirmationReference,
+    ConfirmationToolResult,
+    build_confirmation_prompt,
+    check_tool_confirmation,
+    finalize_confirmation_turn,
+    lock_conversation_for_confirmation,
+    process_pending_confirmation_response,
+)
 from app.assistant.models import AssistantConversation, AssistantMessage
 from app.assistant.prompts import (
     ERROR_REPLY,
@@ -99,6 +108,9 @@ def run_agent_turn_events(
     input_mode: str = "text",
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
+    # Lock before inserting the message: concurrent FK inserts followed by a
+    # row-lock upgrade can deadlock. The first commit releases this short lock.
+    conversation = lock_conversation_for_confirmation(db, conversation.id)
     user_message = AssistantMessage(
         conversation=conversation,
         role="user",
@@ -108,6 +120,12 @@ def run_agent_turn_events(
     if conversation.title == "Conversación":
         conversation.title = user_text[:255]
     conversation.updated_at = func.now()
+    db.flush()
+    confirmation_context = process_pending_confirmation_response(
+        db,
+        conversation,
+        user_message,
+    )
     db.commit()
     db.refresh(user_message)
     db.refresh(conversation)
@@ -171,11 +189,18 @@ def run_agent_turn_events(
                     },
                 )
                 guarded_result = check_tool_confirmation(
+                    db,
                     conversation,
                     user_message,
                     block.name,
                     tool_input,
                 )
+                if block.name in CONFIRMATION_REQUIRED_TOOLS:
+                    required_confirmation = _confirmation_context_from_result(
+                        guarded_result
+                    )
+                    if required_confirmation is not None:
+                        confirmation_context = required_confirmation
                 result = guarded_result or execute_tool(
                     db,
                     current_user,
@@ -237,6 +262,21 @@ def run_agent_turn_events(
     if not reply_text:
         reply_text = FALLBACK_REPLY
 
+    # Lock before inserting the assistant message to keep the same lock order
+    # as user-message insertion and avoid FK/row-lock deadlocks.
+    conversation = lock_conversation_for_confirmation(db, conversation.id)
+    confirmation_prompt = None
+    if reply_text not in {ERROR_REPLY, FALLBACK_REPLY, REFUSAL_REPLY}:
+        confirmation_prompt = build_confirmation_prompt(
+            conversation,
+            confirmation_context,
+            input_mode=input_mode,
+            turn_user_message_id=user_message.id,
+        )
+    if confirmation_prompt:
+        confirmation_suffix = f"\n\n{confirmation_prompt}"
+        reply_text = f"{reply_text.rstrip()}{confirmation_suffix}"
+        yield TurnEvent("text_delta", {"text": confirmation_suffix})
     assistant_message = AssistantMessage(
         conversation=conversation,
         role="assistant",
@@ -247,6 +287,14 @@ def run_agent_turn_events(
     )
     db.add(assistant_message)
     conversation.updated_at = func.now()
+    db.flush()
+    finalize_confirmation_turn(
+        conversation,
+        user_message,
+        assistant_message,
+        confirmation_context,
+        confirmation_prompt=confirmation_prompt,
+    )
     db.commit()
     db.refresh(assistant_message)
     db.refresh(conversation)
@@ -266,6 +314,17 @@ def run_agent_turn_events(
         },
     )
     return assistant_message
+
+
+def _confirmation_context_from_result(
+    result: ConfirmationToolResult | None,
+) -> ConfirmationReference | None:
+    if (
+        isinstance(result, ConfirmationToolResult)
+        and result.status == "required"
+    ):
+        return result.confirmation
+    return None
 
 
 def run_agent_turn(
