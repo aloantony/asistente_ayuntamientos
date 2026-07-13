@@ -78,12 +78,28 @@ from app.assistant.speech import (
 from app.assistant.tools import get_available_tool_specs
 from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
+from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
 from app.rbac.permissions import has_permission
 from app.users.models import User
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
+
+MEMORY_STATUS_TRANSITIONS = {
+    "proposed": frozenset({"approved", "rejected", "archived", "blocked"}),
+    "approved": frozenset({"proposed", "rejected", "archived", "blocked"}),
+    "rejected": frozenset({"proposed", "archived"}),
+    "archived": frozenset({"proposed"}),
+    "blocked": frozenset({"proposed", "rejected", "archived"}),
+}
+ADMIN_FEEDBACK_STATUS_TRANSITIONS = {
+    "submitted": frozenset({"reviewed", "dismissed", "archived"}),
+    "reviewed": frozenset({"submitted", "dismissed", "archived"}),
+    "dismissed": frozenset({"submitted", "reviewed", "archived"}),
+    "archived": frozenset({"submitted"}),
+}
+MEMORY_MATERIAL_FIELDS = frozenset({"category", "content", "sensitivity"})
 
 
 def get_gateway() -> AIGateway:
@@ -180,30 +196,36 @@ def synthesize_speech(
 def list_memory_entries(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
     status: MemoryStatus | None = "proposed",
     organization_id: int | None = None,
-) -> list[AssistantMemoryEntry]:
+    reviewable_only: bool = False,
+) -> list[AssistantMemoryEntryRead]:
     require_assistant_use(db, current_user)
-    permission_code = (
-        "assistant.memory.view" if status == "approved" else "assistant.memory.review"
+    reviewable_organization_ids = get_memory_permission_organization_ids(
+        db, current_user, "assistant.memory.review"
     )
-    organization_ids = get_memory_permission_organization_ids(
-        db,
-        current_user,
-        permission_code,
-    )
+    organization_ids = reviewable_organization_ids
+    if status == "approved" and not reviewable_only:
+        organization_ids = sorted(
+            set(reviewable_organization_ids)
+            | set(
+                get_memory_permission_organization_ids(
+                    db, current_user, "assistant.memory.view"
+                )
+            )
+        )
     if organization_id is not None:
         organization_ids = [
             permitted_id
             for permitted_id in organization_ids
             if permitted_id == organization_id
         ]
-    if not organization_ids:
-        return []
-
     query = (
         select(AssistantMemoryEntry)
         .options(
+            selectinload(AssistantMemoryEntry.organization),
             selectinload(AssistantMemoryEntry.proposed_by),
             selectinload(AssistantMemoryEntry.reviewed_by),
         )
@@ -216,7 +238,17 @@ def list_memory_entries(
     if status is not None:
         query = query.where(AssistantMemoryEntry.status == status)
 
-    return list(db.scalars(query))
+    entries = list(db.scalars(paginate(db, query, page, response)))
+    reviewable_organization_id_set = set(reviewable_organization_ids)
+    return [
+        serialize_memory_entry_for_access(
+            entry,
+            include_review_metadata=(
+                entry.organization_id in reviewable_organization_id_set
+            ),
+        )
+        for entry in entries
+    ]
 
 
 @router.patch(
@@ -230,19 +262,55 @@ def update_memory_entry(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AssistantMemoryEntry:
     require_assistant_use(db, current_user)
-    entry = get_existing_memory_entry(db, entry_id)
-    if not has_permission(
-        current_user,
-        "assistant.memory.review",
+    entry = get_reviewable_memory_entry(
         db,
-        organization_id=entry.organization_id,
-    ):
-        raise HTTPException(
-            status_code=http_status.HTTP_403_FORBIDDEN,
-            detail="Permission required: assistant.memory.review",
-        )
+        current_user,
+        entry_id,
+        for_update=True,
+    )
+    ensure_expected_updated_at(
+        entry.updated_at,
+        payload.expected_updated_at,
+        detail="Assistant memory entry was modified by another reviewer",
+    )
 
     updates = payload.model_dump(exclude_unset=True)
+    updates.pop("expected_updated_at")
+    sensitive_approval_confirmed = updates.pop(
+        "sensitive_approval_confirmed",
+        False,
+    )
+    requested_status = updates.get("status")
+    material_change = any(
+        field in updates
+        and updates[field] is not None
+        and updates[field] != getattr(entry, field)
+        for field in MEMORY_MATERIAL_FIELDS
+    )
+    if entry.status == "approved" and material_change and requested_status is None:
+        requested_status = "proposed"
+
+    if requested_status is not None:
+        ensure_status_transition(
+            entry.status,
+            requested_status,
+            MEMORY_STATUS_TRANSITIONS,
+            detail="Invalid assistant memory status transition",
+        )
+    effective_sensitivity = updates.get("sensitivity") or entry.sensitivity
+    if (
+        requested_status == "approved"
+        and effective_sensitivity != "normal"
+        and not sensitive_approval_confirmed
+    ):
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Sensitive assistant memory approval requires explicit "
+                "confirmation"
+            ),
+        )
+
     if "content" in updates and updates["content"] is not None:
         entry.content = updates["content"]
     if "category" in updates and updates["category"] is not None:
@@ -251,13 +319,17 @@ def update_memory_entry(
         entry.sensitivity = updates["sensitivity"]
     if "review_notes" in updates:
         entry.review_notes = updates["review_notes"]
-    if "status" in updates and updates["status"] is not None:
-        entry.status = updates["status"]
-        entry.reviewed_by_id = current_user.id
-        entry.reviewed_at = datetime.now(timezone.utc)
+    if requested_status is not None:
+        entry.status = requested_status
+        if requested_status == "proposed":
+            entry.reviewed_by_id = None
+            entry.reviewed_at = None
+        else:
+            entry.reviewed_by_id = current_user.id
+            entry.reviewed_at = datetime.now(timezone.utc)
 
     db.commit()
-    return get_existing_memory_entry(db, entry_id)
+    return get_reviewable_memory_entry(db, current_user, entry_id)
 
 
 @router.get(
@@ -267,11 +339,14 @@ def update_memory_entry(
 def list_admin_feedback(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_superuser)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
     status: Annotated[AdminFeedbackStatus | None, Query()] = None,
 ) -> list[AssistantAdminFeedback]:
     query = (
         select(AssistantAdminFeedback)
         .options(
+            selectinload(AssistantAdminFeedback.organization),
             selectinload(AssistantAdminFeedback.submitted_by),
             selectinload(AssistantAdminFeedback.reviewed_by),
         )
@@ -282,7 +357,7 @@ def list_admin_feedback(
     )
     if status is not None:
         query = query.where(AssistantAdminFeedback.status == status)
-    return list(db.scalars(query))
+    return list(db.scalars(paginate(db, query, page, response)))
 
 
 @router.patch(
@@ -295,16 +370,34 @@ def update_admin_feedback(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_superuser)],
 ) -> AssistantAdminFeedback:
-    feedback = get_existing_admin_feedback(db, feedback_id)
+    feedback = get_existing_admin_feedback(db, feedback_id, for_update=True)
+    ensure_expected_updated_at(
+        feedback.updated_at,
+        payload.expected_updated_at,
+        detail="Assistant admin feedback was modified by another reviewer",
+    )
     updates = payload.model_dump(exclude_unset=True)
+    updates.pop("expected_updated_at")
+    requested_status = updates.get("status")
+    if requested_status is not None:
+        ensure_status_transition(
+            feedback.status,
+            requested_status,
+            ADMIN_FEEDBACK_STATUS_TRANSITIONS,
+            detail="Invalid assistant admin feedback status transition",
+        )
     if "priority" in updates and updates["priority"] is not None:
         feedback.priority = updates["priority"]
     if "review_notes" in updates:
         feedback.review_notes = updates["review_notes"]
-    if "status" in updates and updates["status"] is not None:
-        feedback.status = updates["status"]
-        feedback.reviewed_by_id = current_user.id
-        feedback.reviewed_at = datetime.now(timezone.utc)
+    if requested_status is not None:
+        feedback.status = requested_status
+        if requested_status == "submitted":
+            feedback.reviewed_by_id = None
+            feedback.reviewed_at = None
+        else:
+            feedback.reviewed_by_id = current_user.id
+            feedback.reviewed_at = datetime.now(timezone.utc)
 
     db.commit()
     return get_existing_admin_feedback(db, feedback_id)
@@ -1034,16 +1127,34 @@ def get_memory_permission_organization_ids(
     ]
 
 
-def get_existing_memory_entry(db: Session, entry_id: int) -> AssistantMemoryEntry:
-    entry = db.scalar(
+def get_reviewable_memory_entry(
+    db: Session,
+    current_user: User,
+    entry_id: int,
+    *,
+    for_update: bool = False,
+) -> AssistantMemoryEntry:
+    organization_ids = get_memory_permission_organization_ids(
+        db,
+        current_user,
+        "assistant.memory.review",
+    )
+    query = (
         select(AssistantMemoryEntry)
         .options(
+            selectinload(AssistantMemoryEntry.organization),
             selectinload(AssistantMemoryEntry.proposed_by),
             selectinload(AssistantMemoryEntry.reviewed_by),
         )
-        .where(AssistantMemoryEntry.id == entry_id)
+        .where(
+            AssistantMemoryEntry.id == entry_id,
+            AssistantMemoryEntry.organization_id.in_(organization_ids),
+        )
         .execution_options(populate_existing=True)
     )
+    if for_update:
+        query = query.with_for_update()
+    entry = db.scalar(query)
     if entry is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1052,25 +1163,81 @@ def get_existing_memory_entry(db: Session, entry_id: int) -> AssistantMemoryEntr
     return entry
 
 
+def serialize_memory_entry_for_access(
+    entry: AssistantMemoryEntry,
+    *,
+    include_review_metadata: bool,
+) -> AssistantMemoryEntryRead:
+    serialized = AssistantMemoryEntryRead.model_validate(entry)
+    if include_review_metadata:
+        return serialized
+    return serialized.model_copy(
+        update={
+            "source_conversation_id": None,
+            "source_message_id": None,
+            "proposed_by_id": None,
+            "reviewed_by_id": None,
+            "review_notes": None,
+            "proposed_by": None,
+            "reviewed_by": None,
+        }
+    )
+
+
 def get_existing_admin_feedback(
     db: Session,
     feedback_id: int,
+    *,
+    for_update: bool = False,
 ) -> AssistantAdminFeedback:
-    feedback = db.scalar(
+    query = (
         select(AssistantAdminFeedback)
         .options(
+            selectinload(AssistantAdminFeedback.organization),
             selectinload(AssistantAdminFeedback.submitted_by),
             selectinload(AssistantAdminFeedback.reviewed_by),
         )
         .where(AssistantAdminFeedback.id == feedback_id)
         .execution_options(populate_existing=True)
     )
+    if for_update:
+        query = query.with_for_update()
+    feedback = db.scalar(query)
     if feedback is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Assistant admin feedback not found",
         )
     return feedback
+
+
+def ensure_expected_updated_at(
+    actual: datetime,
+    expected: datetime,
+    *,
+    detail: str,
+) -> None:
+    if actual != expected:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=detail,
+        )
+
+
+def ensure_status_transition(
+    current_status: str,
+    requested_status: str,
+    transitions: dict[str, frozenset[str]],
+    *,
+    detail: str,
+) -> None:
+    if requested_status == current_status:
+        return
+    if requested_status not in transitions[current_status]:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=detail,
+        )
 
 
 def get_existing_transversal_feature(

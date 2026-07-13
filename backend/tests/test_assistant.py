@@ -164,7 +164,34 @@ def assistant_user(make_user, make_organization, grant_permissions):
     ],
 )
 def test_confirmation_response_classification(text, expected):
-    assert assistant_guards.classify_confirmation_response(text) == expected
+    assert (
+        assistant_guards.classify_confirmation_response(
+            text,
+            tool_name="create_requirement",
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "text"),
+    [
+        ("create_requirement", "Sí, envíalo"),
+        ("send_admin_feedback", "Sí, créalo"),
+        ("send_admin_feedback", "Confirmo el borrador"),
+    ],
+)
+def test_action_specific_confirmation_does_not_authorize_another_tool(
+    tool_name,
+    text,
+):
+    assert (
+        assistant_guards.classify_confirmation_response(
+            text,
+            tool_name=tool_name,
+        )
+        == "ambiguous"
+    )
 
 
 def test_assistant_requires_permission(client, make_user):
@@ -1608,6 +1635,57 @@ def test_realtime_explicit_confirmation_is_consumed_once(
         state["last_consumed_confirmation"]["consumed_at_user_message_id"]
         == confirmation_started.json()["user_message"]["id"]
     )
+
+
+def test_realtime_requirement_rejects_feedback_specific_confirmation(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Confirmación cruzada realtime",
+        "problem": "La acción debe coincidir con el verbo confirmado.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    proposal, _ = arm_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        tool_input,
+    )
+    confirmation_turn_id = str(uuid.uuid4())
+    confirmation_started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=confirmation_turn_id,
+        user_text="Sí, envíalo",
+    )
+    assert confirmation_started.status_code == 200
+
+    attempted = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        confirmation_turn_id,
+        call_id="call_cross_confirmation",
+        name="create_requirement",
+        arguments=tool_input,
+    )
+
+    assert attempted.status_code == 200
+    assert attempted.json()["ok"] is False
+    assert attempted.json()["confirmation_prompt"] == proposal["confirmation_prompt"]
+    assert db.scalar(select(Requirement)) is None
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert pending["tool"] == "create_requirement"
+    assert "response_user_message_id" not in pending
 
 
 def test_realtime_confirmation_with_changed_payload_starts_new_proposal(

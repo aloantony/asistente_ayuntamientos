@@ -1,4 +1,8 @@
 import { userHasPermission, type User } from "../../components/types";
+import {
+  canUseMemoryReview,
+  canUseProductReview,
+} from "../../lib/permissions";
 
 export function canUseMunicipalitiesSection(user: User) {
   return [
@@ -45,6 +49,12 @@ export type AdminNavItem = {
 // El orden define la prioridad de la redirección de /admin.
 export function getAdminNavItems(user: User): AdminNavItem[] {
   return [
+    ...(canUseProductReview(user)
+      ? [{ href: "/admin/producto", label: "Producto" }]
+      : []),
+    ...(canUseMemoryReview(user)
+      ? [{ href: "/admin/memoria", label: "Memoria" }]
+      : []),
     ...(userHasPermission(user, "users.manage")
       ? [{ href: "/admin/usuarios", label: "Usuarios" }]
       : []),

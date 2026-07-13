@@ -18,7 +18,12 @@ import {
   getErrorMessage,
   isAuthError,
 } from "./api";
-import { ADMIN_PANEL_PERMISSIONS, PROJECT_PERMISSIONS } from "./permissions";
+import {
+  ADMIN_PANEL_PERMISSIONS,
+  canUseMemoryReview,
+  canUseProductReview,
+  PROJECT_PERMISSIONS,
+} from "./permissions";
 
 export const REQUIREMENT_PERMISSIONS = [
   "requirements.view",
@@ -36,7 +41,11 @@ export function hasAnyPermission(user: User, permissionCodes: string[]) {
 }
 
 export function shouldShowAdminPanel(user: User) {
-  return hasAnyPermission(user, ADMIN_PANEL_PERMISSIONS);
+  return (
+    hasAnyPermission(user, ADMIN_PANEL_PERMISSIONS) ||
+    canUseProductReview(user) ||
+    canUseMemoryReview(user)
+  );
 }
 
 export function shouldShowRequirementsPanel(user: User) {

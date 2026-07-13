@@ -20,34 +20,47 @@ from app.assistant.prompts import (
     CONFIRMATION_REQUIRED_TOOL_RESULT,
     CONFIRMATION_STALE_TURN_TOOL_RESULT,
 )
-from app.assistant.tools import ToolResult, normalize_create_requirement_input
+from app.assistant.tools import (
+    ToolResult,
+    normalize_admin_feedback_input,
+    normalize_create_requirement_input,
+)
 
 logger = logging.getLogger(__name__)
 
-CONFIRMATION_REQUIRED_TOOLS = frozenset({"create_requirement"})
-EXPLICIT_CONFIRMATIONS = frozenset(
+CONFIRMATION_REQUIRED_TOOLS = frozenset(
+    {"create_requirement", "send_admin_feedback"}
+)
+GENERIC_EXPLICIT_CONFIRMATIONS = frozenset(
     {
         "adelante",
-        "adelante crealo",
         "confirmo",
-        "confirmo el borrador",
-        "confirmo la creacion",
-        "crealo",
-        "de acuerdo crealo",
-        "guardalo",
         "hazlo",
         "lo confirmo",
         "si adelante",
         "si confirmo",
-        "si crealo",
-        "si guardalo",
         "si hazlo",
     }
 )
+TOOL_EXPLICIT_CONFIRMATIONS = {
+    "create_requirement": frozenset(
+        {
+            "adelante crealo",
+            "confirmo el borrador",
+            "confirmo la creacion",
+            "crealo",
+            "de acuerdo crealo",
+            "guardalo",
+            "si crealo",
+            "si guardalo",
+        }
+    ),
+    "send_admin_feedback": frozenset({"envialo", "si envialo"}),
+}
 CANCELLATION_PATTERN = re.compile(
     r"^(?:"
     r"no(?:\s+gracias)?|"
-    r"no\s+.*\b(?:crees|guardes|hagas)\b.*|"
+    r"no\s+.*\b(?:crees|guardes|hagas|envies|mandes)\b.*|"
     r".*\b(?:cancela(?:r|lo)?|rechaz(?:a|ar|o)|detente|olvida(?:lo|r)?)\b.*"
     r")$"
 )
@@ -67,6 +80,13 @@ REQUIREMENT_CONFIRMATION_FIELDS = (
     ("acceptance_criteria", "criterios_de_aceptacion"),
     ("open_questions", "preguntas_abiertas"),
     ("priority", "prioridad"),
+)
+ADMIN_FEEDBACK_CONFIRMATION_FIELDS = (
+    ("category", "categoria"),
+    ("title", "titulo"),
+    ("description", "descripcion"),
+    ("priority", "prioridad"),
+    ("organization_id", "organizacion_id"),
 )
 
 
@@ -263,7 +283,11 @@ def process_pending_confirmation_response(
         pending.pop("response_prompted_at_assistant_message_id", None)
         state_changed = True
 
-    response = classify_confirmation_response(user_message.content)
+    pending_tool = pending.get("tool")
+    response = classify_confirmation_response(
+        user_message.content,
+        tool_name=pending_tool if isinstance(pending_tool, str) else None,
+    )
     if response == "cancelled":
         state.pop("pending_confirmation", None)
         state["last_cancelled_confirmation"] = {
@@ -431,6 +455,8 @@ def _confirmation_digest(tool_name: str, tool_input: dict) -> str:
 def _confirmation_input(tool_name: str, tool_input: dict) -> dict:
     if tool_name == "create_requirement":
         return normalize_create_requirement_input(tool_input)
+    if tool_name == "send_admin_feedback":
+        return normalize_admin_feedback_input(tool_input)
     return deepcopy(tool_input)
 
 
@@ -473,6 +499,11 @@ def _render_confirmation_prompt(
     *,
     input_mode: str,
 ) -> str:
+    if reference.tool == "send_admin_feedback":
+        return _render_admin_feedback_confirmation_prompt(
+            reference,
+            input_mode=input_mode,
+        )
     if reference.tool != "create_requirement":
         raise ValueError(f"Unsupported confirmation tool: {reference.tool}")
 
@@ -505,6 +536,43 @@ def _render_confirmation_prompt(
         "Los campos que no aparecen quedarán sin informar. Se guardará como "
         "borrador con origen conversacional.\n\n"
         "Responde **Sí, créalo**, **Confirmo** o **Adelante** solo si estos "
+        "datos son correctos."
+    )
+
+
+def _render_admin_feedback_confirmation_prompt(
+    reference: ConfirmationReference,
+    *,
+    input_mode: str,
+) -> str:
+    display_payload = {
+        label: reference.tool_input[field]
+        for field, label in ADMIN_FEEDBACK_CONFIRMATION_FIELDS
+        if field in reference.tool_input and field != "priority"
+    }
+    display_payload["prioridad"] = reference.tool_input.get("priority") or "medium"
+    if input_mode == "voice":
+        details = "; ".join(
+            f"{label.replace('_', ' ')}: {_plain_confirmation_value(value)}"
+            for label, value in display_payload.items()
+        )
+        return (
+            "Feedback pendiente de confirmación. "
+            f"Datos exactos: {details}. "
+            "Para enviarlo al equipo administrador, responde: Sí, envíalo; "
+            "Confirmo; o Adelante."
+        )
+
+    serialized = json.dumps(display_payload, ensure_ascii=False, indent=2)
+    indented_payload = "\n".join(
+        f"    {line}" for line in serialized.splitlines()
+    )
+    return (
+        "### Feedback pendiente de confirmación\n\n"
+        f"Referencia: `{reference.confirmation_id}`\n\n"
+        f"{indented_payload}\n\n"
+        "Se enviará al equipo administrador con estos datos exactos.\n\n"
+        "Responde **Sí, envíalo**, **Confirmo** o **Adelante** solo si los "
         "datos son correctos."
     )
 
@@ -558,11 +626,19 @@ def _is_stale_confirmation_turn(
     )
 
 
-def classify_confirmation_response(text: str) -> str:
+def classify_confirmation_response(
+    text: str,
+    *,
+    tool_name: str | None = None,
+) -> str:
     normalized = normalize_confirmation_response(text)
     if normalized.endswith(" por favor"):
         normalized = normalized.removesuffix(" por favor").strip()
-    if normalized in EXPLICIT_CONFIRMATIONS:
+    tool_confirmations = TOOL_EXPLICIT_CONFIRMATIONS.get(tool_name, frozenset())
+    if (
+        normalized in GENERIC_EXPLICIT_CONFIRMATIONS
+        or normalized in tool_confirmations
+    ):
         return "confirmed"
     if CANCELLATION_PATTERN.fullmatch(normalized):
         return "cancelled"

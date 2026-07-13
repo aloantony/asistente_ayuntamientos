@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.organizations.schemas import OrganizationSummary
+
 MemoryCategory = Literal[
     "protocol",
     "preference",
@@ -254,6 +256,7 @@ class AssistantMemoryUserSummary(BaseModel):
 class AssistantMemoryEntryRead(BaseModel):
     id: int
     organization_id: int
+    organization: OrganizationSummary
     category: MemoryCategory
     content: str
     status: MemoryStatus
@@ -273,6 +276,8 @@ class AssistantMemoryEntryRead(BaseModel):
 
 
 class AssistantMemoryEntryUpdate(BaseModel):
+    expected_updated_at: datetime
+    sensitive_approval_confirmed: bool = False
     category: MemoryCategory | None = None
     content: str | None = Field(default=None, min_length=1, max_length=1000)
     status: MemoryStatus | None = None
@@ -285,6 +290,7 @@ class AssistantMemoryEntryUpdate(BaseModel):
 class AssistantAdminFeedbackRead(BaseModel):
     id: int
     organization_id: int | None
+    organization: OrganizationSummary | None
     category: AdminFeedbackCategory
     title: str
     description: str
@@ -305,6 +311,7 @@ class AssistantAdminFeedbackRead(BaseModel):
 
 
 class AssistantAdminFeedbackUpdate(BaseModel):
+    expected_updated_at: datetime
     status: AdminFeedbackStatus | None = None
     priority: AdminFeedbackPriority | None = None
     review_notes: str | None = Field(default=None, max_length=2000)

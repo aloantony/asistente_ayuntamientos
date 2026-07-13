@@ -997,6 +997,7 @@ export type AssistantMemoryUser = {
 export type AssistantMemoryEntry = {
   id: number;
   organization_id: number;
+  organization: OrganizationSummary;
   category: AssistantMemoryCategory;
   content: string;
   status: AssistantMemoryStatus;
@@ -1008,6 +1009,47 @@ export type AssistantMemoryEntry = {
   review_notes: string | null;
   reviewed_at: string | null;
   proposed_by: AssistantMemoryUser | null;
+  reviewed_by: AssistantMemoryUser | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AssistantAdminFeedbackCategory =
+  | "bug"
+  | "improvement"
+  | "missing_capability"
+  | "data_issue"
+  | "ux"
+  | "other";
+
+export type AssistantAdminFeedbackStatus =
+  | "submitted"
+  | "reviewed"
+  | "dismissed"
+  | "archived";
+
+export type AssistantAdminFeedbackPriority =
+  | "low"
+  | "medium"
+  | "high"
+  | "urgent";
+
+export type AssistantAdminFeedback = {
+  id: number;
+  organization_id: number | null;
+  organization: OrganizationSummary | null;
+  category: AssistantAdminFeedbackCategory;
+  title: string;
+  description: string;
+  priority: AssistantAdminFeedbackPriority;
+  status: AssistantAdminFeedbackStatus;
+  source_conversation_id: number | null;
+  source_message_id: number | null;
+  submitted_by_id: number | null;
+  reviewed_by_id: number | null;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  submitted_by: AssistantMemoryUser | null;
   reviewed_by: AssistantMemoryUser | null;
   created_at: string;
   updated_at: string;
@@ -1193,6 +1235,108 @@ export const ASSISTANT_MEMORY_SENSITIVITY_LABELS: Record<
   sensitive: "Sensible",
   legal: "Legal",
 };
+
+export const ASSISTANT_MEMORY_STATUSES: AssistantMemoryStatus[] = [
+  "proposed",
+  "approved",
+  "rejected",
+  "blocked",
+  "archived",
+];
+
+export const ASSISTANT_MEMORY_CATEGORIES: AssistantMemoryCategory[] = [
+  "protocol",
+  "preference",
+  "context",
+  "decision",
+  "open_question",
+];
+
+export const ASSISTANT_MEMORY_SENSITIVITIES: AssistantMemorySensitivity[] = [
+  "normal",
+  "personal",
+  "sensitive",
+  "legal",
+];
+
+export const ASSISTANT_MEMORY_STATUS_LABELS: Record<
+  AssistantMemoryStatus,
+  string
+> = {
+  proposed: "Propuesta",
+  approved: "Aprobada",
+  rejected: "Rechazada",
+  blocked: "Bloqueada",
+  archived: "Archivada",
+};
+
+export const ASSISTANT_ADMIN_FEEDBACK_STATUSES: AssistantAdminFeedbackStatus[] = [
+  "submitted",
+  "reviewed",
+  "dismissed",
+  "archived",
+];
+
+export const ASSISTANT_ADMIN_FEEDBACK_PRIORITIES: AssistantAdminFeedbackPriority[] = [
+  "low",
+  "medium",
+  "high",
+  "urgent",
+];
+
+export const ASSISTANT_ADMIN_FEEDBACK_CATEGORY_LABELS: Record<
+  AssistantAdminFeedbackCategory,
+  string
+> = {
+  bug: "Error",
+  improvement: "Mejora",
+  missing_capability: "Capacidad ausente",
+  data_issue: "Problema de datos",
+  ux: "Experiencia de uso",
+  other: "Otro",
+};
+
+export const ASSISTANT_ADMIN_FEEDBACK_STATUS_LABELS: Record<
+  AssistantAdminFeedbackStatus,
+  string
+> = {
+  submitted: "Pendiente",
+  reviewed: "Revisado",
+  dismissed: "Descartado",
+  archived: "Archivado",
+};
+
+export const ASSISTANT_ADMIN_FEEDBACK_PRIORITY_LABELS: Record<
+  AssistantAdminFeedbackPriority,
+  string
+> = {
+  low: "Baja",
+  medium: "Media",
+  high: "Alta",
+  urgent: "Urgente",
+};
+
+export function formatAssistantMemoryStatus(status: AssistantMemoryStatus) {
+  return ASSISTANT_MEMORY_STATUS_LABELS[status];
+}
+
+export function formatAssistantAdminFeedbackCategory(
+  category: AssistantAdminFeedbackCategory,
+) {
+  return ASSISTANT_ADMIN_FEEDBACK_CATEGORY_LABELS[category];
+}
+
+export function formatAssistantAdminFeedbackStatus(
+  status: AssistantAdminFeedbackStatus,
+) {
+  return ASSISTANT_ADMIN_FEEDBACK_STATUS_LABELS[status];
+}
+
+export function formatAssistantAdminFeedbackPriority(
+  priority: AssistantAdminFeedbackPriority,
+) {
+  return ASSISTANT_ADMIN_FEEDBACK_PRIORITY_LABELS[priority];
+}
 
 export function userHasPermission(user: User, permissionCode: string) {
   return (

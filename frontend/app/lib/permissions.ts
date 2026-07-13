@@ -1,6 +1,8 @@
-// Códigos de permiso compartidos por el sidebar (session.tsx) y la
-// subnavegación de admin (nav.ts): única fuente para que el predicado del
-// panel y el de sus secciones no puedan divergir al añadir permisos nuevos.
+import { userHasPermission, type User } from "../components/types";
+
+// Códigos y predicados compartidos por el sidebar (session.tsx) y la
+// subnavegación de admin (nav.ts): una única fuente evita que el acceso visual
+// diverja del contrato que aplican las páginas.
 
 export const MUNICIPALITY_PERMISSIONS = [
   "municipalities.view",
@@ -47,7 +49,17 @@ export const ADMIN_MANAGEMENT_PERMISSIONS = [
   "ordinances.manage",
 ];
 
-// Cualquier permiso que abre alguna sección de /admin. Los permisos de solo
-// consulta (por ejemplo ordinances.view/compare del alcalde piloto) no deben
-// mostrar el área de administración.
+// Permisos de las secciones administrativas tradicionales. Producto y memoria
+// usan predicados compuestos porque no se pueden expresar como una lista OR.
 export const ADMIN_PANEL_PERMISSIONS = ADMIN_MANAGEMENT_PERMISSIONS;
+
+export function canUseProductReview(user: User) {
+  return user.is_superuser;
+}
+
+export function canUseMemoryReview(user: User) {
+  return (
+    userHasPermission(user, "assistant.use") &&
+    userHasPermission(user, "assistant.memory.review")
+  );
+}
