@@ -4,13 +4,13 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 
-Asistente Ayuntamientos: FastAPI + Next.js platform for municipal management (documentation, requirements intake, ordinances, internal processes) with progressive, human-supervised AI support. Full context lives in `README.md` (English); architecture, decisions (ADRs) and requirements live in `docs/` (Spanish).
+Asistente Ayuntamientos is the FastAPI + Next.js codebase for Anacleto, the operational municipal agent defined in `docs/vision-producto.md`. The current implementation is transitional and is assessed in `docs/analisis-repositorio-2026-07-13.md`. Operational context lives in `README.md`; current architecture and ADRs live in `docs/`.
 
 ## Stack
 
 - `backend/`: FastAPI, SQLAlchemy 2, Alembic, PostgreSQL 17 (psycopg 3), JWT auth + RBAC. Deps pinned exactly in `backend/requirements.txt`.
 - `frontend/`: Next.js 15 App Router, React 19, TypeScript strict. Multi-route app (ADR-014): `(auth)/login` plus an `(app)` route group whose sidebar shell (`app/(app)/layout.tsx`) gates nav items with the same permission predicates as the routes — `/asistente`, `/requisitos`, `/proyectos`, `/cuenta`, `/admin/*`. Session state and the 401 funnel live in `SessionProvider` (`app/lib/session.tsx`, mounted in the root layout); the route guard is client-side. Each route mounts only its own controller — admin is split into per-domain hooks under `app/lib/admin/`, cross-domain lists go through `app/lib/fetchers.ts` — and selection/filters/page state live in the URL (deep links and back button must keep working). API access goes through helpers in `app/lib/api.ts` (native fetch, `credentials: "include"`), except login (`app/(auth)/login/page.tsx`), logout (`app/lib/session.tsx`) and the document download (`app/lib/useProjectsController.ts`), which call fetch directly. Browser auth is an httpOnly SameSite=Lax cookie: frontend and backend must share the same host — localhost in dev (ADR-010).
-- Orchestration: Docker Compose — backend on 127.0.0.1:8000, frontend on 127.0.0.1:3000, postgres and redis internal. Redis is reserved for future workers/cache; no code consumes it yet. The backend intentionally runs a single uvicorn worker: the login rate limiter (`app/core/rate_limit.py`) is in-memory per-process and must move to Redis before going multi-worker (ADR-010).
+- Orchestration: Docker Compose — backend on 127.0.0.1:8000, frontend on 127.0.0.1:3000, an RQ worker, PostgreSQL and Redis. Redis backs queued ordinance and agent-office jobs. The backend intentionally runs a single uvicorn worker on `main`: the login rate limiter (`app/core/rate_limit.py`) is in-memory per-process and must move to Redis before going multi-worker.
 
 ## Commands
 
@@ -44,19 +44,19 @@ docker compose exec backend alembic current
 git diff --check
 ```
 
-There is intentionally no CI (documented as accepted debt in `docs/arquitectura.md`), and no linter, formatter or type checker is configured; pre-handoff validation — always including the test suite — is the substitute. Match the existing code style and do not introduce new tooling without recording an ADR.
+`origin/main` currently has no CI workflow, linter, formatter or standalone type-check script. A pending hardening branch contains a proposed workflow and frontend tooling; do not claim they are active until those commits are integrated. Until then, run the documented pre-handoff validation, including the relevant tests.
 
 ## Hard rules
 
 - Never commit or edit `.env`. `.env.example` is the documented template.
 - Never delete the `postgres_data` or `document_storage` volumes by any means (`docker compose down -v`/`--volumes`, `docker volume rm`, `prune`, ...); they are persistent user data.
 - Keep services bound to localhost; never expose PostgreSQL or Redis.
-- All external AI calls and private agent runtime calls go through the Privacy/AI Gateway (`backend/app/assistant/gateway.py`); the voice pipeline (STT/TTS) egresses only through `backend/app/assistant/speech.py` under the same discipline (ADR-021). No other module may call external AI services. Only conversation text, approved institutional memory and user-typed structured fields may be sent; never original documents or stored municipal files. Log metadata only (runtime, model, stop_reason, token counts), never message content. Keep runtime-specific code (SDK imports, OpenAI-compatible adapters, model ids) inside `gateway.py`; runtime selection comes from `ASSISTANT_RUNTIME` (ADR-013, ADR-016).
+- All external AI calls and private agent runtime calls go through the Privacy/AI Gateway (`backend/app/assistant/gateway.py`); the voice pipeline (STT/TTS) egresses only through `backend/app/assistant/speech.py` (ADR-021). No other module may call external AI services. The current implementation must continue rejecting original documents and stored municipal files until provider approval, data policy, minimization and egress receipts from `docs/vision-producto.md` are implemented. Log metadata only, never message content. Keep runtime-specific code inside `gateway.py`; runtime selection comes from `ASSISTANT_RUNTIME`.
 - Voice capture and playback stay in the browser, but STT/TTS cloud egress happens only through `backend/app/assistant/speech.py`; when the configured runtime is disabled or unavailable the voice UI stays unavailable — never fall back to browser cloud speech recognition or `speechSynthesis` (ADR-021).
 
 ## Architecture constraints
 
-- `Organization` is the tenant and scopes users, groups, projects, documents and requirements. `Municipality` is global reference data shared across tenants — a different concept, not the tenant.
+- In the current implementation, `Organization` is the tenant and scopes users, groups, projects, documents and requirements, while `Municipality` is global reference data. The target is one municipal instance plus a separate control plane. Preserve current isolation while implementing that migration; do not present shared operational tenancy as the product direction.
 - Access control chain: user → group → role → permission, with an `is_superuser` bypass. Superuser-only operations: granting/revoking superuser, creating organizations, mutating the global roles/permissions catalog. New endpoints must enforce both tenancy and permissions; the permission catalog is seeded idempotently at backend startup.
 - Paginated list endpoints (municipalities, ordinances, requirements, admin users) use `limit` (1–200, default 100) + `offset` via `app/core/pagination.py` and expose the total in the `X-Total-Count` header; new list endpoints should follow this pattern (projects, documents and organizations listings are currently unpaginated). Heavy fields (e.g. ordinance `text_content`) travel only on detail endpoints.
 - Prefer archive/status fields over hard delete for business objects.
@@ -72,7 +72,7 @@ There is intentionally no CI (documented as accepted debt in `docs/arquitectura.
 ## Conventions
 
 - Migrations: `backend/alembic/versions/`, named `YYYYMMDD_NNNN_description.py`, always with both `upgrade()` and `downgrade()`.
-- Commits: English, imperative subject, no conventional-commit prefixes; detailed body that references ADRs ("See ADR-012") when relevant. Module milestones follow the pattern "Add <module> v1".
+- Commits: follow `AGENTS.md` and use Conventional Commits with a focused scope; reference ADRs in the body when relevant.
 - Docs: `docs/` is written in Spanish; the living docs (`arquitectura.md`, `requisitos.md`) carry `Actualizado: <fecha>` headers. Decisions are recorded as numbered ADRs in `docs/decisiones.md`. Documentation is synced in dedicated docs commits after feature commits; `README.md` is the source of operational detail.
-- `docs/requisitos.md` describes the current state only; new product requirements enter via the Requirements Intake module as drafts, not by editing the doc.
+- `docs/vision-producto.md` is the product authority. `docs/requisitos.md` inventories implemented requirements. Product needs may be captured conversationally, but durable product decisions must also be reflected in versioned documentation.
 - UI text is Spanish; backend API error details are English and translated for the UI in `frontend/app/lib/api.ts` (`translateApiDetail`).

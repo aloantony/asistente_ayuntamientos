@@ -1,12 +1,12 @@
 # Requisitos
 
-Actualizado: 2026-07-08. Este documento refleja el estado actual del producto. La fuente de detalle operativo es `README.md`; los requisitos nuevos entran por el asistente Anacleto y el módulo de Requirements Intake.
+Actualizado: 2026-07-13. Este documento enumera principalmente capacidades ya implementadas. La visión objetivo y sus límites están en `docs/vision-producto.md`; el análisis de transición está en `docs/analisis-repositorio-2026-07-13.md`.
 
 ## Visión de producto
 
-Plataforma para ayudar a ayuntamientos pequeños y medianos a gestionar documentación, requisitos, ordenanzas y procesos internos, con apoyo progresivo de IA supervisada por humanos.
+Anacleto es un agente operativo interno para cada ayuntamiento. Conversa con el alcalde y el resto de trabajadores, coordina personas y sistemas y puede actuar de forma proactiva dentro de competencias, políticas y delegaciones auditables.
 
-El primer usuario real es un alcalde (socio del proyecto) que comunicará las necesidades del producto mediante un agente de IA conversacional de intake de requisitos. Ese agente es la prioridad actual del roadmap, por delante de Comparación de Ordenanzas v1.
+La captura de requisitos deja de ser el propósito principal del asistente. Pasa a ser una capacidad de evolución del producto: Anacleto dialoga y contrasta la necesidad con los usuarios afectados antes de generar una propuesta estructurada y validada.
 
 ## Requisitos funcionales implementados
 
@@ -25,14 +25,14 @@ El primer usuario real es un alcalde (socio del proyecto) que comunicará las ne
 ## Requisitos técnicos
 
 - Backend FastAPI + SQLAlchemy + Alembic; frontend Next.js; PostgreSQL; orquestación local con Docker Compose.
-- Redis declarado en Compose, reservado para colas/caché de fases futuras (sin consumidor en el código todavía).
+- Redis/RQ para trabajos encolados de ordenanzas y oficina de agentes.
 - Configuración exclusivamente por variables de entorno; sin secretos en el repositorio.
 - Tests de backend con pytest ejecutados dentro del contenedor contra una base de datos PostgreSQL de test aislada (ver README §9).
 
 ## Restricciones
 
-- La IA asiste, propone y estructura, pero no toma decisiones legales o administrativas finales sin supervisión humana.
-- Ningún documento original ni dato municipal sensible se envía directamente a APIs de IA externas ni al runtime de agentes; el egreso LLM pasa por el gateway de IA y el egreso STT/TTS solo por `app/assistant/speech.py`, con minimización de datos y logs de metadatos.
+- El estado implementado exige supervisión para las escrituras disponibles. El objetivo es sustituir esa regla general por niveles de autonomía basados en riesgo, competencia y delegación, manteniendo aprobación obligatoria donde corresponda.
+- El estado implementado no envía documentos originales ni datos municipales sensibles a APIs de IA. El objetivo permite que proveedores aprobados contractualmente procesen los datos necesarios, pero solo después de implementar política por proveedor, minimización, trazabilidad y los controles descritos en la visión de producto.
 - Los documentos se almacenan en servidor propio, nunca en S3/almacenamiento externo.
 - Los objetos de negocio importantes se archivan, no se borran (usuarios y grupos son la excepción: borrado físico con guardas).
 - Backend y frontend ligados a localhost en desarrollo; PostgreSQL y Redis nunca expuestos públicamente.

@@ -1,15 +1,21 @@
 # Arquitectura
 
-Actualizado: 2026-07-08.
+Actualizado: 2026-07-13.
+
+Este documento describe la arquitectura **implementada**. No representa por sí
+solo la arquitectura objetivo. La decisión de producto es una instancia por
+ayuntamiento con control de plataforma separado; véanse
+`docs/vision-producto.md` y `docs/analisis-repositorio-2026-07-13.md`.
 
 ## Visión general
 
-Aplicación multi-tenant con cuatro servicios en Docker Compose:
+Aplicación multi-tenant actual con cinco servicios en Docker Compose:
 
 - `backend`: API HTTP FastAPI (puerto 127.0.0.1:8000), monolito modular.
+- `worker`: consumidor RQ de trabajos encolados por ordenanzas y oficina de agentes.
 - `frontend`: Next.js App Router (puerto 127.0.0.1:3000), consola de administración y trabajo.
 - `postgres`: PostgreSQL 17, interno (sin puerto publicado), con volumen persistente.
-- `redis`: Redis 7, interno, reservado para colas/caché futuras (sin consumidor todavía).
+- `redis`: Redis 7, interno, usado como cola de trabajos RQ.
 
 ## Modelo de dominio y tenancy
 

@@ -2,37 +2,28 @@
 
 ## 1. Project overview
 
-Asistente Ayuntamientos is a FastAPI + Next.js application for municipal management workflows.
+Asistente Ayuntamientos is the codebase for Anacleto, an operational AI agent for municipal work, built with FastAPI and Next.js.
 
-The project objective is: "A platform to help small and medium-sized municipalities manage documentation, requirements, ordinances and internal processes, with progressive support from AI."
-
-The current product space is municipal documentation, internal work tracking, requirements intake, ordinance management and comparative reference data. It is intended for technical development and operational use, not as a public marketing site.
+The target product is defined in [docs/vision-producto.md](docs/vision-producto.md). The current codebase is in transition: it contains useful municipal modules and an assistant originally optimized for supervised requirements intake, but that historical framing is no longer the product objective. The gap and recommended transition are documented in [docs/analisis-repositorio-2026-07-13.md](docs/analisis-repositorio-2026-07-13.md).
 
 ## 2. Product objective and direction
 
-The project is evolving toward a municipal management and automation platform where:
+The first user is the mayor, followed by the rest of the municipal staff. Each municipality will have its own instance and one organizational Anacleto shared through permission-scoped conversations. Text and voice are the primary interface; projects, documents, requirements, ordinances and maps are work surfaces that Anacleto uses when needed.
 
-- Municipalities or client entities that use the application are managed as `Organization` records.
-- Real-world municipalities are stored as `Municipality` records for comparative and reference data.
-- Projects represent expedientes, work areas or internal initiatives.
-- Documents are stored securely on our own server.
-- Requirements capture functional needs and product ideas from municipal stakeholders.
-- Ordinances provide the basis for a future comparative knowledge base of municipal regulations.
+Anacleto is intended to observe authorized events, plan, coordinate people and systems, act within explicit delegations and escalate decisions according to risk. It must preserve source provenance, delegated identity and a complete audit trail. It supports institutional municipal work, not personal, partisan or electoral activity.
 
-AI is intended to be central to the product direction. The system should assist, compare, structure, propose and automate where appropriate, but AI must remain supervised by humans. It must not silently make final legal or administrative decisions.
+The target deployment is one operational instance per municipality, plus a separate central control plane for versions, technical health and reviewed product improvements. The current `Organization` tenancy model remains an implemented security boundary during the transition; it must not be mistaken for the final deployment model.
 
-External AI calls must go through the Privacy/AI Gateway before any LLM API call; the voice pipeline (STT/TTS) egresses only through `app/assistant/speech.py` under the same discipline. Original documents and sensitive municipal data must not be sent directly to external AI services. External AI APIs may be used only after filtering, minimization and pseudonymization where needed.
+The application follows a hybrid source-of-truth model: Anacleto owns conversations, memory, plans, tasks and automation while existing expediente, registry, accounting and other municipal systems remain authoritative until deliberately replaced.
 
-The assistant can run either against Anthropic directly or against a private/local Hermes Agent API Server. Hermes Agent is treated as an external runtime/app, not as the institutional memory store and not as the source of authorization decisions.
-
-Future priorities will be refined through Requirements Intake and through work with municipal stakeholders and developers. The exact first commercial module and user persona are intentionally still open.
+External AI providers are the initial runtime strategy. Approved providers may process the data necessary for a task under municipal policy and contractual safeguards; the gateway must still minimize context and record provider, model and purpose. The present implementation is more restrictive for original documents and sensitive data and must stay that way until the required policy engine, provider controls and contracts exist. Owned models are a later migration path, not the immediate product priority.
 
 ## 3. Current technical stack
 
 - Backend: FastAPI
 - Frontend: Next.js
 - Database: PostgreSQL
-- Redis: declared in Docker Compose and reserved for future workers/cache; no backend code consumes it yet
+- Redis/RQ: queue for ordinance imports and agent-office tasks
 - Local orchestration: Docker Compose
 - ORM: SQLAlchemy
 - Migrations: Alembic
@@ -195,15 +186,16 @@ must keep an `app_test` prefix.
 
 ## 11. Current roadmap
 
-The roadmap is technical and directional. Items are subject to refinement through Requirements Intake and stakeholder feedback.
+The roadmap now follows the product transition described in the repository analysis:
 
-- AI Requirements Intake Agent v1 (conversational; the first external user is a mayor who feeds requirements through it) — shipped, see Implemented modules
-- Privacy/AI Gateway — v1 shipped with the intake agent; filtering/pseudonymization hardening pending
-- Voice dialogue for the intake agent — shipped, see ADR-021
-- Ordinance Comparison v1
-- Ordinance AI Assistant v1
-- Draft Generator v1
-- Future AI-assisted municipal workflows
+- Align product documentation and consolidate pending security/CI work on the agreed integration branch.
+- Add municipal roles, competencies, delegations and a risk-based autonomy policy.
+- Generalize memory into permission-scoped information with consent and retention policies.
+- Evolve the agent office into the event, work, action, approval and audit substrate for proactive Anacleto.
+- Make Anacleto the persistent primary experience and expose modules as contextual work surfaces.
+- Add API-first connectors and controlled interface automation for official municipal systems.
+- Build the reviewed, anonymized improvement network and central fleet control plane.
+- Add owned model runtimes and a separate citizen assistant only in later phases.
 
 ## 12. Developer handoff checklist
 
