@@ -144,6 +144,9 @@ function AsistentePageInner() {
         draftMessage={assistantController.draftMessage}
         voiceModeEnabled={assistantController.voiceModeEnabled}
         handsFreeEnabled={assistantController.handsFreeEnabled}
+        voiceState={assistantController.voiceState}
+        realtimeVoiceActive={assistantController.realtimeVoiceActive}
+        realtimeVoiceFallback={assistantController.realtimeVoiceFallback}
         isLoadingAssistant={assistantController.isLoadingAssistant}
         isSendingMessage={assistantController.isSendingMessage}
         isSpeaking={assistantController.isSpeaking}
@@ -153,16 +156,12 @@ function AsistentePageInner() {
         }
         onDraftMessageChange={assistantController.setDraftMessage}
         onVoiceModeChange={assistantController.setVoiceModeEnabled}
-        onHandsFreeChange={assistantController.setHandsFreeEnabled}
         onSelectConversation={handleSelectConversation}
         onStartConversation={assistantController.startConversation}
         onSendMessage={assistantController.sendMessage}
-        onSendVoiceTranscript={(transcript) =>
-          void assistantController.sendMessage({
-            contentOverride: transcript,
-            inputMode: "voice",
-          })
-        }
+        onSendVoiceAudio={assistantController.sendVoiceAudio}
+        onStartRealtimeVoice={assistantController.startRealtimeVoice}
+        onStopRealtimeVoice={assistantController.stopRealtimeVoice}
         onStopSpeaking={assistantController.stopSpeaking}
         onTranscribeAudio={assistantController.transcribeAudio}
         onArchiveConversation={assistantController.archiveConversation}
