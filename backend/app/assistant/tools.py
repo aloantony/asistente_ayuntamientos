@@ -435,10 +435,14 @@ _TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "create_requirement",
         "description": (
-            "Crea un requisito nuevo como BORRADOR (status=draft, "
-            "source_type=conversation) en nombre del usuario. Antes de "
-            "llamarla, confirma con el usuario al menos el título y el "
-            "problema. Rellena todos los campos que la conversación permita."
+            "Prepara la propuesta exacta de un requisito y, tras una "
+            "confirmación explícita en un turno posterior, lo crea como "
+            "BORRADOR (status=draft, source_type=conversation). Dialoga antes "
+            "si faltan decisiones materiales; cuando el contenido esté "
+            "entendido, llama a la herramienta con todos los campos disponibles. "
+            "La primera llamada muestra la propuesta supervisable y queda "
+            "bloqueada por el servidor, así que no pidas una confirmación textual "
+            "antes de esa primera llamada."
         ),
         "input_schema": {
             "type": "object",
@@ -1076,10 +1080,9 @@ def _create_requirement(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    organization_id = int(tool_input["organization_id"])
-    title = str(tool_input["title"]).strip()
-    if not title:
-        raise ValueError("title no puede estar vacío")
+    normalized_input = normalize_create_requirement_input(tool_input)
+    organization_id = normalized_input["organization_id"]
+    title = normalized_input["title"]
 
     ensure_organization_exists(db, organization_id)
     require_requirement_permission(
@@ -1088,21 +1091,21 @@ def _create_requirement(
         organization_id,
         "requirements.create",
     )
-    project_id = tool_input.get("project_id")
+    project_id = normalized_input.get("project_id")
     ensure_project_matches_organization(
         db,
         project_id=project_id,
         organization_id=organization_id,
     )
 
-    priority = tool_input.get("priority") or "medium"
+    priority = normalized_input["priority"]
     if priority not in VALID_PRIORITIES:
         raise ValueError(f"priority inválida: {priority}")
 
     requirement = Requirement(
         organization_id=organization_id,
         project_id=project_id,
-        title=title[:255],
+        title=title,
         priority=priority,
         status="draft",
         source_type="conversation",
@@ -1111,13 +1114,50 @@ def _create_requirement(
     for field in REQUIREMENT_CONTENT_FIELDS:
         if field == "title":
             continue
-        value = tool_input.get(field)
+        value = normalized_input.get(field)
         if value is not None:
-            setattr(requirement, field, str(value))
+            setattr(requirement, field, value)
 
     db.add(requirement)
     db.commit()
     return _serialize_requirement(requirement, full=True)
+
+
+def normalize_create_requirement_input(tool_input: dict) -> dict:
+    """Return the exact values that create_requirement would persist."""
+    if "organization_id" not in tool_input:
+        raise ValueError("organization_id es obligatorio")
+    if "title" not in tool_input:
+        raise ValueError("title es obligatorio")
+
+    normalized: dict = {
+        "organization_id": _normalize_positive_identifier(
+            tool_input["organization_id"],
+            "organization_id",
+        )
+    }
+    if tool_input.get("project_id") is not None:
+        normalized["project_id"] = _normalize_positive_identifier(
+            tool_input["project_id"],
+            "project_id",
+        )
+    normalized["title"] = str(tool_input["title"]).strip()[:255]
+    if not normalized["title"]:
+        raise ValueError("title no puede estar vacío")
+    for field in REQUIREMENT_CONTENT_FIELDS:
+        if field == "title":
+            continue
+        value = tool_input.get(field)
+        if value is not None:
+            normalized[field] = str(value)
+    normalized["priority"] = tool_input.get("priority") or "medium"
+    return normalized
+
+
+def _normalize_positive_identifier(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field} debe ser un entero positivo")
+    return value
 
 
 def _update_requirement(
