@@ -81,3 +81,9 @@ Choose the base branch deliberately:
 - Backend assistant/tooling changes should usually run targeted `pytest` first, then the relevant broader suite.
 - Frontend changes should run the relevant lint/build checks.
 - Never claim tests passed without real command output.
+
+## Database migration safety
+
+- Treat every Alembic revision applied to a persistent database as immutable. Never delete, rename or rewrite it; reconcile mistakes with a successor revision.
+- Before a migration drops or transforms data, inspect affected environments and make the migration stop with a clear error when safe automatic handling is not possible.
+- Validate both a fresh upgrade and the path from the latest revision already deployed to `head`.

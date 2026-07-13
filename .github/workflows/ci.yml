@@ -81,6 +81,9 @@ jobs:
       - name: Apply and verify migrations
         run: |
           alembic heads
+          # Keep the last revision already seen in persistent environments
+          # executable before testing the current head.
+          alembic upgrade 20260701_0020
           alembic upgrade head
           alembic check
 
