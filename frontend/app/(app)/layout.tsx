@@ -1,5 +1,6 @@
 "use client";
 
+import { LogOut } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -541,11 +542,19 @@ export default function AppLayout({
             ) : null}
           </div>
           <button
-            className="secondary-button"
+            aria-label="Cerrar sesión"
+            className="secondary-button app-session-logout"
             onClick={() => logout()}
+            title="Cerrar sesión"
             type="button"
           >
-            Cerrar sesión
+            <LogOut
+              aria-hidden="true"
+              className="app-session-logout-icon"
+              size={17}
+              strokeWidth={1.8}
+            />
+            <span className="app-session-logout-label">Cerrar sesión</span>
           </button>
         </div>
       </aside>
