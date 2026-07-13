@@ -306,11 +306,11 @@ _TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "send_admin_feedback",
         "description": (
-            "Envía al administrador feedback explícito del usuario sobre la "
+            "Prepara feedback explícito del usuario para el administrador sobre la "
             "plataforma o el asistente: errores, fricciones, capacidades que "
-            "faltan, problemas de datos o mejoras de UX. Úsala solo después de "
-            "que el usuario acepte enviarlo; antes puedes sugerirlo en lenguaje "
-            "natural. Resume el problema sin datos personales innecesarios."
+            "faltan, problemas de datos o mejoras de UX. La primera llamada queda "
+            "bloqueada hasta que el usuario confirme los datos exactos en un turno "
+            "posterior. Resume el problema sin datos personales innecesarios."
         ),
         "input_schema": {
             "type": "object",
@@ -1289,32 +1289,16 @@ def _propose_memory_entry(
     }
 
 
-def _send_admin_feedback(
-    db: Session,
-    current_user: User,
-    tool_input: dict,
-    context: ToolContext,
-) -> dict:
-    organization_id = tool_input.get("organization_id")
-    if organization_id is not None:
-        organization_id = int(organization_id)
-        ensure_organization_exists(db, organization_id)
-        if not has_permission(
-            current_user,
-            "assistant.use",
-            db,
-            organization_id=organization_id,
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="Permission required: assistant.use",
-            )
+def normalize_admin_feedback_input(tool_input: dict) -> dict:
+    """Return the exact values that send_admin_feedback would persist."""
+    for field in ("category", "title", "description"):
+        if field not in tool_input:
+            raise ValueError(f"{field} es obligatorio")
 
     category = str(tool_input["category"]).strip()
     if category not in VALID_ADMIN_FEEDBACK_CATEGORIES:
         raise ValueError(f"category inválida: {category}")
 
-    title = _clean_transversal_text("title", tool_input["title"], 255)
     description = str(tool_input["description"]).strip()
     if not description:
         raise ValueError("description no puede estar vacío")
@@ -1328,12 +1312,47 @@ def _send_admin_feedback(
     if priority not in VALID_PRIORITIES:
         raise ValueError(f"priority inválida: {priority}")
 
+    normalized = {
+        "category": category,
+        "title": _clean_transversal_text("title", tool_input["title"], 255),
+        "description": description,
+        "priority": priority,
+    }
+    if tool_input.get("organization_id") is not None:
+        normalized["organization_id"] = _normalize_positive_identifier(
+            tool_input["organization_id"],
+            "organization_id",
+        )
+    return normalized
+
+
+def _send_admin_feedback(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    normalized_input = normalize_admin_feedback_input(tool_input)
+    organization_id = normalized_input.get("organization_id")
+    if organization_id is not None:
+        ensure_organization_exists(db, organization_id)
+        if not has_permission(
+            current_user,
+            "assistant.use",
+            db,
+            organization_id=organization_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Permission required: assistant.use",
+            )
+
     feedback = AssistantAdminFeedback(
         organization_id=organization_id,
-        category=category,
-        title=title,
-        description=description,
-        priority=priority,
+        category=normalized_input["category"],
+        title=normalized_input["title"],
+        description=normalized_input["description"],
+        priority=normalized_input["priority"],
         status="submitted",
         source_conversation_id=context.conversation_id,
         source_message_id=context.user_message_id,

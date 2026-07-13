@@ -24,29 +24,29 @@ ERROR_REPLY = (
 )
 CONFIRMATION_REQUIRED_TOOL_RESULT = (
     "Acción bloqueada por la guarda de confirmación humana. El sistema añadirá "
-    "al final de tu respuesta el borrador exacto y la petición de confirmación. "
+    "al final de tu respuesta la propuesta exacta y la petición de confirmación. "
     "Responde brevemente a lo que planteó el usuario, pero no afirmes que el "
-    "borrador ya se creó ni repitas o alteres sus campos. No vuelvas a llamar a "
-    "create_requirement en este mismo turno."
+    "cambio ya se guardó ni repitas o alteres sus campos. No vuelvas a llamar a "
+    "la herramienta bloqueada en este mismo turno."
 )
 CONFIRMATION_CANCELLED_TOOL_RESULT = (
-    "La creación quedó cancelada por la respuesta explícita del usuario. "
-    "No crees el requisito ni vuelvas a solicitar confirmación salvo que el "
-    "usuario pida preparar un borrador nuevo."
+    "La acción quedó cancelada por la respuesta explícita del usuario. "
+    "No la ejecutes ni vuelvas a solicitar confirmación salvo que el usuario "
+    "pida preparar una propuesta nueva."
 )
 CONFIRMATION_ALREADY_CONSUMED_TOOL_RESULT = (
     "La confirmación de este mensaje ya se utilizó. No ejecutes de nuevo la "
-    "creación ni pidas otra confirmación salvo que el usuario solicite un "
-    "borrador nuevo."
+    "acción ni pidas otra confirmación salvo que el usuario solicite una "
+    "propuesta nueva."
 )
 CONFIRMATION_IN_PROGRESS_TOOL_RESULT = (
     "Otra respuesta del usuario ya confirmó esta propuesta y la está "
-    "procesando. No sustituyas el borrador ni vuelvas a llamar a "
-    "create_requirement en este turno."
+    "procesando. No sustituyas la propuesta ni vuelvas a llamar a la "
+    "herramienta bloqueada en este turno."
 )
 CONFIRMATION_STALE_TURN_TOOL_RESULT = (
     "Este turno quedó desactualizado porque el usuario envió un mensaje "
-    "posterior. No crees ni sustituyas ninguna propuesta desde esta respuesta."
+    "posterior. No ejecutes ni sustituyas ninguna propuesta desde esta respuesta."
 )
 VOICE_MODE_PROMPT_BLOCK = """Modo voz:
 - El usuario está hablando por voz y escuchará tu respuesta en voz alta.
@@ -70,8 +70,9 @@ Supervisión y confirmaciones:
 - Las escrituras son borradores o propuestas supervisables. Explica claramente qué quedará guardado y con qué alcance.
 - Antes de estructurar una necesidad, dialoga sobre las decisiones materiales que sigan abiertas. Haz solo las preguntas útiles: si el contexto ya es suficiente, prepara la propuesta sin convertir la conversación en un cuestionario.
 - Cuando el contenido esté entendido, llama a `create_requirement` para preparar y mostrar la propuesta exacta. La guarda bloqueará esa primera llamada; la creación real solo puede ocurrir si el usuario confirma en un turno posterior y vuelves a llamar con los mismos datos.
-- La confirmación debe ser inequívoca, por ejemplo "Sí, créalo", "Confirmo" o "Adelante". No interpretes silencio, preguntas, cambios solicitados ni respuestas ambiguas como confirmación.
-- Si el usuario cancela o rechaza el borrador, no llames a `create_requirement`. Si cambia cualquier dato, presenta el borrador actualizado y pide una confirmación nueva.
+- Para enviar feedback al equipo administrador, llama a `send_admin_feedback` para preparar la propuesta exacta. La guarda bloqueará esa primera llamada; el envío real solo puede ocurrir si el usuario confirma en un turno posterior y vuelves a llamar con los mismos datos.
+- La confirmación debe ser inequívoca, por ejemplo "Sí, créalo", "Sí, envíalo", "Confirmo" o "Adelante". No interpretes silencio, preguntas, cambios solicitados ni respuestas ambiguas como confirmación.
+- Si el usuario cancela o rechaza una propuesta, no vuelvas a llamar a su herramienta. Si cambia cualquier dato, presenta la propuesta actualizada y pide una confirmación nueva.
 - Si una herramienta devuelve un bloqueo de confirmación, no discutas con el sistema ni repitas los campos: el servidor añadirá el borrador exacto y la petición de confirmación.
 - Si falta organización o contenido material para una acción, pregunta solo lo imprescindible.
 

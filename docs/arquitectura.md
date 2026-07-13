@@ -1,6 +1,10 @@
 # Arquitectura
 
-Actualizado: 2026-07-08.
+Actualizado: 2026-07-13.
+
+Este documento describe la arquitectura **implementada**. La arquitectura
+objetivo, con una instancia operativa por ayuntamiento y un control de
+plataforma separado, se define en `docs/vision-producto.md`.
 
 ## Visión general
 
@@ -40,13 +44,13 @@ La distinción central del dominio:
 
 ## IA (dirección)
 
-- La IA es central en la dirección del producto pero siempre supervisada: asiste, estructura y propone; no decide.
+- La implementación actual supervisa todas las escrituras disponibles. La dirección de producto sustituirá progresivamente esa regla general por autonomía basada en riesgo, competencia y delegación, como define `docs/vision-producto.md`.
 - Toda llamada a APIs externas de IA o a un runtime privado de agentes pasa por el gateway interno (`app/assistant/gateway.py`); el pipeline de voz STT/TTS egresa solo por `app/assistant/speech.py` bajo la misma disciplina (ADR-021). Solo viaja el texto de la conversación, memoria institucional aprobada, campos que el usuario dicta, audio del turno y texto de respuesta sintetizable; los documentos originales no salen del servidor y los logs registran solo metadatos (runtime, modelo, tokens, bytes/duración/idioma), nunca contenido.
 - Primera pieza implementada: Anacleto v2 (`app/assistant/`) es un único asistente model-first. No hay planner/router ni handlers de plantillas: el modelo redacta desde un system prompt con contrato de producto, organizaciones visibles, memoria aprobada, cobertura de ordenanzas y herramientas filtradas por permisos. El backend ejecuta las herramientas con los mismos chequeos RBAC que las rutas REST, persiste `agent_key="anacleto"`, `routing=null` y el rastro JSON de herramientas. Las escrituras siguen siendo supervisables: la primera llamada a `create_requirement` prepara una propuesta canónica visible y una guarda en código exige una respuesta explícita en un turno posterior, ligada al payload efectivo completo y consumible una sola vez, antes de crear el borrador. El bucle de tool-use usa el runtime configurado (`ASSISTANT_RUNTIME=anthropic` o `ASSISTANT_RUNTIME=hermes_agent`) y el egreso LLM pasa por `gateway.py`. Sin configuración completa del runtime seleccionado, el módulo queda deshabilitado (503).
 - Streaming web: el endpoint SSE `/assistant/conversations/{id}/messages/stream` emite deltas de texto y actividad de herramientas; el POST clásico queda para compatibilidad y Telegram.
 - Diálogo por voz web: el navegador captura con `MediaRecorder` y reproduce con `<audio>`. La transcripción usa `POST /assistant/audio-transcriptions` (runtime `disabled|nvidia_nim`) y la síntesis `POST /assistant/speech` (runtime `disabled|azure`, MP3 `audio/mpeg`). `/assistant/status` expone las banderas de STT/TTS para que el frontend oculte el modo voz cuando falte alguna. `input_mode="voice"` añade un bloque de estilo oral al prompt por turno, sin columnas nuevas. La web implementa un modo por turnos y un modo manos libres con parada por silencio, síntesis por frases, re-escucha opcional y pausa al ocultar la pestaña.
-- Feedback interno del asistente: Anacleto puede usar `send_admin_feedback` cuando el usuario lo pida o confirme, siempre como herramienta auditada y con los permisos del usuario.
-- Memoria institucional controlada: el asistente puede proponer entradas (`assistant.memory.propose`), pero solo quedan reutilizables tras aprobación humana (`assistant.memory.review`). La reutilización exige `assistant.memory.view` en la organización y solo inyecta entradas `approved` como contexto delimitado.
+- Feedback interno del asistente: `send_admin_feedback` prepara una propuesta exacta y una guarda backend exige confirmación explícita en un turno posterior antes de enviarla. `/admin/producto` es una bandeja local transitoria para el superusuario de la instancia: no anonimiza ni representa todavía el futuro control central.
+- Memoria institucional controlada: el asistente puede proponer entradas (`assistant.memory.propose`), pero solo quedan reutilizables tras aprobación humana (`assistant.memory.review`). La reutilización exige `assistant.memory.view` en la organización y solo inyecta entradas `approved` como contexto delimitado. `/admin/memoria` pertenece al responsable municipal y se mantiene separado de la revisión de producto.
 
 ## MVP ordenanzas Burgos
 
@@ -58,9 +62,9 @@ La distinción central del dominio:
 
 ## Frontend
 
-- App Router multi-ruta con shell de navegación lateral: `/asistente`, `/requisitos`, `/proyectos`, `/mapa`, `/cuenta` y `/admin/{usuarios,grupos,organizaciones,roles,municipios,ordenanzas}`. Los ítems del menú usan los mismos predicados de permisos que las rutas; los permisos de lectura/compare de ordenanzas del alcalde piloto no abren administración, y `/proyectos` solo aparece con permisos de proyecto. Tras el login se aterriza en la primera sección visible.
+- App Router multi-ruta con shell de navegación lateral: `/asistente`, `/requisitos`, `/proyectos`, `/mapa`, `/cuenta` y `/admin/{producto,memoria,usuarios,grupos,organizaciones,roles,municipios,ordenanzas}`. Los ítems del menú usan los mismos predicados de permisos que las rutas; producto exige superusuario, memoria exige `assistant.use` y `assistant.memory.review`, los permisos de solo lectura de ordenanzas no abren administración y `/proyectos` solo aparece con permisos de proyecto. Tras el login se aterriza en la primera sección visible.
 - La sesión vive en `SessionProvider` (layout raíz): usuario, embudo de 401 → logout, cierre de sesión. Guard client-side; sin `middleware.ts` por ahora.
-- Cada ruta monta solo su controlador de dominio y carga datos al entrar; las listas de otros dominios llegan por fetchers ligeros (`app/lib/fetchers.ts`). Los seis hooks de administración viven en `app/lib/admin/`.
+- Cada ruta monta solo su controlador de dominio y carga datos al entrar; las listas de otros dominios llegan por fetchers ligeros (`app/lib/fetchers.ts`). Los controladores de administración viven en `app/lib/admin/`; la revisión de memoria se mantiene fuera del controlador conversacional.
 - Selección, filtros y paginación viven en la URL (deep-links, refresh y botón atrás funcionan); los filtros de municipios, ordenanzas y requisitos se aplican en el servidor.
 - Convenciones: sin librerías de UI/estado, TS estricto, texto en español, CSS monocromo propio.
 

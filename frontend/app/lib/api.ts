@@ -244,6 +244,18 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró la carpeta.";
     case "Assistant memory entry not found":
       return "No se encontró la entrada de memoria.";
+    case "Assistant admin feedback not found":
+      return "No se encontró el feedback de producto.";
+    case "Assistant memory entry was modified by another reviewer":
+      return "Otra persona ha modificado esta entrada. Actualiza la bandeja y revisa la versión nueva antes de continuar.";
+    case "Assistant admin feedback was modified by another reviewer":
+      return "Otra persona ha modificado este feedback. Actualiza la bandeja y revisa la versión nueva antes de continuar.";
+    case "Invalid assistant memory status transition":
+      return "Ese cambio de estado de memoria ya no está permitido. Actualiza la bandeja.";
+    case "Sensitive assistant memory approval requires explicit confirmation":
+      return "Confirma expresamente la revisión del contenido sensible antes de aprobar esta memoria.";
+    case "Invalid assistant admin feedback status transition":
+      return "Ese cambio de estado del feedback ya no está permitido. Actualiza la bandeja.";
     case "Transversal feature not found":
       return "No se encontró la funcionalidad transversal.";
     case "Transversal feature adoption not found":

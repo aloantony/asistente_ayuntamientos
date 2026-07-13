@@ -6,10 +6,6 @@ import type {
   AssistantConversation,
   AssistantConversationDetail,
   AssistantConversationFolder,
-  AssistantMemoryCategory,
-  AssistantMemoryEntry,
-  AssistantMemorySensitivity,
-  AssistantMemoryStatus,
   AssistantRealtimeResponseStatus,
   AssistantStatus,
   AssistantStreamToolActivity,
@@ -503,9 +499,6 @@ export function useAssistantController({
   const [conversationFolders, setConversationFolders] = useState<
     AssistantConversationFolder[]
   >([]);
-  const [memoryEntries, setMemoryEntries] = useState<AssistantMemoryEntry[]>(
-    [],
-  );
   const [selectedConversation, setSelectedConversation] =
     useState<AssistantConversationDetail | null>(null);
   const [draftMessage, setDraftMessage] = useState("");
@@ -632,7 +625,6 @@ export function useAssistantController({
     setAssistantStatus(null);
     setConversations([]);
     setConversationFolders([]);
-    setMemoryEntries([]);
     applySelectedConversation(null);
     setDraftMessage("");
     setIncludeArchivedConversations(false);
@@ -655,7 +647,7 @@ export function useAssistantController({
       const conversationsPath = includeArchived
         ? "/assistant/conversations?include_archived=true"
         : "/assistant/conversations";
-      const [status, conversationList, conversationFoldersList, pendingMemory] =
+      const [status, conversationList, conversationFoldersList] =
         await Promise.all([
         adminRequest<AssistantStatus>(
           "/assistant/status",
@@ -672,16 +664,10 @@ export function useAssistantController({
           token,
           "No se pudieron cargar las carpetas.",
         ).catch(() => []),
-        adminRequest<AssistantMemoryEntry[]>(
-          "/assistant/memory?status=proposed",
-          token,
-          "No se pudieron cargar las propuestas de memoria.",
-        ),
       ]);
       setAssistantStatus(status);
       setConversations(conversationList);
       setConversationFolders(conversationFoldersList);
-      setMemoryEntries(pendingMemory);
     } catch (requestError) {
       handleRequestError(
         requestError,
@@ -2875,25 +2861,6 @@ export function useAssistantController({
     }
   }
 
-  async function loadMemoryEntries(status: AssistantMemoryStatus = "proposed") {
-    setAssistantError("");
-
-    try {
-      const entries = await adminRequest<AssistantMemoryEntry[]>(
-        `/assistant/memory?status=${status}`,
-        getStoredToken(),
-        "No se pudieron cargar las propuestas de memoria.",
-      );
-      setMemoryEntries(entries);
-    } catch (requestError) {
-      handleRequestError(
-        requestError,
-        setAssistantError,
-        "No se pudieron cargar las propuestas de memoria.",
-      );
-    }
-  }
-
   async function assignConversationFolder(
     conversationId: number,
     folderId: number | null,
@@ -3008,40 +2975,10 @@ export function useAssistantController({
     }
   }
 
-  async function updateMemoryEntry(
-    entryId: number,
-    updates: {
-      category?: AssistantMemoryCategory;
-      content?: string;
-      status?: AssistantMemoryStatus;
-      sensitivity?: AssistantMemorySensitivity;
-      review_notes?: string;
-    },
-  ) {
-    setAssistantError("");
-
-    try {
-      await adminRequest<AssistantMemoryEntry>(
-        `/assistant/memory/${entryId}`,
-        getStoredToken(),
-        "No se pudo actualizar la memoria.",
-        { method: "PATCH", body: JSON.stringify(updates) },
-      );
-      await loadMemoryEntries();
-    } catch (requestError) {
-      handleRequestError(
-        requestError,
-        setAssistantError,
-        "No se pudo actualizar la memoria.",
-      );
-    }
-  }
-
   return {
     assistantStatus,
     conversations,
     conversationFolders,
-    memoryEntries,
     selectedConversation,
     draftMessage,
     includeArchivedConversations,
@@ -3057,7 +2994,6 @@ export function useAssistantController({
     setDraftMessage,
     setVoiceModeEnabled,
     loadAssistant,
-    loadMemoryEntries,
     toggleIncludeArchivedConversations,
     selectConversation,
     deselectConversation,
@@ -3075,7 +3011,6 @@ export function useAssistantController({
     createConversationFolder,
     renameConversationFolder,
     deleteConversationFolder,
-    updateMemoryEntry,
     clearAssistantState,
   };
 }
