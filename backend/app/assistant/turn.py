@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.assistant.gateway import (
@@ -37,6 +37,7 @@ from app.assistant.prompts import (
 )
 from app.assistant.tools import (
     ToolContext,
+    ToolResult,
     ToolSpec,
     execute_tool,
     get_available_tool_specs,
@@ -47,6 +48,10 @@ from app.users.models import User
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 4000
+STALE_MUTATING_TOOL_RESULT = (
+    "No se ejecutó la herramienta porque este turno quedó desactualizado por "
+    "un mensaje posterior del usuario."
+)
 TOKEN_PATTERN = re.compile(r"[a-záéíóúüñ0-9]+", re.IGNORECASE)
 TOOL_INTENT_STOPWORDS = {
     "a",
@@ -111,6 +116,11 @@ def run_agent_turn_events(
     # Lock before inserting the message: concurrent FK inserts followed by a
     # row-lock upgrade can deadlock. The first commit releases this short lock.
     conversation = lock_conversation_for_confirmation(db, conversation.id)
+    # Imported lazily because realtime orchestration reuses this module's
+    # history and tool-loop helpers.
+    from app.assistant.realtime import seal_active_realtime_turn
+
+    seal_active_realtime_turn(db, conversation)
     user_message = AssistantMessage(
         conversation=conversation,
         role="user",
@@ -139,6 +149,7 @@ def run_agent_turn_events(
     )
 
     tools = get_available_tool_specs(db, current_user)
+    tools_by_name = {tool.name: tool for tool in tools}
     tool_definitions = [tool.definition for tool in tools]
     tool_names = frozenset(tool.name for tool in tools)
     system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
@@ -201,12 +212,15 @@ def run_agent_turn_events(
                     )
                     if required_confirmation is not None:
                         confirmation_context = required_confirmation
-                result = guarded_result or execute_tool(
-                    db,
-                    current_user,
-                    block.name,
-                    tool_input,
-                    ToolContext(
+                result = guarded_result or _execute_tool_for_current_turn(
+                    db=db,
+                    current_user=current_user,
+                    conversation=conversation,
+                    user_message=user_message,
+                    tool=tools_by_name.get(block.name),
+                    tool_name=block.name,
+                    tool_input=tool_input,
+                    context=ToolContext(
                         conversation_id=conversation.id,
                         user_message_id=user_message.id,
                     ),
@@ -314,6 +328,55 @@ def run_agent_turn_events(
         },
     )
     return assistant_message
+
+
+def _execute_tool_for_current_turn(
+    *,
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    user_message: AssistantMessage,
+    tool: ToolSpec | None,
+    tool_name: str,
+    tool_input: dict,
+    context: ToolContext,
+    allowed: frozenset[str],
+) -> ToolResult:
+    if tool is None or tool.read_only:
+        return execute_tool(
+            db,
+            current_user,
+            tool_name,
+            tool_input,
+            context,
+            allowed=allowed,
+        )
+
+    lock_conversation_for_confirmation(db, conversation.id)
+    latest_user_message_id = db.scalar(
+        select(AssistantMessage.id)
+        .where(
+            AssistantMessage.conversation_id == conversation.id,
+            AssistantMessage.role == "user",
+        )
+        .order_by(AssistantMessage.id.desc())
+        .limit(1)
+    )
+    if latest_user_message_id != user_message.id:
+        db.commit()
+        return ToolResult(content=STALE_MUTATING_TOOL_RESULT, ok=False)
+
+    # Mutating executors commit or roll back their own transaction. Calling the
+    # executor while this row lock is held makes the latest-turn check atomic
+    # with the mutation.
+    return execute_tool(
+        db,
+        current_user,
+        tool_name,
+        tool_input,
+        context,
+        allowed=allowed,
+    )
 
 
 def _confirmation_context_from_result(

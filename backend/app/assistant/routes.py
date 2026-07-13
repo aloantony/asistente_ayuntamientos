@@ -45,6 +45,8 @@ from app.assistant.schemas import (
     AssistantRealtimeToolCallRead,
     AssistantRealtimeTurnCreate,
     AssistantRealtimeTurnRead,
+    AssistantRealtimeTurnStartCreate,
+    AssistantRealtimeTurnStartRead,
     AssistantSpeechCreate,
     AssistantStatusRead,
     AssistantTransversalFeatureAdoptionRead,
@@ -57,11 +59,13 @@ from app.assistant.schemas import (
     TransversalFeatureStatus,
 )
 from app.assistant.realtime import (
+    AssistantRealtimeConflictError,
     AssistantRealtimeUnavailableError,
     create_realtime_client_secret,
     execute_realtime_tool_call,
     persist_realtime_turn,
     realtime_voice_enabled,
+    start_realtime_turn,
 )
 from app.assistant.turn import TurnEvent, run_agent_turn, run_agent_turn_events
 from app.assistant.voice import run_voice_turn_events
@@ -646,6 +650,11 @@ def send_message(
             agent_gateway,
             input_mode=payload.input_mode,
         )
+    except AssistantRealtimeConflictError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from None
     except AssistantUnavailableError:
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -692,6 +701,8 @@ def send_message_stream(
             yield format_sse_event(
                 TurnEvent("error", {"detail": "Assistant request failed"})
             )
+        except AssistantRealtimeConflictError as error:
+            yield format_sse_event(TurnEvent("error", {"detail": str(error)}))
 
     return StreamingResponse(
         event_stream(),
@@ -746,6 +757,8 @@ async def send_voice_turn_stream(
             yield format_sse_event(
                 TurnEvent("error", {"detail": "Assistant request failed"})
             )
+        except AssistantRealtimeConflictError as error:
+            yield format_sse_event(TurnEvent("error", {"detail": str(error)}))
 
     return StreamingResponse(
         event_stream(),
@@ -782,7 +795,11 @@ def create_realtime_voice_session(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Realtime voice is not configured",
         ) from None
-
+    except AssistantRealtimeConflictError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from None
     return AssistantRealtimeSessionRead(
         client_secret=client_secret["value"],
         client_secret_expires_at=client_secret.get("expires_at"),
@@ -793,11 +810,50 @@ def create_realtime_voice_session(
 
 
 @router.post(
-    "/conversations/{conversation_id}/realtime/tool-calls",
+    "/conversations/{conversation_id}/realtime/turns/start",
+    response_model=AssistantRealtimeTurnStartRead,
+)
+def start_realtime_voice_turn(
+    conversation_id: int,
+    payload: AssistantRealtimeTurnStartCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    require_assistant_use(db, current_user)
+    conversation = get_own_conversation(db, current_user, conversation_id)
+
+    if conversation.status != "active":
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="Conversation is archived",
+        )
+
+    try:
+        user_message, replayed = start_realtime_turn(
+            db,
+            current_user,
+            conversation,
+            payload,
+        )
+    except AssistantRealtimeConflictError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from None
+    return {
+        "turn_id": payload.turn_id,
+        "user_message": user_message,
+        "replayed": replayed,
+    }
+
+
+@router.post(
+    "/conversations/{conversation_id}/realtime/turns/{turn_id}/tool-calls",
     response_model=AssistantRealtimeToolCallRead,
 )
 def execute_realtime_voice_tool_call(
     conversation_id: int,
+    turn_id: str,
     payload: AssistantRealtimeToolCallCreate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
@@ -811,27 +867,39 @@ def execute_realtime_voice_tool_call(
             detail="Conversation is archived",
         )
 
-    action, output, user_message = execute_realtime_tool_call(
-        db,
-        current_user,
-        conversation,
-        payload,
-    )
+    try:
+        action, output, user_message, confirmation_prompt, replayed = (
+            execute_realtime_tool_call(
+                db,
+                current_user,
+                conversation,
+                turn_id,
+                payload,
+            )
+        )
+    except AssistantRealtimeConflictError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from None
     return {
         "call_id": payload.call_id,
         "ok": action["ok"],
         "output": output,
         "action": action,
         "user_message": user_message,
+        "confirmation_prompt": confirmation_prompt,
+        "replayed": replayed,
     }
 
 
 @router.post(
-    "/conversations/{conversation_id}/realtime/turns",
+    "/conversations/{conversation_id}/realtime/turns/{turn_id}/complete",
     response_model=AssistantRealtimeTurnRead,
 )
 def persist_realtime_voice_turn(
     conversation_id: int,
+    turn_id: str,
     payload: AssistantRealtimeTurnCreate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
@@ -845,16 +913,33 @@ def persist_realtime_voice_turn(
             detail="Conversation is archived",
         )
 
-    user_message, assistant_message = persist_realtime_turn(
-        db,
-        current_user,
-        conversation,
-        payload,
-    )
+    try:
+        (
+            user_message,
+            assistant_message,
+            confirmation_prompt,
+            confirmation_delivery_required,
+            replayed,
+        ) = persist_realtime_turn(
+            db,
+            current_user,
+            conversation,
+            turn_id,
+            payload,
+        )
+    except AssistantRealtimeConflictError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from None
+    db.refresh(conversation)
     return {
         "conversation": conversation,
         "user_message": user_message,
         "assistant_message": assistant_message,
+        "confirmation_prompt": confirmation_prompt,
+        "confirmation_delivery_required": confirmation_delivery_required,
+        "replayed": replayed,
     }
 
 

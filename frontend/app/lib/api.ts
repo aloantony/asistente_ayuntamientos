@@ -2,8 +2,10 @@ import type {
   AssistantRealtimeSession,
   AssistantRealtimeToolCallRequest,
   AssistantRealtimeToolCallResult,
-  AssistantRealtimeTurnRequest,
+  AssistantRealtimeTurnCompleteRequest,
   AssistantRealtimeTurnResult,
+  AssistantRealtimeTurnStartRequest,
+  AssistantRealtimeTurnStartResult,
   AssistantStreamDone,
   AssistantStreamMessageStart,
   AssistantStreamTranscriptFinal,
@@ -420,38 +422,57 @@ export async function streamAssistantVoiceTurn(
 export async function createAssistantRealtimeSession(
   conversationId: number,
   accessToken: string,
+  signal?: AbortSignal,
 ) {
   return adminRequest<AssistantRealtimeSession>(
     `/assistant/conversations/${conversationId}/realtime/session`,
     accessToken,
     "No se pudo iniciar la voz en tiempo real.",
-    { method: "POST", body: JSON.stringify({}) },
+    { method: "POST", body: JSON.stringify({}), signal },
   );
 }
 
 export async function sendAssistantRealtimeToolCall(
   conversationId: number,
+  turnId: string,
   payload: AssistantRealtimeToolCallRequest,
   accessToken: string,
+  signal?: AbortSignal,
 ) {
   return adminRequest<AssistantRealtimeToolCallResult>(
-    `/assistant/conversations/${conversationId}/realtime/tool-calls`,
+    `/assistant/conversations/${conversationId}/realtime/turns/${turnId}/tool-calls`,
     accessToken,
     "No se pudo ejecutar la herramienta de voz.",
-    { method: "POST", body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(payload), signal },
   );
 }
 
-export async function persistAssistantRealtimeTurn(
+export async function startAssistantRealtimeTurn(
   conversationId: number,
-  payload: AssistantRealtimeTurnRequest,
+  payload: AssistantRealtimeTurnStartRequest,
   accessToken: string,
+  signal?: AbortSignal,
+) {
+  return adminRequest<AssistantRealtimeTurnStartResult>(
+    `/assistant/conversations/${conversationId}/realtime/turns/start`,
+    accessToken,
+    "No se pudo iniciar el turno de voz.",
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+}
+
+export async function completeAssistantRealtimeTurn(
+  conversationId: number,
+  turnId: string,
+  payload: AssistantRealtimeTurnCompleteRequest,
+  accessToken: string,
+  signal?: AbortSignal,
 ) {
   return adminRequest<AssistantRealtimeTurnResult>(
-    `/assistant/conversations/${conversationId}/realtime/turns`,
+    `/assistant/conversations/${conversationId}/realtime/turns/${turnId}/complete`,
     accessToken,
     "No se pudo guardar el turno de voz.",
-    { method: "POST", body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(payload), signal },
   );
 }
 

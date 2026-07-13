@@ -1014,6 +1014,7 @@ export type AssistantMemoryEntry = {
 };
 
 export type AssistantAction = {
+  call_id?: string;
   tool: string;
   ok: boolean;
   input: Record<string, unknown>;
@@ -1092,12 +1093,21 @@ export type AssistantRealtimeSession = {
   realtime_url: string;
 };
 
+export type AssistantRealtimeTurnStartRequest = {
+  turn_id: string;
+  user_text: string;
+};
+
+export type AssistantRealtimeTurnStartResult = {
+  turn_id: string;
+  user_message: AssistantMessage;
+  replayed: boolean;
+};
+
 export type AssistantRealtimeToolCallRequest = {
   call_id: string;
   name: string;
   arguments: Record<string, unknown>;
-  user_transcript?: string | null;
-  user_message_id?: number | null;
 };
 
 export type AssistantRealtimeToolCallResult = {
@@ -1106,20 +1116,30 @@ export type AssistantRealtimeToolCallResult = {
   output: string;
   action: AssistantAction;
   user_message: AssistantMessage;
+  confirmation_prompt: string | null;
+  replayed: boolean;
 };
 
-export type AssistantRealtimeTurnRequest = {
-  user_text?: string | null;
+export type AssistantRealtimeResponseStatus =
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "incomplete";
+
+export type AssistantRealtimeTurnCompleteRequest = {
+  response_id: string;
+  response_status: AssistantRealtimeResponseStatus;
   assistant_text?: string | null;
-  actions: AssistantAction[];
-  user_message_id?: number | null;
-  interrupted?: boolean;
+  interrupted: boolean;
 };
 
 export type AssistantRealtimeTurnResult = {
   conversation: AssistantConversation;
   user_message: AssistantMessage | null;
   assistant_message: AssistantMessage | null;
+  confirmation_prompt: string | null;
+  confirmation_delivery_required: boolean;
+  replayed: boolean;
 };
 
 export type AssistantConversationFolder = {
