@@ -954,6 +954,9 @@ export type AssistantStatus = {
   runtime_healthy: boolean | null;
   speech_transcription_enabled: boolean;
   speech_synthesis_enabled: boolean;
+  realtime_voice_enabled: boolean;
+  realtime_voice_provider: "openai" | null;
+  realtime_voice_model: string | null;
   tools: AssistantTool[];
 };
 
@@ -1011,6 +1014,7 @@ export type AssistantMemoryEntry = {
 };
 
 export type AssistantAction = {
+  call_id?: string;
   tool: string;
   ok: boolean;
   input: Record<string, unknown>;
@@ -1057,6 +1061,85 @@ export type AssistantStreamToolActivity = {
 export type AssistantStreamDone = {
   message: AssistantMessage;
   conversation: AssistantConversation;
+};
+
+export type AssistantVoiceState =
+  | "idle"
+  | "connecting"
+  | "listening"
+  | "user_speaking"
+  | "transcribing"
+  | "thinking"
+  | "tool_running"
+  | "responding"
+  | "done"
+  | "interrupted"
+  | "error";
+
+export type AssistantStreamVoiceState = {
+  state: AssistantVoiceState;
+};
+
+export type AssistantStreamTranscriptFinal = {
+  text: string;
+};
+
+export type AssistantRealtimeSession = {
+  client_secret: string;
+  client_secret_expires_at: number | null;
+  provider: "openai";
+  model: string;
+  voice: string;
+  realtime_url: string;
+};
+
+export type AssistantRealtimeTurnStartRequest = {
+  turn_id: string;
+  user_text: string;
+};
+
+export type AssistantRealtimeTurnStartResult = {
+  turn_id: string;
+  user_message: AssistantMessage;
+  replayed: boolean;
+};
+
+export type AssistantRealtimeToolCallRequest = {
+  call_id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+};
+
+export type AssistantRealtimeToolCallResult = {
+  call_id: string;
+  ok: boolean;
+  output: string;
+  action: AssistantAction;
+  user_message: AssistantMessage;
+  confirmation_prompt: string | null;
+  replayed: boolean;
+};
+
+export type AssistantRealtimeResponseStatus =
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "incomplete";
+
+export type AssistantRealtimeTurnCompleteRequest = {
+  response_id: string;
+  response_status: AssistantRealtimeResponseStatus;
+  assistant_text?: string | null;
+  interrupted: boolean;
+};
+
+export type AssistantRealtimeTurnResult = {
+  conversation: AssistantConversation;
+  user_message: AssistantMessage | null;
+  assistant_message: AssistantMessage | null;
+  confirmation_prompt: string | null;
+  confirmation_delivery_required: boolean;
+  replayed: boolean;
 };
 
 export type AssistantConversationFolder = {

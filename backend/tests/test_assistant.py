@@ -2,6 +2,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.assistant import guards as assistant_guards
+from app.assistant import realtime as assistant_realtime
 from app.assistant import tools as assistant_tools
+from app.assistant import turn as assistant_turn
 from app.assistant.gateway import (
     AITextDelta,
     AssistantUnavailableError,
@@ -23,6 +26,7 @@ from app.assistant.models import (
 )
 from app.assistant.speech import SpeechTranscriptionError, build_azure_ssml
 from app.assistant.routes import get_gateway
+from app.assistant.schemas import AssistantRealtimeTurnStartCreate
 from app.assistant.turn import ERROR_REPLY, build_history
 from app.core.config import settings
 from app.main import app
@@ -83,6 +87,37 @@ class FakeGateway:
         for delta in response.deltas:
             yield AITextDelta(text=delta)
         return response
+
+
+def parse_sse_events(payload: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for frame in payload.strip().split("\n\n"):
+        if not frame.strip():
+            continue
+        event_name = "message"
+        data_lines: list[str] = []
+        for line in frame.splitlines():
+            if line.startswith("event:"):
+                event_name = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").strip())
+        data = json.loads("\n".join(data_lines)) if data_lines else {}
+        events.append((event_name, data))
+    return events
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
 
 
 @pytest.fixture()
@@ -182,6 +217,48 @@ def test_status_reports_speech_flags(
     assert body["speech_synthesis_enabled"] is True
 
 
+def test_status_reports_realtime_voice_flags(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "assistant_realtime_enabled", True)
+    monkeypatch.setattr(settings, "assistant_realtime_model", "gpt-realtime-2.1")
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["realtime_voice_enabled"] is True
+    assert body["realtime_voice_provider"] == "openai"
+    assert body["realtime_voice_model"] == "gpt-realtime-2.1"
+
+
+def test_realtime_voice_requires_server_transcription(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "assistant_realtime_enabled", True)
+    monkeypatch.setattr(settings, "assistant_realtime_transcription_model", "")
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["realtime_voice_enabled"] is False
+    assert body["realtime_voice_provider"] is None
+    assert body["realtime_voice_model"] is None
+
+
 def test_transcribe_audio_returns_text(client, assistant_user, monkeypatch):
     user, _ = assistant_user
 
@@ -259,6 +336,1562 @@ def test_transcribe_audio_unavailable_when_disabled(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Audio transcription is not available"
+
+
+def test_voice_turn_stream_transcribes_runs_agent_and_persists_reply(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "end_turn",
+                    [text_block("Claro, te ayudo con la consulta.")],
+                    deltas=["Claro, ", "te ayudo con la consulta."],
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "app.assistant.voice.transcribe_audio_bytes",
+        lambda audio, *, language_code=None: "Hola por voz",
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/voice-turns/stream",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    event_names = [name for name, _ in events]
+    assert event_names[:3] == [
+        "voice_state",
+        "transcript_final",
+        "voice_state",
+    ]
+    assert events[0][1] == {"state": "transcribing"}
+    assert events[1][1] == {"text": "Hola por voz"}
+    assert events[2][1] == {"state": "thinking"}
+    assert ("text_delta", {"text": "Claro, "}) in events
+    assert ("text_delta", {"text": "te ayudo con la consulta."}) in events
+    done = next(data for name, data in events if name == "done")
+    assert done["message"]["content"] == "Claro, te ayudo con la consulta."
+    assert done["message"]["role"] == "assistant"
+    assert gateway.calls[0]["messages"][-1] == {
+        "role": "user",
+        "content": "Hola por voz",
+    }
+    assert "escuchará tu respuesta en voz alta" in gateway.calls[0]["system"]
+
+
+def test_voice_turn_stream_rejects_large_audio(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "speech_transcription_max_bytes", 10)
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/voice-turns/stream",
+        files={"file": ("audio.webm", b"x" * 11, "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Audio file is too large"
+
+
+def test_voice_turn_stream_reports_transcription_unavailable(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+
+    def raise_unavailable(audio: bytes, *, language_code=None) -> str:
+        raise SpeechTranscriptionError("Speech transcription is disabled")
+
+    monkeypatch.setattr(
+        "app.assistant.voice.transcribe_audio_bytes",
+        raise_unavailable,
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/voice-turns/stream",
+        files={"file": ("audio.webm", b"audio", "audio/webm")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert parse_sse_events(response.text) == [
+        ("voice_state", {"state": "transcribing"}),
+        ("error", {"detail": "Audio transcription is not available"}),
+    ]
+
+
+def test_realtime_session_creates_openai_client_secret(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    captured = {}
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "assistant_realtime_enabled", True)
+    monkeypatch.setattr(settings, "assistant_realtime_model", "gpt-realtime-2.1")
+    monkeypatch.setattr(settings, "assistant_realtime_voice", "marin")
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
+
+    monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    active_turn_id = str(uuid.uuid4())
+    active_turn = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=active_turn_id,
+        user_text="Turno pendiente antes de reconectar",
+    )
+    assert active_turn.status_code == 200
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/realtime/session",
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "client_secret": "ek_test",
+        "client_secret_expires_at": 123,
+        "provider": "openai",
+        "model": "gpt-realtime-2.1",
+        "voice": "marin",
+        "realtime_url": settings.assistant_realtime_url,
+    }
+    assert captured["url"] == settings.assistant_realtime_client_secret_url
+    session = captured["payload"]["session"]
+    assert session["type"] == "realtime"
+    assert session["model"] == "gpt-realtime-2.1"
+    assert session["audio"]["output"]["voice"] == "marin"
+    assert (
+        session["audio"]["input"]["turn_detection"]["interrupt_response"]
+        is True
+    )
+    assert session["audio"]["input"]["turn_detection"]["create_response"] is False
+    assert "conversación hablada" in session["instructions"]
+    tool_names = {tool["name"] for tool in session["tools"]}
+    assert "list_requirements" in tool_names
+    assert "create_requirement" in tool_names
+    state = get_conversation_state(db, conversation["id"])
+    assert state["realtime_voice"]["active_turn"] is None
+    abandoned = next(
+        turn
+        for turn in state["realtime_voice"]["recent_turns"]
+        if turn["turn_id"] == active_turn_id
+    )
+    assert abandoned["status"] == "abandoned"
+    assert abandoned["assistant_message_id"]
+    assert "Respuesta de voz interrumpida" in session["instructions"]
+
+
+def test_realtime_session_history_marks_finished_actions_as_already_processed(
+    client,
+    db,
+    assistant_user,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Expediente con nota realtime",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Anade la nota acordada al expediente",
+    )
+    assert started.status_code == 200
+    private_note = "DETALLE_INTERNO_QUE_NO_DEBE_ENTRAR_EN_EL_PROMPT"
+    tool_response = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_add_note_before_reconnect",
+        name="add_requirement_message",
+        arguments={"requirement_id": requirement.id, "body": private_note},
+    )
+    assert tool_response.status_code == 200
+    assert tool_response.json()["ok"] is True
+    cancelled = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id="response_cancelled_before_reconnect",
+        assistant_text="",
+        response_status="cancelled",
+        interrupted=True,
+    )
+    assert cancelled.status_code == 200
+    assert "No las repitas automáticamente" in cancelled.json()[
+        "assistant_message"
+    ]["content"]
+
+    captured = {}
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "assistant_realtime_enabled", True)
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
+
+    monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
+    session_response = client.post(
+        f"/assistant/conversations/{conversation['id']}/realtime/session",
+        headers=headers_for(user),
+    )
+
+    assert session_response.status_code == 200
+    instructions = captured["payload"]["session"]["instructions"]
+    assert "No las repitas automáticamente" in instructions
+    assert "correctas: add_requirement_message (1)" in instructions
+    assert private_note not in instructions
+    state = get_conversation_state(db, conversation["id"])
+    assert state["realtime_voice"]["active_turn"] is None
+    db.expire_all()
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert [message.role for message in stored_messages] == ["user", "assistant"]
+    assert stored_messages[-1].content.startswith("Respuesta interrumpida.")
+    assert json.loads(stored_messages[-1].actions or "[]") == [
+        tool_response.json()["action"]
+    ]
+
+
+def post_realtime_turn_start(
+    client,
+    user,
+    conversation_id: int,
+    *,
+    turn_id: str,
+    user_text: str,
+):
+    return client.post(
+        f"/assistant/conversations/{conversation_id}/realtime/turns/start",
+        json={"turn_id": turn_id, "user_text": user_text},
+        headers=headers_for(user),
+    )
+
+
+def post_realtime_tool_call(
+    client,
+    user,
+    conversation_id: int,
+    turn_id: str,
+    *,
+    call_id: str,
+    name: str,
+    arguments: dict,
+):
+    return client.post(
+        (
+            f"/assistant/conversations/{conversation_id}/realtime/turns/"
+            f"{turn_id}/tool-calls"
+        ),
+        json={"call_id": call_id, "name": name, "arguments": arguments},
+        headers=headers_for(user),
+    )
+
+
+def post_realtime_turn_complete(
+    client,
+    user,
+    conversation_id: int,
+    turn_id: str,
+    *,
+    response_id: str,
+    assistant_text: str,
+    response_status: str = "completed",
+    interrupted: bool = False,
+):
+    return client.post(
+        (
+            f"/assistant/conversations/{conversation_id}/realtime/turns/"
+            f"{turn_id}/complete"
+        ),
+        json={
+            "response_id": response_id,
+            "response_status": response_status,
+            "assistant_text": assistant_text,
+            "interrupted": interrupted,
+        },
+        headers=headers_for(user),
+    )
+
+
+def create_realtime_requirement_proposal(
+    client,
+    user,
+    conversation_id: int,
+    tool_input: dict,
+) -> tuple[str, dict, dict]:
+    turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation_id,
+        turn_id=turn_id,
+        user_text="Prepara esta necesidad como borrador",
+    )
+    assert started.status_code == 200
+    tool_response = post_realtime_tool_call(
+        client,
+        user,
+        conversation_id,
+        turn_id,
+        call_id="call_proposal",
+        name="create_requirement",
+        arguments=tool_input,
+    )
+    assert tool_response.status_code == 200
+    return turn_id, started.json(), tool_response.json()
+
+
+def arm_realtime_requirement_proposal(
+    client,
+    user,
+    conversation_id: int,
+    tool_input: dict,
+) -> tuple[dict, dict]:
+    turn_id, _, tool_body = create_realtime_requirement_proposal(
+        client,
+        user,
+        conversation_id,
+        tool_input,
+    )
+    prompt = tool_body["confirmation_prompt"]
+    completed = post_realtime_turn_complete(
+        client,
+        user,
+        conversation_id,
+        turn_id,
+        response_id=f"response-{turn_id}",
+        assistant_text=prompt,
+    )
+    assert completed.status_code == 200
+    return tool_body, completed.json()
+
+
+def test_realtime_turn_start_is_idempotent_and_user_text_is_immutable(
+    client,
+    db,
+    assistant_user,
+):
+    user, _ = assistant_user
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+
+    first = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Lista las necesidades abiertas",
+    )
+    replay = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Lista las necesidades abiertas",
+    )
+    mismatch = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Texto alterado después de iniciar el turno",
+    )
+
+    assert first.status_code == 200
+    assert first.json()["replayed"] is False
+    assert first.json()["turn_id"] == turn_id
+    assert first.json()["user_message"]["content"] == "Lista las necesidades abiertas"
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert replay.json()["user_message"]["id"] == first.json()["user_message"]["id"]
+    assert mismatch.status_code == 409
+    db.expire_all()
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert len(stored_messages) == 1
+    assert stored_messages[0].role == "user"
+    assert stored_messages[0].content == "Lista las necesidades abiertas"
+
+
+def test_realtime_new_speech_supersedes_open_turn_without_reusing_it(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Acción realtime auditable",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    first_turn_id = str(uuid.uuid4())
+    second_turn_id = str(uuid.uuid4())
+
+    first = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=first_turn_id,
+        user_text="Primera intervención",
+    )
+    first_call = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        first_turn_id,
+        call_id="call_first_turn",
+        name="list_requirements",
+        arguments={"organization_id": organization.id},
+    )
+    second = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=second_turn_id,
+        user_text="Intervención que sustituye la anterior",
+    )
+    old_call = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        first_turn_id,
+        call_id="call_old_turn",
+        name="list_requirements",
+        arguments={},
+    )
+
+    assert first.status_code == 200
+    assert first_call.status_code == 200
+    assert second.status_code == 200
+    assert old_call.status_code == 409
+    state = get_conversation_state(db, conversation["id"])["realtime_voice"]
+    assert state["active_turn"]["turn_id"] == second_turn_id
+    archived = next(
+        turn
+        for turn in state["recent_turns"]
+        if turn["turn_id"] == first_turn_id
+    )
+    assert archived["status"] == "superseded"
+    assert archived["assistant_message_id"]
+    db.expire_all()
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert [message.role for message in stored_messages] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert stored_messages[1].content.startswith("Respuesta de voz interrumpida.")
+    assert "No las repitas automáticamente" in stored_messages[1].content
+    assert "correctas: list_requirements (1)" in stored_messages[1].content
+    assert json.loads(stored_messages[1].actions or "[]") == [
+        first_call.json()["action"]
+    ]
+
+
+def test_realtime_new_turn_rejects_tool_call_still_in_progress(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    first_turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=first_turn_id,
+        user_text="Ejecuta una consulta",
+    )
+    assert started.status_code == 200
+    state = get_conversation_state(db, conversation["id"])
+    active_turn = state["realtime_voice"]["active_turn"]
+    active_turn["call_order"].append("call_in_progress")
+    active_turn["calls"]["call_in_progress"] = {
+        "request_digest": "reserved",
+        "status": "started",
+        "name": "list_requirements",
+        "input": {},
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    stored_conversation.state = json.dumps(state, ensure_ascii=False)
+    db.commit()
+
+    superseding = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=str(uuid.uuid4()),
+        user_text="No debe sustituir el turno en ejecución",
+    )
+
+    assert superseding.status_code == 409
+    normal_turn = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Tampoco debe insertar un mensaje de texto"},
+        headers=headers_for(user),
+    )
+    assert normal_turn.status_code == 409
+    state = get_conversation_state(db, conversation["id"])
+    assert state["realtime_voice"]["active_turn"]["turn_id"] == first_turn_id
+    db.expire_all()
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert [message.role for message in stored_messages] == ["user"]
+
+
+def test_realtime_expired_tool_lease_is_sealed_as_indeterminate(
+    client,
+    db,
+    assistant_user,
+):
+    user, _ = assistant_user
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    first_turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=first_turn_id,
+        user_text="Turno cuyo worker dejó de responder",
+    )
+    assert started.status_code == 200
+    state = get_conversation_state(db, conversation["id"])
+    active_turn = state["realtime_voice"]["active_turn"]
+    active_turn["call_order"].append("call_expired")
+    active_turn["calls"]["call_expired"] = {
+        "request_digest": "reserved",
+        "status": "started",
+        "name": "list_requirements",
+        "input": {},
+        "started_at": "2000-01-01T00:00:00+00:00",
+    }
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    stored_conversation.state = json.dumps(state, ensure_ascii=False)
+    db.commit()
+
+    next_turn = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=str(uuid.uuid4()),
+        user_text="Continúa sin repetir la acción incierta",
+    )
+
+    assert next_turn.status_code == 200
+    state = get_conversation_state(db, conversation["id"])
+    archived = next(
+        turn
+        for turn in state["realtime_voice"]["recent_turns"]
+        if turn["turn_id"] == first_turn_id
+    )
+    expired_call = archived["calls"]["call_expired"]
+    assert archived["status"] == "superseded"
+    assert expired_call["status"] == "indeterminate"
+    assert expired_call["action"]["ok"] is False
+    assert "Revisa el sistema" in expired_call["action"]["result"]
+    db.expire_all()
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert json.loads(stored_messages[1].actions or "[]") == [
+        expired_call["action"]
+    ]
+
+
+def test_realtime_read_tool_replays_calls_and_persists_server_actions(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Actualizar inventario",
+        summary="Inventario de luminarias",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Lista las necesidades abiertas",
+    )
+    assert started.status_code == 200
+    arguments = {"organization_id": organization.id}
+
+    tool_response = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_read",
+        name="list_requirements",
+        arguments=arguments,
+    )
+    replay = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_read",
+        name="list_requirements",
+        arguments=arguments,
+    )
+    mismatch = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_read",
+        name="list_requirements",
+        arguments={"organization_id": organization.id + 1},
+    )
+
+    assert tool_response.status_code == 200
+    tool_body = tool_response.json()
+    assert tool_body["call_id"] == "call_read"
+    assert tool_body["ok"] is True
+    assert tool_body["replayed"] is False
+    assert tool_body["action"]["tool"] == "list_requirements"
+    assert "Actualizar inventario" in tool_body["output"]
+    assert tool_body["confirmation_prompt"] is None
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert replay.json()["action"] == tool_body["action"]
+    assert replay.json()["output"] == tool_body["output"]
+    assert mismatch.status_code == 409
+
+    complete_payload = {
+        "response_id": f"response-{turn_id}",
+        "assistant_text": "Hay una necesidad abierta: actualizar inventario.",
+    }
+    completed = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        **complete_payload,
+    )
+    complete_replay = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        **complete_payload,
+    )
+
+    assert completed.status_code == 200
+    complete_body = completed.json()
+    assert complete_body["replayed"] is False
+    assert complete_body["confirmation_prompt"] is None
+    assert complete_body["confirmation_delivery_required"] is False
+    assert complete_body["assistant_message"]["actions"] == [tool_body["action"]]
+    assert complete_replay.status_code == 200
+    assert complete_replay.json()["replayed"] is True
+    assert (
+        complete_replay.json()["assistant_message"]["id"]
+        == complete_body["assistant_message"]["id"]
+    )
+    db.expire_all()
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert [message.role for message in stored_messages] == ["user", "assistant"]
+    assert json.loads(stored_messages[-1].actions or "[]") == [tool_body["action"]]
+
+
+def test_realtime_tool_exception_is_cached_as_indeterminate(
+    client,
+    db,
+    assistant_user,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Ejecuta una consulta que falla de forma inesperada",
+    )
+    assert started.status_code == 200
+
+    def fail_unexpectedly(*args, **kwargs):
+        raise RuntimeError("unexpected tool failure")
+
+    monkeypatch.setattr(
+        "app.assistant.realtime.execute_tool",
+        fail_unexpectedly,
+    )
+    payload = {
+        "call_id": "call_indeterminate",
+        "name": "list_requirements",
+        "arguments": {"organization_id": organization.id},
+    }
+    first = client.post(
+        (
+            f"/assistant/conversations/{conversation['id']}/realtime/turns/"
+            f"{turn_id}/tool-calls"
+        ),
+        json=payload,
+        headers=headers_for(user),
+    )
+    replay = client.post(
+        (
+            f"/assistant/conversations/{conversation['id']}/realtime/turns/"
+            f"{turn_id}/tool-calls"
+        ),
+        json=payload,
+        headers=headers_for(user),
+    )
+
+    assert first.status_code == 200
+    assert first.json()["ok"] is False
+    assert "Revisa el sistema" in first.json()["output"]
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert replay.json()["action"] == first.json()["action"]
+    followup_call = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_after_indeterminate",
+        name="list_requirements",
+        arguments={"organization_id": organization.id},
+    )
+    assert followup_call.status_code == 409
+    completed = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id=f"response-{turn_id}",
+        assistant_text="No se pudo confirmar el resultado de la consulta.",
+    )
+    assert completed.status_code == 200
+    assert completed.json()["assistant_message"]["actions"] == [
+        first.json()["action"]
+    ]
+    state = get_conversation_state(db, conversation["id"])
+    archived = next(
+        turn
+        for turn in state["realtime_voice"]["recent_turns"]
+        if turn["turn_id"] == turn_id
+    )
+    assert archived["calls"]["call_indeterminate"]["status"] == "indeterminate"
+
+
+def test_realtime_tool_output_is_bounded(
+    client,
+    assistant_user,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Devuelve un resultado grande",
+    )
+    monkeypatch.setattr(
+        "app.assistant.realtime.execute_tool",
+        lambda *args, **kwargs: assistant_tools.ToolResult(
+            content="x" * 5000,
+            ok=True,
+        ),
+    )
+
+    response = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_large_output",
+        name="list_requirements",
+        arguments={"organization_id": organization.id},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["output"]) == 4000
+    assert len(response.json()["action"]["result"]) == 4000
+
+
+def test_realtime_requirement_confirmation_arms_only_after_exact_completed_prompt(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Portal ciudadano realtime",
+        "problem": "Las solicitudes se reciben por correo.",
+        "summary": "Centralizar solicitudes ciudadanas.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    turn_id, _, tool_body = create_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        tool_input,
+    )
+
+    assert tool_body["ok"] is False
+    assert tool_body["replayed"] is False
+    prompt = tool_body["confirmation_prompt"]
+    assert isinstance(prompt, str) and prompt
+    assert "Borrador pendiente de confirmación" in prompt
+    assert tool_input["title"] in prompt
+    assert tool_input["problem"] in prompt
+    assert "prioridad: medium" in prompt
+    assert "estado al guardar: draft" in prompt
+    assert "origen: conversation" in prompt
+    assert "###" not in prompt
+    assert "**" not in prompt
+    assert "`" not in prompt
+    assert db.scalar(select(Requirement)) is None
+    pending_before_completion = get_pending_confirmation(db, conversation["id"])
+    assert "prompted_at_assistant_message_id" not in pending_before_completion
+
+    completed = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id=f"response-{turn_id}",
+        assistant_text=prompt,
+        response_status="completed",
+        interrupted=False,
+    )
+
+    assert completed.status_code == 200
+    complete_body = completed.json()
+    assert complete_body["replayed"] is False
+    assert complete_body["confirmation_prompt"] == prompt
+    assert complete_body["confirmation_delivery_required"] is False
+    assert complete_body["assistant_message"]["content"] == prompt
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert (
+        pending["prompted_at_assistant_message_id"]
+        == complete_body["assistant_message"]["id"]
+    )
+
+
+def test_realtime_interrupted_prompt_does_not_arm_confirmation(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Propuesta interrumpida",
+        "problem": "Debe oírse el contenido exacto antes de confirmar.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id, _, tool_body = create_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        tool_input,
+    )
+    prompt = tool_body["confirmation_prompt"]
+
+    completed = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id=f"response-{turn_id}",
+        assistant_text=prompt,
+        response_status="completed",
+        interrupted=True,
+    )
+
+    assert completed.status_code == 200
+    assert completed.json()["confirmation_prompt"] == prompt
+    assert completed.json()["confirmation_delivery_required"] is False
+    interrupted_content = completed.json()["assistant_message"]["content"]
+    assert interrupted_content.startswith(prompt)
+    assert "No las repitas automáticamente" in interrupted_content
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert "prompted_at_assistant_message_id" not in pending
+
+    confirmation_turn_id = str(uuid.uuid4())
+    confirmation_started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=confirmation_turn_id,
+        user_text="Sí, créalo",
+    )
+    assert confirmation_started.status_code == 200
+    attempted_confirmation = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        confirmation_turn_id,
+        call_id="call_hidden_confirmation",
+        name="create_requirement",
+        arguments=tool_input,
+    )
+
+    assert attempted_confirmation.status_code == 200
+    assert attempted_confirmation.json()["ok"] is False
+    assert attempted_confirmation.json()["confirmation_prompt"] == prompt
+    assert db.scalar(select(Requirement)) is None
+
+
+def test_realtime_paraphrased_prompt_requires_exact_delivery_before_arming(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Propuesta parafraseada",
+        "problem": "La paráfrasis no debe autorizar una confirmación.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id, _, tool_body = create_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        tool_input,
+    )
+    prompt = tool_body["confirmation_prompt"]
+
+    paraphrased = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id=f"paraphrased-{turn_id}",
+        assistant_text="He preparado el borrador. ¿Lo confirmas?",
+        response_status="completed",
+        interrupted=False,
+    )
+
+    assert paraphrased.status_code == 200
+    assert paraphrased.json()["assistant_message"] is None
+    assert paraphrased.json()["confirmation_prompt"] == prompt
+    assert paraphrased.json()["confirmation_delivery_required"] is True
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert "prompted_at_assistant_message_id" not in pending
+    superseding_turn_id = str(uuid.uuid4())
+    superseding_turn = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=superseding_turn_id,
+        user_text="Sí, créalo",
+    )
+    assert superseding_turn.status_code == 200
+
+    stale_delivery = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id=f"canonical-{turn_id}",
+        assistant_text=prompt,
+        response_status="completed",
+        interrupted=False,
+    )
+
+    assert stale_delivery.status_code == 409
+    state = get_conversation_state(db, conversation["id"])
+    superseded_turn = next(
+        turn
+        for turn in state["realtime_voice"]["recent_turns"]
+        if turn["turn_id"] == turn_id
+    )
+    assert superseded_turn["status"] == "superseded"
+    assert "prompted_at_assistant_message_id" not in state["pending_confirmation"]
+
+    delivered = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        superseding_turn_id,
+        response_id=f"canonical-{superseding_turn_id}",
+        assistant_text=prompt,
+        response_status="completed",
+        interrupted=False,
+    )
+
+    assert delivered.status_code == 200
+    assert delivered.json()["confirmation_delivery_required"] is False
+    assert delivered.json()["assistant_message"]["content"].endswith(prompt)
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert (
+        pending["prompted_at_assistant_message_id"]
+        == delivered.json()["assistant_message"]["id"]
+    )
+
+
+def test_realtime_confirmation_delivery_responses_are_bounded(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Propuesta con respuestas acotadas",
+        "problem": "No debe crecer el estado con paráfrasis ilimitadas.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id, _, _ = create_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        tool_input,
+    )
+
+    for index in range(4):
+        response = post_realtime_turn_complete(
+            client,
+            user,
+            conversation["id"],
+            turn_id,
+            response_id=f"paraphrase-{index}",
+            assistant_text=f"Paráfrasis incompleta {index}",
+        )
+        assert response.status_code == 200
+        assert response.json()["confirmation_delivery_required"] is True
+
+    overflow = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id="paraphrase-overflow",
+        assistant_text="Una paráfrasis adicional",
+    )
+
+    assert overflow.status_code == 409
+    state = get_conversation_state(db, conversation["id"])
+    assert len(state["realtime_voice"]["active_turn"]["responses"]) == 4
+
+
+def test_realtime_explicit_confirmation_is_consumed_once(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Confirmación realtime",
+        "problem": "La gestión actual requiere duplicar datos.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    _, armed = arm_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        tool_input,
+    )
+    prompt_message_id = armed["assistant_message"]["id"]
+    confirmation_turn_id = str(uuid.uuid4())
+    confirmation_started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=confirmation_turn_id,
+        user_text="Sí, créalo",
+    )
+    assert confirmation_started.status_code == 200
+
+    confirmed = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        confirmation_turn_id,
+        call_id="call_confirm",
+        name="create_requirement",
+        arguments=tool_input,
+    )
+    replay = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        confirmation_turn_id,
+        call_id="call_confirm",
+        name="create_requirement",
+        arguments=tool_input,
+    )
+    second_call = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        confirmation_turn_id,
+        call_id="call_confirm_again",
+        name="create_requirement",
+        arguments=tool_input,
+    )
+
+    assert confirmed.status_code == 200
+    assert confirmed.json()["ok"] is True
+    assert confirmed.json()["replayed"] is False
+    assert confirmed.json()["confirmation_prompt"] is None
+    assert replay.status_code == 200
+    assert replay.json()["ok"] is True
+    assert replay.json()["replayed"] is True
+    assert second_call.status_code == 200
+    assert second_call.json()["ok"] is False
+    assert "confirmación" in second_call.json()["output"].lower()
+    requirements = db.scalars(select(Requirement)).all()
+    assert len(requirements) == 1
+    assert requirements[0].title == tool_input["title"]
+    assert requirements[0].status == "draft"
+    assert requirements[0].source_type == "conversation"
+    state = get_conversation_state(db, conversation["id"])
+    assert "pending_confirmation" not in state
+    assert (
+        state["last_consumed_confirmation"]["prompted_at_assistant_message_id"]
+        == prompt_message_id
+    )
+    assert (
+        state["last_consumed_confirmation"]["consumed_at_user_message_id"]
+        == confirmation_started.json()["user_message"]["id"]
+    )
+
+
+def test_realtime_confirmation_with_changed_payload_starts_new_proposal(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    original_input = {
+        "organization_id": organization.id,
+        "title": "Payload realtime",
+        "problem": "Problema originalmente confirmado.",
+    }
+    changed_input = {
+        **original_input,
+        "problem": "Problema modificado después de pedir confirmación.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    arm_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        original_input,
+    )
+    original_pending = get_pending_confirmation(db, conversation["id"])
+    confirmation_turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=confirmation_turn_id,
+        user_text="Sí, créalo",
+    )
+    assert started.status_code == 200
+
+    changed = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        confirmation_turn_id,
+        call_id="call_changed_payload",
+        name="create_requirement",
+        arguments=changed_input,
+    )
+
+    assert changed.status_code == 200
+    changed_body = changed.json()
+    assert changed_body["ok"] is False
+    assert changed_input["problem"] in changed_body["confirmation_prompt"]
+    assert db.scalar(select(Requirement)) is None
+    replacement = get_pending_confirmation(db, conversation["id"])
+    assert replacement["confirmation_id"] != original_pending["confirmation_id"]
+    assert replacement["input"]["problem"] == changed_input["problem"]
+
+
+def test_realtime_complete_rejects_turn_superseded_by_normal_user_message(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    tool_input = {
+        "organization_id": organization.id,
+        "title": "Turno realtime obsoleto",
+        "problem": "Un mensaje posterior no debe permitir completar este turno.",
+    }
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id, _, tool_body = create_realtime_requirement_proposal(
+        client,
+        user,
+        conversation["id"],
+        tool_input,
+    )
+    prompt = tool_body["confirmation_prompt"]
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert "prompted_at_assistant_message_id" not in pending
+    use_gateway(FakeGateway([AssistantUnavailableError("gateway unavailable")]))
+
+    normal_turn = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Continúa por texto con otra cuestión"},
+        headers=headers_for(user),
+    )
+    stale_completion = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id=f"response-{turn_id}",
+        assistant_text=prompt,
+        response_status="completed",
+        interrupted=False,
+    )
+
+    assert normal_turn.status_code == 200
+    assert normal_turn.json()["messages"][-1]["content"] == ERROR_REPLY
+    assert stale_completion.status_code == 409
+    assert "superseded" in stale_completion.json()["detail"].lower()
+    state = get_conversation_state(db, conversation["id"])
+    pending = state["pending_confirmation"]
+    assert "prompted_at_assistant_message_id" not in pending
+    realtime_state = state["realtime_voice"]
+    assert realtime_state["active_turn"] is None
+    archived_turn = next(
+        turn
+        for turn in realtime_state["recent_turns"]
+        if turn["turn_id"] == turn_id
+    )
+    assert archived_turn["status"] == "superseded"
+    assert archived_turn["assistant_message_id"]
+    db.expire_all()
+    stored_messages = db.scalars(
+        select(AssistantMessage).where(
+            AssistantMessage.conversation_id == conversation["id"]
+        )
+    ).all()
+    assert [message.role for message in stored_messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert all(message.content != prompt for message in stored_messages)
+    assert db.scalar(select(Requirement)) is None
+    next_turn = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=str(uuid.uuid4()),
+        user_text="Nuevo turno realtime",
+    )
+    assert next_turn.status_code == 200
+
+
+def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
+    engine,
+    monkeypatch,
+):
+    suffix = uuid.uuid4().hex
+    with Session(engine, expire_on_commit=False) as seed_db:
+        user = User(
+            email=f"normal-realtime-race-{suffix}@example.com",
+            hashed_password="not-used",
+            full_name="Normal Realtime Race Test",
+        )
+        conversation = AssistantConversation(
+            title="Carrera normal y realtime",
+            status="active",
+            channel="web",
+            created_by=user,
+        )
+        seed_db.add_all([user, conversation])
+        seed_db.commit()
+        user_id = user.id
+        conversation_id = conversation.id
+
+    normal_waiting = threading.Event()
+    release_normal = threading.Event()
+    mutation_calls: list[str] = []
+    turn_id = str(uuid.uuid4())
+
+    class BlockingGateway:
+        def __init__(self):
+            self.call_count = 0
+
+        def complete(self, *, system, messages, tools):
+            self.call_count += 1
+            if self.call_count == 1:
+                normal_waiting.set()
+                assert release_normal.wait(timeout=15)
+                return fake_response(
+                    "tool_use",
+                    [tool_use_block("stale-mutation", "test_mutation", {})],
+                )
+            return fake_response(
+                "end_turn",
+                [text_block("El turno anterior ya no puede modificar datos.")],
+            )
+
+    mutating_tool = assistant_tools.ToolSpec(
+        name="test_mutation",
+        label="Mutación de prueba",
+        description="Herramienta mutante para probar el orden de turnos.",
+        input_schema={"type": "object", "properties": {}},
+        executor=lambda *args, **kwargs: {},
+        read_only=False,
+        domain="test",
+    )
+    monkeypatch.setattr(
+        assistant_turn,
+        "get_available_tool_specs",
+        lambda db, current_user: [mutating_tool],
+    )
+
+    def execute_test_mutation(
+        db,
+        current_user,
+        name,
+        tool_input,
+        context=None,
+        allowed=None,
+    ):
+        mutation_calls.append(name)
+        db.commit()
+        return assistant_tools.ToolResult(content='{"mutated": true}', ok=True)
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", execute_test_mutation)
+
+    def run_normal_turn():
+        with Session(engine, expire_on_commit=False) as normal_db:
+            normal_user = normal_db.get(User, user_id)
+            normal_conversation = normal_db.get(
+                AssistantConversation,
+                conversation_id,
+            )
+            assert normal_user is not None
+            assert normal_conversation is not None
+            return assistant_turn.run_agent_turn(
+                normal_db,
+                normal_user,
+                normal_conversation,
+                "Ejecuta una mutación desde el turno normal",
+                BlockingGateway(),
+            )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            normal_future = executor.submit(run_normal_turn)
+            assert normal_waiting.wait(timeout=15)
+            try:
+                with Session(engine, expire_on_commit=False) as realtime_db:
+                    realtime_user = realtime_db.get(User, user_id)
+                    realtime_conversation = realtime_db.get(
+                        AssistantConversation,
+                        conversation_id,
+                    )
+                    assert realtime_user is not None
+                    assert realtime_conversation is not None
+                    assistant_realtime.start_realtime_turn(
+                        realtime_db,
+                        realtime_user,
+                        realtime_conversation,
+                        AssistantRealtimeTurnStartCreate(
+                            turn_id=turn_id,
+                            user_text="Este mensaje realtime sustituye al normal",
+                        ),
+                    )
+            finally:
+                release_normal.set()
+            normal_reply = normal_future.result(timeout=15)
+
+        assert mutation_calls == []
+        assert json.loads(normal_reply.actions or "[]") == [
+            {
+                "tool": "test_mutation",
+                "ok": False,
+                "input": {},
+                "result": assistant_turn.STALE_MUTATING_TOOL_RESULT,
+            }
+        ]
+        with Session(engine) as verification_db:
+            stored_conversation = verification_db.get(
+                AssistantConversation,
+                conversation_id,
+            )
+            assert stored_conversation is not None
+            state = assistant_guards.load_conversation_state(stored_conversation)
+            assert state["realtime_voice"]["active_turn"]["turn_id"] == turn_id
+    finally:
+        release_normal.set()
+        with Session(engine) as cleanup_db:
+            stored_user = cleanup_db.get(User, user_id)
+            if stored_user is not None:
+                cleanup_db.delete(stored_user)
+                cleanup_db.commit()
 
 
 def test_speech_synthesis_returns_audio(client, assistant_user, monkeypatch):
@@ -340,6 +1973,12 @@ def test_azure_ssml_escapes_markup():
     assert "&lt;hola &amp; adiós&gt;" in ssml
     assert "xml:lang='es-ES'" in ssml
     assert "name='es-ES-ElviraNeural'" in ssml
+
+
+def test_azure_ssml_supports_optional_prosody_rate():
+    ssml = build_azure_ssml("hola", "es-ES-DarioNeural", "es-ES", "+12%")
+
+    assert "<prosody rate='+12%'>hola</prosody>" in ssml
 
 
 def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
@@ -490,12 +2129,15 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     assert gateway.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
 
 
-def get_pending_confirmation(db, conversation_id: int) -> dict:
+def get_conversation_state(db, conversation_id: int) -> dict:
     db.expire_all()
     conversation = db.get(AssistantConversation, conversation_id)
     assert conversation is not None
-    state = json.loads(conversation.state or "{}")
-    return state["pending_confirmation"]
+    return json.loads(conversation.state or "{}")
+
+
+def get_pending_confirmation(db, conversation_id: int) -> dict:
+    return get_conversation_state(db, conversation_id)["pending_confirmation"]
 
 
 def test_create_requirement_requires_matching_explicit_confirmation(

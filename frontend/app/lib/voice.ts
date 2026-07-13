@@ -6,12 +6,26 @@ const SILENCE_AFTER_VOICE_MS = 1400;
 const NO_VOICE_TIMEOUT_MS = 15000;
 const MAX_UTTERANCE_MS = 60000;
 const MIN_RMS_THRESHOLD = 0.01;
+const MAX_RMS_THRESHOLD = 0.045;
 const NOISE_MULTIPLIER = 3;
+// Barge-in (interrupting the assistant by speaking over it). Tuned
+// conservatively so residual echo of the assistant's own voice and street noise
+// do not cut it off: the user's speech must exceed the ambient/echo floor by a
+// wide margin and stay above it. There is no upper cap on the threshold — in
+// loud places it rises with the noise so only clearly louder speech barges in.
+const BARGE_IN_SETTLE_MS = 350;
+const BARGE_IN_SUSTAIN_MS = 300;
+const BARGE_IN_MIN_THRESHOLD = 0.03;
+const BARGE_IN_MULTIPLIER = 4;
 
 type SpeechPlayerListener = (speaking: boolean) => void;
 
 type SpeechQueueItem = {
   text: string;
+  // Synthesis is started as soon as the sentence is queued (not when playback
+  // reaches it), so later sentences are generated while the current one plays.
+  audio: Promise<Blob>;
+  abortController: AbortController;
   resolve: () => void;
   reject: (error: unknown) => void;
 };
@@ -145,17 +159,16 @@ export function createSpeechPlayer(deps: {
         continue;
       }
       currentItem = item;
-      const abortController = new AbortController();
-      currentAbortController = abortController;
+      currentAbortController = item.abortController;
 
       try {
-        const audio = await deps.synthesize(item.text, abortController.signal);
-        if (!abortController.signal.aborted) {
-          await playBlob(audio, abortController.signal);
+        const audio = await item.audio;
+        if (!item.abortController.signal.aborted) {
+          await playBlob(audio, item.abortController.signal);
         }
         item.resolve();
       } catch (error) {
-        if (abortController.signal.aborted) {
+        if (item.abortController.signal.aborted) {
           item.resolve();
         } else {
           item.reject(error);
@@ -178,12 +191,20 @@ export function createSpeechPlayer(deps: {
         return Promise.resolve();
       }
       return new Promise((resolve, reject) => {
-        queue.push({ text: normalized, resolve, reject });
+        // Start synthesis immediately so it overlaps playback of earlier
+        // sentences and there is no gap at each sentence boundary.
+        const abortController = new AbortController();
+        const audio = deps.synthesize(normalized, abortController.signal);
+        // Prevent an unhandled rejection if the item is stopped/aborted before
+        // the queue consumes it; the queue still awaits `audio` for real errors.
+        audio.catch(() => undefined);
+        queue.push({ text: normalized, audio, abortController, resolve, reject });
         void processQueue();
       });
     },
     stop(): void {
       currentAbortController?.abort();
+      queue.forEach((item) => item.abortController.abort());
       releaseCurrentAudio();
       while (queue.length > 0) {
         queue.shift()?.resolve();
@@ -277,11 +298,14 @@ export function createSilenceDetector(
   const analyser = audioContext.createAnalyser();
   analyser.fftSize = 2048;
   source.connect(analyser);
+  // A context created outside a direct user gesture (e.g. the mic auto-armed on
+  // entering voice mode) can start suspended; the analyser then reads silence
+  // and the loop never detects the end of speech. Resume it defensively.
+  void audioContext.resume().catch(() => undefined);
 
   const samples = new Uint8Array(analyser.fftSize);
   const startedAt = performance.now();
-  let calibrationTotal = 0;
-  let calibrationSamples = 0;
+  let noiseFloor: number | null = null;
   let threshold = MIN_RMS_THRESHOLD;
   let heardVoice = false;
   let lastVoiceAt = 0;
@@ -312,18 +336,25 @@ export function createSilenceDetector(
     const elapsed = now - startedAt;
     const rms = currentRms();
 
-    if (elapsed <= SILENCE_CALIBRATION_MS) {
-      calibrationTotal += rms;
-      calibrationSamples += 1;
-      return;
+    // Track the background noise floor as the quietest level seen (with a slow
+    // upward drift) rather than averaging the first samples: a user who starts
+    // talking the instant the mic opens would otherwise bake their own voice
+    // into the floor, pushing the threshold above their speech so the loop
+    // never registers voice — and never auto-stops on silence. The threshold is
+    // also capped so a noisy calibration can't hide normal speech.
+    if (noiseFloor === null || rms < noiseFloor) {
+      noiseFloor = rms;
+    } else {
+      noiseFloor = noiseFloor * 0.98 + rms * 0.02;
     }
+    threshold = Math.min(
+      MAX_RMS_THRESHOLD,
+      Math.max(MIN_RMS_THRESHOLD, noiseFloor * NOISE_MULTIPLIER),
+    );
 
-    if (calibrationSamples > 0) {
-      threshold = Math.max(
-        MIN_RMS_THRESHOLD,
-        (calibrationTotal / calibrationSamples) * NOISE_MULTIPLIER,
-      );
-      calibrationSamples = 0;
+    // Brief settle window before acting on levels (mic gain / context resume).
+    if (elapsed <= SILENCE_CALIBRATION_MS) {
+      return;
     }
 
     if (rms >= threshold) {
@@ -344,6 +375,101 @@ export function createSilenceDetector(
 
     if (heardVoice && elapsed >= MAX_UTTERANCE_MS) {
       finish(opts.onSilence);
+    }
+  }, SILENCE_CHECK_INTERVAL_MS);
+
+  function stop() {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    window.clearInterval(interval);
+    source.disconnect();
+    analyser.disconnect();
+    void audioContext.close().catch(() => undefined);
+  }
+
+  return { stop };
+}
+
+type BargeInDetectorOptions = {
+  onSpeech: () => void;
+};
+
+// Watches the microphone while the assistant is speaking and fires `onSpeech`
+// when the user talks over it, so the caller can cut the playback and start
+// listening (full-duplex barge-in). Unlike the silence detector it deliberately
+// leaves the MediaStream tracks running: the caller owns the stream and may
+// hand it straight to the listening phase.
+export function createBargeInDetector(
+  stream: MediaStream,
+  opts: BargeInDetectorOptions,
+) {
+  const AudioContextConstructor =
+    window.AudioContext ??
+    (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+  if (!AudioContextConstructor) {
+    return {
+      stop() {},
+    };
+  }
+
+  const audioContext = new AudioContextConstructor();
+  const source = audioContext.createMediaStreamSource(stream);
+  const analyser = audioContext.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+  void audioContext.resume().catch(() => undefined);
+
+  const samples = new Uint8Array(analyser.fftSize);
+  const startedAt = performance.now();
+  let noiseFloor: number | null = null;
+  let voiceSince: number | null = null;
+  let finished = false;
+  let stopped = false;
+
+  function currentRms() {
+    analyser.getByteTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) {
+      const normalized = (sample - 128) / 128;
+      sum += normalized * normalized;
+    }
+    return Math.sqrt(sum / samples.length);
+  }
+
+  const interval = window.setInterval(() => {
+    const now = performance.now();
+    const elapsed = now - startedAt;
+    const rms = currentRms();
+
+    if (noiseFloor === null || rms < noiseFloor) {
+      noiseFloor = rms;
+    } else {
+      noiseFloor = noiseFloor * 0.98 + rms * 0.02;
+    }
+    const threshold = Math.max(
+      BARGE_IN_MIN_THRESHOLD,
+      noiseFloor * BARGE_IN_MULTIPLIER,
+    );
+
+    // Ignore the first moments so the ambient/echo floor can settle and the
+    // playback onset transient is not mistaken for the user speaking.
+    if (elapsed <= BARGE_IN_SETTLE_MS) {
+      return;
+    }
+
+    if (rms >= threshold) {
+      if (voiceSince === null) {
+        voiceSince = now;
+      } else if (!finished && now - voiceSince >= BARGE_IN_SUSTAIN_MS) {
+        finished = true;
+        stop();
+        opts.onSpeech();
+      }
+    } else {
+      voiceSince = null;
     }
   }, SILENCE_CHECK_INTERVAL_MS);
 

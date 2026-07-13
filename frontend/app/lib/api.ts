@@ -1,7 +1,16 @@
 import type {
+  AssistantRealtimeSession,
+  AssistantRealtimeToolCallRequest,
+  AssistantRealtimeToolCallResult,
+  AssistantRealtimeTurnCompleteRequest,
+  AssistantRealtimeTurnResult,
+  AssistantRealtimeTurnStartRequest,
+  AssistantRealtimeTurnStartResult,
   AssistantStreamDone,
   AssistantStreamMessageStart,
+  AssistantStreamTranscriptFinal,
   AssistantStreamToolActivity,
+  AssistantStreamVoiceState,
   User,
 } from "../components/types";
 
@@ -18,7 +27,12 @@ export class ApiRequestError extends Error {
 const CONFIGURED_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
 function isLoopbackHostname(hostname: string) {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
 }
 
 function isLoopbackApiBaseUrl(value: string) {
@@ -38,9 +52,17 @@ function normalizeApiBaseUrl(value: string) {
   // NEXT_PUBLIC_API_BASE_URL is baked into the Next.js bundle at build time.
   // Local builds commonly set it to localhost, but a browser opening a public
   // tunnel would then call its *own* localhost and fail with "Failed to fetch".
-  // In that public-origin case, fall back to same-origin relative API routes.
+  // In a loopback browser, keep the hostname aligned with the page so the
+  // httpOnly session cookie is stored and sent to the same site.
+  // In a public-origin case, fall back to same-origin relative API routes.
   if (typeof window !== "undefined" && isLoopbackApiBaseUrl(trimmed)) {
-    return isLoopbackHostname(window.location.hostname) ? trimmed : "";
+    if (!isLoopbackHostname(window.location.hostname)) {
+      return "";
+    }
+
+    const apiUrl = new URL(trimmed);
+    apiUrl.hostname = window.location.hostname;
+    return apiUrl.toString().replace(/\/$/, "");
   }
 
   return trimmed;
@@ -206,6 +228,8 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El asistente no ha podido procesar la petición. Inténtalo de nuevo.";
     case "Audio transcription is not available":
       return "La transcripción de voz no está disponible ahora mismo.";
+    case "Audio transcription returned no text":
+      return "No he detectado texto en el audio. Prueba con una nota un poco más clara.";
     case "Speech synthesis is not available":
       return "La voz del asistente no está disponible ahora mismo.";
     case "Speech text is too long":
@@ -344,6 +368,8 @@ export async function adminRequestWithTotal<T>(
 }
 
 type AssistantStreamHandlers = {
+  onVoiceState?: (event: AssistantStreamVoiceState) => void;
+  onTranscriptFinal?: (event: AssistantStreamTranscriptFinal) => void;
   onMessageStart?: (event: AssistantStreamMessageStart) => void;
   onTextDelta?: (text: string) => void;
   onToolActivity?: (event: AssistantStreamToolActivity) => void;
@@ -364,6 +390,96 @@ export async function streamAssistantMessage(
     { method: "POST", body: JSON.stringify({ content, input_mode: inputMode }) },
   );
 
+  if (!response.body) {
+    throw new ApiRequestError("El asistente no ha podido responder.", 0);
+  }
+
+  await readAssistantStream(response, handlers);
+}
+
+export async function streamAssistantVoiceTurn(
+  conversationId: number,
+  audio: Blob,
+  accessToken: string,
+  handlers: AssistantStreamHandlers,
+) {
+  const formData = new FormData();
+  formData.append("file", audio, "anacleto-audio.webm");
+  const response = await performAdminRequest(
+    `/assistant/conversations/${conversationId}/voice-turns/stream`,
+    accessToken,
+    "El asistente no ha podido responder.",
+    { method: "POST", body: formData },
+  );
+
+  if (!response.body) {
+    throw new ApiRequestError("El asistente no ha podido responder.", 0);
+  }
+
+  await readAssistantStream(response, handlers);
+}
+
+export async function createAssistantRealtimeSession(
+  conversationId: number,
+  accessToken: string,
+  signal?: AbortSignal,
+) {
+  return adminRequest<AssistantRealtimeSession>(
+    `/assistant/conversations/${conversationId}/realtime/session`,
+    accessToken,
+    "No se pudo iniciar la voz en tiempo real.",
+    { method: "POST", body: JSON.stringify({}), signal },
+  );
+}
+
+export async function sendAssistantRealtimeToolCall(
+  conversationId: number,
+  turnId: string,
+  payload: AssistantRealtimeToolCallRequest,
+  accessToken: string,
+  signal?: AbortSignal,
+) {
+  return adminRequest<AssistantRealtimeToolCallResult>(
+    `/assistant/conversations/${conversationId}/realtime/turns/${turnId}/tool-calls`,
+    accessToken,
+    "No se pudo ejecutar la herramienta de voz.",
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+}
+
+export async function startAssistantRealtimeTurn(
+  conversationId: number,
+  payload: AssistantRealtimeTurnStartRequest,
+  accessToken: string,
+  signal?: AbortSignal,
+) {
+  return adminRequest<AssistantRealtimeTurnStartResult>(
+    `/assistant/conversations/${conversationId}/realtime/turns/start`,
+    accessToken,
+    "No se pudo iniciar el turno de voz.",
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+}
+
+export async function completeAssistantRealtimeTurn(
+  conversationId: number,
+  turnId: string,
+  payload: AssistantRealtimeTurnCompleteRequest,
+  accessToken: string,
+  signal?: AbortSignal,
+) {
+  return adminRequest<AssistantRealtimeTurnResult>(
+    `/assistant/conversations/${conversationId}/realtime/turns/${turnId}/complete`,
+    accessToken,
+    "No se pudo guardar el turno de voz.",
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+}
+
+async function readAssistantStream(
+  response: Response,
+  handlers: AssistantStreamHandlers,
+) {
   if (!response.body) {
     throw new ApiRequestError("El asistente no ha podido responder.", 0);
   }
@@ -423,6 +539,16 @@ function dispatchAssistantStreamFrame(
   const rawData = dataLines.join("\n");
   const data = rawData ? (JSON.parse(rawData) as Record<string, unknown>) : {};
   switch (eventName) {
+    case "voice_state":
+      if (typeof data.state === "string") {
+        handlers.onVoiceState?.(data as AssistantStreamVoiceState);
+      }
+      break;
+    case "transcript_final":
+      if (typeof data.text === "string") {
+        handlers.onTranscriptFinal?.(data as AssistantStreamTranscriptFinal);
+      }
+      break;
     case "message_start":
       handlers.onMessageStart?.(data as AssistantStreamMessageStart);
       break;

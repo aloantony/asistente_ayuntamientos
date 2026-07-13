@@ -35,9 +35,21 @@ import {
   type AssistantConversationDetail,
   type AssistantConversationFolder,
   type AssistantStatus,
+  type AssistantVoiceState,
   type User,
 } from "./types";
-import { createSilenceDetector } from "../lib/voice";
+import { createBargeInDetector, createSilenceDetector } from "../lib/voice";
+
+// Ask the browser for echo cancellation / noise suppression so the mic stays
+// usable while the assistant is speaking (barge-in without hearing itself) and
+// so street / low-quality-mic noise is cleaned up before capture.
+const AUDIO_CAPTURE_CONSTRAINTS: MediaStreamConstraints = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  },
+};
 
 type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
@@ -48,6 +60,9 @@ type AssistantPanelProps = {
   draftMessage: string;
   voiceModeEnabled: boolean;
   handsFreeEnabled: boolean;
+  voiceState: AssistantVoiceState;
+  realtimeVoiceActive: boolean;
+  realtimeVoiceFallback: boolean;
   isLoadingAssistant: boolean;
   isSendingMessage: boolean;
   isSpeaking: boolean;
@@ -55,11 +70,12 @@ type AssistantPanelProps = {
   includeArchivedConversations: boolean;
   onDraftMessageChange: (value: string) => void;
   onVoiceModeChange: (enabled: boolean) => void;
-  onHandsFreeChange: (enabled: boolean) => void;
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
   onSendMessage: () => void;
-  onSendVoiceTranscript: (transcript: string) => void;
+  onSendVoiceAudio: (audio: Blob) => Promise<void>;
+  onStartRealtimeVoice: () => Promise<void>;
+  onStopRealtimeVoice: (options?: { interrupted?: boolean }) => void;
   onStopSpeaking: () => void;
   onTranscribeAudio: (audio: Blob) => Promise<string>;
   onArchiveConversation: (conversationId: number) => void;
@@ -558,6 +574,9 @@ export function AssistantPanel({
   draftMessage,
   voiceModeEnabled,
   handsFreeEnabled,
+  voiceState,
+  realtimeVoiceActive,
+  realtimeVoiceFallback,
   isLoadingAssistant,
   isSendingMessage,
   isSpeaking,
@@ -565,11 +584,12 @@ export function AssistantPanel({
   includeArchivedConversations,
   onDraftMessageChange,
   onVoiceModeChange,
-  onHandsFreeChange,
   onSelectConversation,
   onStartConversation,
   onSendMessage,
-  onSendVoiceTranscript,
+  onSendVoiceAudio,
+  onStartRealtimeVoice,
+  onStopRealtimeVoice,
   onStopSpeaking,
   onTranscribeAudio,
   onArchiveConversation,
@@ -622,6 +642,7 @@ export function AssistantPanel({
   const [voiceError, setVoiceError] = useState("");
   const [voiceLoopActive, setVoiceLoopActive] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
+  const [realtimeSupported, setRealtimeSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
   const [isConversationListOpen, setIsConversationListOpen] = useState(true);
   const [conversationListMode, setConversationListMode] =
@@ -655,6 +676,12 @@ export function AssistantPanel({
   const silenceDetectorRef = useRef<ReturnType<typeof createSilenceDetector> | null>(
     null,
   );
+  // Barge-in: a second detector + mic stream kept open only while the assistant
+  // is speaking, so talking over it interrupts the playback and starts listening.
+  const bargeInDetectorRef = useRef<ReturnType<typeof createBargeInDetector> | null>(
+    null,
+  );
+  const bargeInStreamRef = useRef<MediaStream | null>(null);
   const discardNextAudioRef = useRef(false);
   const wasSpeakingRef = useRef(false);
   // Held synchronously across the getUserMedia await so a concurrent
@@ -662,6 +689,9 @@ export function AssistantPanel({
   // re-arm effect) cannot open a second microphone before the recorder ref
   // is set.
   const isArmingMicRef = useRef(false);
+  // Tracks the last voiceModeEnabled value so activating voice mode can arm the
+  // microphone once (ChatGPT-style), without re-firing on mount or re-render.
+  const previousVoiceModeRef = useRef(voiceModeEnabled);
   const previousConversationIdRef = useRef<number | null>(
     selectedConversation?.id ?? null,
   );
@@ -672,19 +702,47 @@ export function AssistantPanel({
   const speechTranscriptionEnabled = Boolean(
     assistantStatus?.speech_transcription_enabled,
   );
+  const realtimeVoiceAvailable =
+    Boolean(assistantStatus?.realtime_voice_enabled) &&
+    realtimeSupported &&
+    !realtimeVoiceFallback;
   const voiceDialogueAvailable =
-    speechTranscriptionEnabled &&
-    Boolean(assistantStatus?.speech_synthesis_enabled) &&
-    speechSupported;
-  const voiceStatus = isListening
-    ? "Escuchando…"
-    : isTranscribingVoice
-      ? "Transcribiendo…"
-      : voiceModeEnabled && isSendingMessage
-        ? "Pensando…"
-        : isSpeaking
-          ? "Hablando…"
-          : "";
+    realtimeVoiceAvailable ||
+    (speechTranscriptionEnabled &&
+      Boolean(assistantStatus?.speech_synthesis_enabled) &&
+      speechSupported);
+  const voiceCaptureAvailable = realtimeVoiceAvailable || speechTranscriptionEnabled;
+  const useRealtimeVoice = voiceModeEnabled && realtimeVoiceAvailable;
+  const voiceStatus = (() => {
+    if (voiceState === "connecting") {
+      return "Conectando voz…";
+    }
+    if (realtimeVoiceActive && voiceState === "listening") {
+      return "Escuchando en tiempo real…";
+    }
+    if (voiceState === "user_speaking") {
+      return "Te escucho…";
+    }
+    if (isListening) {
+      return "Escuchando…";
+    }
+    if (isTranscribingVoice || voiceState === "transcribing") {
+      return "Transcribiendo…";
+    }
+    if (voiceState === "tool_running") {
+      return "Consultando…";
+    }
+    if (voiceState === "responding") {
+      return "Respondiendo…";
+    }
+    if (voiceState === "thinking" || (voiceModeEnabled && isSendingMessage)) {
+      return "Pensando…";
+    }
+    if (isSpeaking) {
+      return "Hablando…";
+    }
+    return "";
+  })();
 
   const filteredConversations = useMemo(() => {
     const query = conversationFilter.trim().toLowerCase();
@@ -768,10 +826,14 @@ export function AssistantPanel({
   }, [selectedConversation?.id, composerDisabled]);
 
   useEffect(() => {
-    setSpeechSupported(
+    const canCaptureAudio =
       typeof navigator !== "undefined" &&
-        Boolean(navigator.mediaDevices?.getUserMedia) &&
-        typeof MediaRecorder !== "undefined",
+      Boolean(navigator.mediaDevices?.getUserMedia);
+    setSpeechSupported(
+      canCaptureAudio && typeof MediaRecorder !== "undefined",
+    );
+    setRealtimeSupported(
+      canCaptureAudio && typeof RTCPeerConnection !== "undefined",
     );
   }, []);
 
@@ -780,6 +842,13 @@ export function AssistantPanel({
     silenceDetectorRef.current = null;
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
+  }
+
+  function stopBargeInMonitoring() {
+    bargeInDetectorRef.current?.stop();
+    bargeInDetectorRef.current = null;
+    bargeInStreamRef.current?.getTracks().forEach((track) => track.stop());
+    bargeInStreamRef.current = null;
   }
 
   function stopListening(options: { discardAudio?: boolean } = {}) {
@@ -799,7 +868,9 @@ export function AssistantPanel({
 
   function pauseVoiceLoop(discardAudio = true) {
     setVoiceLoopActive(false);
+    stopBargeInMonitoring();
     stopListening({ discardAudio });
+    onStopRealtimeVoice({ interrupted: true });
     onStopSpeaking();
   }
 
@@ -810,6 +881,7 @@ export function AssistantPanel({
         recorder.stop();
       }
       releaseAudioStream();
+      stopBargeInMonitoring();
     };
   }, []);
 
@@ -824,6 +896,45 @@ export function AssistantPanel({
       silenceDetectorRef.current = null;
     }
   }, [assistantError, handsFreeEnabled, voiceModeEnabled]);
+
+  // ChatGPT-style entry: turning voice mode on immediately arms the microphone
+  // and starts the (hands-free) dialogue, instead of requiring a second tap on
+  // the mic. Only fires on the user-driven false→true transition, not on mount
+  // when the setting is restored from localStorage.
+  useEffect(() => {
+    const wasEnabled = previousVoiceModeRef.current;
+    previousVoiceModeRef.current = voiceModeEnabled;
+    if (
+      voiceModeEnabled &&
+      !wasEnabled &&
+      voiceDialogueAvailable &&
+      !isListening &&
+      !isTranscribingVoice &&
+      !isSpeaking &&
+      !realtimeVoiceActive &&
+      !isSendingMessage &&
+      !composerDisabled &&
+      document.visibilityState !== "hidden"
+    ) {
+      if (useRealtimeVoice) {
+        void onStartRealtimeVoice();
+      } else {
+        void startListening({ force: true, loop: handsFreeEnabled });
+      }
+    }
+  }, [
+    composerDisabled,
+    handsFreeEnabled,
+    isListening,
+    isSendingMessage,
+    isSpeaking,
+    isTranscribingVoice,
+    onStartRealtimeVoice,
+    realtimeVoiceActive,
+    useRealtimeVoice,
+    voiceDialogueAvailable,
+    voiceModeEnabled,
+  ]);
 
   useEffect(() => {
     function handleVisibilityChange() {
@@ -847,8 +958,9 @@ export function AssistantPanel({
     // auto-sending it to whatever conversation is now open.
     previousConversationIdRef.current = currentConversationId;
     setVoiceLoopActive(false);
+    onStopRealtimeVoice({ interrupted: true });
     stopListening({ discardAudio: true });
-  }, [selectedConversation?.id]);
+  }, [onStopRealtimeVoice, selectedConversation?.id]);
 
   useEffect(() => {
     if (isSpeaking) {
@@ -865,6 +977,7 @@ export function AssistantPanel({
       voiceLoopActive &&
       voiceModeEnabled &&
       handsFreeEnabled &&
+      !useRealtimeVoice &&
       !isListening &&
       !isTranscribingVoice &&
       !isSendingMessage &&
@@ -880,7 +993,63 @@ export function AssistantPanel({
     isSendingMessage,
     isSpeaking,
     isTranscribingVoice,
+    useRealtimeVoice,
     voiceLoopActive,
+    voiceModeEnabled,
+  ]);
+
+  // Barge-in: while the assistant is speaking in hands-free voice mode, keep the
+  // mic open and, the moment the user talks over it, cut the playback and start
+  // listening — the same outcome as tapping the mic, but hands-free.
+  useEffect(() => {
+    // Note: intentionally NOT gated on composerDisabled — the assistant starts
+    // speaking while the response is still streaming (isSendingMessage true),
+    // which is exactly when the user needs to be able to cut in.
+    if (
+      !isSpeaking ||
+      !voiceModeEnabled ||
+      !handsFreeEnabled ||
+      useRealtimeVoice ||
+      !speechSupported ||
+      document.visibilityState === "hidden"
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(
+          AUDIO_CAPTURE_CONSTRAINTS,
+        );
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        bargeInStreamRef.current = stream;
+        bargeInDetectorRef.current = createBargeInDetector(stream, {
+          onSpeech: () => {
+            stopBargeInMonitoring();
+            onStopSpeaking();
+            setVoiceLoopActive(true);
+            void startListening({ force: true, loop: true });
+          },
+        });
+      } catch {
+        // Mic unavailable during playback → barge-in just isn't offered this
+        // turn; tapping the mic still interrupts.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      stopBargeInMonitoring();
+    };
+  }, [
+    handsFreeEnabled,
+    isSpeaking,
+    speechSupported,
+    useRealtimeVoice,
     voiceModeEnabled,
   ]);
 
@@ -888,18 +1057,20 @@ export function AssistantPanel({
     if (audio.size === 0) {
       return;
     }
+    if (voiceModeEnabled) {
+      if (handsFreeEnabled) {
+        setVoiceLoopActive(true);
+      }
+      await onSendVoiceAudio(audio);
+      return;
+    }
     setIsTranscribingVoice(true);
     try {
       const transcript = (await onTranscribeAudio(audio)).trim();
       if (!transcript) {
-        setVoiceError("No he detectado texto en el audio. Prueba con una nota un poco más clara.");
-        return;
-      }
-      if (voiceModeEnabled) {
-        if (handsFreeEnabled) {
-          setVoiceLoopActive(true);
-        }
-        onSendVoiceTranscript(transcript);
+        setVoiceError(
+          "No he detectado texto en el audio. Prueba con una nota un poco más clara.",
+        );
         return;
       }
       const currentDraft = draftMessageRef.current;
@@ -938,7 +1109,9 @@ export function AssistantPanel({
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia(
+        AUDIO_CAPTURE_CONSTRAINTS,
+      );
       const recorder = new MediaRecorder(stream);
       mediaStreamRef.current = stream;
       audioChunksRef.current = [];
@@ -989,6 +1162,14 @@ export function AssistantPanel({
   }
 
   function handleToggleListening() {
+    if (useRealtimeVoice) {
+      if (realtimeVoiceActive || voiceState === "connecting") {
+        onStopRealtimeVoice({ interrupted: true });
+      } else {
+        void onStartRealtimeVoice();
+      }
+      return;
+    }
     if (isSpeaking && voiceModeEnabled && handsFreeEnabled) {
       onStopSpeaking();
       setVoiceLoopActive(true);
@@ -1015,12 +1196,14 @@ export function AssistantPanel({
     }
 
     stopListening();
+    onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     stopListening();
+    onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
   }
 
@@ -1884,52 +2067,49 @@ export function AssistantPanel({
                           onClick={() => onVoiceModeChange(!voiceModeEnabled)}
                           disabled={composerDisabled}
                         >
-                          {voiceModeEnabled ? "Modo voz activado" : "Modo voz"}
+                          {voiceModeEnabled
+                            ? realtimeVoiceAvailable
+                              ? "Voz realtime activa"
+                              : "Modo voz activado"
+                            : realtimeVoiceAvailable
+                              ? "Voz realtime"
+                              : "Modo voz"}
                         </button>
                       ) : null}
-                      {voiceDialogueAvailable && voiceModeEnabled ? (
+                      {voiceCaptureAvailable ? (
                         <button
                           type="button"
                           className={
-                            handsFreeEnabled
-                              ? "voice-handsfree-toggle active"
-                              : "voice-handsfree-toggle"
-                          }
-                          aria-pressed={handsFreeEnabled}
-                          onClick={() => onHandsFreeChange(!handsFreeEnabled)}
-                          disabled={composerDisabled}
-                        >
-                          Autoescucha
-                        </button>
-                      ) : null}
-                      {speechTranscriptionEnabled ? (
-                        <button
-                          type="button"
-                          className={
-                            isListening
+                            isListening || realtimeVoiceActive
                               ? "assistant-mic recording"
                               : "assistant-mic"
                           }
                           aria-label={
-                            isListening ? "Detener grabación" : "Grabar audio"
+                            isListening || realtimeVoiceActive
+                              ? "Detener voz"
+                              : "Grabar audio"
                           }
-                          aria-pressed={isListening}
+                          aria-pressed={isListening || realtimeVoiceActive}
                           onClick={handleToggleListening}
                           disabled={
-                            !speechSupported ||
+                            (useRealtimeVoice
+                              ? !realtimeSupported
+                              : !speechSupported) ||
                             composerDisabled ||
                             isTranscribingVoice ||
                             (isSpeaking && !(voiceModeEnabled && handsFreeEnabled))
                           }
                           title={
-                            speechSupported
-                              ? "Grabar audio y transcribirlo con Anacleto"
-                              : "Grabación de audio no disponible en este navegador"
+                            useRealtimeVoice
+                              ? "Voz en tiempo real"
+                              : speechSupported
+                                ? "Grabar audio y transcribirlo con Anacleto"
+                                : "Grabación de audio no disponible en este navegador"
                           }
                         >
-                          {isTranscribingVoice ? (
+                          {isTranscribingVoice || voiceState === "connecting" ? (
                             <Loader2 aria-hidden size={18} />
-                          ) : isListening ? (
+                          ) : isListening || realtimeVoiceActive ? (
                             <AssistantSymbolIcon name="mic" size={18} />
                           ) : (
                             <AssistantSymbolIcon name="mic" size={18} />
@@ -1952,11 +2132,17 @@ export function AssistantPanel({
                 {voiceStatus ? (
                   <div className="voice-status" role="status">
                     <span>{voiceStatus}</span>
-                    {isSpeaking ? (
+                    {isSpeaking || realtimeVoiceActive ? (
                       <button
                         type="button"
                         className="voice-stop-button"
-                        onClick={onStopSpeaking}
+                        onClick={() => {
+                          if (realtimeVoiceActive) {
+                            onStopRealtimeVoice({ interrupted: true });
+                          } else {
+                            onStopSpeaking();
+                          }
+                        }}
                       >
                         Detener voz
                       </button>

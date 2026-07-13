@@ -63,6 +63,9 @@ class AssistantStatusRead(BaseModel):
     runtime_healthy: bool | None = None
     speech_transcription_enabled: bool = False
     speech_synthesis_enabled: bool = False
+    realtime_voice_enabled: bool = False
+    realtime_voice_provider: Literal["openai"] | None = None
+    realtime_voice_model: str | None = None
     tools: list["AssistantToolRead"] = []
 
 
@@ -85,6 +88,7 @@ class AssistantToolRead(BaseModel):
 
 
 class AssistantActionRead(BaseModel):
+    call_id: str | None = None
     tool: str
     ok: bool
     input: dict
@@ -134,6 +138,64 @@ class AssistantConversationRead(BaseModel):
 
 class AssistantConversationDetail(AssistantConversationRead):
     messages: list[AssistantMessageRead]
+
+
+class AssistantRealtimeSessionRead(BaseModel):
+    client_secret: str
+    client_secret_expires_at: int | None = None
+    provider: Literal["openai"] = "openai"
+    model: str
+    voice: str
+    realtime_url: str
+
+
+class AssistantRealtimeTurnStartCreate(BaseModel):
+    turn_id: str = Field(min_length=1, max_length=255)
+    user_text: str = Field(min_length=1, max_length=20000)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantRealtimeTurnStartRead(BaseModel):
+    turn_id: str
+    user_message: AssistantMessageRead
+    replayed: bool = False
+
+
+class AssistantRealtimeToolCallCreate(BaseModel):
+    call_id: str = Field(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
+    arguments: dict = Field(default_factory=dict)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantRealtimeToolCallRead(BaseModel):
+    call_id: str
+    ok: bool
+    output: str
+    action: AssistantActionRead
+    user_message: AssistantMessageRead
+    confirmation_prompt: str | None = None
+    replayed: bool = False
+
+
+class AssistantRealtimeTurnCreate(BaseModel):
+    response_id: str = Field(min_length=1, max_length=255)
+    response_status: Literal["completed", "cancelled", "failed", "incomplete"]
+    assistant_text: str | None = Field(default=None, max_length=20000)
+    interrupted: bool = False
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class AssistantRealtimeTurnRead(BaseModel):
+    conversation: AssistantConversationRead
+    user_message: AssistantMessageRead | None = None
+    assistant_message: AssistantMessageRead | None = None
+    confirmation_prompt: str | None = None
+    confirmation_delivery_required: bool = False
+    replayed: bool = False
 
 
 class AssistantConversationCreate(BaseModel):
