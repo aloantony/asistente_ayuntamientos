@@ -225,6 +225,56 @@ def test_status_exposes_single_assistant_contract_and_filtered_tools(
     assert "web_search" not in tool_names
 
 
+def test_web_search_is_hidden_when_permission_exists_but_runtime_is_incomplete(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
+    monkeypatch.setattr(settings, "hermes_web_api_key", None)
+    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+
+    specs = assistant_tools.get_available_tool_specs(db, user)
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert "web_search" not in {spec.name for spec in specs}
+    assert response.status_code == 200
+    assert "web_search" not in {
+        tool["name"] for tool in response.json()["tools"]
+    }
+
+
+def test_web_search_is_available_with_permission_and_complete_runtime_config(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
+    monkeypatch.setattr(settings, "hermes_web_api_key", "web-secret")
+    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+
+    specs = assistant_tools.get_available_tool_specs(db, user)
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert "web_search" in {spec.name for spec in specs}
+    assert response.status_code == 200
+    assert "web_search" in {
+        tool["name"] for tool in response.json()["tools"]
+    }
+
+
 def test_status_reports_speech_flags(
     client,
     assistant_user,
@@ -557,6 +607,37 @@ def test_realtime_session_creates_openai_client_secret(
     assert abandoned["status"] == "abandoned"
     assert abandoned["assistant_message_id"]
     assert "Respuesta de voz interrumpida" in session["instructions"]
+
+
+def test_realtime_session_hides_web_search_when_runtime_is_incomplete(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
+    monkeypatch.setattr(settings, "hermes_web_api_key", "")
+    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+    conversation_data = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    conversation = db.get(AssistantConversation, conversation_data["id"])
+    assert conversation is not None
+
+    payload = assistant_realtime.build_realtime_client_secret_payload(
+        db,
+        user,
+        conversation,
+    )
+
+    assert "web_search" not in {
+        tool["name"] for tool in payload["session"]["tools"]
+    }
 
 
 def test_realtime_session_history_marks_finished_actions_as_already_processed(
@@ -2107,6 +2188,39 @@ def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     stored = db.get(AssistantConversation, conversation["id"])
     assert stored is not None
     assert stored.title == "¿qué puedes hacer?"
+
+
+def test_normal_turn_hides_web_search_when_runtime_is_incomplete(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
+    monkeypatch.setattr(settings, "hermes_web_api_key", None)
+    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+    gateway = use_gateway(
+        FakeGateway([fake_response("end_turn", [text_block("Respuesta final.")])])
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca información pública"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert "web_search" not in {
+        tool["name"] for tool in gateway.calls[0]["tools"]
+    }
 
 
 def test_voice_input_mode_adds_oral_style_prompt(

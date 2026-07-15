@@ -1772,6 +1772,7 @@ def get_available_tool_specs(
         spec
         for name, spec in TOOL_CATALOG.items()
         if name in requested_tool_names
+        and (name != "web_search" or hermes_web_client.enabled)
         and (
             spec.required_permission is None
             or has_permission(current_user, spec.required_permission, db)

@@ -24,7 +24,15 @@ class HermesWebUnavailableError(Exception):
 class HermesWebClient:
     @property
     def enabled(self) -> bool:
-        return bool(settings.hermes_web_base_url and settings.hermes_web_api_key)
+        """Return local configuration readiness without making a network call."""
+        return all(
+            isinstance(value, str) and bool(value.strip())
+            for value in (
+                settings.hermes_web_base_url,
+                settings.hermes_web_api_key,
+                settings.hermes_web_model,
+            )
+        )
 
     def search(self, *, query: str, limit: int) -> list[dict[str, str | None]]:
         if not self.enabled:
