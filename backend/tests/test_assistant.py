@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.assistant import gateway as assistant_gateway
 from app.assistant import guards as assistant_guards
+from app.assistant import hermes_web as assistant_hermes_web
 from app.assistant import realtime as assistant_realtime
 from app.assistant import tools as assistant_tools
 from app.assistant import turn as assistant_turn
@@ -288,6 +289,187 @@ def test_web_search_is_available_with_permission_and_complete_runtime_config(
     assert "web_search" in {
         tool["name"] for tool in response.json()["tools"]
     }
+
+
+def test_web_search_compacts_complete_sources_below_action_limit(
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    sources = [
+        {
+            "title": f"Fuente {index} " + ("T" * 200),
+            "url": f"https://source-{index}.example/" + ("u" * 500),
+            "snippet": f"Resumen {index} " + ("s" * 1000),
+            "published_at": "2026-07-15",
+        }
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        assistant_tools.hermes_web_client,
+        "search",
+        lambda *, query, limit: sources[:limit],
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "contratación pública municipal", "limit": 5},
+        allowed=frozenset({"web_search"}),
+    )
+
+    assert result.ok is True
+    assert len(result.content) < assistant_tools.MAX_WEB_TOOL_RESULT_CHARS
+    payload = json.loads(result.content)
+    assert payload["truncated"] is True
+    assert 0 < len(payload["results"]) < len(sources)
+    assert payload["results"] == sources[: len(payload["results"])]
+    next_candidate = {
+        **payload,
+        "results": [
+            *payload["results"],
+            sources[len(payload["results"])],
+        ],
+    }
+    assert (
+        len(assistant_tools._serialize_web_search_payload(next_candidate))
+        >= assistant_tools.MAX_WEB_TOOL_RESULT_CHARS
+    )
+
+
+def test_web_search_reports_complete_result_set_without_truncation(
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    sources = [
+        {
+            "title": "Portal de contratación",
+            "url": "https://contratacion.example/noticia",
+            "snippet": "Información pública.",
+            "published_at": None,
+        },
+        {
+            "title": "Boletín oficial",
+            "url": "http://boletin.example/anuncio",
+            "snippet": "Anuncio oficial.",
+            "published_at": "2026-07-15",
+        },
+    ]
+    monkeypatch.setattr(
+        assistant_tools.hermes_web_client,
+        "search",
+        lambda *, query, limit: sources[:limit],
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "contratación pública municipal", "limit": 5},
+        allowed=frozenset({"web_search"}),
+    )
+
+    assert result.ok is True
+    assert json.loads(result.content)["results"] == sources
+    assert json.loads(result.content)["truncated"] is False
+    assert result.content == json.dumps(
+        json.loads(result.content),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def test_hermes_web_keeps_only_absolute_credential_free_http_urls():
+    content = json.dumps(
+        {
+            "results": [
+                {"title": "HTTPS", "url": "https://example.org/noticia"},
+                {"title": "HTTP", "url": "http://example.org/anuncio"},
+                {"title": "Relative", "url": "/noticia"},
+                {"title": "Protocol relative", "url": "//example.org/noticia"},
+                {"title": "FTP", "url": "ftp://example.org/file"},
+                {"title": "Script", "url": "javascript:alert(1)"},
+                {
+                    "title": "Credentials",
+                    "url": "https://user:secret@example.org/private",
+                },
+                {"title": "No host", "url": "https:///missing-host"},
+                {"title": "Whitespace", "url": "https://exa mple.org"},
+                {"title": "Bad port", "url": "https://example.org:not-a-port"},
+                {"title": "Too long", "url": "https://example.org/" + ("a" * 2000)},
+            ]
+        }
+    )
+
+    results = assistant_hermes_web._parse_results(content, limit=20)
+
+    assert [result["url"] for result in results] == [
+        "https://example.org/noticia",
+        "http://example.org/anuncio",
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "DNI 12 345 678-A",
+        "DNI 12.345.678 A",
+        "NIE X-123 456-7-A",
+        "Teléfono +34 612-345-678",
+        "Teléfono 612 345 678",
+        "Teléfono 612 34 56 78",
+    ],
+)
+def test_web_personal_data_guard_recognizes_formatted_identifiers(query):
+    assert assistant_tools.PERSONAL_DATA_PATTERN.search(query)
+
+
+def test_web_personal_data_guard_allows_benign_public_query():
+    assert not assistant_tools.PERSONAL_DATA_PATTERN.search(
+        "Ordenanza de terrazas publicada en julio de 2026"
+    )
+
+
+def test_web_search_rejects_formatted_personal_data_before_runtime(
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    runtime_called = False
+
+    def unexpected_search(*, query, limit):
+        nonlocal runtime_called
+        runtime_called = True
+        return []
+
+    monkeypatch.setattr(
+        assistant_tools.hermes_web_client,
+        "search",
+        unexpected_search,
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "Busca información sobre el DNI 12 345 678-A"},
+        allowed=frozenset({"web_search"}),
+    )
+
+    assert result.ok is False
+    assert "datos personales identificables" in result.content
+    assert runtime_called is False
 
 
 def test_status_reports_speech_flags(
