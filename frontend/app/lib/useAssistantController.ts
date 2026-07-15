@@ -27,9 +27,9 @@ import {
   type RealtimeServerEvent,
 } from "./realtimeVoice";
 import {
-  createSentenceChunker,
   createSpeechPlayer,
   flattenMarkdownForSpeech,
+  splitTextForSpeech,
 } from "./voice";
 
 type RequestErrorHandler = (
@@ -793,11 +793,10 @@ export function useAssistantController({
     setAssistantError("");
 
     let streamedUserMessageId: number | null = null;
-    const speakAssistantText = (text: string) => {
+    const queueAssistantSpeech = (speechText: string) => {
       if (speechInterruptedRef.current) {
         return;
       }
-      const speechText = flattenMarkdownForSpeech(text);
       if (!speechText) {
         return;
       }
@@ -811,11 +810,6 @@ export function useAssistantController({
         }
       });
     };
-    const sentenceChunker =
-      inputMode === "voice" && handsFreeEnabled
-        ? createSentenceChunker(speakAssistantText)
-        : null;
-
     // Optimistic echo so the user sees their message while the agent works.
     setSelectedConversation((current) =>
       current && current.id === conversationId
@@ -867,7 +861,6 @@ export function useAssistantController({
           );
         },
         onTextDelta: (text) => {
-          sentenceChunker?.push(text);
           setSelectedConversation((current) =>
             current && current.id === conversationId
               ? {
@@ -876,6 +869,18 @@ export function useAssistantController({
                     message.id === -2
                       ? { ...message, content: `${message.content}${text}` }
                       : message,
+                  ),
+                }
+              : current,
+          );
+        },
+        onTextReset: (text) => {
+          setSelectedConversation((current) =>
+            current && current.id === conversationId
+              ? {
+                  ...current,
+                  messages: current.messages.map((message) =>
+                    message.id === -2 ? { ...message, content: text } : message,
                   ),
                 }
               : current,
@@ -937,10 +942,14 @@ export function useAssistantController({
           if (hasMutatingAction) {
             onRequirementsChanged?.();
           }
-          if (sentenceChunker) {
-            sentenceChunker.flush();
-          } else if (inputMode === "voice") {
-            speakAssistantText(event.message.content);
+          if (inputMode === "voice") {
+            const speechText = flattenMarkdownForSpeech(event.message.content);
+            for (const chunk of splitTextForSpeech(
+              speechText,
+              assistantStatus?.speech_synthesis_max_chars ?? 3000,
+            )) {
+              queueAssistantSpeech(chunk);
+            }
           }
         },
       }, inputMode, abortController.signal);
@@ -1053,11 +1062,10 @@ export function useAssistantController({
 
     let streamedUserMessageId: number | null = null;
     let transcriptReceived = false;
-    const speakAssistantText = (text: string) => {
+    const queueAssistantSpeech = (speechText: string) => {
       if (speechInterruptedRef.current) {
         return;
       }
-      const speechText = flattenMarkdownForSpeech(text);
       if (!speechText) {
         return;
       }
@@ -1071,8 +1079,6 @@ export function useAssistantController({
         }
       });
     };
-    const sentenceChunker = createSentenceChunker(speakAssistantText);
-
     const insertTranscribedTurn = (content: string) => {
       transcriptReceived = true;
       setSelectedConversation((current) =>
@@ -1129,7 +1135,6 @@ export function useAssistantController({
           );
         },
         onTextDelta: (text) => {
-          sentenceChunker.push(text);
           setSelectedConversation((current) =>
             current && current.id === conversationId
               ? {
@@ -1138,6 +1143,18 @@ export function useAssistantController({
                     message.id === -2
                       ? { ...message, content: `${message.content}${text}` }
                       : message,
+                  ),
+                }
+              : current,
+          );
+        },
+        onTextReset: (text) => {
+          setSelectedConversation((current) =>
+            current && current.id === conversationId
+              ? {
+                  ...current,
+                  messages: current.messages.map((message) =>
+                    message.id === -2 ? { ...message, content: text } : message,
                   ),
                 }
               : current,
@@ -1199,7 +1216,13 @@ export function useAssistantController({
           if (hasMutatingAction) {
             onRequirementsChanged?.();
           }
-          sentenceChunker.flush();
+          const speechText = flattenMarkdownForSpeech(event.message.content);
+          for (const chunk of splitTextForSpeech(
+            speechText,
+            assistantStatus?.speech_synthesis_max_chars ?? 3000,
+          )) {
+            queueAssistantSpeech(chunk);
+          }
         },
       }, abortController.signal);
     } catch (requestError) {

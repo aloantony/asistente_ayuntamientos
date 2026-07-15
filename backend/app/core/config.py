@@ -1,5 +1,6 @@
 from functools import lru_cache
 from math import isfinite
+from urllib.parse import urlsplit
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,6 +41,10 @@ class Settings(BaseSettings):
     hermes_web_model: str = "hermes-agent"
     hermes_web_timeout_seconds: float = 60.0
     openai_api_key: str | None = None
+    openai_responses_base_url: str = "https://api.openai.com/v1"
+    openai_responses_model: str = "gpt-5.6"
+    openai_responses_reasoning_effort: str = "medium"
+    openai_responses_max_output_tokens: int = 25000
     assistant_realtime_enabled: bool = True
     assistant_realtime_model: str = "gpt-realtime-2.1"
     assistant_realtime_voice: str = "marin"
@@ -105,9 +110,85 @@ class Settings(BaseSettings):
     @classmethod
     def validate_assistant_runtime(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"anthropic", "hermes_agent"}:
-            raise ValueError("assistant_runtime must be 'anthropic' or 'hermes_agent'")
+        if normalized not in {"anthropic", "hermes_agent", "openai_responses"}:
+            raise ValueError(
+                "assistant_runtime must be 'anthropic', 'hermes_agent' or "
+                "'openai_responses'"
+            )
         return normalized
+
+    @field_validator("openai_responses_base_url")
+    @classmethod
+    def validate_openai_responses_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        allowed_hosts = {
+            "api.openai.com",
+            "ae.api.openai.com",
+            "au.api.openai.com",
+            "ca.api.openai.com",
+            "eu.api.openai.com",
+            "gb.api.openai.com",
+            "in.api.openai.com",
+            "jp.api.openai.com",
+            "kr.api.openai.com",
+            "sg.api.openai.com",
+            "us.api.openai.com",
+        }
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in allowed_hosts
+            or parsed.netloc != parsed.hostname
+            or parsed.path not in {"", "/v1"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "openai_responses_base_url must be an official HTTPS OpenAI "
+                "API base URL ending in /v1"
+            )
+        return f"https://{parsed.hostname}/v1"
+
+    @field_validator("openai_responses_model")
+    @classmethod
+    def validate_openai_responses_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not (
+            normalized == "gpt-5.6" or normalized.startswith("gpt-5.6-")
+        ):
+            raise ValueError(
+                "openai_responses_model must use the supported GPT-5.6 family"
+            )
+        return normalized
+
+    @field_validator("openai_responses_reasoning_effort")
+    @classmethod
+    def validate_openai_responses_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError(
+                "openai_responses_reasoning_effort must be one of: none, low, "
+                "medium, high, xhigh, max"
+            )
+        return normalized
+
+    @field_validator("openai_responses_max_output_tokens")
+    @classmethod
+    def validate_openai_responses_max_output_tokens(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError(
+                "openai_responses_max_output_tokens must be greater than zero"
+            )
+        return value
+
+    @field_validator("speech_synthesis_max_chars")
+    @classmethod
+    def validate_speech_synthesis_max_chars(cls, value: int) -> int:
+        if not 1 <= value <= 20000:
+            raise ValueError(
+                "speech_synthesis_max_chars must be between 1 and 20000"
+            )
+        return value
 
     @field_validator(
         "assistant_turn_timeout_seconds",

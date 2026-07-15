@@ -954,6 +954,7 @@ export type AssistantStatus = {
   runtime_healthy: boolean | null;
   speech_transcription_enabled: boolean;
   speech_synthesis_enabled: boolean;
+  speech_synthesis_max_chars: number;
   realtime_voice_enabled: boolean;
   realtime_voice_provider: "openai" | null;
   realtime_voice_model: string | null;

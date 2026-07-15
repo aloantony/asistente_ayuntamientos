@@ -384,6 +384,7 @@ type AssistantStreamHandlers = {
   onTranscriptFinal?: (event: AssistantStreamTranscriptFinal) => void;
   onMessageStart?: (event: AssistantStreamMessageStart) => void;
   onTextDelta?: (text: string) => void;
+  onTextReset?: (text: string) => void;
   onToolActivity?: (event: AssistantStreamToolActivity) => void;
   onDone?: (event: AssistantStreamDone) => void;
 };
@@ -671,6 +672,11 @@ function dispatchAssistantStreamFrame(
     case "text_delta":
       if (typeof data.text === "string") {
         handlers.onTextDelta?.(data.text);
+      }
+      break;
+    case "text_reset":
+      if (typeof data.text === "string") {
+        handlers.onTextReset?.(data.text);
       }
       break;
     case "tool_activity":

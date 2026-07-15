@@ -30,6 +30,7 @@ from app.assistant.models import (
 )
 from app.assistant.speech import SpeechTranscriptionError, build_azure_ssml
 from app.assistant.routes import get_gateway
+from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.schemas import AssistantRealtimeTurnStartCreate
 from app.assistant.turn import ERROR_REPLY, build_history
 from app.core.config import settings
@@ -55,13 +56,19 @@ def tool_use_block(block_id: str, name: str, tool_input: dict) -> FakeToolUseBlo
     return FakeToolUseBlock(type="tool_use", id=block_id, name=name, input=tool_input)
 
 
-def fake_response(stop_reason: str, content: list, deltas: list[str] | None = None):
+def fake_response(
+    stop_reason: str,
+    content: list,
+    deltas: list[str] | None = None,
+    provider_state: tuple[dict, ...] = (),
+):
     return SimpleNamespace(
         model="fake-model",
         stop_reason=stop_reason,
         content=content,
         usage=SimpleNamespace(input_tokens=1, output_tokens=1),
         deltas=deltas or [],
+        provider_state=provider_state,
     )
 
 
@@ -77,13 +84,22 @@ class FakeGateway:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def complete(self, *, system, messages, tools, timeout_seconds=None):
+    def complete(
+        self,
+        *,
+        system,
+        messages,
+        tools,
+        timeout_seconds=None,
+        safety_identifier=None,
+    ):
         self.calls.append(
             {
                 "system": system,
                 "messages": messages,
                 "tools": tools,
                 "timeout_seconds": timeout_seconds,
+                "safety_identifier": safety_identifier,
             }
         )
         if not self.responses:
@@ -93,12 +109,21 @@ class FakeGateway:
             raise response
         return response
 
-    def complete_stream(self, *, system, messages, tools, timeout_seconds=None):
+    def complete_stream(
+        self,
+        *,
+        system,
+        messages,
+        tools,
+        timeout_seconds=None,
+        safety_identifier=None,
+    ):
         response = self.complete(
             system=system,
             messages=messages,
             tools=tools,
             timeout_seconds=timeout_seconds,
+            safety_identifier=safety_identifier,
         )
         for delta in response.deltas:
             yield AITextDelta(text=delta)
@@ -239,6 +264,24 @@ def test_status_exposes_single_assistant_contract_and_filtered_tools(
     assert "create_requirement" in tool_names
     assert "list_requirements" in tool_names
     assert "web_search" not in tool_names
+
+
+def test_status_reports_openai_responses_model(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "assistant_runtime", "openai_responses")
+    monkeypatch.setattr(settings, "openai_responses_model", "gpt-5.6")
+    use_gateway(FakeGateway([]))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    assert response.json()["runtime"] == "openai_responses"
+    assert response.json()["model"] == "gpt-5.6"
 
 
 def test_web_search_is_hidden_when_permission_exists_but_runtime_is_incomplete(
@@ -482,6 +525,7 @@ def test_status_reports_speech_flags(
     use_gateway(FakeGateway([]))
     monkeypatch.setattr(settings, "speech_transcription_runtime", "nvidia_nim")
     monkeypatch.setattr(settings, "speech_synthesis_runtime", "azure")
+    monkeypatch.setattr(settings, "speech_synthesis_max_chars", 2345)
 
     response = client.get("/assistant/status", headers=headers_for(user))
 
@@ -489,6 +533,7 @@ def test_status_reports_speech_flags(
     body = response.json()
     assert body["speech_transcription_enabled"] is True
     assert body["speech_synthesis_enabled"] is True
+    assert body["speech_synthesis_max_chars"] == 2345
 
 
 def test_status_reports_realtime_voice_flags(
@@ -750,6 +795,9 @@ def test_realtime_session_creates_openai_client_secret(
         captured["url"] = request.full_url
         captured["timeout"] = timeout
         captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["safety_identifier"] = request.get_header(
+            "Openai-safety-identifier"
+        )
         return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
 
     monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
@@ -783,6 +831,9 @@ def test_realtime_session_creates_openai_client_secret(
         "realtime_url": settings.assistant_realtime_url,
     }
     assert captured["url"] == settings.assistant_realtime_client_secret_url
+    assert captured["safety_identifier"] == build_assistant_safety_identifier(
+        user.id
+    )
     session = captured["payload"]["session"]
     assert session["type"] == "realtime"
     assert session["model"] == "gpt-realtime-2.1"
@@ -2147,6 +2198,7 @@ def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
             messages,
             tools,
             timeout_seconds=None,
+            safety_identifier=None,
         ):
             self.call_count += 1
             if self.call_count == 1:
@@ -2485,6 +2537,22 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     use_gateway,
 ):
     user, organization = assistant_user
+    provider_state = (
+        {
+            "id": "rs_1",
+            "type": "reasoning",
+            "encrypted_content": "encrypted",
+            "summary": [],
+        },
+        {
+            "id": "fc_1",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_1",
+            "name": "list_requirements",
+            "arguments": json.dumps({"organization_id": organization.id}),
+        },
+    )
     gateway = use_gateway(
         FakeGateway(
             [
@@ -2497,6 +2565,7 @@ def test_tool_loop_executes_available_tool_and_persists_action(
                             {"organization_id": organization.id},
                         )
                     ],
+                    provider_state=provider_state,
                 ),
                 fake_response(
                     "end_turn",
@@ -2525,6 +2594,10 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     assert assistant_message["actions"][0]["ok"] is True
     assert len(gateway.calls) == 2
     assert gateway.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+    assert gateway.calls[1]["messages"][-2]["provider_state"] == provider_state
+    safety_identifier = gateway.calls[0]["safety_identifier"]
+    assert safety_identifier == gateway.calls[1]["safety_identifier"]
+    assert len(safety_identifier) == 64
 
 
 def test_tool_call_budget_skips_excess_calls_and_forces_tool_free_synthesis(
@@ -2938,7 +3011,15 @@ def test_turn_wall_clock_budget_bounds_gateway_calls_and_stops_before_overrun(
                 )
             ]
 
-        def complete(self, *, system, messages, tools, timeout_seconds=None):
+        def complete(
+            self,
+            *,
+            system,
+            messages,
+            tools,
+            timeout_seconds=None,
+            safety_identifier=None,
+        ):
             assert timeout_seconds is not None
             self.calls.append(
                 {"tools": tools, "timeout_seconds": timeout_seconds}
@@ -4574,12 +4655,14 @@ def test_sse_stream_emits_deltas_tool_activity_and_done(
                 fake_response(
                     "tool_use",
                     [
+                        text_block("Voy a consultar."),
                         tool_use_block(
                             "call_1",
                             "list_requirements",
                             {"organization_id": organization.id},
                         )
                     ],
+                    deltas=["Voy a consultar."],
                 ),
                 fake_response(
                     "end_turn",
@@ -4607,19 +4690,122 @@ def test_sse_stream_emits_deltas_tool_activity_and_done(
     events = parse_sse(body)
     assert [event["event"] for event in events] == [
         "message_start",
+        "text_delta",
         "tool_activity",
         "tool_activity",
         "text_delta",
         "text_delta",
+        "text_reset",
         "done",
     ]
-    assert events[1]["data"]["status"] == "started"
-    assert events[2]["data"]["status"] == "finished"
-    assert events[2]["data"]["ok"] is True
-    assert events[3]["data"]["text"] == "Respuesta "
+    assert events[1]["data"]["text"] == "Voy a consultar."
+    assert events[2]["data"]["status"] == "started"
+    assert events[3]["data"]["status"] == "finished"
+    assert events[3]["data"]["ok"] is True
+    assert events[4]["data"]["text"] == "Respuesta "
+    assert events[-2]["data"]["text"] == "Respuesta final."
     assert events[-1]["data"]["message"]["content"] == "Respuesta final."
     assert events[-1]["data"]["message"]["agent_key"] == "anacleto"
     assert len(gateway.calls) == 2
+
+
+def test_sse_pause_turn_reconciles_partial_text_with_final_message(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "pause_turn",
+                    [text_block("Respuesta todavía incompleta")],
+                    deltas=["Respuesta todavía incompleta"],
+                    provider_state=(
+                        {
+                            "id": "rs_partial",
+                            "type": "reasoning",
+                            "encrypted_content": "encrypted",
+                            "summary": [],
+                        },
+                    ),
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("Respuesta final verificada.")],
+                    deltas=["Respuesta final verificada."],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Continua hasta terminar"},
+        headers=headers_for(user),
+    ) as response:
+        events = parse_sse("".join(response.iter_text()))
+
+    assert response.status_code == 200
+    assert [event["event"] for event in events] == [
+        "message_start",
+        "text_delta",
+        "text_delta",
+        "text_reset",
+        "done",
+    ]
+    assert events[-2]["data"]["text"] == "Respuesta final verificada."
+    assert events[-1]["data"]["message"]["content"] == (
+        "Respuesta final verificada."
+    )
+
+
+def test_sse_delta_then_gateway_failure_resets_to_persisted_error(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+
+    class PartialFailureGateway:
+        enabled = True
+        runtime_healthy = None
+
+        def complete_stream(self, **kwargs):
+            yield AITextDelta(text="Texto provisional no fiable")
+            raise AssistantUnavailableError("upstream disconnected")
+
+    use_gateway(PartialFailureGateway())
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Responde"},
+        headers=headers_for(user),
+    ) as response:
+        events = parse_sse("".join(response.iter_text()))
+
+    assert response.status_code == 200
+    assert [event["event"] for event in events] == [
+        "message_start",
+        "text_delta",
+        "text_reset",
+        "done",
+    ]
+    assert events[-2]["data"]["text"] == ERROR_REPLY
+    assert events[-1]["data"]["message"]["content"] == ERROR_REPLY
 
 
 def test_sse_precondition_errors_are_http(client, assistant_user, use_gateway):

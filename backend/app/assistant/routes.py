@@ -131,12 +131,17 @@ def get_assistant_status(
         model=(
             settings.hermes_agent_model
             if settings.assistant_runtime == "hermes_agent"
-            else settings.assistant_model
+            else (
+                settings.openai_responses_model
+                if settings.assistant_runtime == "openai_responses"
+                else settings.assistant_model
+            )
         ),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
         speech_transcription_enabled=settings.speech_transcription_runtime
         != "disabled",
         speech_synthesis_enabled=settings.speech_synthesis_runtime != "disabled",
+        speech_synthesis_max_chars=settings.speech_synthesis_max_chars,
         realtime_voice_enabled=realtime_voice_enabled(),
         realtime_voice_provider="openai" if realtime_voice_enabled() else None,
         realtime_voice_model=(
