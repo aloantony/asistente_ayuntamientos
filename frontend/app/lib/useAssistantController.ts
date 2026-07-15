@@ -778,6 +778,7 @@ export function useAssistantController({
       !content ||
       !selectedConversation ||
       isSendingMessage ||
+      assistantStreamAbortRef.current !== null ||
       realtimeServerClosuresRef.current.size > 0
     ) {
       return;
@@ -1034,6 +1035,7 @@ export function useAssistantController({
     if (
       !selectedConversation ||
       isSendingMessage ||
+      assistantStreamAbortRef.current !== null ||
       audio.size === 0 ||
       realtimeServerClosuresRef.current.size > 0
     ) {

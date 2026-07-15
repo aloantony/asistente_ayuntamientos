@@ -412,6 +412,8 @@ def test_voice_turn_stream_transcribes_runs_agent_and_persists_reply(
     assert events[2][1] == {"state": "thinking"}
     assert ("text_delta", {"text": "Claro, "}) in events
     assert ("text_delta", {"text": "te ayudo con la consulta."}) in events
+    assert events[-2] == ("voice_state", {"state": "done"})
+    assert events[-1][0] == "done"
     done = next(data for name, data in events if name == "done")
     assert done["message"]["content"] == "Claro, te ayudo con la consulta."
     assert done["message"]["role"] == "assistant"
