@@ -48,6 +48,44 @@ from app.users.models import User
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 4000
+TOOL_CALL_BUDGET_RESULT = (
+    "No se ejecutó la herramienta porque se agotó el presupuesto total de "
+    "llamadas de este turno. Resume los resultados ya disponibles y explica "
+    "honestamente cualquier comprobación pendiente."
+)
+TOOL_ROUND_BUDGET_RESULT = (
+    "No se ejecutó la herramienta porque se agotó el presupuesto de rondas "
+    "de este turno. Resume los resultados ya disponibles y explica "
+    "honestamente cualquier comprobación pendiente."
+)
+REPEATED_TOOL_CALL_RESULT = (
+    "No se volvió a ejecutar la herramienta porque repite una llamada "
+    "equivalente ya realizada en este turno. Usa el resultado anterior y "
+    "responde al usuario sin volver a intentarlo."
+)
+FAILED_TOOL_RETRY_RESULT = (
+    "No se volvió a ejecutar la herramienta porque ya falló en este turno con "
+    "un error que no se resolverá cambiando la consulta. Explica la "
+    "indisponibilidad al usuario y continúa sin esta herramienta."
+)
+FINALIZATION_PENDING_TOOL_RESULT = (
+    "No se ejecutó la herramienta porque el turno ya está cerrando su fase de "
+    "consultas. Usa los resultados disponibles para responder al usuario."
+)
+TOOL_LOOP_LIMIT_REPLY = (
+    "He detenido las consultas para evitar un bucle. No he podido completar "
+    "todas las comprobaciones; puedes pedirme que reintente la parte pendiente."
+)
+TOOL_LOOP_FINALIZATION_INSTRUCTION = """
+
+CIERRE OBLIGATORIO DEL TURNO
+Se ha alcanzado un límite de seguridad de herramientas. Las herramientas están
+deshabilitadas para esta última respuesta. Redacta ahora una respuesta final y
+autosuficiente para el usuario basándote únicamente en los resultados que ya
+figuran en la conversación. No anuncies nuevas consultas ni prometas seguir
+trabajando. Distingue lo comprobado de lo que quedó pendiente y explica de forma
+breve cualquier limitación o error de herramienta.
+""".strip()
 STALE_MUTATING_TOOL_RESULT = (
     "No se ejecutó la herramienta porque este turno quedó desactualizado por "
     "un mensaje posterior del usuario."
@@ -157,6 +195,11 @@ def run_agent_turn_events(
 
     actions: list[dict] = []
     reply_text = ""
+    tool_calls_used = 0
+    seen_read_calls: set[str] = set()
+    unavailable_read_tools: set[str] = set()
+    iterations_remaining = max(0, settings.assistant_max_tool_iterations)
+    tool_call_budget = max(0, settings.assistant_max_tool_calls)
     try:
         response = yield from _complete_with_events(
             gateway,
@@ -165,7 +208,7 @@ def run_agent_turn_events(
             tools=tool_definitions,
         )
 
-        for _ in range(settings.assistant_max_tool_iterations):
+        while True:
             response = recover_textual_read_tool_call(response, tools, messages)
 
             if response.stop_reason == "refusal":
@@ -174,6 +217,16 @@ def run_agent_turn_events(
 
             if response.stop_reason == "pause_turn":
                 messages.append({"role": "assistant", "content": response.content})
+                if iterations_remaining <= 0:
+                    reply_text = yield from _complete_forced_synthesis(
+                        gateway,
+                        system=system,
+                        messages=messages,
+                        reason="iteration_budget",
+                        conversation_id=conversation.id,
+                    )
+                    break
+                iterations_remaining -= 1
                 response = yield from _complete_with_events(
                     gateway,
                     system=system,
@@ -186,11 +239,19 @@ def run_agent_turn_events(
                 reply_text = sanitize_model_reply(extract_text(response.content))
                 break
 
-            tool_results = []
+            force_synthesis_reason: str | None = None
+            execute_round = iterations_remaining > 0
+            if execute_round:
+                iterations_remaining -= 1
+            else:
+                force_synthesis_reason = "iteration_budget"
+
+            tool_results: list[dict] = []
             for block in response.content:
                 if block.type != "tool_use":
                     continue
                 tool_input = dict(block.input)
+                tool = tools_by_name.get(block.name)
                 yield TurnEvent(
                     "tool_activity",
                     {
@@ -199,33 +260,61 @@ def run_agent_turn_events(
                         "input": tool_input,
                     },
                 )
-                guarded_result = check_tool_confirmation(
-                    db,
-                    conversation,
-                    user_message,
-                    block.name,
-                    tool_input,
-                )
-                if block.name in CONFIRMATION_REQUIRED_TOOLS:
-                    required_confirmation = _confirmation_context_from_result(
-                        guarded_result
+                signature = tool_call_signature(block.name, tool_input)
+                track_repetition = tool is None or tool.read_only
+                if not execute_round:
+                    result = ToolResult(content=TOOL_ROUND_BUDGET_RESULT, ok=False)
+                elif force_synthesis_reason is not None:
+                    result = ToolResult(
+                        content=FINALIZATION_PENDING_TOOL_RESULT,
+                        ok=False,
                     )
-                    if required_confirmation is not None:
-                        confirmation_context = required_confirmation
-                result = guarded_result or _execute_tool_for_current_turn(
-                    db=db,
-                    current_user=current_user,
-                    conversation=conversation,
-                    user_message=user_message,
-                    tool=tools_by_name.get(block.name),
-                    tool_name=block.name,
-                    tool_input=tool_input,
-                    context=ToolContext(
-                        conversation_id=conversation.id,
-                        user_message_id=user_message.id,
-                    ),
-                    allowed=tool_names,
-                )
+                elif track_repetition and block.name in unavailable_read_tools:
+                    result = ToolResult(content=FAILED_TOOL_RETRY_RESULT, ok=False)
+                    force_synthesis_reason = "failed_tool_retry"
+                elif track_repetition and signature in seen_read_calls:
+                    result = ToolResult(content=REPEATED_TOOL_CALL_RESULT, ok=False)
+                    force_synthesis_reason = "repeated_tool_call"
+                elif tool_calls_used >= tool_call_budget:
+                    result = ToolResult(content=TOOL_CALL_BUDGET_RESULT, ok=False)
+                    force_synthesis_reason = "tool_call_budget"
+                else:
+                    tool_calls_used += 1
+                    guarded_result = check_tool_confirmation(
+                        db,
+                        conversation,
+                        user_message,
+                        block.name,
+                        tool_input,
+                    )
+                    if block.name in CONFIRMATION_REQUIRED_TOOLS:
+                        required_confirmation = _confirmation_context_from_result(
+                            guarded_result
+                        )
+                        if required_confirmation is not None:
+                            confirmation_context = required_confirmation
+                    result = guarded_result or _execute_tool_for_current_turn(
+                        db=db,
+                        current_user=current_user,
+                        conversation=conversation,
+                        user_message=user_message,
+                        tool=tool,
+                        tool_name=block.name,
+                        tool_input=tool_input,
+                        context=ToolContext(
+                            conversation_id=conversation.id,
+                            user_message_id=user_message.id,
+                        ),
+                        allowed=tool_names,
+                    )
+                    if track_repetition:
+                        seen_read_calls.add(signature)
+                        if _is_non_retryable_tool_failure(result):
+                            unavailable_read_tools.add(block.name)
+                    elif result.ok:
+                        # A successful mutation can make an identical read useful
+                        # again later in this same turn.
+                        seen_read_calls.clear()
                 action = {
                     "tool": block.name,
                     "ok": result.ok,
@@ -254,18 +343,33 @@ def run_agent_turn_events(
 
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
+            if not tool_results:
+                force_synthesis_reason = "empty_tool_response"
+            elif iterations_remaining <= 0:
+                force_synthesis_reason = (
+                    force_synthesis_reason or "iteration_budget"
+                )
+            elif tool_calls_used >= tool_call_budget:
+                force_synthesis_reason = (
+                    force_synthesis_reason or "tool_call_budget"
+                )
+
+            if force_synthesis_reason is not None:
+                reply_text = yield from _complete_forced_synthesis(
+                    gateway,
+                    system=system,
+                    messages=messages,
+                    reason=force_synthesis_reason,
+                    conversation_id=conversation.id,
+                )
+                break
+
             response = yield from _complete_with_events(
                 gateway,
                 system=system,
                 messages=messages,
                 tools=tool_definitions,
             )
-        else:
-            logger.warning(
-                "Assistant hit the tool iteration limit (conversation=%s)",
-                conversation.id,
-            )
-            reply_text = sanitize_model_reply(extract_text(response.content))
     except AssistantUnavailableError:
         logger.warning(
             "Assistant gateway failed mid-turn (conversation=%s)",
@@ -328,6 +432,99 @@ def run_agent_turn_events(
         },
     )
     return assistant_message
+
+
+def tool_call_signature(tool_name: str, tool_input: dict) -> str:
+    """Return a stable signature for superficially equivalent tool inputs."""
+    normalized = _normalize_tool_call_value(tool_input)
+    return f"{tool_name}:{json.dumps(normalized, sort_keys=True, separators=(',', ':'))}"
+
+
+def _normalize_tool_call_value(value):
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_tool_call_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, list):
+        return [_normalize_tool_call_value(item) for item in value]
+    if isinstance(value, str):
+        return " ".join(value.split()).casefold()
+    return value
+
+
+def _is_non_retryable_tool_failure(result: ToolResult) -> bool:
+    if result.ok:
+        return False
+    normalized = result.content.casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "error (401)",
+            "error (403)",
+            "error (503)",
+            "herramienta desconocida",
+            "herramienta no disponible",
+            "no está configurad",
+            "no esta configurad",
+        )
+    )
+
+
+def _complete_forced_synthesis(
+    gateway: AIGateway,
+    *,
+    system: str,
+    messages: list[dict],
+    reason: str,
+    conversation_id: int,
+) -> Generator[TurnEvent, None, str]:
+    """Complete once without tools and only publish a valid final answer."""
+    logger.warning(
+        "Assistant tool loop forced final synthesis (conversation=%s reason=%s)",
+        conversation_id,
+        reason,
+    )
+    final_system = f"{system}\n\n{TOOL_LOOP_FINALIZATION_INSTRUCTION}"
+    completion_events = _complete_with_events(
+        gateway,
+        system=final_system,
+        messages=messages,
+        tools=[],
+    )
+    buffered_events: list[TurnEvent] = []
+    while True:
+        try:
+            buffered_events.append(next(completion_events))
+        except StopIteration as stop:
+            completion = stop.value
+            break
+
+    if completion.stop_reason == "refusal":
+        reply_text = REFUSAL_REPLY
+        buffered_events = []
+    elif completion.stop_reason in {"tool_use", "pause_turn"}:
+        reply_text = TOOL_LOOP_LIMIT_REPLY
+        buffered_events = []
+    else:
+        reply_text = sanitize_model_reply(extract_text(completion.content))
+        if not reply_text:
+            reply_text = TOOL_LOOP_LIMIT_REPLY
+            buffered_events = []
+
+    buffered_text = "".join(
+        str(event.data.get("text", ""))
+        for event in buffered_events
+        if event.type == "text_delta"
+    )
+    if buffered_events and buffered_text != reply_text:
+        buffered_events = []
+
+    if buffered_events:
+        yield from buffered_events
+    elif reply_text:
+        yield TurnEvent("text_delta", {"text": reply_text})
+    return reply_text
 
 
 def _execute_tool_for_current_turn(

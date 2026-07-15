@@ -2321,6 +2321,379 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     assert gateway.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
 
 
+def test_tool_call_budget_skips_excess_calls_and_forces_tool_free_synthesis(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 2)
+    executed_inputs: list[dict] = []
+
+    def record_execution(
+        db,
+        current_user,
+        tool_name,
+        tool_input,
+        context,
+        *,
+        allowed,
+    ):
+        executed_inputs.append(tool_input)
+        return assistant_tools.ToolResult(content="[]", ok=True)
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", record_execution)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        text_block("Voy a consultar varias veces antes de responder."),
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "draft",
+                            },
+                        ),
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "submitted",
+                            },
+                        ),
+                        tool_use_block(
+                            "call_3",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "accepted",
+                            },
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("Consulté dos estados; no pude consultar el tercero.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Resume las necesidades por estado"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == (
+        "Consulté dos estados; no pude consultar el tercero."
+    )
+    assert "Voy a consultar" not in assistant_message["content"]
+    assert len(executed_inputs) == 2
+    assert [action["ok"] for action in assistant_message["actions"]] == [
+        True,
+        True,
+        False,
+    ]
+    assert "presupuesto" in assistant_message["actions"][-1]["result"].lower()
+    assert len(gateway.calls) == 2
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_repeated_equivalent_read_call_is_suppressed_and_forces_synthesis(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    execution_count = 0
+
+    def record_execution(
+        db,
+        current_user,
+        tool_name,
+        tool_input,
+        context,
+        *,
+        allowed,
+    ):
+        nonlocal execution_count
+        execution_count += 1
+        return assistant_tools.ToolResult(content="[]", ok=True)
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", record_execution)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "draft",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {
+                                "status": "  DRAFT ",
+                                "organization_id": organization.id,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No hay necesidades en borrador.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Lista las necesidades en borrador"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == "No hay necesidades en borrador."
+    assert execution_count == 1
+    assert [action["ok"] for action in assistant_message["actions"]] == [True, False]
+    assert "equivalente" in assistant_message["actions"][-1]["result"].lower()
+    assert len(gateway.calls) == 3
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_non_retryable_failed_read_tool_is_not_retried_with_new_arguments(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    execution_count = 0
+
+    def fail_execution(
+        db,
+        current_user,
+        tool_name,
+        tool_input,
+        context,
+        *,
+        allowed,
+    ):
+        nonlocal execution_count
+        execution_count += 1
+        return assistant_tools.ToolResult(
+            content="Error (503): servicio no configurado",
+            ok=False,
+        )
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", fail_execution)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "draft",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "No pude consultar las necesidades porque el servicio "
+                            "no está configurado."
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Lista las necesidades"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert execution_count == 1
+    assert "no está configurado" in assistant_message["content"]
+    assert [action["ok"] for action in assistant_message["actions"]] == [False, False]
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_tool_round_limit_forces_tool_free_completion_instead_of_fallback(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 1)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        text_block("Voy a revisar los datos."),
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("La consulta terminó sin necesidades visibles.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta las necesidades"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == (
+        "La consulta terminó sin necesidades visibles."
+    )
+    assert "Voy a revisar" not in assistant_message["content"]
+    assert assistant_message["content"] != assistant_turn.FALLBACK_REPLY
+    assert len(gateway.calls) == 2
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_invalid_forced_synthesis_uses_explicit_loop_limit_reply(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 1)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        text_block("Voy a consultar otra vez."),
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        ),
+                    ],
+                    deltas=["Voy a consultar otra vez."],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta las necesidades"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == assistant_turn.TOOL_LOOP_LIMIT_REPLY
+    assert assistant_message["content"] != assistant_turn.FALLBACK_REPLY
+    assert "Voy a consultar" not in assistant_message["content"]
+    assert len(gateway.calls) == 2
+    assert gateway.calls[-1]["tools"] == []
+
+
 def get_conversation_state(db, conversation_id: int) -> dict:
     db.expire_all()
     conversation = db.get(AssistantConversation, conversation_id)
@@ -3986,6 +4359,54 @@ def test_sse_precondition_errors_are_http(client, assistant_user, use_gateway):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Assistant is not configured"
+
+
+def test_sse_unexpected_exception_emits_terminal_error_without_leaking_detail(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+    caplog,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    def fail_after_start(*args, **kwargs):
+        yield assistant_turn.TurnEvent(
+            "message_start",
+            {"conversation_id": conversation["id"], "user_message_id": 999},
+        )
+        raise RuntimeError("sensitive internal detail")
+
+    monkeypatch.setattr(
+        "app.assistant.routes.run_agent_turn_events",
+        fail_after_start,
+    )
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Hola"},
+        headers=headers_for(user),
+    ) as response:
+        body = "".join(response.iter_text())
+        events = parse_sse_events(body)
+
+    assert response.status_code == 200
+    assert events == [
+        (
+            "message_start",
+            {"conversation_id": conversation["id"], "user_message_id": 999},
+        ),
+        ("error", {"detail": "Assistant request failed"}),
+    ]
+    assert "sensitive internal detail" not in body
+    assert "Unexpected assistant stream failure" in caplog.text
 
 
 def test_gateway_failure_mid_turn_persists_error_reply(client, assistant_user, use_gateway):
