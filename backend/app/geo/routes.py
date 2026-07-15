@@ -2,8 +2,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.assets.models import MunicipalAsset
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
 from app.geo.access import (
@@ -20,6 +22,11 @@ from app.geo.schemas import EntityLocationCreate, GeoEntityType, GeoMapItem
 from app.users.models import User
 
 router = APIRouter(prefix="/geo", tags=["geo"])
+
+ASSET_LOCATION_SCOPE_CONFLICT = (
+    "Location organization or municipality cannot change while assets reference it"
+)
+LOCATION_UPDATE_CONFLICT = "Location update conflicts with existing data"
 
 
 @router.get("/map-items", response_model=list[GeoMapItem])
@@ -139,6 +146,7 @@ def create_entity_location(
         )
     )
 
+    location_scope_changed = False
     if attachment is None:
         location = GeoLocation(
             organization_id=organization_id,
@@ -166,6 +174,12 @@ def create_entity_location(
         db.add(attachment)
     else:
         location = attachment.location
+        location_scope_changed = (
+            location.organization_id != organization_id
+            or location.municipality_id != municipality_id
+        )
+        if location_scope_changed:
+            ensure_location_has_no_assets(db, location.id)
         location.organization_id = organization_id
         location.municipality_id = municipality_id
         location.label = payload.location.label
@@ -180,7 +194,18 @@ def create_entity_location(
         location.confidence = payload.location.confidence
         location.review_status = payload.location.review_status
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                ASSET_LOCATION_SCOPE_CONFLICT
+                if location_scope_changed
+                else LOCATION_UPDATE_CONFLICT
+            ),
+        ) from None
     db.refresh(attachment.location)
 
     return GeoMapItem(
@@ -195,3 +220,16 @@ def create_entity_location(
         detail_path=visible.detail_path,
         location=attachment.location,
     )
+
+
+def ensure_location_has_no_assets(db: Session, location_id: int) -> None:
+    asset_id = db.scalar(
+        select(MunicipalAsset.id)
+        .where(MunicipalAsset.location_id == location_id)
+        .limit(1)
+    )
+    if asset_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=ASSET_LOCATION_SCOPE_CONFLICT,
+        )

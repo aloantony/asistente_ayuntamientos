@@ -10,6 +10,7 @@ from app.agent_office.routes import router as agent_office_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.assistant.routes import router as assistant_router
+from app.assets.routes import router as assets_router
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
@@ -69,6 +70,7 @@ for app_router in (
     documents_router,
     requirements_router,
     geo_router,
+    assets_router,
     assistant_router,
     agent_office_router,
     telegram_router,

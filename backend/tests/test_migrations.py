@@ -14,10 +14,139 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260713_0021"
+HEAD_REVISION = "20260715_0022"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
+}
+
+ASSET_INVENTORY_SCHEMA = {
+    "municipal_asset_categories": {
+        "columns": {
+            "id",
+            "organization_id",
+            "code",
+            "name",
+            "description",
+            "color",
+            "sort_order",
+            "status",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_municipal_asset_categories_org_status_sort",
+            "ix_municipal_asset_categories_created_by_id",
+            "ix_municipal_asset_categories_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_municipal_asset_categories_code",
+            "ck_municipal_asset_categories_color",
+            "ck_municipal_asset_categories_sort_order",
+            "ck_municipal_asset_categories_status",
+        },
+        "unique_constraints": {
+            "uq_municipal_asset_categories_org_code",
+            "uq_municipal_asset_categories_id_org",
+        },
+    },
+    "municipal_asset_types": {
+        "columns": {
+            "id",
+            "organization_id",
+            "category_id",
+            "code",
+            "name",
+            "description",
+            "sort_order",
+            "status",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_municipal_asset_types_org_status_sort",
+            "ix_municipal_asset_types_category_sort",
+            "ix_municipal_asset_types_created_by_id",
+            "ix_municipal_asset_types_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("category_id", "organization_id"),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_municipal_asset_types_code",
+            "ck_municipal_asset_types_sort_order",
+            "ck_municipal_asset_types_status",
+        },
+        "unique_constraints": {
+            "uq_municipal_asset_types_org_category_code",
+            "uq_municipal_asset_types_id_org",
+        },
+    },
+    "municipal_assets": {
+        "columns": {
+            "id",
+            "organization_id",
+            "municipality_id",
+            "asset_type_id",
+            "location_id",
+            "code",
+            "name",
+            "description",
+            "status",
+            "condition_status",
+            "material",
+            "dimensions",
+            "installed_on",
+            "last_inspected_on",
+            "notes",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_municipal_assets_org_status_id",
+            "ix_municipal_assets_org_type_id",
+            "ix_municipal_assets_municipality_id",
+            "ix_municipal_assets_asset_type_id",
+            "ix_municipal_assets_location_id",
+            "ix_municipal_assets_created_by_id",
+            "ix_municipal_assets_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id", "municipality_id"),
+            ("municipality_id",),
+            ("asset_type_id", "organization_id"),
+            ("location_id",),
+            ("location_id", "organization_id", "municipality_id"),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_municipal_assets_code",
+            "ck_municipal_assets_status",
+            "ck_municipal_assets_condition_status",
+        },
+        "unique_constraints": {
+            "uq_municipal_assets_org_code",
+        },
+    },
+}
+ASSET_SUPPORTING_UNIQUE_CONSTRAINTS = {
+    "organizations": {"uq_organizations_id_municipality"},
+    "geo_locations": {"uq_geo_locations_id_org_municipality"},
 }
 
 KNOWLEDGE_COLUMNS = {
@@ -345,6 +474,59 @@ def assert_downgraded_prototype_schema(inspector: Inspector) -> None:
     } == ARTIFACT_CHECKS
 
 
+def assert_asset_inventory_schema(inspector: Inspector) -> None:
+    for table_name, expected in ASSET_INVENTORY_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+
+    location_tenant_foreign_key = next(
+        foreign_key
+        for foreign_key in inspector.get_foreign_keys("municipal_assets")
+        if foreign_key["name"] == "fk_municipal_assets_location_tenant"
+    )
+    assert location_tenant_foreign_key["options"].get("deferrable") is True
+    assert (
+        location_tenant_foreign_key["options"].get("initially") == "DEFERRED"
+    )
+
+    for table_name, expected_constraints in (
+        ASSET_SUPPORTING_UNIQUE_CONSTRAINTS.items()
+    ):
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected_constraints
+
+
+def assert_asset_supporting_constraints_absent(inspector: Inspector) -> None:
+    for table_name, constraint_names in (
+        ASSET_SUPPORTING_UNIQUE_CONSTRAINTS.items()
+    ):
+        existing_names = {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+        assert constraint_names.isdisjoint(existing_names)
+
+
 @pytest.mark.parametrize("table_name", sorted(PROTOTYPE_TABLES))
 def test_cleanup_waits_for_and_preserves_concurrent_rows(
     migration_database_url: str,
@@ -417,7 +599,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
             )
 
         run_alembic(migration_database_url, "upgrade", "head")
-        assert PROTOTYPE_TABLES.isdisjoint(inspect(engine).get_table_names())
+        upgraded_inspector = inspect(engine)
+        assert PROTOTYPE_TABLES.isdisjoint(upgraded_inspector.get_table_names())
+        assert_asset_inventory_schema(upgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -434,11 +618,20 @@ def test_reconciles_deployed_revision_and_reversible_schema(
             ).scalar_one() == 1
 
         run_alembic(migration_database_url, "downgrade", DEPLOYED_REVISION)
-        assert_downgraded_prototype_schema(inspect(engine))
+        downgraded_inspector = inspect(engine)
+        assert_downgraded_prototype_schema(downgraded_inspector)
+        assert set(ASSET_INVENTORY_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert_asset_supporting_constraints_absent(downgraded_inspector)
 
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
-        assert PROTOTYPE_TABLES.isdisjoint(inspect(engine).get_table_names())
+        reupgraded_inspector = inspect(engine)
+        assert PROTOTYPE_TABLES.isdisjoint(
+            reupgraded_inspector.get_table_names()
+        )
+        assert_asset_inventory_schema(reupgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -453,5 +646,32 @@ def test_reconciles_deployed_revision_and_reversible_schema(
                     """
                 )
             ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_fresh_upgrade_and_asset_inventory_downgrade(
+    migration_database_url: str,
+) -> None:
+    engine = create_engine(migration_database_url)
+
+    try:
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_asset_inventory_schema(inspect(engine))
+
+        run_alembic(migration_database_url, "downgrade", "20260713_0021")
+        downgraded_inspector = inspect(engine)
+        assert set(ASSET_INVENTORY_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert_asset_supporting_constraints_absent(downgraded_inspector)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260713_0021"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_asset_inventory_schema(inspect(engine))
     finally:
         engine.dispose()
