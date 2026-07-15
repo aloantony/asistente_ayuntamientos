@@ -11,6 +11,7 @@ import logging
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
+from urllib.parse import urlsplit
 
 from app.core.config import settings
 
@@ -136,7 +137,7 @@ def _parse_results(content: str, *, limit: int) -> list[dict[str, str | None]]:
         if not isinstance(raw, dict):
             continue
         title = _clean_optional_string(raw.get("title"), max_length=300)
-        url = _clean_optional_string(raw.get("url"), max_length=2000)
+        url = _clean_absolute_http_url(raw.get("url"), max_length=2000)
         snippet = _clean_optional_string(raw.get("snippet"), max_length=1000)
         published_at = _clean_optional_string(
             raw.get("published_at"),
@@ -173,6 +174,38 @@ def _clean_optional_string(value: Any, *, max_length: int) -> str | None:
     if not text:
         return None
     return text[:max_length]
+
+
+def _clean_absolute_http_url(value: Any, *, max_length: int) -> str | None:
+    """Accept only browser-safe absolute HTTP(S) source URLs."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if (
+        not text
+        or len(text) > max_length
+        or any(char.isspace() or ord(char) < 32 for char in text)
+    ):
+        return None
+
+    try:
+        parsed = urlsplit(text)
+        hostname = parsed.hostname
+        # Accessing port also rejects malformed values such as ``:not-a-port``.
+        parsed.port
+    except ValueError:
+        return None
+
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or not hostname.strip(".")
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return text
 
 
 hermes_web_client = HermesWebClient()

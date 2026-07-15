@@ -84,14 +84,28 @@ VALID_ADMIN_FEEDBACK_CATEGORIES = {
 }
 MAX_WEB_QUERY_CHARS = 400
 MAX_WEB_RESULTS = 5
+MAX_WEB_TOOL_RESULT_CHARS = 4000
 MAX_ORDINANCE_QUERY_CHARS = 400
 MAX_ORDINANCE_RESULTS = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
+# This is a narrow last-line guard for obvious structured identifiers, not a
+# complete DLP policy. Names and postal addresses need a separately reviewed
+# policy before web search can be considered suitable for arbitrary free text.
 PERSONAL_DATA_PATTERN = re.compile(
-    r"(\b\d{8}[A-Za-z]\b|\b[XYZ]\d{7}[A-Za-z]\b|[\w.+-]+@[\w-]+\.[\w.-]+|\b(?:\+34\s?)?[6789]\d{8}\b)",
-    re.IGNORECASE,
+    r"""
+    (
+        (?<!\w)\d(?:[\s.-]*\d){7}[\s.-]*[A-Za-z](?!\w)
+        |
+        (?<!\w)[XYZ][\s.-]*\d(?:[\s.-]*\d){6}[\s.-]*[A-Za-z](?!\w)
+        |
+        [\w.+-]+@[\w-]+\.[\w.-]+
+        |
+        (?<!\d)(?:(?:\+|00)34[\s.-]*)?[6789](?:[\s.-]*\d){8}(?!\d)
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 REQUIREMENT_CONTENT_FIELDS = (
@@ -719,7 +733,11 @@ def execute_tool(
             ok=False,
         )
 
-    return ToolResult(content=json.dumps(result, ensure_ascii=False), ok=True)
+    if name == "web_search":
+        content = _serialize_web_search_payload(result)
+    else:
+        content = json.dumps(result, ensure_ascii=False)
+    return ToolResult(content=content, ok=True)
 
 
 def _serialize_requirement(requirement: Requirement, *, full: bool) -> dict:
@@ -969,11 +987,51 @@ def _web_search(
     except HermesWebUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
-    return {
+    return _compact_web_search_payload(
+        query=query,
+        limit=limit,
+        results=results,
+    )
+
+
+def _serialize_web_search_payload(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_web_search_payload(
+    *,
+    query: str,
+    limit: int,
+    results: list[dict[str, str | None]],
+) -> dict:
+    """Keep complete sources while guaranteeing a valid action JSON payload."""
+    selected: list[dict[str, str | None]] = []
+    omitted = 0
+    for result in results:
+        candidate = {
+            "query": query,
+            "limit": limit,
+            "results": [*selected, result],
+            # ``false`` is one character longer than ``true`` and therefore
+            # reserves enough room regardless of the final flag value.
+            "truncated": False,
+        }
+        if len(_serialize_web_search_payload(candidate)) < MAX_WEB_TOOL_RESULT_CHARS:
+            selected.append(result)
+        else:
+            omitted += 1
+
+    payload = {
         "query": query,
         "limit": limit,
-        "results": results,
+        "results": selected,
+        "truncated": omitted > 0,
     }
+    if len(_serialize_web_search_payload(payload)) >= MAX_WEB_TOOL_RESULT_CHARS:
+        # The bounded query and fixed metadata should make this unreachable,
+        # but fail closed if those limits drift in the future.
+        raise ValueError("web search metadata exceeds the action result limit")
+    return payload
 
 
 def _semantic_search_ordinances(
