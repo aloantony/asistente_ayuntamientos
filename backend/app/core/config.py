@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     assistant_model: str = "claude-opus-4-8"
     assistant_max_tokens: int = 16000
     assistant_max_tool_iterations: int = 8
+    assistant_max_tool_calls: int = 8
     assistant_history_max_messages: int = 40
     hermes_agent_base_url: str = "http://127.0.0.1:8642/v1"
     hermes_agent_api_key: str | None = None
