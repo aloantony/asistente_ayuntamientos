@@ -856,11 +856,13 @@ export function AssistantPanel({
 
   function stopListening(options: { discardAudio?: boolean } = {}) {
     const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
+    if (recorder) {
       if (options.discardAudio) {
         discardNextAudioRef.current = true;
       }
-      recorder.stop();
+      if (recorder.state !== "inactive") {
+        recorder.stop();
+      }
       return;
     }
     discardNextAudioRef.current = false;
