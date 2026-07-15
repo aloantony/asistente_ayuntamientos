@@ -65,6 +65,7 @@ class AssistantStatusRead(BaseModel):
     runtime_healthy: bool | None = None
     speech_transcription_enabled: bool = False
     speech_synthesis_enabled: bool = False
+    speech_synthesis_max_chars: int = 3000
     realtime_voice_enabled: bool = False
     realtime_voice_provider: Literal["openai"] | None = None
     realtime_voice_model: str | None = None

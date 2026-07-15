@@ -29,6 +29,7 @@ from app.assistant.schemas import (
     AssistantRealtimeTurnCreate,
     AssistantRealtimeTurnStartCreate,
 )
+from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import ToolContext, execute_tool, get_available_tool_specs
 from app.assistant.turn import MAX_TOOL_RESULT_CHARS, build_history
 from app.core.config import settings
@@ -92,7 +93,9 @@ def create_realtime_client_secret(
         headers={
             "Authorization": f"Bearer {settings.openai_api_key}",
             "Content-Type": "application/json",
-            "OpenAI-Safety-Identifier": _safety_identifier(current_user),
+            "OpenAI-Safety-Identifier": build_assistant_safety_identifier(
+                current_user.id
+            ),
         },
         method="POST",
     )
@@ -1111,8 +1114,3 @@ def _transcription_config() -> dict | None:
     if delay:
         config["delay"] = delay
     return config
-
-
-def _safety_identifier(current_user: User) -> str:
-    raw = f"assistant-user:{current_user.id}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()

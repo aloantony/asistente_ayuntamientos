@@ -37,6 +37,7 @@ from app.assistant.prompts import (
     REFUSAL_REPLY,
     build_system_prompt,
 )
+from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import (
     ToolContext,
     ToolResult,
@@ -161,6 +162,40 @@ def run_agent_turn_events(
     *,
     input_mode: str = "text",
 ) -> Generator[TurnEvent, None, AssistantMessage]:
+    """Stream a turn and reconcile speculative text before its terminal event."""
+    streamed_text: list[str] = []
+    events = _run_agent_turn_events(
+        db,
+        current_user,
+        conversation,
+        user_text,
+        gateway,
+        input_mode=input_mode,
+    )
+    while True:
+        try:
+            event = next(events)
+        except StopIteration as stop:
+            return stop.value
+        if event.type == "text_delta":
+            streamed_text.append(str(event.data.get("text", "")))
+        elif event.type == "done" and streamed_text:
+            message = event.data.get("message") or {}
+            canonical_text = str(message.get("content", ""))
+            if "".join(streamed_text) != canonical_text:
+                yield TurnEvent("text_reset", {"text": canonical_text})
+        yield event
+
+
+def _run_agent_turn_events(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+    user_text: str,
+    gateway: AIGateway,
+    *,
+    input_mode: str = "text",
+) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
     turn_deadline = monotonic() + settings.assistant_turn_timeout_seconds
     # Lock before inserting the message: concurrent FK inserts followed by a
@@ -204,6 +239,7 @@ def run_agent_turn_events(
     tool_names = frozenset(tool.name for tool in tools)
     system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
     messages = build_history(conversation)
+    safety_identifier = build_assistant_safety_identifier(current_user.id)
 
     actions: list[dict] = []
     reply_text = ""
@@ -219,6 +255,7 @@ def run_agent_turn_events(
             messages=messages,
             tools=tool_definitions,
             timeout_seconds=_remaining_gateway_timeout(turn_deadline),
+            safety_identifier=safety_identifier,
         )
 
         while True:
@@ -229,7 +266,7 @@ def run_agent_turn_events(
                 break
 
             if response.stop_reason == "pause_turn":
-                messages.append({"role": "assistant", "content": response.content})
+                messages.append(_assistant_response_message(response))
                 if iterations_remaining <= 0:
                     reply_text = yield from _complete_forced_synthesis(
                         gateway,
@@ -238,6 +275,7 @@ def run_agent_turn_events(
                         reason="iteration_budget",
                         conversation_id=conversation.id,
                         turn_deadline=turn_deadline,
+                        safety_identifier=safety_identifier,
                     )
                     break
                 iterations_remaining -= 1
@@ -247,6 +285,7 @@ def run_agent_turn_events(
                     messages=messages,
                     tools=tool_definitions,
                     timeout_seconds=_remaining_gateway_timeout(turn_deadline),
+                    safety_identifier=safety_identifier,
                 )
                 continue
 
@@ -359,7 +398,7 @@ def run_agent_turn_events(
                     }
                 )
 
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append(_assistant_response_message(response))
             messages.append({"role": "user", "content": tool_results})
             if _turn_timed_out(turn_deadline):
                 force_synthesis_reason = "turn_timeout"
@@ -386,6 +425,7 @@ def run_agent_turn_events(
                         reason=force_synthesis_reason,
                         conversation_id=conversation.id,
                         turn_deadline=turn_deadline,
+                        safety_identifier=safety_identifier,
                     )
                 break
 
@@ -395,6 +435,7 @@ def run_agent_turn_events(
                 messages=messages,
                 tools=tool_definitions,
                 timeout_seconds=_remaining_gateway_timeout(turn_deadline),
+                safety_identifier=safety_identifier,
             )
     except AssistantTimeoutError:
         logger.warning(
@@ -523,6 +564,7 @@ def _complete_forced_synthesis(
     reason: str,
     conversation_id: int,
     turn_deadline: float,
+    safety_identifier: str,
 ) -> Generator[TurnEvent, None, str]:
     """Complete once without tools and only publish a valid final answer."""
     logger.warning(
@@ -537,6 +579,7 @@ def _complete_forced_synthesis(
         messages=messages,
         tools=[],
         timeout_seconds=_remaining_gateway_timeout(turn_deadline),
+        safety_identifier=safety_identifier,
     )
     buffered_events: list[TurnEvent] = []
     while True:
@@ -667,6 +710,14 @@ def build_history(conversation: AssistantConversation) -> list[dict]:
     if len(messages) <= max_messages:
         return messages
     return messages[-max_messages:]
+
+
+def _assistant_response_message(response: AICompletion) -> dict:
+    message = {"role": "assistant", "content": response.content}
+    provider_state = getattr(response, "provider_state", ())
+    if provider_state:
+        message["provider_state"] = provider_state
+    return message
 
 
 def extract_text(content_blocks) -> str:
@@ -830,6 +881,7 @@ def _complete_with_events(
     messages: list[dict],
     tools: list[dict],
     timeout_seconds: float,
+    safety_identifier: str,
 ) -> Generator[TurnEvent, None, AICompletion]:
     call_deadline = monotonic() + timeout_seconds
     complete_stream = getattr(gateway, "complete_stream", None)
@@ -839,6 +891,7 @@ def _complete_with_events(
             messages=messages,
             tools=tools,
             timeout_seconds=timeout_seconds,
+            safety_identifier=safety_identifier,
         )
         if monotonic() >= call_deadline:
             raise AssistantTimeoutError("Assistant gateway call timed out")
@@ -852,6 +905,7 @@ def _complete_with_events(
         messages=messages,
         tools=tools,
         timeout_seconds=timeout_seconds,
+        safety_identifier=safety_identifier,
     )
     while True:
         try:

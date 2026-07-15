@@ -14,6 +14,7 @@ import re
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
+from http import client as http_client
 from time import monotonic
 from typing import Any
 from urllib import error as urlerror
@@ -24,6 +25,10 @@ import anthropic
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+MAX_OPENAI_RESPONSES_BYTES = 8 * 1024 * 1024
+MAX_OPENAI_RESPONSES_STREAM_BYTES = 16 * 1024 * 1024
+OPENAI_RESPONSES_STREAM_CHUNK_BYTES = 64 * 1024
 
 _INLINE_TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*(?P<payload>\{.*?\})\s*</tool_call>",
@@ -37,6 +42,13 @@ class AssistantUnavailableError(Exception):
 
 class AssistantTimeoutError(AssistantUnavailableError):
     """The AI gateway exceeded the timeout assigned to this request."""
+
+
+class _RejectOpenAIRedirects(urlrequest.HTTPRedirectHandler):
+    """Never forward an OpenAI bearer token through an HTTP redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 @dataclass(frozen=True)
@@ -70,6 +82,10 @@ class AICompletion:
     stop_reason: str
     content: list[AITextBlock | AIToolUseBlock]
     usage: AIUsage
+    # Responses reasoning and function-call items are required again after a
+    # tool executes. They remain in memory for this turn and are never stored
+    # in AssistantMessage or exposed to clients.
+    provider_state: tuple[dict[str, Any], ...] = ()
 
 
 class AIGateway:
@@ -82,7 +98,17 @@ class AIGateway:
             return bool(settings.anthropic_api_key)
         if settings.assistant_runtime == "hermes_agent":
             return hermes_agent_enabled()
+        if settings.assistant_runtime == "openai_responses":
+            return bool(settings.openai_api_key)
         return False
+
+    @property
+    def model(self) -> str:
+        if settings.assistant_runtime == "hermes_agent":
+            return settings.hermes_agent_model
+        if settings.assistant_runtime == "openai_responses":
+            return settings.openai_responses_model
+        return settings.assistant_model
 
     @property
     def runtime_healthy(self) -> bool | None:
@@ -109,6 +135,7 @@ class AIGateway:
         messages: list[dict],
         tools: list[dict],
         timeout_seconds: float | None = None,
+        safety_identifier: str | None = None,
     ) -> AICompletion:
         if settings.assistant_runtime == "anthropic":
             return self._complete_anthropic(
@@ -124,6 +151,14 @@ class AIGateway:
                 tools=tools,
                 timeout_seconds=timeout_seconds,
             )
+        if settings.assistant_runtime == "openai_responses":
+            return self._complete_openai_responses(
+                system=system,
+                messages=messages,
+                tools=tools,
+                timeout_seconds=timeout_seconds,
+                safety_identifier=safety_identifier,
+            )
         raise AssistantUnavailableError("Assistant runtime is not supported")
 
     def complete_stream(
@@ -133,6 +168,7 @@ class AIGateway:
         messages: list[dict],
         tools: list[dict],
         timeout_seconds: float | None = None,
+        safety_identifier: str | None = None,
     ) -> Generator[AITextDelta, None, AICompletion]:
         if settings.assistant_runtime == "anthropic":
             completion = yield from self._complete_stream_anthropic(
@@ -148,6 +184,15 @@ class AIGateway:
                 messages=messages,
                 tools=tools,
                 timeout_seconds=timeout_seconds,
+            )
+            return completion
+        if settings.assistant_runtime == "openai_responses":
+            completion = yield from self._complete_stream_openai_responses(
+                system=system,
+                messages=messages,
+                tools=tools,
+                timeout_seconds=timeout_seconds,
+                safety_identifier=safety_identifier,
             )
             return completion
         raise AssistantUnavailableError("Assistant runtime is not supported")
@@ -341,6 +386,52 @@ class AIGateway:
         )
         return completion
 
+    def _complete_openai_responses(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        timeout_seconds: float | None,
+        safety_identifier: str | None,
+    ) -> AICompletion:
+        if not self.enabled:
+            raise AssistantUnavailableError("Assistant is not configured")
+
+        request_timeout = _bounded_gateway_timeout(timeout_seconds)
+        completion = complete_openai_responses(
+            system=system,
+            messages=messages,
+            tools=tools,
+            timeout=request_timeout,
+            safety_identifier=safety_identifier,
+        )
+        _log_openai_responses_completion(completion)
+        return completion
+
+    def _complete_stream_openai_responses(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        timeout_seconds: float | None,
+        safety_identifier: str | None,
+    ) -> Generator[AITextDelta, None, AICompletion]:
+        if not self.enabled:
+            raise AssistantUnavailableError("Assistant is not configured")
+
+        request_timeout = _bounded_gateway_timeout(timeout_seconds)
+        completion = yield from complete_openai_responses_stream(
+            system=system,
+            messages=messages,
+            tools=tools,
+            timeout=request_timeout,
+            safety_identifier=safety_identifier,
+        )
+        _log_openai_responses_completion(completion)
+        return completion
+
 
 def _bounded_gateway_timeout(
     requested_timeout: float | None,
@@ -353,6 +444,312 @@ def _bounded_gateway_timeout(
     if timeout <= 0:
         raise AssistantTimeoutError("Assistant request timed out")
     return timeout
+
+
+def complete_openai_responses(
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    timeout: float,
+    safety_identifier: str | None,
+) -> AICompletion:
+    if not settings.openai_api_key:
+        raise AssistantUnavailableError("OpenAI Responses is not configured")
+
+    payload = _openai_responses_payload(
+        system=system,
+        messages=messages,
+        tools=tools,
+        safety_identifier=safety_identifier,
+    )
+    request = urlrequest.Request(
+        _openai_responses_url(),
+        data=json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        headers=_openai_responses_headers(accept="application/json"),
+        method="POST",
+    )
+
+    try:
+        with _openai_responses_urlopen(request, timeout=timeout) as response:
+            raw_body = response.read(MAX_OPENAI_RESPONSES_BYTES + 1)
+        if len(raw_body) > MAX_OPENAI_RESPONSES_BYTES:
+            raise ValueError("response body exceeds the configured limit")
+        response_data = json.loads(raw_body.decode("utf-8"))
+        return _from_openai_responses_response(response_data)
+    except urlerror.HTTPError as error:
+        logger.error(
+            "OpenAI Responses API error: status=%s",
+            error.code,
+        )
+        raise AssistantUnavailableError("Assistant API request failed") from error
+    except TimeoutError as error:
+        logger.error("OpenAI Responses API timeout")
+        raise AssistantTimeoutError("Assistant request timed out") from error
+    except urlerror.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            logger.error("OpenAI Responses API timeout")
+            raise AssistantTimeoutError("Assistant request timed out") from error
+        logger.error("OpenAI Responses API connection error")
+        raise AssistantUnavailableError(
+            "Assistant API connection failed"
+        ) from error
+    except (http_client.HTTPException, OSError) as error:
+        logger.error("OpenAI Responses API connection error")
+        raise AssistantUnavailableError(
+            "Assistant API connection failed"
+        ) from error
+    except (KeyError, TypeError, UnicodeDecodeError, ValueError) as error:
+        logger.error("OpenAI Responses API returned an invalid response")
+        raise AssistantUnavailableError(
+            "Assistant API returned an invalid response"
+        ) from error
+
+
+def complete_openai_responses_stream(
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    timeout: float,
+    safety_identifier: str | None,
+) -> Generator[AITextDelta, None, AICompletion]:
+    if not settings.openai_api_key:
+        raise AssistantUnavailableError("OpenAI Responses is not configured")
+
+    payload = _openai_responses_payload(
+        system=system,
+        messages=messages,
+        tools=tools,
+        safety_identifier=safety_identifier,
+    )
+    payload["stream"] = True
+    request = urlrequest.Request(
+        _openai_responses_url(),
+        data=json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        headers=_openai_responses_headers(accept="text/event-stream"),
+        method="POST",
+    )
+
+    terminal_response: dict | None = None
+    request_deadline = monotonic() + timeout
+    try:
+        with _openai_responses_urlopen(request, timeout=timeout) as response:
+            for event in _iter_openai_responses_sse(
+                response,
+                deadline=request_deadline,
+            ):
+                event_type = event.get("type")
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta")
+                    if not isinstance(delta, str):
+                        raise ValueError("text delta is not a string")
+                    if delta:
+                        yield AITextDelta(text=delta)
+                elif event_type in {"response.completed", "response.incomplete"}:
+                    candidate = event.get("response")
+                    if not isinstance(candidate, dict):
+                        raise ValueError("terminal event has no response")
+                    terminal_response = candidate
+                    break
+                elif event_type in {
+                    "error",
+                    "response.cancelled",
+                    "response.failed",
+                }:
+                    logger.error(
+                        "OpenAI Responses stream failed: event=%s",
+                        event_type,
+                    )
+                    raise AssistantUnavailableError(
+                        "Assistant API stream failed"
+                    )
+
+        if terminal_response is None:
+            raise ValueError("stream ended without a terminal response")
+        return _from_openai_responses_response(terminal_response)
+    except AssistantUnavailableError:
+        raise
+    except urlerror.HTTPError as error:
+        logger.error(
+            "OpenAI Responses stream API error: status=%s",
+            error.code,
+        )
+        raise AssistantUnavailableError("Assistant API request failed") from error
+    except TimeoutError as error:
+        logger.error("OpenAI Responses stream API timeout")
+        raise AssistantTimeoutError("Assistant request timed out") from error
+    except urlerror.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            logger.error("OpenAI Responses stream API timeout")
+            raise AssistantTimeoutError("Assistant request timed out") from error
+        logger.error("OpenAI Responses stream API connection error")
+        raise AssistantUnavailableError(
+            "Assistant API connection failed"
+        ) from error
+    except (http_client.HTTPException, OSError) as error:
+        logger.error("OpenAI Responses stream API connection error")
+        raise AssistantUnavailableError(
+            "Assistant API connection failed"
+        ) from error
+    except (KeyError, TypeError, UnicodeDecodeError, ValueError) as error:
+        logger.error("OpenAI Responses stream returned an invalid response")
+        raise AssistantUnavailableError(
+            "Assistant API returned an invalid response"
+        ) from error
+
+
+def _openai_responses_payload(
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    safety_identifier: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": settings.openai_responses_model,
+        "instructions": system,
+        "input": _to_openai_responses_input(messages),
+        "max_output_tokens": settings.openai_responses_max_output_tokens,
+        "store": False,
+        "include": ["reasoning.encrypted_content"],
+        "reasoning": {
+            "effort": settings.openai_responses_reasoning_effort,
+        },
+        "parallel_tool_calls": True,
+        "truncation": "auto",
+    }
+    response_tools = _to_openai_responses_tools(tools)
+    if response_tools:
+        payload["tools"] = response_tools
+        payload["tool_choice"] = "auto"
+    if safety_identifier:
+        if len(safety_identifier) > 64:
+            raise ValueError("safety identifier exceeds 64 characters")
+        payload["safety_identifier"] = safety_identifier
+    return payload
+
+
+def _openai_responses_url() -> str:
+    return f"{settings.openai_responses_base_url.rstrip('/')}/responses"
+
+
+def _openai_responses_headers(*, accept: str) -> dict[str, str]:
+    return {
+        "Accept": accept,
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": f"{settings.app_name}/{settings.app_version}",
+    }
+
+
+def _openai_responses_urlopen(request, *, timeout: float):
+    opener = urlrequest.build_opener(_RejectOpenAIRedirects())
+    return opener.open(request, timeout=timeout)
+
+
+def _iter_openai_responses_sse(
+    response,
+    *,
+    deadline: float,
+) -> Generator[dict, None, None]:
+    data_lines: list[str] = []
+    for line in _iter_openai_responses_sse_lines(response, deadline=deadline):
+        if not line:
+            if data_lines:
+                data = "\n".join(data_lines)
+                data_lines = []
+                if data != "[DONE]":
+                    event = json.loads(data)
+                    if not isinstance(event, dict):
+                        raise ValueError("stream event is not an object")
+                    yield event
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").lstrip())
+
+    if data_lines:
+        data = "\n".join(data_lines)
+        if data != "[DONE]":
+            event = json.loads(data)
+            if not isinstance(event, dict):
+                raise ValueError("stream event is not an object")
+            yield event
+
+
+def _iter_openai_responses_sse_lines(
+    response,
+    *,
+    deadline: float,
+) -> Generator[str, None, None]:
+    """Read bounded chunks so a peer cannot hold an unlimited SSE line open."""
+    buffered = bytearray()
+    total_bytes = 0
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise AssistantTimeoutError("Assistant request timed out")
+        _set_openai_response_read_timeout(response, remaining)
+        read1 = getattr(response, "read1", None)
+        if callable(read1):
+            raw_chunk = read1(OPENAI_RESPONSES_STREAM_CHUNK_BYTES)
+        else:
+            # A one-byte fallback still returns control to the monotonic
+            # deadline after every socket operation.
+            raw_chunk = response.read(1)
+        if monotonic() >= deadline:
+            raise AssistantTimeoutError("Assistant request timed out")
+        if not raw_chunk:
+            break
+        if not isinstance(raw_chunk, bytes):
+            raise ValueError("stream chunk is not bytes")
+        total_bytes += len(raw_chunk)
+        if total_bytes > MAX_OPENAI_RESPONSES_STREAM_BYTES:
+            raise ValueError("stream exceeds the configured limit")
+        buffered.extend(raw_chunk)
+        while True:
+            newline_index = buffered.find(b"\n")
+            if newline_index < 0:
+                break
+            raw_line = bytes(buffered[:newline_index])
+            del buffered[: newline_index + 1]
+            yield raw_line.rstrip(b"\r").decode("utf-8")
+
+    if buffered:
+        yield bytes(buffered).rstrip(b"\r").decode("utf-8")
+
+
+def _set_openai_response_read_timeout(response, timeout: float) -> None:
+    """Reduce the CPython HTTP socket timeout to the remaining deadline."""
+    explicit_setter = getattr(response, "set_read_timeout", None)
+    if callable(explicit_setter):
+        explicit_setter(timeout)
+        return
+    response_fp = getattr(response, "fp", None)
+    raw = getattr(response_fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    settimeout = getattr(sock, "settimeout", None)
+    if callable(settimeout):
+        settimeout(timeout)
+
+
+def _log_openai_responses_completion(completion: AICompletion) -> None:
+    logger.info(
+        "Assistant completion: runtime=openai_responses model=%s "
+        "stop_reason=%s input_tokens=%s output_tokens=%s",
+        completion.model,
+        completion.stop_reason,
+        completion.usage.input_tokens,
+        completion.usage.output_tokens,
+    )
 
 
 def hermes_agent_enabled() -> bool:
@@ -708,6 +1105,234 @@ def _is_tool_result_list(content) -> bool:
     return isinstance(content, list) and all(
         isinstance(block, dict) and block.get("type") == "tool_result"
         for block in content
+    )
+
+
+def _to_openai_responses_input(messages: list[dict]) -> list[dict]:
+    converted: list[dict] = []
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+        provider_state = message.get("provider_state")
+        if provider_state:
+            if not isinstance(provider_state, (list, tuple)) or not all(
+                isinstance(item, dict) for item in provider_state
+            ):
+                raise ValueError("provider state is invalid")
+            converted.extend(provider_state)
+        elif isinstance(content, str):
+            input_message = {"role": role, "content": content}
+            if role == "assistant":
+                # Persisted assistant messages are completed replies. GPT-5.6
+                # uses this label to avoid treating tool preambles as answers.
+                input_message["phase"] = "final_answer"
+            converted.append(input_message)
+        elif role == "assistant":
+            converted.extend(_assistant_blocks_to_openai_responses_items(content))
+        elif role == "user" and _is_tool_result_list(content):
+            converted.extend(_tool_results_to_openai_responses_items(content))
+        else:
+            converted.append(
+                {
+                    "role": role,
+                    "content": json.dumps(content, ensure_ascii=False),
+                }
+            )
+    return converted
+
+
+def _assistant_blocks_to_openai_responses_items(content: list) -> list[dict]:
+    text_parts: list[str] = []
+    function_calls: list[dict] = []
+    for block in content:
+        block_type = _block_value(block, "type")
+        if block_type == "text":
+            text = _block_value(block, "text")
+            if text:
+                text_parts.append(str(text))
+        elif block_type == "tool_use":
+            call_id = str(_block_value(block, "id") or "")
+            name = str(_block_value(block, "name") or "")
+            if not call_id or not name:
+                raise ValueError("tool call is missing its identifier or name")
+            function_calls.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": json.dumps(
+                        _block_value(block, "input") or {},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+
+    items: list[dict] = []
+    if text_parts:
+        items.append(
+            {
+                "role": "assistant",
+                "content": "\n\n".join(text_parts),
+                "phase": "commentary" if function_calls else "final_answer",
+            }
+        )
+    items.extend(function_calls)
+    return items
+
+
+def _tool_results_to_openai_responses_items(content: list[dict]) -> list[dict]:
+    return [
+        {
+            "type": "function_call_output",
+            "call_id": str(block["tool_use_id"]),
+            "output": str(block.get("content", "")),
+        }
+        for block in content
+        if block.get("type") == "tool_result"
+    ]
+
+
+def _to_openai_responses_tools(tools: list[dict]) -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters": tool.get("input_schema", {"type": "object"}),
+            # Existing schemas intentionally permit optional fields and do not
+            # all declare additionalProperties=false. Preserve that contract.
+            "strict": False,
+        }
+        for tool in tools
+    ]
+
+
+def _from_openai_responses_response(response_data: dict) -> AICompletion:
+    if not isinstance(response_data, dict):
+        raise ValueError("response is not an object")
+    status = response_data.get("status")
+    if status not in {"completed", "incomplete"}:
+        raise ValueError("response did not reach a supported terminal state")
+    if response_data.get("error"):
+        raise ValueError("response contains an upstream error")
+    model = response_data.get("model")
+    if not isinstance(model, str) or not model:
+        raise ValueError("response model is missing")
+    output = response_data.get("output")
+    if not isinstance(output, list):
+        raise ValueError("response output is missing")
+
+    content: list[AITextBlock | AIToolUseBlock] = []
+    commentary_content: list[AITextBlock] = []
+    refused = False
+    saw_final_answer = False
+    saw_function_call = False
+    for item in output:
+        if not isinstance(item, dict):
+            raise ValueError("response output item is invalid")
+        item_type = item.get("type")
+        if item_type == "message":
+            item_status = item.get("status")
+            if item_status not in {"completed", "incomplete"}:
+                raise ValueError("response message status is invalid")
+            phase = item.get("phase")
+            if phase not in {None, "commentary", "final_answer"}:
+                raise ValueError("response message phase is invalid")
+            if phase in {None, "final_answer"}:
+                saw_final_answer = True
+            text_target = (
+                commentary_content if phase == "commentary" else content
+            )
+            parts = item.get("content")
+            if not isinstance(parts, list):
+                raise ValueError("response message content is invalid")
+            for part in parts:
+                if not isinstance(part, dict):
+                    raise ValueError("response content part is invalid")
+                part_type = part.get("type")
+                if part_type == "output_text":
+                    text = part.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError("response text is invalid")
+                    if text:
+                        text_target.append(AITextBlock(text=text))
+                elif part_type == "refusal":
+                    refusal = part.get("refusal")
+                    if not isinstance(refusal, str):
+                        raise ValueError("response refusal is invalid")
+                    refused = True
+        elif item_type == "function_call":
+            saw_function_call = True
+            if status != "completed" or item.get("status") != "completed":
+                raise ValueError("incomplete function calls cannot be executed")
+            call_id = item.get("call_id")
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError("function call identifier is missing")
+            if not isinstance(name, str) or not name:
+                raise ValueError("function call name is missing")
+            if not isinstance(arguments, str):
+                raise ValueError("function call arguments are invalid")
+            try:
+                decoded_arguments = json.loads(arguments)
+            except json.JSONDecodeError as error:
+                raise ValueError("function call arguments are malformed") from error
+            if not isinstance(decoded_arguments, dict):
+                raise ValueError("function call arguments must be an object")
+            content.append(
+                AIToolUseBlock(
+                    id=call_id,
+                    name=name,
+                    input=decoded_arguments,
+                )
+            )
+
+    incomplete_details = response_data.get("incomplete_details") or {}
+    incomplete_reason = (
+        incomplete_details.get("reason")
+        if isinstance(incomplete_details, dict)
+        else None
+    )
+    if incomplete_reason == "content_filter":
+        refused = True
+
+    if refused:
+        stop_reason = "refusal"
+    elif status == "incomplete":
+        if saw_function_call:
+            raise ValueError("incomplete response contains a function call")
+        content.extend(commentary_content)
+        stop_reason = "pause_turn"
+    elif any(block.type == "tool_use" for block in content):
+        content.extend(commentary_content)
+        stop_reason = "tool_use"
+    elif not saw_final_answer:
+        content.extend(commentary_content)
+        stop_reason = "pause_turn"
+    else:
+        stop_reason = "end_turn"
+
+    usage = response_data.get("usage") or {}
+    if not isinstance(usage, dict):
+        raise ValueError("response usage is invalid")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if input_tokens is not None and not isinstance(input_tokens, int):
+        raise ValueError("input token usage is invalid")
+    if output_tokens is not None and not isinstance(output_tokens, int):
+        raise ValueError("output token usage is invalid")
+
+    return AICompletion(
+        model=model,
+        stop_reason=stop_reason,
+        content=content,
+        usage=AIUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        ),
+        provider_state=tuple(output),
     )
 
 

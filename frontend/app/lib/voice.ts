@@ -262,6 +262,47 @@ export function createSentenceChunker(onSentence: (sentence: string) => void) {
   };
 }
 
+export function splitTextForSpeech(text: string, maxChars: number) {
+  const limit = Math.max(1, Math.floor(maxChars));
+  let remaining = Array.from(text.trim());
+  const chunks: string[] = [];
+
+  while (remaining.length > limit) {
+    let boundary = -1;
+    for (let index = limit - 1; index >= 0; index -= 1) {
+      const char = remaining[index];
+      const next = remaining[index + 1] ?? "";
+      if (char === "\n" || (".!?…".includes(char) && /\s/.test(next))) {
+        boundary = index + 1;
+        break;
+      }
+    }
+    if (boundary < 1) {
+      for (let index = limit - 1; index >= 0; index -= 1) {
+        if (/\s/.test(remaining[index])) {
+          boundary = index + 1;
+          break;
+        }
+      }
+    }
+    if (boundary < 1) {
+      boundary = limit;
+    }
+
+    const chunk = remaining.slice(0, boundary).join("").trim();
+    remaining = Array.from(remaining.slice(boundary).join("").trimStart());
+    if (chunk) {
+      chunks.push(chunk);
+    }
+  }
+
+  const finalChunk = remaining.join("").trim();
+  if (finalChunk) {
+    chunks.push(finalChunk);
+  }
+  return chunks;
+}
+
 function findSentenceBoundary(text: string) {
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
