@@ -838,6 +838,119 @@ def test_import_job_discovers_candidates_with_bop_burgos_connector(
     assert candidates[0].url.endswith("bopbur-2025-177-anuncio-202504362.pdf")
 
 
+def test_import_job_uses_configured_web_search_provider(monkeypatch):
+    municipality_model = import_service.Municipality(
+        id=101,
+        name="Aranda de Duero",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    source = OfficialLegalSource(
+        id=202,
+        name="Sede municipal",
+        base_url="https://sede.example.org/",
+        domain="sede.example.org",
+        source_type="municipal",
+    )
+    job = import_service.OrdinanceImportJob(
+        title="Búsqueda municipal",
+        topic="terrazas",
+        search_query="ordenanza",
+        municipality_ids_json="[]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Fuente oficial.",
+        created_by_id=1,
+    )
+    calls = []
+
+    class FakeWebSearchClient:
+        enabled = True
+
+        def search(self, *, query, limit):
+            calls.append((query, limit))
+            return [
+                {
+                    "title": "Ordenanza de terrazas",
+                    "url": "https://sede.example.org/ordenanza.pdf",
+                    "snippet": "Texto oficial.",
+                    "published_at": None,
+                }
+            ]
+
+    monkeypatch.setattr(
+        import_service,
+        "web_search_client",
+        FakeWebSearchClient(),
+    )
+
+    candidates = import_service._discover_candidates(
+        job,
+        [source],
+        [municipality_model],
+    )
+
+    assert calls
+    assert "Aranda de Duero" in calls[0][0]
+    assert "site:sede.example.org" in calls[0][0]
+    assert candidates == [
+        import_service.SourceCandidate(
+            url="https://sede.example.org/ordenanza.pdf",
+            municipality_id=101,
+            official_source_id=202,
+            title="Ordenanza de terrazas",
+        )
+    ]
+
+
+def test_import_job_preserves_invalid_web_query_cause(monkeypatch):
+    municipality_model = import_service.Municipality(
+        id=101,
+        name="Aranda de Duero",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    source = OfficialLegalSource(
+        id=202,
+        name="Sede municipal",
+        base_url="https://sede.example.org/",
+        domain="sede.example.org",
+        source_type="municipal",
+    )
+    job = import_service.OrdinanceImportJob(
+        title="Búsqueda municipal inválida",
+        topic="terrazas",
+        search_query="x" * 401,
+        municipality_ids_json="[]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Fuente oficial.",
+        created_by_id=1,
+    )
+    monkeypatch.setattr(import_service.settings, "web_search_provider", "brave")
+    monkeypatch.setattr(
+        import_service.settings,
+        "brave_search_api_key",
+        "brave-secret",
+    )
+    monkeypatch.setattr(
+        import_service.settings,
+        "brave_search_storage_rights_confirmed",
+        True,
+    )
+
+    candidates = import_service._discover_candidates(
+        job,
+        [source],
+        [municipality_model],
+    )
+
+    assert candidates == []
+    assert job.error_message == (
+        "Consulta de búsqueda no válida: query no puede superar 400 caracteres"
+    )
+
+
 def test_import_service_splits_chunks_by_articles():
     chunks = import_service._split_chunks(
         "Preámbulo de la ordenanza.\n\n"

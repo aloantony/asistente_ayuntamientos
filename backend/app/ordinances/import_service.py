@@ -13,7 +13,7 @@ from pypdf import PdfReader
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
+from app.assistant.web_search import WebSearchUnavailableError, web_search_client
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.municipalities.models import Municipality
@@ -74,12 +74,17 @@ def run_import_job(job_id: int, db: Session | None = None) -> None:
         if not candidates:
             job.status = "failed"
             job.finished_at = datetime.now(UTC)
-            job.error_message = (
-                "No se encontraron fuentes oficiales. Añade URLs semilla o "
-                "configura Hermes Web para búsqueda oficial."
-            )
+            if not job.error_message:
+                job.error_message = (
+                    "No se encontraron fuentes oficiales. Añade URLs semilla o "
+                    "configura el proveedor de búsqueda web oficial."
+                )
             db.commit()
             return
+
+        # A valid seed/discovered candidate makes a partial discovery warning
+        # non-terminal; individual source failures remain on their import item.
+        job.error_message = None
 
         item_ids = _create_items(db, job, candidates)
         for item_id in item_ids:
@@ -178,7 +183,7 @@ def _discover_candidates(
             bop_burgos_sources[0],
             municipalities,
         )
-    if not hermes_web_client.enabled:
+    if not web_search_client.enabled:
         return []
 
     candidates: list[SourceCandidate] = []
@@ -189,11 +194,17 @@ def _discover_candidates(
         for source in official_sources:
             query = f"{query_base} {municipality.name} site:{source.domain}"
             try:
-                results = hermes_web_client.search(
+                results = web_search_client.search(
                     query=query,
                     limit=settings.ordinance_import_search_limit,
                 )
-            except HermesWebUnavailableError:
+            except WebSearchUnavailableError as error:
+                if not candidates:
+                    job.error_message = f"Proveedor de búsqueda no disponible: {error}"
+                return candidates
+            except ValueError as error:
+                if not candidates:
+                    job.error_message = f"Consulta de búsqueda no válida: {error}"
                 return candidates
             for result in results:
                 url = str(result.get("url") or "").strip()

@@ -295,9 +295,8 @@ def test_web_search_is_hidden_when_permission_exists_but_runtime_is_incomplete(
     user, organization = assistant_user
     grant_permissions(user, organization, ["assistant.web.search"])
     use_gateway(FakeGateway([]))
-    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
-    monkeypatch.setattr(settings, "hermes_web_api_key", None)
-    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", None)
 
     specs = assistant_tools.get_available_tool_specs(db, user)
     response = client.get("/assistant/status", headers=headers_for(user))
@@ -320,9 +319,10 @@ def test_web_search_is_available_with_permission_and_complete_runtime_config(
     user, organization = assistant_user
     grant_permissions(user, organization, ["assistant.web.search"])
     use_gateway(FakeGateway([]))
-    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
-    monkeypatch.setattr(settings, "hermes_web_api_key", "web-secret")
-    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
 
     specs = assistant_tools.get_available_tool_specs(db, user)
     response = client.get("/assistant/status", headers=headers_for(user))
@@ -352,7 +352,7 @@ def test_web_search_compacts_complete_sources_below_action_limit(
         for index in range(5)
     ]
     monkeypatch.setattr(
-        assistant_tools.hermes_web_client,
+        assistant_tools.web_search_client,
         "search",
         lambda *, query, limit: sources[:limit],
     )
@@ -407,7 +407,7 @@ def test_web_search_reports_complete_result_set_without_truncation(
         },
     ]
     monkeypatch.setattr(
-        assistant_tools.hermes_web_client,
+        assistant_tools.web_search_client,
         "search",
         lambda *, query, limit: sources[:limit],
     )
@@ -469,6 +469,7 @@ def test_hermes_web_keeps_only_absolute_credential_free_http_urls():
         "Teléfono +34 612-345-678",
         "Teléfono 612 345 678",
         "Teléfono 612 34 56 78",
+        "DNI １２ ３４５ ６７８-A",
     ],
 )
 def test_web_personal_data_guard_recognizes_formatted_identifiers(query):
@@ -497,7 +498,7 @@ def test_web_search_rejects_formatted_personal_data_before_runtime(
         return []
 
     monkeypatch.setattr(
-        assistant_tools.hermes_web_client,
+        assistant_tools.web_search_client,
         "search",
         unexpected_search,
     )
@@ -868,9 +869,8 @@ def test_realtime_session_hides_web_search_when_runtime_is_incomplete(
 ):
     user, organization = assistant_user
     grant_permissions(user, organization, ["assistant.web.search"])
-    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
-    monkeypatch.setattr(settings, "hermes_web_api_key", "")
-    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "")
     conversation_data = client.post(
         "/assistant/conversations",
         json={},
@@ -2457,9 +2457,8 @@ def test_normal_turn_hides_web_search_when_runtime_is_incomplete(
 ):
     user, organization = assistant_user
     grant_permissions(user, organization, ["assistant.web.search"])
-    monkeypatch.setattr(settings, "hermes_web_base_url", "http://web.test/v1")
-    monkeypatch.setattr(settings, "hermes_web_api_key", None)
-    monkeypatch.setattr(settings, "hermes_web_model", "hermes-agent")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", None)
     gateway = use_gateway(
         FakeGateway([fake_response("end_turn", [text_block("Respuesta final.")])])
     )

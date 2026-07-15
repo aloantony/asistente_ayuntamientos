@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     hermes_web_api_key: str | None = None
     hermes_web_model: str = "hermes-agent"
     hermes_web_timeout_seconds: float = 60.0
+    web_search_provider: str = "hermes"
+    brave_search_api_key: str | None = None
+    brave_search_timeout_seconds: float = 15.0
+    brave_search_country: str = "ES"
+    brave_search_language: str = "es"
+    brave_search_ui_language: str = "es-ES"
+    brave_search_storage_rights_confirmed: bool = False
     openai_api_key: str | None = None
     openai_responses_base_url: str = "https://api.openai.com/v1"
     openai_responses_model: str = "gpt-5.6"
@@ -190,6 +197,16 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("web_search_provider")
+    @classmethod
+    def validate_web_search_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"brave", "hermes", "disabled"}:
+            raise ValueError(
+                "web_search_provider must be 'brave', 'hermes' or 'disabled'"
+            )
+        return normalized
+
     @field_validator(
         "assistant_turn_timeout_seconds",
         "assistant_gateway_timeout_seconds",
@@ -198,6 +215,15 @@ class Settings(BaseSettings):
     def validate_assistant_timeouts(cls, value: float) -> float:
         if not isfinite(value) or value <= 0:
             raise ValueError("assistant timeouts must be finite and greater than zero")
+        return value
+
+    @field_validator("brave_search_timeout_seconds")
+    @classmethod
+    def validate_brave_search_timeout(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError(
+                "brave_search_timeout_seconds must be finite and greater than zero"
+            )
         return value
 
     @field_validator("embeddings_runtime")
