@@ -1,11 +1,16 @@
 import os
 import re
+import shutil
+import tempfile
 import uuid
 from collections.abc import Callable, Generator
 
 # Configure the environment BEFORE importing the app so module-level
 # singletons (settings, storage service) pick up test values.
-os.environ["DOCUMENT_STORAGE_ROOT"] = "/tmp/test-document-storage"
+_TEST_DOCUMENT_STORAGE_ROOT = tempfile.mkdtemp(
+    prefix="asistente-ayuntamientos-test-documents-"
+)
+os.environ["DOCUMENT_STORAGE_ROOT"] = _TEST_DOCUMENT_STORAGE_ROOT
 
 import pytest
 from fastapi.testclient import TestClient
@@ -50,6 +55,13 @@ SERVER_DATABASE_URL = _TEST_DATABASE_URL.set(database="app").render_as_string(
     hide_password=False
 )
 DROP_TEST_DATABASE = _CONFIGURED_TEST_DATABASE_URL is None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolated_document_storage() -> Generator[None, None, None]:
+    """Remove the process-specific test document directory after the suite."""
+    yield
+    shutil.rmtree(_TEST_DOCUMENT_STORAGE_ROOT, ignore_errors=True)
 
 
 def _validate_test_database_name() -> None:

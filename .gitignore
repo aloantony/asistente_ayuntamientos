@@ -20,3 +20,4 @@ postgres_data/
 .DS_Store
 frontend/tsconfig.tsbuildinfo
 .claude/settings.local.json
+.codex-sessions/

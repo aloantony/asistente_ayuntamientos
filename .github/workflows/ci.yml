@@ -31,6 +31,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: git diff --check "${BASE_SHA}...${GITHUB_SHA}"
 
+      - name: Test Codex session coordination helper
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
   backend:
     name: Backend
     runs-on: ubuntu-24.04
