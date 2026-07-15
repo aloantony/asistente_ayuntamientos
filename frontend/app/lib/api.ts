@@ -388,18 +388,27 @@ type AssistantStreamHandlers = {
   onDone?: (event: AssistantStreamDone) => void;
 };
 
+type AssistantStreamTerminalEvent =
+  | { type: "done"; event: AssistantStreamDone }
+  | { type: "error"; error: ApiRequestError };
+
 export async function streamAssistantMessage(
   conversationId: number,
   content: string,
   accessToken: string,
   handlers: AssistantStreamHandlers,
   inputMode: "text" | "voice" = "text",
+  signal?: AbortSignal,
 ) {
   const response = await performAdminRequest(
     `/assistant/conversations/${conversationId}/messages/stream`,
     accessToken,
     "El asistente no ha podido responder.",
-    { method: "POST", body: JSON.stringify({ content, input_mode: inputMode }) },
+    {
+      method: "POST",
+      body: JSON.stringify({ content, input_mode: inputMode }),
+      signal,
+    },
   );
 
   if (!response.body) {
@@ -414,6 +423,7 @@ export async function streamAssistantVoiceTurn(
   audio: Blob,
   accessToken: string,
   handlers: AssistantStreamHandlers,
+  signal?: AbortSignal,
 ) {
   const formData = new FormData();
   formData.append("file", audio, "anacleto-audio.webm");
@@ -421,7 +431,7 @@ export async function streamAssistantVoiceTurn(
     `/assistant/conversations/${conversationId}/voice-turns/stream`,
     accessToken,
     "El asistente no ha podido responder.",
-    { method: "POST", body: formData },
+    { method: "POST", body: formData, signal },
   );
 
   if (!response.body) {
@@ -499,24 +509,62 @@ async function readAssistantStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminalEvent: AssistantStreamTerminalEvent | null = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  const dispatchFrame = (frame: string) => {
+    const nextTerminalEvent = dispatchAssistantStreamFrame(
+      frame,
+      terminalEvent ? {} : handlers,
+    );
+    if (!nextTerminalEvent) {
+      return null;
     }
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      dispatchAssistantStreamFrame(frame, handlers);
+    if (terminalEvent) {
+      throw new ApiRequestError(
+        "El asistente ha enviado una respuesta no válida. Inténtalo de nuevo.",
+        0,
+      );
     }
+    return nextTerminalEvent;
+  };
+
+  try {
+    while (!terminalEvent) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        terminalEvent = dispatchFrame(frame) ?? terminalEvent;
+      }
+    }
+
+    if (!terminalEvent) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        terminalEvent = dispatchFrame(buffer) ?? terminalEvent;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    dispatchAssistantStreamFrame(buffer, handlers);
+  if (!terminalEvent) {
+    throw new ApiRequestError(
+      "La respuesta del asistente se ha interrumpido antes de terminar. Inténtalo de nuevo.",
+      0,
+    );
   }
+
+  if (terminalEvent.type === "error") {
+    throw terminalEvent.error;
+  }
+
+  handlers.onDone?.(terminalEvent.event);
 }
 
 export async function synthesizeAssistantSpeech(
@@ -573,19 +621,23 @@ function dispatchAssistantStreamFrame(
       handlers.onToolActivity?.(data as AssistantStreamToolActivity);
       break;
     case "done":
-      handlers.onDone?.(data as AssistantStreamDone);
-      break;
+      return { type: "done" as const, event: data as AssistantStreamDone };
     case "error":
-      throw new ApiRequestError(
-        translateApiDetail(
-          typeof data.detail === "string" ? data.detail : "",
-          "El asistente no ha podido responder.",
+      return {
+        type: "error" as const,
+        error: new ApiRequestError(
+          translateApiDetail(
+            typeof data.detail === "string" ? data.detail : "",
+            "El asistente no ha podido responder.",
+          ),
+          500,
         ),
-        500,
-      );
+      };
     default:
       break;
   }
+
+  return null;
 }
 
 export function getErrorMessage(error: unknown, fallback: string) {
