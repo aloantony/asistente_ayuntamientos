@@ -293,6 +293,96 @@ export type MunicipalAsset = {
   location: GeoLocation | null;
 };
 
+export type MaintenanceOrderStatus =
+  | "planned"
+  | "scheduled"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
+
+export type MaintenanceOrderPriority = "low" | "normal" | "high" | "urgent";
+
+export type MaintenanceType =
+  | "preventive"
+  | "corrective"
+  | "inspection"
+  | "cleaning"
+  | "other";
+
+export type MaintenanceEventType = "created" | "updated" | "transition";
+
+export type MaintenanceAssetSummary = {
+  id: number;
+  code: string | null;
+  name: string;
+  status: AssetStatus;
+};
+
+export type MaintenanceAssigneeSummary = {
+  id: number;
+  full_name: string;
+};
+
+export type MaintenanceOrder = {
+  id: number;
+  organization_id: number;
+  municipality_id: number;
+  asset_id: number;
+  title: string;
+  description: string | null;
+  maintenance_type: MaintenanceType;
+  priority: MaintenanceOrderPriority;
+  status: MaintenanceOrderStatus;
+  scheduled_for: string | null;
+  estimated_minutes: number | null;
+  assigned_to_id: number | null;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  asset: MaintenanceAssetSummary;
+  assigned_to: MaintenanceAssigneeSummary | null;
+};
+
+export type MaintenanceOrderEvent = {
+  id: number;
+  order_id: number;
+  organization_id: number;
+  event_type: MaintenanceEventType;
+  from_status: MaintenanceOrderStatus | null;
+  to_status: MaintenanceOrderStatus | null;
+  changed_fields: string[];
+  note: string | null;
+  actor_id: number | null;
+  created_at: string;
+};
+
+export type MaintenanceOrderDetail = MaintenanceOrder & {
+  events: MaintenanceOrderEvent[];
+};
+
+export type MaintenanceOrderCreate = {
+  asset_id: number;
+  title: string;
+  description?: string | null;
+  maintenance_type?: MaintenanceType;
+  priority?: MaintenanceOrderPriority;
+  scheduled_for?: string | null;
+  estimated_minutes?: number | null;
+  assigned_to_id?: number | null;
+};
+
+export type MaintenanceOrderUpdate = Omit<
+  Partial<MaintenanceOrderCreate>,
+  "asset_id"
+>;
+
+export type MaintenanceOrderTransition = {
+  status: MaintenanceOrderStatus;
+  note?: string | null;
+  scheduled_for?: string | null;
+};
+
 export type GeoMapItem = {
   entity_type: GeoEntityType;
   entity_id: number;

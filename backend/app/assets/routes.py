@@ -29,6 +29,7 @@ from app.assets.schemas import (
     MunicipalAssetRead,
     MunicipalAssetUpdate,
 )
+from app.maintenance.models import MaintenanceOrder
 from app.auth.dependencies import get_current_user
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
@@ -413,6 +414,23 @@ def update_asset(
             organization_id=asset.organization_id,
             require_active=True,
         )
+    if updates.get("status") in {"retired", "archived"}:
+        asset = get_locked_asset(db, asset_id)
+        has_open_maintenance = db.scalar(
+            select(MaintenanceOrder.id)
+            .where(
+                MaintenanceOrder.asset_id == asset.id,
+                MaintenanceOrder.status.in_(
+                    ("planned", "scheduled", "in_progress")
+                ),
+            )
+            .limit(1)
+        )
+        if has_open_maintenance is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Asset has open maintenance orders",
+            )
     for field, value in updates.items():
         setattr(asset, field, value)
     asset.updated_by_id = current_user.id
@@ -469,6 +487,21 @@ def get_existing_asset_type(db: Session, asset_type_id: int) -> MunicipalAssetTy
 def get_existing_asset(db: Session, asset_id: int) -> MunicipalAsset:
     asset = db.scalar(
         select_assets_with_summaries().where(MunicipalAsset.id == asset_id)
+    )
+    if asset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Asset not found",
+        )
+    return asset
+
+
+def get_locked_asset(db: Session, asset_id: int) -> MunicipalAsset:
+    asset = db.scalar(
+        select(MunicipalAsset)
+        .where(MunicipalAsset.id == asset_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if asset is None:
         raise HTTPException(

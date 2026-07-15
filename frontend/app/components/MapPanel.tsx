@@ -17,8 +17,10 @@ import {
   fetchMunicipalAssets,
 } from "../lib/geo";
 import { useSession } from "../lib/session";
+import { AssetMaintenancePanel } from "./AssetMaintenancePanel";
 import { MunicipalMap } from "./MunicipalMap";
 import type {
+  AssetStatus,
   GeoEntityType,
   GeoMapItem,
   MunicipalAsset,
@@ -95,6 +97,18 @@ function entityDetailLabel(type: GeoEntityType) {
 
 function formatStatus(value: string) {
   return value.replace(/_/g, " ");
+}
+
+function normalizeAssetStatus(value: string): AssetStatus {
+  if (
+    value === "active" ||
+    value === "inactive" ||
+    value === "retired" ||
+    value === "archived"
+  ) {
+    return value;
+  }
+  return "archived";
 }
 
 function locationRoleLabel(role: GeoMapItem["role"]) {
@@ -990,6 +1004,22 @@ export function MapPanel({ user }: MapPanelProps) {
                   ? "Abrir contexto municipal"
                   : `Abrir ${entityDetailLabel(selectedItem.entity_type)}`}
               </Link>
+              {selectedItem.entity_type === "asset" ? (
+                <AssetMaintenancePanel
+                  assetId={selectedItem.entity_id}
+                  assetName={selectedItem.title}
+                  assetStatus={normalizeAssetStatus(selectedItem.status)}
+                  key={`${selectedItem.organization_id}-${selectedItem.entity_id}`}
+                  organizationId={selectedItem.organization_id}
+                  organizationStatus={
+                    user.organizations?.find(
+                      (organization) =>
+                        organization.id === selectedItem.organization_id,
+                    )?.status ?? "archived"
+                  }
+                  user={user}
+                />
+              ) : null}
             </>
           ) : (
             <div className="map-detail-placeholder">

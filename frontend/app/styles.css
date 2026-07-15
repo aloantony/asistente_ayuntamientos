@@ -1186,6 +1186,297 @@ html.dark .municipal-map-canvas .leaflet-tile-pane {
   color: var(--text);
 }
 
+.asset-maintenance-panel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 20px;
+}
+
+.asset-maintenance-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.asset-maintenance-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.asset-maintenance-heading h3 {
+  font-size: 18px;
+}
+
+.asset-maintenance-heading span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.asset-maintenance-heading button,
+.maintenance-order-actions button,
+.maintenance-load-error button {
+  padding: 8px 11px;
+  font-size: 12px;
+}
+
+.maintenance-feedback,
+.maintenance-empty,
+.maintenance-load-error {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 11px 12px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.maintenance-feedback {
+  border-left: 3px solid var(--accent);
+  color: var(--success-fg);
+  background: var(--success-bg);
+}
+
+.maintenance-load-error {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  border-color: var(--danger-fg);
+  background: var(--danger-bg);
+}
+
+.maintenance-load-error p {
+  margin: 0;
+  color: var(--danger-fg);
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.maintenance-order-group {
+  display: grid;
+  gap: 9px;
+}
+
+.maintenance-order-group h4 {
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.maintenance-order-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 12px;
+  background: var(--surface-muted);
+}
+
+.maintenance-order-card--overdue {
+  border-color: color-mix(in srgb, var(--danger-fg) 52%, var(--border));
+  background: color-mix(in srgb, var(--danger-bg) 74%, var(--surface-muted));
+}
+
+.maintenance-order-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 9px;
+}
+
+.maintenance-order-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.maintenance-order-heading strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.maintenance-order-heading > div span,
+.maintenance-order-meta {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.maintenance-status {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 7px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.maintenance-status--in_progress,
+.maintenance-status--scheduled {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+  color: var(--success-fg);
+  background: var(--success-bg);
+}
+
+.maintenance-status--cancelled {
+  color: var(--text-muted);
+  background: var(--fill);
+}
+
+.maintenance-order-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+}
+
+.maintenance-order-meta strong {
+  color: var(--danger-fg);
+}
+
+.maintenance-order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.maintenance-transition-form {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 11px;
+}
+
+.maintenance-transition-form label {
+  font-size: 12px;
+}
+
+.maintenance-transition-form textarea {
+  min-height: 78px;
+  padding: 9px 10px;
+  font-size: 12px;
+}
+
+.maintenance-transition-form .button-row {
+  gap: 7px;
+}
+
+.maintenance-event-panel {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.maintenance-event-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0 0 0 18px;
+}
+
+.maintenance-event-list li {
+  padding-left: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.maintenance-event-list strong,
+.maintenance-event-list span {
+  display: block;
+}
+
+.maintenance-event-list strong {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.maintenance-event-list span {
+  margin-top: 2px;
+}
+
+.maintenance-event-list p {
+  margin: 5px 0 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.maintenance-inline-error {
+  margin: 0;
+  color: var(--danger-fg);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.maintenance-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(32 27 19 / 42%);
+  backdrop-filter: blur(8px);
+}
+
+.maintenance-dialog {
+  display: grid;
+  gap: 18px;
+  width: min(100%, 680px);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 22px;
+  padding: 24px;
+  background: var(--surface-raised);
+  box-shadow: 0 34px 90px rgb(32 27 19 / 28%);
+}
+
+.maintenance-dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.maintenance-dialog-heading .eyebrow {
+  max-width: 470px;
+  overflow: hidden;
+  margin-bottom: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.maintenance-dialog-heading h2 {
+  font-size: 25px;
+}
+
+.maintenance-dialog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.maintenance-dialog-title-field,
+.maintenance-dialog-description-field {
+  grid-column: 1 / -1;
+}
+
+.maintenance-dialog-actions {
+  justify-content: flex-end;
+}
+
 .map-context-menu {
   position: fixed;
   z-index: 1200;
@@ -1452,6 +1743,33 @@ html.dark .municipal-map-canvas .leaflet-tile-pane {
 
   .map-registration-head {
     display: grid;
+  }
+
+  .asset-maintenance-heading,
+  .maintenance-order-heading,
+  .maintenance-dialog-heading {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .maintenance-dialog-backdrop {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .maintenance-dialog {
+    max-height: calc(100dvh - 24px);
+    border-radius: 18px;
+    padding: 18px;
+  }
+
+  .maintenance-dialog-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .maintenance-dialog-title-field,
+  .maintenance-dialog-description-field {
+    grid-column: auto;
   }
 }
 

@@ -8,13 +8,14 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260715_0022"
+HEAD_REVISION = "20260715_0023"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -141,7 +142,85 @@ ASSET_INVENTORY_SCHEMA = {
         },
         "unique_constraints": {
             "uq_municipal_assets_org_code",
+            "uq_municipal_assets_id_org_municipality",
         },
+    },
+}
+
+MAINTENANCE_SCHEMA = {
+    "maintenance_orders": {
+        "columns": {
+            "id",
+            "organization_id",
+            "municipality_id",
+            "asset_id",
+            "title",
+            "description",
+            "maintenance_type",
+            "priority",
+            "status",
+            "scheduled_for",
+            "estimated_minutes",
+            "assigned_to_id",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_maintenance_orders_org_status_scheduled",
+            "ix_maintenance_orders_asset_status",
+            "ix_maintenance_orders_assigned_status_scheduled",
+            "ix_maintenance_orders_municipality_id",
+            "ix_maintenance_orders_created_by_id",
+            "ix_maintenance_orders_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id", "municipality_id"),
+            ("municipality_id",),
+            ("asset_id", "organization_id", "municipality_id"),
+            ("assigned_to_id",),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_maintenance_orders_title",
+            "ck_maintenance_orders_type",
+            "ck_maintenance_orders_priority",
+            "ck_maintenance_orders_status",
+            "ck_maintenance_orders_estimated_minutes",
+            "ck_maintenance_orders_scheduled_date",
+        },
+        "unique_constraints": {"uq_maintenance_orders_id_org"},
+    },
+    "maintenance_order_events": {
+        "columns": {
+            "id",
+            "order_id",
+            "organization_id",
+            "event_type",
+            "from_status",
+            "to_status",
+            "changed_fields",
+            "note",
+            "actor_id",
+            "created_at",
+        },
+        "indexes": {
+            "ix_maintenance_order_events_order_id",
+            "ix_maintenance_order_events_org_created",
+            "ix_maintenance_order_events_actor_id",
+        },
+        "foreign_keys": {
+            ("order_id", "organization_id"),
+            ("actor_id",),
+        },
+        "checks": {
+            "ck_maintenance_order_events_type",
+            "ck_maintenance_order_events_from_status",
+            "ck_maintenance_order_events_to_status",
+        },
+        "unique_constraints": set(),
     },
 }
 ASSET_SUPPORTING_UNIQUE_CONSTRAINTS = {
@@ -527,6 +606,61 @@ def assert_asset_supporting_constraints_absent(inspector: Inspector) -> None:
         assert constraint_names.isdisjoint(existing_names)
 
 
+def assert_maintenance_schema(inspector: Inspector) -> None:
+    for table_name, expected in MAINTENANCE_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+
+
+def assert_maintenance_trigger(engine: Engine) -> None:
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = 'trg_maintenance_order_events_immutable'
+                      AND NOT tgisinternal
+                )
+                """
+            )
+        ).scalar_one() is True
+
+
+def assert_maintenance_trigger_absent(engine: Engine) -> None:
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1
+                    FROM pg_proc
+                    WHERE proname = 'prevent_maintenance_order_event_mutation'
+                )
+                """
+            )
+        ).scalar_one() is True
+
+
 @pytest.mark.parametrize("table_name", sorted(PROTOTYPE_TABLES))
 def test_cleanup_waits_for_and_preserves_concurrent_rows(
     migration_database_url: str,
@@ -602,6 +736,8 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         upgraded_inspector = inspect(engine)
         assert PROTOTYPE_TABLES.isdisjoint(upgraded_inspector.get_table_names())
         assert_asset_inventory_schema(upgraded_inspector)
+        assert_maintenance_schema(upgraded_inspector)
+        assert_maintenance_trigger(engine)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -623,6 +759,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert set(ASSET_INVENTORY_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert set(MAINTENANCE_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
 
         run_alembic(migration_database_url, "upgrade", "head")
@@ -632,6 +771,8 @@ def test_reconciles_deployed_revision_and_reversible_schema(
             reupgraded_inspector.get_table_names()
         )
         assert_asset_inventory_schema(reupgraded_inspector)
+        assert_maintenance_schema(reupgraded_inspector)
+        assert_maintenance_trigger(engine)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -658,10 +799,15 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
     try:
         run_alembic(migration_database_url, "upgrade", "head")
         assert_asset_inventory_schema(inspect(engine))
+        assert_maintenance_schema(inspect(engine))
+        assert_maintenance_trigger(engine)
 
         run_alembic(migration_database_url, "downgrade", "20260713_0021")
         downgraded_inspector = inspect(engine)
         assert set(ASSET_INVENTORY_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(MAINTENANCE_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
@@ -673,5 +819,203 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
         assert_asset_inventory_schema(inspect(engine))
+        assert_maintenance_schema(inspect(engine))
+        assert_maintenance_trigger(engine)
+    finally:
+        engine.dispose()
+
+
+def test_maintenance_migration_is_reversible_and_events_are_immutable(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260715_0022")
+    engine = create_engine(migration_database_url)
+
+    try:
+        inspector = inspect(engine)
+        assert set(MAINTENANCE_SCHEMA).isdisjoint(inspector.get_table_names())
+        assert "uq_municipal_assets_id_org_municipality" not in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("municipal_assets")
+        }
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_maintenance_schema(inspect(engine))
+        assert_maintenance_trigger(engine)
+
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO users (
+                        email, hashed_password, full_name, is_active, is_superuser
+                    ) VALUES (
+                        'maintenance-migration@example.test', 'hash',
+                        'Maintenance Migration', true, false
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community, ine_code
+                    ) VALUES (
+                        'Migration Town', 'Burgos', 'Castilla y Leon',
+                        'maint-migration'
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+            organization_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO organizations (name, municipality_id, status)
+                    VALUES ('Migration Council', :municipality_id, 'active')
+                    RETURNING id
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            category_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipal_asset_categories (
+                        organization_id, code, name
+                    ) VALUES (:organization_id, 'migration', 'Migration')
+                    RETURNING id
+                    """
+                ),
+                {"organization_id": organization_id},
+            ).scalar_one()
+            type_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipal_asset_types (
+                        organization_id, category_id, code, name
+                    ) VALUES (
+                        :organization_id, :category_id, 'migration', 'Migration'
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "category_id": category_id,
+                },
+            ).scalar_one()
+            asset_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipal_assets (
+                        organization_id, municipality_id, asset_type_id, name
+                    ) VALUES (
+                        :organization_id, :municipality_id, :type_id,
+                        'Migration asset'
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "municipality_id": municipality_id,
+                    "type_id": type_id,
+                },
+            ).scalar_one()
+            order_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO maintenance_orders (
+                        organization_id, municipality_id, asset_id, title,
+                        created_by_id, updated_by_id
+                    ) VALUES (
+                        :organization_id, :municipality_id, :asset_id,
+                        'Migration order', :user_id, :user_id
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "municipality_id": municipality_id,
+                    "asset_id": asset_id,
+                    "user_id": user_id,
+                },
+            ).scalar_one()
+            event_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO maintenance_order_events (
+                        order_id, organization_id, event_type, to_status,
+                        changed_fields, actor_id
+                    ) VALUES (
+                        :order_id, :organization_id, 'created', 'planned',
+                        CAST('["title"]' AS JSON), :user_id
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "order_id": order_id,
+                    "organization_id": organization_id,
+                    "user_id": user_id,
+                },
+            ).scalar_one()
+
+        with engine.begin() as connection:
+            other_organization_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO organizations (name, municipality_id, status)
+                    VALUES ('Other Migration Council', :municipality_id, 'active')
+                    RETURNING id
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO maintenance_orders (
+                            organization_id, municipality_id, asset_id, title,
+                            created_by_id, updated_by_id
+                        ) VALUES (
+                            :organization_id, :municipality_id, :asset_id,
+                            'Cross-tenant order', :user_id, :user_id
+                        )
+                        """
+                    ),
+                    {
+                        "organization_id": other_organization_id,
+                        "municipality_id": municipality_id,
+                        "asset_id": asset_id,
+                        "user_id": user_id,
+                    },
+                )
+
+        for statement in (
+            "UPDATE maintenance_order_events SET note = 'tampered' WHERE id = :id",
+            "DELETE FROM maintenance_order_events WHERE id = :id",
+        ):
+            with pytest.raises(
+                DBAPIError,
+                match="maintenance order events are immutable",
+            ):
+                with engine.begin() as connection:
+                    connection.execute(text(statement), {"id": event_id})
+
+        run_alembic(migration_database_url, "downgrade", "20260715_0022")
+        downgraded = inspect(engine)
+        assert set(MAINTENANCE_SCHEMA).isdisjoint(downgraded.get_table_names())
+        assert "uq_municipal_assets_id_org_municipality" not in {
+            constraint["name"]
+            for constraint in downgraded.get_unique_constraints("municipal_assets")
+        }
+        assert_maintenance_trigger_absent(engine)
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_maintenance_schema(inspect(engine))
+        assert_maintenance_trigger(engine)
     finally:
         engine.dispose()

@@ -9,6 +9,7 @@ from app.assets.models import MunicipalAsset
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
 from app.municipalities.models import Municipality
+from app.maintenance.guards import ensure_membership_has_no_open_assignments
 from app.organizations.access import get_accessible_organizations_query
 from app.organizations.models import Organization, organization_users
 from app.organizations.schemas import (
@@ -191,6 +192,11 @@ def remove_user_from_organization(
     require_organizations_manage(db, current_user, organization_id=organization.id)
 
     prevent_organization_lockout(db, current_user, target_user)
+    ensure_membership_has_no_open_assignments(
+        db,
+        organization_id=organization.id,
+        user_id=target_user.id,
+    )
 
     group_ids = select(Group.id).where(Group.organization_id == organization.id)
     project_ids = select(Project.id).where(Project.organization_id == organization.id)

@@ -265,6 +265,12 @@ class MunicipalAsset(TimestampMixin, Base):
             "code",
             name="uq_municipal_assets_org_code",
         ),
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            "municipality_id",
+            name="uq_municipal_assets_id_org_municipality",
+        ),
         Index(
             "ix_municipal_assets_org_status_id",
             "organization_id",

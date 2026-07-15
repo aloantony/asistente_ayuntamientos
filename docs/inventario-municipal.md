@@ -123,11 +123,13 @@ existente desde el menú contextual para ubicarlo. No crea fichas de inventario.
 Quedan expresamente fuera de esta entrega:
 
 - adjuntos e importaciones masivas;
-- órdenes y ciclos de mantenimiento;
-- historial de inspecciones y auditoría de cambios de dominio;
 - edición de ubicaciones desde una futura pantalla de inventario;
 - PostGIS, polígonos y otras geometrías avanzadas;
 - frontend específico de inventario.
+
+Las órdenes y su historial auditable se implementan como dominio separado para
+no mezclar la ficha del activo con el ciclo de trabajo. Su contrato, permisos y
+límites se documentan en `docs/mantenimiento-municipal.md`.
 
 Cada ampliación debe conservar RBAC, aislamiento tenant, procedencia de datos y
 migraciones reversibles antes de habilitarla en producción.

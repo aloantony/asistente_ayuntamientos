@@ -23,6 +23,7 @@ La distinción central del dominio:
 - `Municipality` es **dato de referencia global**: municipios reales de España, compartidos entre tenants, base de la futura base de conocimiento comparativa. Una organización puede enlazar opcionalmente con un municipio.
 - `Project` (expediente/área de trabajo) y `Document` viven dentro de una organización. `Requirement` pertenece a una organización y opcionalmente a un proyecto.
 - `GeoLocation` y `EntityLocation` forman la capa geográfica compartida del mapa municipal: las ubicaciones pertenecen opcionalmente a una organización/municipio y se vinculan a necesidades o proyectos sin duplicar columnas `lat/lng`. Los activos conservan su vínculo canónico en `municipal_assets.location_id` y se reubican creando una ubicación nueva para no desplazar referencias compartidas.
+- `MaintenanceOrder` representa trabajo humano programado sobre un activo municipal y `MaintenanceOrderEvent` conserva su historial inmutable. Organización y municipio se derivan del activo y quedan protegidos por claves compuestas; este dominio no reutiliza las tareas ejecutables de `agent_office`.
 - `Ordinance` es global, pertenece a un municipio y puede enlazar a un documento de un tenant; ese enlace exige que quien lo crea tenga acceso al documento.
 
 ## Control de acceso
@@ -34,6 +35,7 @@ La distinción central del dominio:
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
 - El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con su visibilidad normal; los activos requieren además permisos de inventario y edición en ambos dominios para reubicarlos, de modo que la capa geográfica no filtre ni modifique trabajo inaccesible por otra ruta.
+- El mantenimiento usa permisos tenant-scoped propios (`maintenance.view|create|edit|complete|manage`) y exige además visibilidad del activo. Las transiciones de estado y su evento de auditoría se confirman en una única transacción bajo bloqueo de fila; los eventos no tienen API de edición ni borrado.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.
 
 ## Documentos
@@ -62,7 +64,7 @@ La distinción central del dominio:
 
 ## Frontend
 
-- App Router multi-ruta con shell de navegación lateral: `/ayuntamiento`, `/asistente`, `/requisitos`, `/proyectos`, `/mapa`, `/cuenta` y `/admin/{producto,memoria,usuarios,grupos,organizaciones,roles,municipios,ordenanzas}`. Los ítems del menú usan los mismos predicados de permisos que las rutas; `/ayuntamiento` exige `municipalities.view|manage` y deriva su contexto de las organizaciones visibles de la sesión, producto exige superusuario, memoria exige `assistant.use` y `assistant.memory.review`, los permisos de solo lectura de ordenanzas no abren administración y `/proyectos` solo aparece con permisos de proyecto. Tras el login se aterriza en la primera sección visible.
+- App Router multi-ruta con shell de navegación lateral: `/ayuntamiento`, `/asistente`, `/requisitos`, `/proyectos`, `/mapa`, `/cuenta` y `/admin/{producto,memoria,usuarios,grupos,organizaciones,roles,municipios,ordenanzas}`. Los ítems del menú usan los mismos predicados de permisos que las rutas; `/ayuntamiento` exige `municipalities.view|manage` y deriva su contexto de las organizaciones visibles de la sesión, producto exige superusuario, memoria exige `assistant.use` y `assistant.memory.review`, los permisos de solo lectura de ordenanzas no abren administración y `/proyectos` solo aparece con permisos de proyecto. El detalle de un activo en `/mapa` compone su panel de mantenimiento sin duplicar la ficha del inventario. Tras el login se aterriza en la primera sección visible.
 - La sesión vive en `SessionProvider` (layout raíz): usuario, embudo de 401 → logout, cierre de sesión. Guard client-side; sin `middleware.ts` por ahora.
 - Cada ruta monta solo su controlador de dominio y carga datos al entrar; las listas de otros dominios llegan por fetchers ligeros (`app/lib/fetchers.ts`). Los controladores de administración viven en `app/lib/admin/`; la revisión de memoria se mantiene fuera del controlador conversacional.
 - Selección, filtros y paginación viven en la URL (deep-links, refresh y botón atrás funcionan); los filtros de municipios, ordenanzas y requisitos se aplican en el servidor.
