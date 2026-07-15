@@ -9,12 +9,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.assistant import gateway as assistant_gateway
 from app.assistant import guards as assistant_guards
 from app.assistant import realtime as assistant_realtime
 from app.assistant import tools as assistant_tools
 from app.assistant import turn as assistant_turn
 from app.assistant.gateway import (
+    AIGateway,
     AITextDelta,
+    AssistantTimeoutError,
     AssistantUnavailableError,
     _from_openai_response,
     _hermes_agent_url,
@@ -73,8 +76,15 @@ class FakeGateway:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def complete(self, *, system, messages, tools):
-        self.calls.append({"system": system, "messages": messages, "tools": tools})
+    def complete(self, *, system, messages, tools, timeout_seconds=None):
+        self.calls.append(
+            {
+                "system": system,
+                "messages": messages,
+                "tools": tools,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
         if not self.responses:
             raise AssertionError("FakeGateway ran out of scripted responses")
         response = self.responses.pop(0)
@@ -82,8 +92,13 @@ class FakeGateway:
             raise response
         return response
 
-    def complete_stream(self, *, system, messages, tools):
-        response = self.complete(system=system, messages=messages, tools=tools)
+    def complete_stream(self, *, system, messages, tools, timeout_seconds=None):
+        response = self.complete(
+            system=system,
+            messages=messages,
+            tools=tools,
+            timeout_seconds=timeout_seconds,
+        )
         for delta in response.deltas:
             yield AITextDelta(text=delta)
         return response
@@ -1943,7 +1958,14 @@ def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
         def __init__(self):
             self.call_count = 0
 
-        def complete(self, *, system, messages, tools):
+        def complete(
+            self,
+            *,
+            system,
+            messages,
+            tools,
+            timeout_seconds=None,
+        ):
             self.call_count += 1
             if self.call_count == 1:
                 normal_waiting.set()
@@ -2694,6 +2716,80 @@ def test_invalid_forced_synthesis_uses_explicit_loop_limit_reply(
     assert "Voy a consultar" not in assistant_message["content"]
     assert len(gateway.calls) == 2
     assert gateway.calls[-1]["tools"] == []
+
+
+def test_turn_wall_clock_budget_bounds_gateway_calls_and_stops_before_overrun(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_turn_timeout_seconds", 10.0)
+    monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 3.0)
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    clock = [100.0]
+
+    class AdvancingGateway:
+        enabled = True
+
+        def __init__(self):
+            self.calls: list[dict] = []
+            self.responses = [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            f"call_{index}",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": status,
+                            },
+                        )
+                    ],
+                )
+                for index, status in enumerate(
+                    ("draft", "submitted", "accepted", "archived"),
+                    start=1,
+                )
+            ]
+
+        def complete(self, *, system, messages, tools, timeout_seconds=None):
+            assert timeout_seconds is not None
+            self.calls.append(
+                {"tools": tools, "timeout_seconds": timeout_seconds}
+            )
+            clock[0] += min(2.5, timeout_seconds)
+            return self.responses.pop(0)
+
+    gateway = AdvancingGateway()
+    monkeypatch.setattr(assistant_turn, "monotonic", lambda: clock[0])
+    use_gateway(gateway)
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta todos los estados"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == assistant_turn.TURN_TIMEOUT_REPLY
+    assert [call["timeout_seconds"] for call in gateway.calls] == pytest.approx(
+        [3.0, 3.0, 3.0, 2.5]
+    )
+    assert [action["ok"] for action in assistant_message["actions"]] == [
+        True,
+        True,
+        True,
+    ]
 
 
 def get_conversation_state(db, conversation_id: int) -> dict:
@@ -4430,6 +4526,31 @@ def test_gateway_failure_mid_turn_persists_error_reply(client, assistant_user, u
     assert response.json()["messages"][-1]["content"] == ERROR_REPLY
 
 
+def test_gateway_timeout_mid_turn_persists_honest_timeout_reply(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([AssistantTimeoutError("deadline")]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Hola"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][-1]["content"] == (
+        assistant_turn.TURN_TIMEOUT_REPLY
+    )
+
+
 def test_textual_read_tool_call_recovery_executes_matching_read_tool(
     client,
     assistant_user,
@@ -4509,6 +4630,56 @@ def test_hermes_agent_url_normalizes_v1(monkeypatch):
         "http://127.0.0.1:8642/v1/chat/completions"
     )
     assert _hermes_agent_url("health") == "http://127.0.0.1:8642/health"
+
+
+def test_hermes_gateway_uses_smaller_turn_timeout(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "hermes_agent_api_key", "test-key")
+    monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 5.0)
+    monkeypatch.setattr(settings, "hermes_agent_timeout_seconds", 120.0)
+
+    def fake_complete_hermes_agent(**kwargs):
+        captured.update(kwargs)
+        return fake_response("end_turn", [text_block("Respuesta acotada")])
+
+    monkeypatch.setattr(
+        assistant_gateway,
+        "complete_hermes_agent",
+        fake_complete_hermes_agent,
+    )
+
+    completion = AIGateway().complete(
+        system="system",
+        messages=[{"role": "user", "content": "hola"}],
+        tools=[],
+        timeout_seconds=2.5,
+    )
+
+    assert completion.content[0].text == "Respuesta acotada"
+    assert captured["timeout"] == pytest.approx(2.5)
+
+
+def test_hermes_blocking_timeout_is_classified_as_turn_timeout(monkeypatch):
+    monkeypatch.setattr(assistant_gateway, "hermes_agent_enabled", lambda: True)
+
+    def raise_timeout(*args, **kwargs):
+        raise TimeoutError("socket deadline")
+
+    monkeypatch.setattr(assistant_gateway.urlrequest, "urlopen", raise_timeout)
+
+    with pytest.raises(AssistantTimeoutError):
+        assistant_gateway.complete_hermes_agent(
+            system="system",
+            messages=[{"role": "user", "content": "hola"}],
+            tools=[],
+            model="hermes-agent",
+            max_tokens=100,
+            timeout=1.0,
+            tool_choice="auto",
+            log_context="test",
+        )
 
 
 def parse_sse(body: str) -> list[dict]:

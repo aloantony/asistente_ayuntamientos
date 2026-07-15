@@ -1,4 +1,5 @@
 from functools import lru_cache
+from math import isfinite
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,6 +26,8 @@ class Settings(BaseSettings):
     assistant_max_tokens: int = 16000
     assistant_max_tool_iterations: int = 8
     assistant_max_tool_calls: int = 8
+    assistant_turn_timeout_seconds: float = 120.0
+    assistant_gateway_timeout_seconds: float = 30.0
     assistant_history_max_messages: int = 40
     hermes_agent_base_url: str = "http://127.0.0.1:8642/v1"
     hermes_agent_api_key: str | None = None
@@ -105,6 +108,16 @@ class Settings(BaseSettings):
         if normalized not in {"anthropic", "hermes_agent"}:
             raise ValueError("assistant_runtime must be 'anthropic' or 'hermes_agent'")
         return normalized
+
+    @field_validator(
+        "assistant_turn_timeout_seconds",
+        "assistant_gateway_timeout_seconds",
+    )
+    @classmethod
+    def validate_assistant_timeouts(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError("assistant timeouts must be finite and greater than zero")
+        return value
 
     @field_validator("embeddings_runtime")
     @classmethod

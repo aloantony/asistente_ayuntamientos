@@ -782,7 +782,7 @@ class ScriptedGateway:
     def __init__(self, responses: list):
         self.responses = list(responses)
 
-    def complete(self, *, system, messages, tools):
+    def complete(self, *, system, messages, tools, timeout_seconds=None):
         if not self.responses:
             raise AssertionError("ScriptedGateway ran out of responses")
         return self.responses.pop(0)
