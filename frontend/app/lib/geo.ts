@@ -1,12 +1,38 @@
-import type { GeoEntityType, GeoMapItem } from "../components/types";
-import { adminRequest } from "./api";
+import type {
+  GeoEntityType,
+  GeoMapItem,
+  MunicipalAsset,
+} from "../components/types";
+import { adminRequest, adminRequestWithTotal } from "./api";
 
-export function fetchGeoMapItems(params: URLSearchParams) {
+export function fetchGeoMapItems(params: URLSearchParams, signal?: AbortSignal) {
   const suffix = params.toString();
   return adminRequest<GeoMapItem[]>(
     `/geo/map-items${suffix ? `?${suffix}` : ""}`,
     "",
     "No se pudieron cargar los elementos del mapa.",
+    { signal },
+  );
+}
+
+export function fetchMunicipalAssets(
+  organizationId: number,
+  search: string,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({
+    organization_id: String(organizationId),
+    include_archived: "false",
+    limit: "200",
+  });
+  if (search.trim()) {
+    params.set("q", search.trim());
+  }
+  return adminRequestWithTotal<MunicipalAsset[]>(
+    `/assets?${params.toString()}`,
+    "",
+    "No se pudo cargar el inventario municipal.",
+    { signal },
   );
 }
 

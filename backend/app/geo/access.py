@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
+from app.assets.models import MunicipalAsset
 from app.organizations.models import Organization
 from app.projects.access import get_project_with_memberships, user_can_access_project
 from app.projects.models import Project
@@ -15,7 +17,7 @@ from app.users.models import User
 @dataclass(frozen=True)
 class VisibleEntity:
     entity_type: str
-    entity: Requirement | Project
+    entity: Requirement | Project | MunicipalAsset
     organization_id: int
     organization_name: str
     title: str
@@ -75,6 +77,49 @@ def has_map_edit_permission(
     )
 
 
+def has_asset_view_permission(
+    db: Session,
+    current_user: User,
+    organization_id: int,
+) -> bool:
+    return has_permission(
+        current_user,
+        "assets.view",
+        db,
+        organization_id=organization_id,
+    ) or has_permission(
+        current_user,
+        "assets.manage",
+        db,
+        organization_id=organization_id,
+    )
+
+
+def has_asset_location_edit_permission(
+    db: Session,
+    current_user: User,
+    organization_id: int,
+) -> bool:
+    if has_permission(
+        current_user,
+        "assets.manage",
+        db,
+        organization_id=organization_id,
+    ):
+        return True
+    return has_permission(
+        current_user,
+        "assets.view",
+        db,
+        organization_id=organization_id,
+    ) and has_permission(
+        current_user,
+        "assets.edit",
+        db,
+        organization_id=organization_id,
+    )
+
+
 def get_visible_entity(
     db: Session,
     current_user: User,
@@ -119,6 +164,35 @@ def get_visible_entity(
             detail_path="/proyectos",
         )
 
+    if entity_type == "asset":
+        asset = db.scalar(
+            select(MunicipalAsset)
+            .options(selectinload(MunicipalAsset.asset_type))
+            .where(MunicipalAsset.id == entity_id)
+        )
+        if asset is None:
+            return None
+        if not has_asset_view_permission(
+            db,
+            current_user,
+            asset.organization_id,
+        ):
+            return None
+        organization = db.get(Organization, asset.organization_id)
+        if organization is None:
+            return None
+        return VisibleEntity(
+            entity_type="asset",
+            entity=asset,
+            organization_id=asset.organization_id,
+            organization_name=organization.name,
+            title=asset.name,
+            subtitle=build_asset_subtitle(asset),
+            status=asset.status,
+            priority=None,
+            detail_path="/ayuntamiento",
+        )
+
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail="Unsupported entity_type",
@@ -145,3 +219,9 @@ def derive_municipality_id(db: Session, organization_id: int) -> int | None:
     if organization is None:
         return None
     return organization.municipality_id
+
+
+def build_asset_subtitle(asset: MunicipalAsset) -> str:
+    return asset.description or (
+        f"{asset.asset_type.name} · {asset.condition_status}"
+    )

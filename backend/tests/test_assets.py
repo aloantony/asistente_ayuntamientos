@@ -493,51 +493,80 @@ def test_type_and_asset_reject_taxonomy_from_another_organization(
     assert cross_type.status_code == 409
 
 
-def test_asset_rejects_location_from_another_organization_or_municipality(
+def test_asset_api_rejects_direct_location_assignment_and_preserves_visibility(
     client,
     db,
     superuser,
+    make_user,
     make_municipal_organization,
+    grant_permissions,
 ):
     organization, municipality = make_municipal_organization()
-    other_organization, other_municipality = make_municipal_organization()
-    auth = headers_for(superuser)
-    _, asset_type = create_hierarchy(client, auth, organization.id)
-    other_org_location = make_location(
-        db,
-        other_organization.id,
-        other_municipality.id,
-        label="Ubicacion de otra organizacion",
+    super_auth = headers_for(superuser)
+    _, asset_type = create_hierarchy(client, super_auth, organization.id)
+    asset = create_asset(client, super_auth, organization.id, asset_type["id"])
+    owner = make_user()
+    grant_permissions(
+        owner,
+        organization,
+        ["map.view", "map.edit", "requirements.view"],
     )
-    other_municipality_location = make_location(
-        db,
-        organization.id,
-        other_municipality.id,
-        label="Ubicacion de otro municipio",
+    requirement = Requirement(
+        organization_id=organization.id,
+        title=f"Ubicacion privada {unique_suffix()}",
+        priority="medium",
+        status="draft",
+        source_type="manual",
+        created_by_id=owner.id,
     )
+    db.add(requirement)
+    db.commit()
+    created_location = client.post(
+        "/geo/entity-locations",
+        json=entity_location_payload(
+            requirement.id,
+            organization.id,
+            municipality.id,
+        ),
+        headers=headers_for(owner),
+    )
+    assert created_location.status_code == 201
+    location_id = created_location.json()["location"]["id"]
 
-    cross_org = client.post(
+    attacker = make_user()
+    grant_permissions(
+        attacker,
+        organization,
+        ["assets.view", "assets.create", "assets.edit", "map.view", "map.edit"],
+    )
+    attacker_auth = headers_for(attacker)
+    hidden_map = client.get("/geo/map-items", headers=attacker_auth)
+    direct_create = client.post(
         "/assets",
         json=asset_payload(
             organization.id,
             asset_type["id"],
-            location_id=other_org_location.id,
+            location_id=location_id,
         ),
-        headers=auth,
+        headers=attacker_auth,
     )
-    cross_municipality = client.post(
-        "/assets",
-        json=asset_payload(
-            organization.id,
-            asset_type["id"],
-            location_id=other_municipality_location.id,
-        ),
-        headers=auth,
+    direct_update = client.patch(
+        f"/assets/{asset['id']}",
+        json={"location_id": location_id},
+        headers=attacker_auth,
     )
 
-    assert cross_org.status_code == 409
-    assert cross_municipality.status_code == 409
-    assert municipality.id != other_municipality.id
+    assert hidden_map.status_code == 200
+    assert hidden_map.json() == []
+    for response in (direct_create, direct_update):
+        assert response.status_code == 422
+        assert any(
+            error["type"] == "extra_forbidden"
+            and error["loc"][-1] == "location_id"
+            for error in response.json()["detail"]
+        )
+    db.expire_all()
+    assert db.get(MunicipalAsset, asset["id"]).location_id is None
 
 
 def test_organization_municipality_cannot_change_or_clear_while_assets_exist(
@@ -572,7 +601,7 @@ def test_organization_municipality_cannot_change_or_clear_while_assets_exist(
     assert db.get(Organization, organization.id).municipality_id == municipality.id
 
 
-def test_geo_api_cannot_reassign_location_referenced_by_asset(
+def test_geo_api_uses_copy_on_write_for_location_referenced_by_asset(
     client,
     db,
     make_user,
@@ -610,15 +639,12 @@ def test_geo_api_cannot_reassign_location_referenced_by_asset(
     assert created_location.status_code == 201
     location_id = created_location.json()["location"]["id"]
     _, asset_type = create_hierarchy(client, auth, organization.id)
-    asset = create_asset(
-        client,
-        auth,
-        organization.id,
-        asset_type["id"],
-        location_id=location_id,
-    )
+    asset = create_asset(client, auth, organization.id, asset_type["id"])
+    stored_asset = db.get(MunicipalAsset, asset["id"])
+    stored_asset.location_id = location_id
+    db.commit()
 
-    rejected = client.post(
+    moved_to_other_municipality = client.post(
         "/geo/entity-locations",
         json=entity_location_payload(
             requirement.id,
@@ -640,17 +666,25 @@ def test_geo_api_cannot_reassign_location_referenced_by_asset(
         headers=auth,
     )
 
-    assert rejected.status_code == 409
-    assert rejected.json()["detail"] == (
-        "Location organization or municipality cannot change while assets reference it"
+    assert moved_to_other_municipality.status_code == 201
+    moved_location_id = moved_to_other_municipality.json()["location"]["id"]
+    assert moved_location_id != location_id
+    assert (
+        moved_to_other_municipality.json()["location"]["municipality_id"]
+        == other_municipality.id
     )
     assert allowed_same_scope.status_code == 201
-    assert allowed_same_scope.json()["location"]["id"] == location_id
+    assert allowed_same_scope.json()["location"]["id"] not in {
+        location_id,
+        moved_location_id,
+    }
     assert allowed_same_scope.json()["location"]["label"] == "Plaza Mayor actualizada"
     asset_detail = client.get(f"/assets/{asset['id']}", headers=auth)
     assert asset_detail.status_code == 200
     assert asset_detail.json()["location_id"] == location_id
     assert asset_detail.json()["location"]["municipality_id"] == municipality.id
+    assert asset_detail.json()["location"]["label"] == "Plaza Mayor"
+    assert asset_detail.json()["location"]["latitude"] == 42.34
 
 
 def test_database_constraints_reject_incompatible_asset_scope(
@@ -719,13 +753,10 @@ def test_deleting_location_keeps_asset_and_clears_location_id(
         municipality.id,
         label="Ubicacion eliminable",
     )
-    asset = create_asset(
-        client,
-        auth,
-        organization.id,
-        asset_type["id"],
-        location_id=location.id,
-    )
+    asset = create_asset(client, auth, organization.id, asset_type["id"])
+    stored_asset = db.get(MunicipalAsset, asset["id"])
+    stored_asset.location_id = location.id
+    db.commit()
 
     db.execute(delete(GeoLocation).where(GeoLocation.id == location.id))
     db.commit()

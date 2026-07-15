@@ -97,7 +97,10 @@ function translateProviderError(detail: string) {
 }
 
 function translateApiDetail(detail: string, fallback: string) {
-  if (detail.startsWith("Permission required:")) {
+  if (
+    detail.startsWith("Permission required:") ||
+    detail.startsWith("Permissions required:")
+  ) {
     return "No tienes el permiso necesario para esta acción.";
   }
 
@@ -170,6 +173,28 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró la organización indicada.";
     case "Organization access denied":
       return "No tienes acceso a esa organización.";
+    case "Organization is not available for asset inventory reads":
+      return "La organización ya no está disponible para consultar su inventario.";
+    case "Organization must be active to modify asset inventory":
+      return "La organización debe estar activa para modificar su inventario.";
+    case "Organization must have a municipality to modify asset inventory":
+      return "La organización necesita un municipio asociado para modificar su inventario.";
+    case "Organization municipality must be active to modify asset inventory":
+      return "El municipio asociado debe estar activo para modificar el inventario.";
+    case "Entity access denied":
+      return "No tienes acceso al elemento indicado.";
+    case "Asset changed while assigning its location":
+      return "El activo cambió mientras se guardaba su ubicación. Vuelve a buscarlo e inténtalo de nuevo.";
+    case "Asset municipality does not match organization municipality":
+      return "El activo no pertenece al municipio actual de la organización.";
+    case "Location organization does not match asset organization":
+      return "La ubicación no pertenece a la misma organización que el activo.";
+    case "Location municipality does not match asset municipality":
+      return "La ubicación no pertenece al mismo municipio que el activo.";
+    case "Asset location update conflicts with existing data":
+      return "No se pudo guardar la ubicación porque el activo cambió. Actualiza el inventario e inténtalo de nuevo.";
+    case "Asset locations only support the primary role":
+      return "Los activos solo admiten una ubicación principal.";
     case "Municipality not found":
       return "No se encontró el municipio indicado.";
     case "Municipality already exists":

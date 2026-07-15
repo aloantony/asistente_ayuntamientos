@@ -26,7 +26,30 @@ const FALLBACK_CENTER: [number, number] = [42.3439, -3.6969];
 const FALLBACK_ZOOM = 12;
 
 function getItemKey(item: GeoMapItem) {
-  return `${item.entity_type}-${item.entity_id}`;
+  return `${item.entity_type}-${item.entity_id}-${item.role}`;
+}
+
+function entityTypeLabel(item: GeoMapItem) {
+  if (item.entity_type === "requirement") {
+    return "Necesidad";
+  }
+  if (item.entity_type === "project") {
+    return "Proyecto";
+  }
+  if (item.entity_type === "asset") {
+    return "Activo municipal";
+  }
+  return "Elemento municipal";
+}
+
+function locationRoleLabel(item: GeoMapItem) {
+  if (item.role === "primary") {
+    return "Principal";
+  }
+  if (item.role === "affected_area") {
+    return "Área afectada";
+  }
+  return "Referencia";
 }
 
 function isPointItem(item: GeoMapItem) {
@@ -132,7 +155,7 @@ export function MunicipalMap({
 
         marker.bindPopup(
           `<strong>${escapeHtml(item.title)}</strong><br><span>${escapeHtml(
-            item.entity_type === "requirement" ? "Necesidad" : "Proyecto",
+            `${entityTypeLabel(item)} · ${locationRoleLabel(item)}`,
           )}</span>`,
         );
         marker.on("click", () => onSelectItem(item));
@@ -180,7 +203,7 @@ export function MunicipalMap({
   return (
     <div className="municipal-map-shell">
       <div
-        aria-label="Mapa municipal con ubicaciones de necesidades y proyectos"
+        aria-label="Mapa municipal con ubicaciones de necesidades, proyectos y activos"
         className="municipal-map-canvas"
         ref={containerRef}
         role="region"

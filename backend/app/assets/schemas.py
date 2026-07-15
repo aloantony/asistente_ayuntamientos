@@ -185,7 +185,6 @@ class MunicipalAssetRead(BaseModel):
 class MunicipalAssetCreate(BaseModel):
     organization_id: int
     asset_type_id: int
-    location_id: int | None = None
     code: str | None = Field(default=None, min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
@@ -197,7 +196,7 @@ class MunicipalAssetCreate(BaseModel):
     last_inspected_on: date | None = None
     notes: str | None = None
 
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     _blank_optional_text = field_validator(
         "code",
@@ -211,7 +210,6 @@ class MunicipalAssetCreate(BaseModel):
 
 class MunicipalAssetUpdate(BaseModel):
     asset_type_id: int | None = None
-    location_id: int | None = None
     code: str | None = Field(default=None, min_length=1, max_length=100)
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
@@ -223,7 +221,7 @@ class MunicipalAssetUpdate(BaseModel):
     last_inspected_on: date | None = None
     notes: str | None = None
 
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     _blank_optional_text = field_validator(
         "code",

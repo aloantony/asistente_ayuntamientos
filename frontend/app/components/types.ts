@@ -212,8 +212,43 @@ export type Role = {
   updated_at: string;
 };
 
-export type GeoEntityType = "requirement" | "project";
+export type GeoEntityType = "requirement" | "project" | "asset";
+export type GeoLocationRole = "primary" | "affected_area" | "reference";
 export type GeoReviewStatus = "draft" | "proposed" | "reviewed" | "rejected";
+export type AssetTaxonomyStatus = "active" | "archived";
+export type AssetStatus = "active" | "inactive" | "retired" | "archived";
+export type AssetConditionStatus = "good" | "fair" | "poor" | "unknown";
+
+export type MunicipalAssetCategory = {
+  id: number;
+  organization_id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  color: string | null;
+  sort_order: number;
+  status: AssetTaxonomyStatus;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MunicipalAssetType = {
+  id: number;
+  organization_id: number;
+  category_id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  sort_order: number;
+  status: AssetTaxonomyStatus;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  category: MunicipalAssetCategory;
+};
 
 export type GeoLocation = {
   id: number;
@@ -234,9 +269,34 @@ export type GeoLocation = {
   updated_at: string;
 };
 
+export type MunicipalAsset = {
+  id: number;
+  organization_id: number;
+  municipality_id: number;
+  asset_type_id: number;
+  location_id: number | null;
+  code: string | null;
+  name: string;
+  description: string | null;
+  status: AssetStatus;
+  condition_status: AssetConditionStatus;
+  material: string | null;
+  dimensions: string | null;
+  installed_on: string | null;
+  last_inspected_on: string | null;
+  notes: string | null;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  asset_type: MunicipalAssetType;
+  location: GeoLocation | null;
+};
+
 export type GeoMapItem = {
   entity_type: GeoEntityType;
   entity_id: number;
+  role: GeoLocationRole;
   title: string;
   subtitle: string | null;
   status: string;

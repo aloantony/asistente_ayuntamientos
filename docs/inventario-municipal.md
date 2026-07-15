@@ -5,9 +5,9 @@ Actualizado: 2026-07-15.
 ## Propósito
 
 El inventario municipal registra elementos físicos gestionados por cada
-ayuntamiento y prepara su posterior visualización en el mapa y su conexión con
-mantenimiento. Esta primera entrega define el contrato backend; no incorpora
-todavía una pantalla de inventario ni edición cartográfica.
+ayuntamiento, permite representarlos y reubicarlos en el mapa, y prepara su
+conexión posterior con mantenimiento. Continúa sin una pantalla específica de
+inventario.
 
 ## Modelo de datos
 
@@ -70,10 +70,12 @@ municipio activo vinculado a la organización.
 
 Cuando una organización ya tiene activos, su municipio no se puede cambiar ni
 eliminar mediante la API: antes hay que migrar o retirar esos datos de forma
-explícita. De igual manera, una ubicación enlazada puede actualizar etiqueta,
-coordenadas y metadatos, pero no reasignarse a otra organización o municipio.
-Las restricciones de PostgreSQL preservan ambas reglas también ante carreras o
-escrituras que no pasen por la API.
+explícita. En el modelo, una ubicación enlazada conserva mutable su etiqueta,
+coordenadas y metadatos, pero no puede reasignarse a otra organización o
+municipio. El flujo cartográfico no explota esa mutabilidad: reubica mediante
+copy-on-write para preservar cualquier referencia compartida. Las restricciones
+de PostgreSQL protegen el ámbito también ante carreras o escrituras que no pasen
+por la API.
 
 Archivar y editar son capacidades independientes. Un `PATCH` que archive y
 modifique otros campos exige ambos permisos, y crear directamente un registro
@@ -83,21 +85,38 @@ recibir nuevos tipos o activos.
 
 ## Integración geográfica
 
-Un activo puede referenciar una ubicación ya existente de `geo_locations`.
+Un activo puede referenciar una ubicación de `geo_locations`.
 Para aceptarla, `organization_id` y `municipality_id` deben coincidir con el
-contexto del activo. El inventario no crea ni modifica geometrías en esta
-entrega; esa responsabilidad continúa en el dominio `geo`.
+contexto del activo. La creación y reubicación de geometrías pertenece al
+dominio `geo`; `municipal_assets.location_id` continúa siendo el único vínculo
+del activo y nunca se duplica en `entity_locations`.
 
 `assets.view` autoriza a leer la ubicación completa vinculada a los activos
 visibles de esa organización, porque forma parte de su ficha de inventario.
 No autoriza a listar otras entidades geográficas ni a editar la ubicación:
-`GET /geo/map-items` continúa exigiendo `map.view` y las escrituras geográficas,
-`map.edit`. Esta separación es deliberada y evita que el permiso del mapa sea
-un requisito implícito para consultar una ficha de activo.
+`GET /geo/map-items` exige simultáneamente `map.view|manage` y
+`assets.view|manage` en la organización del activo. Reubicarlo exige además
+edición en ambos dominios. Esta separación es deliberada y evita que el permiso
+del mapa sea un requisito implícito para consultar una ficha de activo, o que
+un editor cartográfico pueda modificar el inventario sin autorización.
 
-El siguiente slice puede añadir activos a la respuesta cartográfica y crear la
-interfaz de consulta/edición, reutilizando este contrato sin duplicar
-coordenadas en `municipal_assets`.
+Cada reubicación cartográfica mediante `POST /geo/entity-locations` crea una
+ubicación nueva con procedencia `user_provided` y estado de revisión `proposed`,
+y reasigna solo el activo. No se actualiza ni se elimina la ubicación anterior:
+puede estar compartida y su eventual limpieza requiere un proceso separado y
+auditable.
+
+`location_id` es de solo lectura en los esquemas públicos del inventario. Ni
+`POST /assets` ni `PATCH /assets/{id}` aceptan identificadores geográficos
+arbitrarios: hacerlo permitiría convertir en visible la ubicación de una
+necesidad o proyecto inaccesible del mismo tenant. El único flujo HTTP que
+asigna o reubica actualmente es el dominio `geo`, con sus permisos,
+copy-on-write y procedencia controlada. Una futura importación o reutilización
+de ubicaciones existentes necesitará un contrato explícito de visibilidad y
+auditoría; no se habilita implícitamente por conocer un id.
+
+`/mapa` permite filtrar y abrir marcadores de activos, y seleccionar un activo
+existente desde el menú contextual para ubicarlo. No crea fichas de inventario.
 
 ## Fuera de alcance
 
@@ -106,9 +125,9 @@ Quedan expresamente fuera de esta entrega:
 - adjuntos e importaciones masivas;
 - órdenes y ciclos de mantenimiento;
 - historial de inspecciones y auditoría de cambios de dominio;
-- edición de ubicaciones desde inventario;
+- edición de ubicaciones desde una futura pantalla de inventario;
 - PostGIS, polígonos y otras geometrías avanzadas;
-- frontend de inventario o mapa de activos.
+- frontend específico de inventario.
 
 Cada ampliación debe conservar RBAC, aislamiento tenant, procedencia de datos y
 migraciones reversibles antes de habilitarla en producción.
@@ -120,7 +139,9 @@ python3 -m compileall -q backend/app backend/alembic
 ```
 
 ```bash
-python -m pytest tests/test_assets.py tests/test_migrations.py -q
+python -m pytest tests/test_geo.py tests/test_assets.py tests/test_migrations.py -q
 ```
 
-La aceptación final debe incluir además la suite backend completa.
+La aceptación final debe incluir además la suite backend completa y
+`npm run typecheck`, `npm run lint`, `npm run build` y validación en navegador
+de `/mapa`.

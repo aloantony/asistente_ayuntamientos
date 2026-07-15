@@ -32,8 +32,6 @@ from app.assets.schemas import (
 from app.auth.dependencies import get_current_user
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
-from app.geo.models import GeoLocation
-from app.organizations.models import Organization
 from app.users.models import User
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -350,11 +348,6 @@ def create_asset(
         organization_id=payload.organization_id,
         require_active=True,
     )
-    ensure_location_matches_organization(
-        db,
-        location_id=payload.location_id,
-        organization=organization,
-    )
     if payload.status == "archived":
         require_asset_permission(
             db,
@@ -406,7 +399,7 @@ def update_asset(
         )
         return asset
 
-    organization = get_asset_organization_for_write(db, asset.organization_id)
+    get_asset_organization_for_write(db, asset.organization_id)
     require_asset_update_permissions(
         db,
         current_user,
@@ -420,13 +413,6 @@ def update_asset(
             organization_id=asset.organization_id,
             require_active=True,
         )
-    if "location_id" in updates:
-        ensure_location_matches_organization(
-            db,
-            location_id=updates["location_id"],
-            organization=organization,
-        )
-
     for field, value in updates.items():
         setattr(asset, field, value)
     asset.updated_by_id = current_user.id
@@ -542,34 +528,6 @@ def ensure_type_matches_organization(
             detail="Asset type category must be active",
         )
     return asset_type
-
-
-def ensure_location_matches_organization(
-    db: Session,
-    *,
-    location_id: int | None,
-    organization: Organization,
-) -> GeoLocation | None:
-    if location_id is None:
-        return None
-
-    location = db.get(GeoLocation, location_id)
-    if location is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Location not found",
-        )
-    if location.organization_id != organization.id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Location does not belong to the organization",
-        )
-    if location.municipality_id != organization.municipality_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Location does not belong to the organization municipality",
-        )
-    return location
 
 
 def require_asset_update_permissions(

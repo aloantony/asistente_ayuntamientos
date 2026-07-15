@@ -1032,6 +1032,17 @@ html.dark .municipal-map-canvas .leaflet-tile-pane {
   background: color-mix(in srgb, var(--text) 90%, var(--accent));
 }
 
+.municipal-map-marker--asset {
+  background: color-mix(in srgb, var(--danger-fg) 58%, var(--accent));
+}
+
+.municipal-map-marker--asset span {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  transform: rotate(45deg);
+}
+
 .municipal-map-marker--selected {
   box-shadow:
     0 0 0 6px color-mix(in srgb, var(--accent) 28%, transparent),
@@ -1179,6 +1190,8 @@ html.dark .municipal-map-canvas .leaflet-tile-pane {
   position: fixed;
   z-index: 1200;
   width: min(310px, calc(100vw - 28px));
+  max-height: calc(100dvh - 28px);
+  overflow-y: auto;
   display: grid;
   gap: 4px;
   border: 1px solid var(--border-strong);
@@ -1293,6 +1306,93 @@ html.dark .municipal-map-canvas .leaflet-tile-pane {
   justify-content: flex-end;
 }
 
+.map-message,
+.map-asset-empty {
+  margin: 0;
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--accent);
+  border-radius: 9px;
+  padding: 10px 14px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.map-asset-dialog {
+  width: min(100%, 700px);
+}
+
+.map-asset-selection {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+}
+
+.map-asset-picker {
+  grid-column: 1 / -1;
+}
+
+.map-asset-load-error {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.map-asset-summary {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  background: var(--surface-muted);
+}
+
+.map-asset-summary > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.map-asset-summary > div:first-child span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.map-asset-summary dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.map-asset-summary dl div {
+  display: grid;
+  gap: 3px;
+}
+
+.map-asset-summary dt {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.map-asset-summary dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.map-asset-location-state {
+  margin: 0;
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .form-error {
   margin: 0;
   max-width: none;
@@ -1331,6 +1431,27 @@ html.dark .municipal-map-canvas .leaflet-tile-pane {
   .municipal-map-shell,
   .map-empty-state {
     min-height: 360px;
+  }
+
+  .map-registration-backdrop {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .map-registration-dialog {
+    max-height: calc(100dvh - 24px);
+    border-radius: 18px;
+    padding: 18px;
+  }
+
+  .map-registration-head,
+  .map-asset-selection,
+  .map-asset-summary dl {
+    grid-template-columns: 1fr;
+  }
+
+  .map-registration-head {
+    display: grid;
   }
 }
 
@@ -4777,6 +4898,7 @@ html.dark .dashboard-ask input {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .municipal-map-focus-ring,
   .municipal-hub-skeleton-grid span {
     animation: none;
   }

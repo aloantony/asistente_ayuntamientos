@@ -22,7 +22,7 @@ La distinción central del dominio:
 - `Organization` es el **tenant**: la entidad cliente que usa la aplicación. Delimita usuarios (vía membresía), grupos, proyectos, documentos y requisitos.
 - `Municipality` es **dato de referencia global**: municipios reales de España, compartidos entre tenants, base de la futura base de conocimiento comparativa. Una organización puede enlazar opcionalmente con un municipio.
 - `Project` (expediente/área de trabajo) y `Document` viven dentro de una organización. `Requirement` pertenece a una organización y opcionalmente a un proyecto.
-- `GeoLocation` y `EntityLocation` forman la capa geográfica compartida del mapa municipal: las ubicaciones pertenecen opcionalmente a una organización/municipio y se vinculan a entidades como necesidades o proyectos sin duplicar columnas `lat/lng` en cada módulo.
+- `GeoLocation` y `EntityLocation` forman la capa geográfica compartida del mapa municipal: las ubicaciones pertenecen opcionalmente a una organización/municipio y se vinculan a necesidades o proyectos sin duplicar columnas `lat/lng`. Los activos conservan su vínculo canónico en `municipal_assets.location_id` y se reubican creando una ubicación nueva para no desplazar referencias compartidas.
 - `Ordinance` es global, pertenece a un municipio y puede enlazar a un documento de un tenant; ese enlace exige que quien lo crea tenga acceso al documento.
 
 ## Control de acceso
@@ -33,7 +33,7 @@ La distinción central del dominio:
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
-- El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con la visibilidad normal de la necesidad/proyecto, para que la capa geográfica no filtre trabajo inaccesible por otra ruta.
+- El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con su visibilidad normal; los activos requieren además permisos de inventario y edición en ambos dominios para reubicarlos, de modo que la capa geográfica no filtre ni modifique trabajo inaccesible por otra ruta.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.
 
 ## Documentos

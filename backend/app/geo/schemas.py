@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-GeoEntityType = Literal["requirement", "project"]
+GeoEntityType = Literal["requirement", "project", "asset"]
 GeoLocationRole = Literal["primary", "affected_area", "reference"]
 GeoLocationSource = Literal[
     "user_provided",
@@ -70,6 +70,7 @@ class GeoMapFilters(BaseModel):
 class GeoMapItem(BaseModel):
     entity_type: GeoEntityType
     entity_id: int
+    role: GeoLocationRole
     title: str
     subtitle: str | None = None
     status: str
