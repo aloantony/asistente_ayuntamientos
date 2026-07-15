@@ -4,6 +4,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from app.assistant import hermes_web as assistant_hermes_web
 from app.assistant import realtime as assistant_realtime
 from app.assistant import tools as assistant_tools
 from app.assistant import turn as assistant_turn
+from app.assistant import web_search as assistant_web_search
 from app.assistant.gateway import (
     AIGateway,
     AITextDelta,
@@ -157,8 +159,29 @@ class FakeHTTPResponse:
     def __exit__(self, exc_type, exc, traceback):
         return False
 
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size: int = -1):
+        body = json.dumps(self.payload).encode("utf-8")
+        return body if size < 0 else body[:size]
+
+
+class FakeStreamingHTTPResponse:
+    def __init__(self, body: bytes):
+        self.body = body
+        self.position = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read1(self, size: int) -> bytes:
+        chunk = self.body[self.position : self.position + size]
+        self.position += len(chunk)
+        return chunk
+
+    def set_read_timeout(self, timeout: float) -> None:
+        pass
 
 
 @pytest.fixture()
@@ -2597,6 +2620,235 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     safety_identifier = gateway.calls[0]["safety_identifier"]
     assert safety_identifier == gateway.calls[1]["safety_identifier"]
     assert len(safety_identifier) == 64
+
+
+def test_openai_responses_web_search_executes_brave_and_replays_function_output(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+
+    monkeypatch.setattr(settings, "assistant_runtime", "openai_responses")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-openai-test")
+    monkeypatch.setattr(
+        settings,
+        "openai_responses_base_url",
+        "https://api.openai.com/v1",
+    )
+    monkeypatch.setattr(settings, "openai_responses_model", "gpt-5.6")
+    monkeypatch.setattr(settings, "openai_responses_reasoning_effort", "medium")
+    monkeypatch.setattr(settings, "openai_responses_max_output_tokens", 25000)
+
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-test-secret")
+    monkeypatch.setattr(
+        settings,
+        "brave_search_storage_rights_confirmed",
+        True,
+    )
+    monkeypatch.setattr(settings, "brave_search_timeout_seconds", 12.5)
+    monkeypatch.setattr(settings, "brave_search_country", "ES")
+    monkeypatch.setattr(settings, "brave_search_language", "es")
+    monkeypatch.setattr(settings, "brave_search_ui_language", "es-ES")
+
+    query = "ordenanza de terrazas Burgos"
+    source_url = "https://burgos.example/ordenanza-terrazas"
+    reasoning_item = {
+        "id": "rs_web_1",
+        "type": "reasoning",
+        "encrypted_content": "encrypted-web-reasoning",
+        "summary": [],
+    }
+    function_item = {
+        "id": "fc_web_1",
+        "type": "function_call",
+        "status": "completed",
+        "call_id": "call_web_1",
+        "name": "web_search",
+        "arguments": json.dumps(
+            {"query": query, "limit": 2},
+            separators=(",", ":"),
+        ),
+    }
+    pending_openai_responses = [
+        {
+            "id": "resp_web_tool",
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "model": "gpt-5.6-sol",
+            "output": [reasoning_item, function_item],
+            "usage": {"input_tokens": 20, "output_tokens": 8},
+        },
+        {
+            "id": "resp_web_final",
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "model": "gpt-5.6-sol",
+            "output": [
+                {
+                    "id": "msg_web_final",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "La información está en el "
+                                f"[portal oficial]({source_url})."
+                            ),
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 35, "output_tokens": 12},
+        },
+    ]
+    openai_requests = []
+
+    def fake_openai_urlopen(request, *, timeout):
+        openai_requests.append((request, timeout))
+        assert pending_openai_responses
+        terminal_event = {
+            "type": "response.completed",
+            "response": pending_openai_responses.pop(0),
+        }
+        body = (
+            "data: "
+            + json.dumps(terminal_event, ensure_ascii=False, separators=(",", ":"))
+            + "\n\n"
+        ).encode("utf-8")
+        return FakeStreamingHTTPResponse(body)
+
+    monkeypatch.setattr(
+        assistant_gateway,
+        "_openai_responses_urlopen",
+        fake_openai_urlopen,
+    )
+
+    brave_requests = []
+
+    def fake_brave_open(request, *, timeout):
+        brave_requests.append((request, timeout))
+        return FakeHTTPResponse(
+            {
+                "web": {
+                    "results": [
+                        {
+                            "title": "Portal oficial de Burgos",
+                            "url": source_url,
+                            "description": "Ordenanza municipal de terrazas.",
+                            "page_age": "2026-07-15",
+                        }
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr(
+        assistant_web_search._brave_opener,
+        "open",
+        fake_brave_open,
+    )
+
+    use_gateway(AIGateway())
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca la ordenanza de terrazas de Burgos"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert pending_openai_responses == []
+    assert len(openai_requests) == 2
+    assert len(brave_requests) == 1
+
+    first_openai = json.loads(openai_requests[0][0].data.decode("utf-8"))
+    second_openai = json.loads(openai_requests[1][0].data.decode("utf-8"))
+    web_tool = next(
+        tool for tool in first_openai["tools"] if tool.get("name") == "web_search"
+    )
+    assert web_tool["type"] == "function"
+    assert web_tool["strict"] is False
+    assert web_tool["parameters"] == (
+        assistant_tools.TOOL_CATALOG["web_search"].definition["input_schema"]
+    )
+    assert not any(
+        tool.get("type") in {"web_search", "web_search_preview"}
+        for tool in first_openai["tools"]
+    )
+    assert first_openai["store"] is False
+    assert second_openai["store"] is False
+    assert len(first_openai["safety_identifier"]) == 64
+    assert second_openai["safety_identifier"] == first_openai["safety_identifier"]
+
+    brave_request, brave_timeout = brave_requests[0]
+    brave_query = parse_qs(urlsplit(brave_request.full_url).query)
+    brave_headers = {
+        key.lower(): value for key, value in brave_request.header_items()
+    }
+    assert (
+        urlsplit(brave_request.full_url)._replace(query="").geturl()
+        == assistant_web_search.BRAVE_WEB_SEARCH_URL
+    )
+    assert brave_query["q"] == [query]
+    assert brave_query["count"] == ["2"]
+    assert brave_headers["x-subscription-token"] == "brave-test-secret"
+    assert brave_timeout == pytest.approx(12.5)
+
+    expected_tool_payload = {
+        "query": query,
+        "limit": 2,
+        "provider": "brave",
+        "results": [
+            {
+                "title": "Portal oficial de Burgos",
+                "url": source_url,
+                "snippet": "Ordenanza municipal de terrazas.",
+                "published_at": "2026-07-15",
+            }
+        ],
+        "truncated": False,
+    }
+    expected_tool_output = json.dumps(
+        expected_tool_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert second_openai["input"][-3:] == [
+        reasoning_item,
+        function_item,
+        {
+            "type": "function_call_output",
+            "call_id": "call_web_1",
+            "output": expected_tool_output,
+        },
+    ]
+
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == (
+        f"La información está en el [portal oficial]({source_url})."
+    )
+    assert len(assistant_message["actions"]) == 1
+    action = assistant_message["actions"][0]
+    assert action["tool"] == "web_search"
+    assert action["ok"] is True
+    assert action["input"] == {"query": query, "limit": 2}
+    assert json.loads(action["result"]) == expected_tool_payload
 
 
 def test_tool_call_budget_skips_excess_calls_and_forces_tool_free_synthesis(
