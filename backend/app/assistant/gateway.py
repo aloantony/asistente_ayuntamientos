@@ -14,6 +14,7 @@ import re
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -32,6 +33,10 @@ _INLINE_TOOL_CALL_RE = re.compile(
 
 class AssistantUnavailableError(Exception):
     """The AI gateway is not configured or the upstream API failed."""
+
+
+class AssistantTimeoutError(AssistantUnavailableError):
+    """The AI gateway exceeded the timeout assigned to this request."""
 
 
 @dataclass(frozen=True)
@@ -92,7 +97,8 @@ class AIGateway:
             raise AssistantUnavailableError("Assistant is not configured")
         if self._anthropic_client is None:
             self._anthropic_client = anthropic.Anthropic(
-                api_key=settings.anthropic_api_key
+                api_key=settings.anthropic_api_key,
+                max_retries=0,
             )
         return self._anthropic_client
 
@@ -102,18 +108,21 @@ class AIGateway:
         system: str,
         messages: list[dict],
         tools: list[dict],
+        timeout_seconds: float | None = None,
     ) -> AICompletion:
         if settings.assistant_runtime == "anthropic":
             return self._complete_anthropic(
                 system=system,
                 messages=messages,
                 tools=tools,
+                timeout_seconds=timeout_seconds,
             )
         if settings.assistant_runtime == "hermes_agent":
             return self._complete_hermes_agent(
                 system=system,
                 messages=messages,
                 tools=tools,
+                timeout_seconds=timeout_seconds,
             )
         raise AssistantUnavailableError("Assistant runtime is not supported")
 
@@ -123,12 +132,14 @@ class AIGateway:
         system: str,
         messages: list[dict],
         tools: list[dict],
+        timeout_seconds: float | None = None,
     ) -> Generator[AITextDelta, None, AICompletion]:
         if settings.assistant_runtime == "anthropic":
             completion = yield from self._complete_stream_anthropic(
                 system=system,
                 messages=messages,
                 tools=tools,
+                timeout_seconds=timeout_seconds,
             )
             return completion
         if settings.assistant_runtime == "hermes_agent":
@@ -136,6 +147,7 @@ class AIGateway:
                 system=system,
                 messages=messages,
                 tools=tools,
+                timeout_seconds=timeout_seconds,
             )
             return completion
         raise AssistantUnavailableError("Assistant runtime is not supported")
@@ -146,8 +158,10 @@ class AIGateway:
         system: str,
         messages: list[dict],
         tools: list[dict],
+        timeout_seconds: float | None,
     ) -> AICompletion:
         client = self._get_anthropic_client()
+        request_timeout = _bounded_gateway_timeout(timeout_seconds)
         try:
             response = client.messages.create(
                 model=settings.assistant_model,
@@ -156,7 +170,11 @@ class AIGateway:
                 system=system,
                 messages=_to_anthropic_messages(messages),
                 tools=tools,
+                timeout=request_timeout,
             )
+        except anthropic.APITimeoutError as error:
+            logger.error("Assistant API timeout: runtime=anthropic")
+            raise AssistantTimeoutError("Assistant request timed out") from error
         except anthropic.APIStatusError as error:
             logger.error(
                 "Assistant API error: status=%s type=%s",
@@ -185,8 +203,10 @@ class AIGateway:
         system: str,
         messages: list[dict],
         tools: list[dict],
+        timeout_seconds: float | None,
     ) -> Generator[AITextDelta, None, AICompletion]:
         client = self._get_anthropic_client()
+        request_timeout = _bounded_gateway_timeout(timeout_seconds)
         try:
             with client.messages.stream(
                 model=settings.assistant_model,
@@ -195,6 +215,7 @@ class AIGateway:
                 system=system,
                 messages=_to_anthropic_messages(messages),
                 tools=tools,
+                timeout=request_timeout,
             ) as stream:
                 for event in stream:
                     if getattr(event, "type", None) != "content_block_delta":
@@ -205,6 +226,9 @@ class AIGateway:
                         if text:
                             yield AITextDelta(text=text)
                 response = stream.get_final_message()
+        except anthropic.APITimeoutError as error:
+            logger.error("Assistant API timeout: runtime=anthropic")
+            raise AssistantTimeoutError("Assistant request timed out") from error
         except anthropic.APIStatusError as error:
             logger.error(
                 "Assistant API error: status=%s type=%s",
@@ -234,17 +258,22 @@ class AIGateway:
         system: str,
         messages: list[dict],
         tools: list[dict],
+        timeout_seconds: float | None,
     ) -> AICompletion:
         if not self.enabled:
             raise AssistantUnavailableError("Assistant is not configured")
 
+        request_timeout = _bounded_gateway_timeout(
+            timeout_seconds,
+            settings.hermes_agent_timeout_seconds,
+        )
         completion = complete_hermes_agent(
             system=system,
             messages=messages,
             tools=tools,
             model=settings.hermes_agent_model,
             max_tokens=settings.assistant_max_tokens,
-            timeout=settings.hermes_agent_timeout_seconds,
+            timeout=request_timeout,
             tool_choice="auto",
             log_context="assistant",
         )
@@ -263,7 +292,13 @@ class AIGateway:
         system: str,
         messages: list[dict],
         tools: list[dict],
+        timeout_seconds: float | None,
     ) -> Generator[AITextDelta, None, AICompletion]:
+        request_timeout = _bounded_gateway_timeout(
+            timeout_seconds,
+            settings.hermes_agent_timeout_seconds,
+        )
+        request_deadline = monotonic() + request_timeout
         try:
             completion = yield from complete_hermes_agent_stream(
                 system=system,
@@ -271,18 +306,25 @@ class AIGateway:
                 tools=tools,
                 model=settings.hermes_agent_model,
                 max_tokens=settings.assistant_max_tokens,
-                timeout=settings.hermes_agent_timeout_seconds,
+                timeout=request_timeout,
                 tool_choice="auto",
                 log_context="assistant",
             )
-        except AssistantUnavailableError:
+        except AssistantTimeoutError:
+            raise
+        except AssistantUnavailableError as stream_error:
+            fallback_timeout = request_deadline - monotonic()
+            if fallback_timeout <= 0:
+                raise AssistantTimeoutError(
+                    "Assistant request timed out"
+                ) from stream_error
             completion = complete_hermes_agent(
                 system=system,
                 messages=messages,
                 tools=tools,
                 model=settings.hermes_agent_model,
                 max_tokens=settings.assistant_max_tokens,
-                timeout=settings.hermes_agent_timeout_seconds,
+                timeout=fallback_timeout,
                 tool_choice="auto",
                 log_context="assistant_fallback",
             )
@@ -298,6 +340,19 @@ class AIGateway:
             completion.usage.output_tokens,
         )
         return completion
+
+
+def _bounded_gateway_timeout(
+    requested_timeout: float | None,
+    *runtime_limits: float,
+) -> float:
+    candidates = [settings.assistant_gateway_timeout_seconds, *runtime_limits]
+    if requested_timeout is not None:
+        candidates.append(requested_timeout)
+    timeout = min(candidates)
+    if timeout <= 0:
+        raise AssistantTimeoutError("Assistant request timed out")
+    return timeout
 
 
 def hermes_agent_enabled() -> bool:
@@ -364,7 +419,13 @@ def complete_hermes_agent(
             error.code,
         )
         raise AssistantUnavailableError("Assistant API request failed") from error
-    except (urlerror.URLError, TimeoutError) as error:
+    except TimeoutError as error:
+        logger.error("Hermes Agent API timeout: context=%s", log_context)
+        raise AssistantTimeoutError("Assistant request timed out") from error
+    except urlerror.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            logger.error("Hermes Agent API timeout: context=%s", log_context)
+            raise AssistantTimeoutError("Assistant request timed out") from error
         logger.error("Hermes Agent API connection error: context=%s", log_context)
         raise AssistantUnavailableError("Assistant API connection failed") from error
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -476,7 +537,16 @@ def complete_hermes_agent_stream(
             error.code,
         )
         raise AssistantUnavailableError("Assistant API request failed") from error
-    except (urlerror.URLError, TimeoutError) as error:
+    except TimeoutError as error:
+        logger.error("Hermes Agent stream API timeout: context=%s", log_context)
+        raise AssistantTimeoutError("Assistant request timed out") from error
+    except urlerror.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            logger.error(
+                "Hermes Agent stream API timeout: context=%s",
+                log_context,
+            )
+            raise AssistantTimeoutError("Assistant request timed out") from error
         logger.error("Hermes Agent stream API connection error: context=%s", log_context)
         raise AssistantUnavailableError("Assistant API connection failed") from error
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
