@@ -1198,14 +1198,14 @@ export function AssistantPanel({
       return;
     }
 
-    stopListening();
+    stopListening({ discardAudio: true });
     onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    stopListening();
+    stopListening({ discardAudio: true });
     onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
   }

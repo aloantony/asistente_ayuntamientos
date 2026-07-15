@@ -39,6 +39,7 @@ def run_voice_turn_events(
     yield TurnEvent("voice_state", {"state": "thinking"})
 
     responding = False
+    terminal_event: TurnEvent | None = None
     for event in run_agent_turn_events(
         db,
         current_user,
@@ -47,6 +48,9 @@ def run_voice_turn_events(
         gateway,
         input_mode="voice",
     ):
+        if event.type in {"done", "error"}:
+            terminal_event = event
+            continue
         if event.type == "tool_activity":
             if event.data.get("status") == "started":
                 yield TurnEvent("voice_state", {"state": "tool_running"})
@@ -58,3 +62,4 @@ def run_voice_turn_events(
         yield event
 
     yield TurnEvent("voice_state", {"state": "done"})
+    yield terminal_event or TurnEvent("error", {"detail": "Assistant request failed"})

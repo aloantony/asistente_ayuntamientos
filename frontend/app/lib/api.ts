@@ -392,6 +392,62 @@ type AssistantStreamTerminalEvent =
   | { type: "done"; event: AssistantStreamDone }
   | { type: "error"; error: ApiRequestError };
 
+const ASSISTANT_STREAM_INACTIVITY_TIMEOUT_MS = 90_000;
+const ASSISTANT_STREAM_TIMEOUT_MESSAGE =
+  "El asistente ha tardado demasiado en responder. Inténtalo de nuevo.";
+
+async function consumeAssistantStream(
+  request: (signal: AbortSignal) => Promise<Response>,
+  handlers: AssistantStreamHandlers,
+  signal?: AbortSignal,
+) {
+  const streamController = new AbortController();
+  let inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const abortFromParent = () => streamController.abort(signal?.reason);
+  const resetInactivityWatchdog = () => {
+    if (inactivityTimeout !== null) {
+      clearTimeout(inactivityTimeout);
+    }
+    inactivityTimeout = setTimeout(() => {
+      timedOut = true;
+      streamController.abort(
+        new DOMException(ASSISTANT_STREAM_TIMEOUT_MESSAGE, "TimeoutError"),
+      );
+    }, ASSISTANT_STREAM_INACTIVITY_TIMEOUT_MS);
+  };
+
+  if (signal?.aborted) {
+    abortFromParent();
+  } else {
+    signal?.addEventListener("abort", abortFromParent, { once: true });
+  }
+  resetInactivityWatchdog();
+
+  try {
+    const response = await request(streamController.signal);
+    if (!response.body) {
+      throw new ApiRequestError("El asistente no ha podido responder.", 0);
+    }
+    resetInactivityWatchdog();
+    await readAssistantStream(response, handlers, resetInactivityWatchdog);
+  } catch (requestError) {
+    if (timedOut && !signal?.aborted) {
+      throw new ApiRequestError(ASSISTANT_STREAM_TIMEOUT_MESSAGE, 408);
+    }
+    throw requestError;
+  } finally {
+    if (inactivityTimeout !== null) {
+      clearTimeout(inactivityTimeout);
+    }
+    signal?.removeEventListener("abort", abortFromParent);
+    if (!streamController.signal.aborted) {
+      streamController.abort();
+    }
+  }
+}
+
 export async function streamAssistantMessage(
   conversationId: number,
   content: string,
@@ -400,22 +456,21 @@ export async function streamAssistantMessage(
   inputMode: "text" | "voice" = "text",
   signal?: AbortSignal,
 ) {
-  const response = await performAdminRequest(
-    `/assistant/conversations/${conversationId}/messages/stream`,
-    accessToken,
-    "El asistente no ha podido responder.",
-    {
-      method: "POST",
-      body: JSON.stringify({ content, input_mode: inputMode }),
-      signal,
-    },
+  await consumeAssistantStream(
+    (streamSignal) =>
+      performAdminRequest(
+        `/assistant/conversations/${conversationId}/messages/stream`,
+        accessToken,
+        "El asistente no ha podido responder.",
+        {
+          method: "POST",
+          body: JSON.stringify({ content, input_mode: inputMode }),
+          signal: streamSignal,
+        },
+      ),
+    handlers,
+    signal,
   );
-
-  if (!response.body) {
-    throw new ApiRequestError("El asistente no ha podido responder.", 0);
-  }
-
-  await readAssistantStream(response, handlers);
 }
 
 export async function streamAssistantVoiceTurn(
@@ -427,18 +482,17 @@ export async function streamAssistantVoiceTurn(
 ) {
   const formData = new FormData();
   formData.append("file", audio, "anacleto-audio.webm");
-  const response = await performAdminRequest(
-    `/assistant/conversations/${conversationId}/voice-turns/stream`,
-    accessToken,
-    "El asistente no ha podido responder.",
-    { method: "POST", body: formData, signal },
+  await consumeAssistantStream(
+    (streamSignal) =>
+      performAdminRequest(
+        `/assistant/conversations/${conversationId}/voice-turns/stream`,
+        accessToken,
+        "El asistente no ha podido responder.",
+        { method: "POST", body: formData, signal: streamSignal },
+      ),
+    handlers,
+    signal,
   );
-
-  if (!response.body) {
-    throw new ApiRequestError("El asistente no ha podido responder.", 0);
-  }
-
-  await readAssistantStream(response, handlers);
 }
 
 export async function createAssistantRealtimeSession(
@@ -501,6 +555,7 @@ export async function completeAssistantRealtimeTurn(
 async function readAssistantStream(
   response: Response,
   handlers: AssistantStreamHandlers,
+  onActivity: () => void,
 ) {
   if (!response.body) {
     throw new ApiRequestError("El asistente no ha podido responder.", 0);
@@ -534,6 +589,7 @@ async function readAssistantStream(
       if (done) {
         break;
       }
+      onActivity();
       buffer += decoder.decode(value, { stream: true });
       const frames = buffer.split("\n\n");
       buffer = frames.pop() ?? "";
