@@ -13,6 +13,7 @@ import {
   MapPin,
   PanelLeftClose,
   PanelLeftOpen,
+  Square,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -73,6 +74,7 @@ type AssistantPanelProps = {
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
   onSendMessage: () => void;
+  onStopMessageGeneration: () => void;
   onSendVoiceAudio: (audio: Blob) => Promise<void>;
   onStartRealtimeVoice: () => Promise<void>;
   onStopRealtimeVoice: (options?: { interrupted?: boolean }) => void;
@@ -587,6 +589,7 @@ export function AssistantPanel({
   onSelectConversation,
   onStartConversation,
   onSendMessage,
+  onStopMessageGeneration,
   onSendVoiceAudio,
   onStartRealtimeVoice,
   onStopRealtimeVoice,
@@ -2116,15 +2119,27 @@ export function AssistantPanel({
                           )}
                         </button>
                       ) : null}
-                      <button
-                        type="submit"
-                        disabled={
-                          composerDisabled || draftMessage.trim().length === 0
-                        }
-                      >
-                        <AssistantSymbolIcon name="send" size={17} />
-                        <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
-                      </button>
+                      {isSendingMessage ? (
+                        <button
+                          type="button"
+                          className="secondary-button assistant-stop-generation"
+                          onClick={onStopMessageGeneration}
+                          aria-label="Detener generación"
+                        >
+                          <Square aria-hidden size={13} fill="currentColor" />
+                          <span>Detener</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="submit"
+                          disabled={
+                            composerDisabled || draftMessage.trim().length === 0
+                          }
+                        >
+                          <AssistantSymbolIcon name="send" size={17} />
+                          <span>Enviar</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </form>

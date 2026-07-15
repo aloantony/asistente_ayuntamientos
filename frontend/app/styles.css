@@ -2994,10 +2994,15 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   padding-bottom: 1px;
 }
 
-.assistant-composer-actions button[type="submit"] {
+.assistant-composer-actions button[type="submit"],
+.assistant-stop-generation {
   min-height: 38px;
   border-radius: 999px;
   padding: 0 13px;
+}
+
+.assistant-stop-generation svg {
+  flex: none;
 }
 
 .assistant-mic {
