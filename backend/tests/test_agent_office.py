@@ -1,3 +1,5 @@
+import pytest
+
 from conftest import headers_for
 
 from app.requirements.models import Requirement, RequirementMessage
@@ -128,6 +130,79 @@ def test_agent_office_creates_and_runs_read_only_task(
     assert finished["result"]["tool"] == "list_requirements"
     assert finished["result"]["ok"] is True
     assert finished["events"][-1]["event_type"] == "completed"
+
+
+@pytest.mark.parametrize("approval_policy", ["never", "after_draft"])
+def test_agent_office_marks_unsuccessful_task_result_as_failed(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+    approval_policy,
+):
+    organization = make_organization("Ayuntamiento con fallo de agente")
+    user = make_user(full_name="Office Failure User")
+    grant_permissions(
+        user,
+        organization,
+        [
+            "agent_office.create",
+            "agent_office.view",
+            "agent_office.approve",
+            "agent_office.execute",
+            "requirements.view",
+        ],
+    )
+    monkeypatch.setattr(
+        "app.agent_office.service.execute_task_body",
+        lambda *args, **kwargs: {
+            "mode": "tool",
+            "tool": "list_requirements",
+            "ok": False,
+            "content": "Error (503): dependency unavailable",
+        },
+    )
+    response = client.post(
+        "/agent-office/tasks",
+        headers=headers_for(user),
+        json={
+            "organization_id": organization.id,
+            "title": "Ejecutar una herramienta que falla",
+            "description": "El resultado negativo debe cerrar la tarea como fallida.",
+            "department": "requirements",
+            "requested_action": "list_requirements",
+            "approval_policy": approval_policy,
+        },
+    )
+    assert response.status_code == 201
+    task = response.json()
+    if task["status"] == "pending_approval":
+        approval = client.patch(
+            f"/agent-office/tasks/{task['id']}/approval",
+            headers=headers_for(user),
+            json={"decision": "approve", "notes": "Aprobada para la regresión."},
+        )
+        assert approval.status_code == 200
+
+    run_response = client.post(
+        f"/agent-office/tasks/{task['id']}/run-inline",
+        headers=headers_for(user),
+    )
+
+    assert run_response.status_code == 200
+    finished = run_response.json()
+    assert finished["status"] == "failed"
+    assert finished["result"] == {
+        "mode": "tool",
+        "tool": "list_requirements",
+        "ok": False,
+        "content": "Error (503): dependency unavailable",
+    }
+    assert finished["error_message"] == "Error (503): dependency unavailable"
+    assert finished["events"][-1]["event_type"] == "failed"
+    assert finished["events"][-1]["message"] == finished["error_message"]
+    assert finished["events"][-1]["payload"] == finished["result"]
 
 
 def test_agent_office_canonicalizes_tool_input_organization_scope(

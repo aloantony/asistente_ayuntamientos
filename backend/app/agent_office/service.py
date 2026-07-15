@@ -629,6 +629,28 @@ def execute_task_body(db: Session, user: User, task: AgentOfficeTask) -> dict:
     return _run_tool_action(db, user, task)
 
 
+def _task_result_error_message(result: dict) -> str:
+    for key in ("error", "detail", "message", "content"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:2000]
+
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        errors = [
+            value.strip()
+            for key, value in summary.items()
+            if key.endswith("_errors")
+            and isinstance(value, str)
+            and value.strip()
+        ]
+        if errors:
+            return "; ".join(errors)[:2000]
+
+    action = result.get("tool") or result.get("mode") or "unknown"
+    return f"Agent office action {action} returned an unsuccessful result."
+
+
 def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOfficeTask:
     owns_session = db is None
     session = db or SessionLocal()
@@ -658,7 +680,21 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
         result = execute_task_body(session, user, task)
         task.result_json = json.dumps(result, ensure_ascii=False)
         task.completed_at = datetime.now(timezone.utc)
-        if task.requires_human_approval and task.approval_policy in {"after_draft", "always"}:
+        if result.get("ok") is False:
+            task.status = "failed"
+            error_message = _task_result_error_message(result)
+            task.error_message = error_message
+            add_task_event(
+                session,
+                task,
+                "failed",
+                error_message,
+                payload=result,
+            )
+        elif task.requires_human_approval and task.approval_policy in {
+            "after_draft",
+            "always",
+        }:
             task.status = "waiting_approval"
             add_task_event(session, task, "draft_ready", "Task result is waiting for human approval.", payload=result)
         else:
