@@ -12,6 +12,17 @@ export const MUNICIPALITY_PERMISSIONS = [
   "municipalities.manage",
 ];
 
+export const MUNICIPAL_HUB_PERMISSIONS = [
+  "municipalities.view",
+  "municipalities.manage",
+];
+
+export function canViewMunicipalHub(user: User) {
+  return MUNICIPAL_HUB_PERMISSIONS.some((permissionCode) =>
+    userHasPermission(user, permissionCode),
+  );
+}
+
 export const ORDINANCE_PERMISSIONS = [
   "ordinances.view",
   "ordinances.create",

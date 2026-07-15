@@ -11,6 +11,7 @@ import {
 } from "react";
 import { userHasPermission, type User } from "../components/types";
 import { fetchRequirementsTotal } from "../lib/fetchers";
+import { canViewMunicipalHub } from "../lib/permissions";
 import {
   consumePendingLoginRedirect,
   shouldShowAdminPanel,
@@ -50,6 +51,7 @@ function getMunicipalBrandName(user: User) {
 // Iconos del menú lateral (trazo fino, coherentes con el resto del shell).
 type NavIconName =
   | "home"
+  | "townhall"
   | "needs"
   | "map"
   | "projects"
@@ -77,6 +79,13 @@ function NavIcon({ name }: { name: NavIconName }) {
           <rect x="14" y="3" width="7" height="7" rx="1.5" />
           <rect x="3" y="14" width="7" height="7" rx="1.5" />
           <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        </svg>
+      );
+    case "townhall":
+      return (
+        <svg {...common}>
+          <path d="m3 10 9-6 9 6" />
+          <path d="M5 10h14M6 20h12M8 10v10M12 10v10M16 10v10" />
         </svg>
       );
     case "needs":
@@ -361,6 +370,15 @@ export default function AppLayout({
       label: "Trabajo",
       items: [
         { href: "/", label: "Inicio", icon: "home", exact: true },
+        ...(canViewMunicipalHub(user)
+          ? [
+              {
+                href: "/ayuntamiento",
+                label: "Ayuntamiento",
+                icon: "townhall" as const,
+              },
+            ]
+          : []),
         ...(shouldShowRequirementsPanel(user)
           ? [
               {
@@ -476,6 +494,7 @@ export default function AppLayout({
                 <span className="app-nav-section">{group.label}</span>
                 {group.items.map((item) => (
                   <Link
+                    aria-current={isActive(item) ? "page" : undefined}
                     className={`app-nav-link${isActive(item) ? " active" : ""}`}
                     href={item.href}
                     key={item.href}

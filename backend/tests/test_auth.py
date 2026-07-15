@@ -4,6 +4,7 @@ from conftest import headers_for, unique_suffix
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.municipalities.models import Municipality
 from app.users.models import User
 
 BOOTSTRAP_TOKEN = "test-bootstrap-token"
@@ -87,10 +88,18 @@ def test_login_with_inactive_user_returns_403(client, make_user):
 
 
 def test_me_returns_sorted_permissions_and_member_organizations(
-    client, make_user, make_organization, grant_permissions
+    client, db, make_user, make_organization, grant_permissions
 ):
     user = make_user()
-    organization = make_organization()
+    municipality = Municipality(
+        name="Fuentelcesped",
+        province="Burgos",
+        autonomous_community="Castilla y Leon",
+        ine_code=f"09{unique_suffix()[:3]}",
+    )
+    db.add(municipality)
+    db.commit()
+    organization = make_organization(municipality_id=municipality.id)
     granted = ["users.manage", "documents.view", "projects.create"]
     grant_permissions(user, organization, granted)
 
@@ -103,6 +112,13 @@ def test_me_returns_sorted_permissions_and_member_organizations(
     assert body["permissions"] == sorted(granted)
     assert [org["id"] for org in body["organizations"]] == [organization.id]
     assert body["organizations"][0]["name"] == organization.name
+    assert body["organizations"][0]["municipality_id"] == municipality.id
+    assert body["organizations"][0]["municipality"] == {
+        "id": municipality.id,
+        "name": municipality.name,
+        "province": municipality.province,
+        "autonomous_community": municipality.autonomous_community,
+    }
 
 
 def test_me_without_token_returns_401(client):

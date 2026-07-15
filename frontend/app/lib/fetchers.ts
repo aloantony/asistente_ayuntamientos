@@ -54,6 +54,18 @@ export function fetchMunicipalityOptions() {
   );
 }
 
+export function fetchMunicipality(
+  municipalityId: number,
+  signal?: AbortSignal,
+) {
+  return adminRequest<Municipality>(
+    `/municipalities/${municipalityId}`,
+    "",
+    "No se pudo cargar la información del municipio.",
+    { signal },
+  );
+}
+
 // Totales para las tarjetas de métricas del panel de inicio: piden una sola
 // fila (limit=1) y leen el conteo real de la cabecera X-Total-Count, sin
 // traerse la lista entera. Cada llamada exige el permiso de su recurso, así
