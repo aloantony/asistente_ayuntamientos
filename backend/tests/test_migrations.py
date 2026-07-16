@@ -15,7 +15,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260716_0024"
+HEAD_REVISION = "20260716_0025"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -32,6 +32,17 @@ POPULATION_PROVENANCE_CHECKS = {
     "ck_municipalities_population_source_url",
     "ck_municipalities_population_source_sha256",
 }
+
+
+def assert_pgvector_extension(engine: Engine) -> None:
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_extension WHERE extname = 'vector'"
+                ")"
+            )
+        ).scalar_one() is True
 
 ASSET_INVENTORY_SCHEMA = {
     "municipal_asset_categories": {
@@ -750,6 +761,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(upgraded_inspector)
         assert_maintenance_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
+        assert_pgvector_extension(engine)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -785,6 +797,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(reupgraded_inspector)
         assert_maintenance_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
+        assert_pgvector_extension(engine)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -813,6 +826,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+        assert_pgvector_extension(engine)
 
         run_alembic(migration_database_url, "downgrade", "20260713_0021")
         downgraded_inspector = inspect(engine)
@@ -833,6 +847,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+        assert_pgvector_extension(engine)
     finally:
         engine.dispose()
 
