@@ -1,19 +1,31 @@
 import json
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from conftest import headers_for
 
 from app.agent_office.models import AgentOfficeTask, AgentOfficeTaskEvent
+from app.agent_office.service import (
+    approve_or_cancel_task,
+    mark_task_queued,
+    run_agent_office_task,
+)
 from app.assistant.models import AssistantAdminFeedback
 from app.assistant.tool_authorization import (
     AGENT_OFFICE_AUTHORIZATION_CLAIM_EVENT,
-    claim_agent_office_tool_authorization,
     issue_agent_office_tool_authorization,
     tool_input_digest,
 )
 from app.assistant.tools import execute_tool, normalize_tool_input
+from app.organizations.models import Organization
 from app.requirements.models import Requirement, RequirementMessage
+from app.users.models import User
 
 
 def _make_authorizable_feedback_task(
@@ -21,7 +33,7 @@ def _make_authorizable_feedback_task(
     organization,
     user,
     *,
-    status="approved",
+    status="running",
     approved=True,
 ):
     task = AgentOfficeTask(
@@ -37,6 +49,16 @@ def _make_authorizable_feedback_task(
         approved_by_id=user.id if approved else None,
     )
     db.add(task)
+    db.flush()
+    if status == "running":
+        db.add(
+            AgentOfficeTaskEvent(
+                task_id=task.id,
+                event_type="started",
+                message="Intento de ejecución de prueba.",
+                created_by_id=user.id,
+            )
+        )
     db.commit()
     return task
 
@@ -48,6 +70,83 @@ def _feedback_input(organization_id: int, *, title="Incidencia autorizada"):
         "title": title,
         "description": "Descripción exacta autorizada.",
     }
+
+
+def _seed_engine_feedback_task(engine, *, status: str) -> dict[str, int]:
+    suffix = uuid.uuid4().hex
+    with Session(engine, expire_on_commit=False) as seed_db:
+        user = User(
+            email=f"agent-race-{suffix}@example.com",
+            hashed_password="not-used",
+            full_name="Agent Office Race",
+            is_active=True,
+            is_superuser=True,
+        )
+        organization = Organization(name=f"Agent race org {suffix}")
+        seed_db.add_all([user, organization])
+        seed_db.flush()
+        task = AgentOfficeTask(
+            organization_id=organization.id,
+            title=f"Incidencia concurrente {suffix}",
+            description="Descripción concurrente exacta.",
+            department="admin_feedback",
+            requested_action="send_admin_feedback",
+            status=status,
+            approval_policy="before_execution",
+            requires_human_approval=True,
+            input_json=json.dumps(
+                {
+                    "organization_id": organization.id,
+                    "category": "bug",
+                    "title": f"Incidencia concurrente {suffix}",
+                    "description": "Descripción concurrente exacta.",
+                    "priority": "medium",
+                }
+            ),
+            requested_by_id=user.id,
+            approved_by_id=user.id,
+        )
+        seed_db.add(task)
+        seed_db.flush()
+        if status == "running":
+            seed_db.add(
+                AgentOfficeTaskEvent(
+                    task_id=task.id,
+                    event_type="started",
+                    message="Committed execution attempt for recovery.",
+                    created_by_id=user.id,
+                )
+            )
+        seed_db.commit()
+        return {
+            "task_id": task.id,
+            "user_id": user.id,
+            "organization_id": organization.id,
+        }
+
+
+def _cleanup_engine_feedback_task(engine, ids: dict[str, int]) -> None:
+    with Session(engine) as cleanup_db:
+        task = cleanup_db.get(AgentOfficeTask, ids["task_id"])
+        if task is not None:
+            cleanup_db.delete(task)
+        for feedback in cleanup_db.scalars(
+            select(AssistantAdminFeedback).where(
+                AssistantAdminFeedback.organization_id == ids["organization_id"]
+            )
+        ):
+            cleanup_db.delete(feedback)
+        cleanup_db.commit()
+        user = cleanup_db.get(User, ids["user_id"])
+        if user is not None:
+            cleanup_db.delete(user)
+        organization = cleanup_db.get(
+            Organization,
+            ids["organization_id"],
+        )
+        if organization is not None:
+            cleanup_db.delete(organization)
+        cleanup_db.commit()
 
 
 def _run_cross_organization_requirement_task(
@@ -520,7 +619,7 @@ def test_agent_office_authorization_rejects_inactive_actor(
         )
 
 
-def test_agent_office_authorization_allows_exact_payload_once(
+def test_agent_office_authorization_replays_completed_result_without_new_effect(
     db,
     make_user,
     make_organization,
@@ -559,12 +658,11 @@ def test_agent_office_authorization_allows_exact_payload_once(
     )
 
     assert first.ok is True
-    assert replay.ok is False
-    assert "inválida o consumida" in replay.content
+    assert replay == first
     assert db.query(AssistantAdminFeedback).count() == 1
 
 
-def test_agent_office_authorization_rejects_different_payload_and_is_consumed(
+def test_agent_office_authorization_rejects_different_payload_but_remains_retriable(
     db,
     make_user,
     make_organization,
@@ -586,6 +684,7 @@ def test_agent_office_authorization_rejects_different_payload_and_is_consumed(
         tool="send_admin_feedback",
         input_digest=tool_input_digest("send_admin_feedback", canonical_input),
     )
+    db.commit()
 
     changed = execute_tool(
         db,
@@ -604,9 +703,8 @@ def test_agent_office_authorization_rejects_different_payload_and_is_consumed(
 
     assert changed.ok is False
     assert "efectos actuales" in changed.content
-    assert exact_replay.ok is False
-    assert "inválida o consumida" in exact_replay.content
-    assert db.query(AssistantAdminFeedback).count() == 0
+    assert exact_replay.ok is True
+    assert db.query(AssistantAdminFeedback).count() == 1
 
 
 def test_agent_office_claim_history_has_no_replay_window_after_100_events(
@@ -630,7 +728,14 @@ def test_agent_office_claim_history_has_no_replay_window_after_100_events(
         tool="send_admin_feedback",
         input_digest=tool_input_digest("send_admin_feedback", canonical_input),
     )
-    assert claim_agent_office_tool_authorization(db, authorization) is True
+    first = execute_tool(
+        db,
+        user,
+        "send_admin_feedback",
+        _feedback_input(organization.id),
+        authorization=authorization,
+    )
+    assert first.ok is True
     db.add_all(
         [
             AgentOfficeTaskEvent(
@@ -647,7 +752,205 @@ def test_agent_office_claim_history_has_no_replay_window_after_100_events(
     )
     db.commit()
 
-    assert claim_agent_office_tool_authorization(db, authorization) is False
+    replay = execute_tool(
+        db,
+        user,
+        "send_admin_feedback",
+        _feedback_input(organization.id),
+        authorization=authorization,
+    )
+    assert replay == first
+    assert db.query(AssistantAdminFeedback).count() == 1
+
+
+def test_two_agent_workers_serialize_one_task_effect(engine):
+    ids = _seed_engine_feedback_task(engine, status="queued")
+    barrier = threading.Barrier(2)
+
+    def run_worker() -> tuple[str, dict]:
+        with Session(engine, expire_on_commit=False) as candidate_db:
+            barrier.wait(timeout=15)
+            task = run_agent_office_task(ids["task_id"], db=candidate_db)
+            return task.status, task.result
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: run_worker(), range(2)))
+
+        assert [status for status, _ in results] == ["completed", "completed"]
+        assert results[0][1] == results[1][1]
+        with Session(engine) as verification_db:
+            feedback = verification_db.scalars(
+                select(AssistantAdminFeedback).where(
+                    AssistantAdminFeedback.organization_id
+                    == ids["organization_id"]
+                )
+            ).all()
+            events = verification_db.scalars(
+                select(AgentOfficeTaskEvent).where(
+                    AgentOfficeTaskEvent.task_id == ids["task_id"]
+                )
+            ).all()
+            event_types = [event.event_type for event in events]
+            assert len(feedback) == 1
+            assert event_types.count("started") == 1
+            assert event_types.count("tool_authorization_issued") == 1
+            assert event_types.count("tool_authorization_claimed") == 1
+            assert event_types.count("tool_execution_completed") == 1
+            assert event_types.count("completed") == 1
+    finally:
+        _cleanup_engine_feedback_task(engine, ids)
+
+
+def test_agent_task_cancellation_wins_row_lock_before_worker(engine):
+    ids = _seed_engine_feedback_task(engine, status="queued")
+    cancellation_locked = threading.Event()
+    worker_read_snapshot = threading.Event()
+
+    def cancel_task() -> str:
+        with Session(engine, expire_on_commit=False) as cancellation_db:
+            user = cancellation_db.get(User, ids["user_id"])
+            stale_task = cancellation_db.get(AgentOfficeTask, ids["task_id"])
+            assert user is not None
+            assert stale_task is not None
+            locked = cancellation_db.scalar(
+                select(AgentOfficeTask)
+                .where(AgentOfficeTask.id == ids["task_id"])
+                .with_for_update()
+            )
+            assert locked is not None
+            cancellation_locked.set()
+            assert worker_read_snapshot.wait(timeout=15)
+            cancelled = approve_or_cancel_task(
+                cancellation_db,
+                user,
+                stale_task,
+                decision="cancel",
+                notes="Cancellation wins the task row lock.",
+            )
+            return cancelled.status
+
+    def run_worker() -> str:
+        assert cancellation_locked.wait(timeout=15)
+        with Session(engine, expire_on_commit=False) as worker_db:
+            snapshot = worker_db.get(AgentOfficeTask, ids["task_id"])
+            assert snapshot is not None
+            assert snapshot.status == "queued"
+            worker_read_snapshot.set()
+            result = run_agent_office_task(ids["task_id"], db=worker_db)
+            return result.status
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            cancel_future = executor.submit(cancel_task)
+            worker_future = executor.submit(run_worker)
+            assert cancel_future.result(timeout=20) == "cancelled"
+            assert worker_future.result(timeout=20) == "cancelled"
+
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, ids["task_id"])
+            assert task is not None
+            event_types = [event.event_type for event in task.events]
+            feedback_count = verification_db.query(AssistantAdminFeedback).filter_by(
+                organization_id=ids["organization_id"]
+            ).count()
+            assert task.status == "cancelled"
+            assert event_types.count("cancelled") == 1
+            assert "started" not in event_types
+            assert feedback_count == 0
+    finally:
+        _cleanup_engine_feedback_task(engine, ids)
+
+
+def test_two_enqueue_requests_create_one_queue_transition(engine):
+    ids = _seed_engine_feedback_task(engine, status="approved")
+    barrier = threading.Barrier(2)
+
+    def enqueue() -> str | int:
+        with Session(engine, expire_on_commit=False) as candidate_db:
+            user = candidate_db.get(User, ids["user_id"])
+            task = candidate_db.get(AgentOfficeTask, ids["task_id"])
+            assert user is not None
+            assert task is not None
+            barrier.wait(timeout=15)
+            try:
+                return mark_task_queued(candidate_db, user, task).status
+            except HTTPException as error:
+                candidate_db.rollback()
+                return error.status_code
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: enqueue(), range(2)))
+
+        assert set(results) == {409, "queued"}
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, ids["task_id"])
+            assert task is not None
+            assert task.status == "queued"
+            assert [event.event_type for event in task.events].count("queued") == 1
+    finally:
+        _cleanup_engine_feedback_task(engine, ids)
+
+
+def test_running_agent_task_recovers_committed_incomplete_intent(engine):
+    ids = _seed_engine_feedback_task(engine, status="running")
+    try:
+        with Session(engine, expire_on_commit=False) as intent_db:
+            task = intent_db.get(AgentOfficeTask, ids["task_id"])
+            user = intent_db.get(User, ids["user_id"])
+            assert task is not None
+            assert user is not None
+            canonical_input = normalize_tool_input(
+                intent_db,
+                user,
+                "send_admin_feedback",
+                task.input,
+            )
+            issued = issue_agent_office_tool_authorization(
+                intent_db,
+                task_id=task.id,
+                actor_id=user.id,
+                tool="send_admin_feedback",
+                input_digest=tool_input_digest(
+                    "send_admin_feedback",
+                    canonical_input,
+                ),
+            )
+            intent_db.commit()
+
+        with Session(engine, expire_on_commit=False) as recovery_db:
+            recovered = run_agent_office_task(
+                ids["task_id"],
+                db=recovery_db,
+            )
+            assert recovered.status == "completed"
+
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, ids["task_id"])
+            assert task is not None
+            event_types = [event.event_type for event in task.events]
+            assert event_types.count("started") == 1
+            assert event_types.count("tool_authorization_issued") == 1
+            assert event_types.count("tool_authorization_claimed") == 1
+            assert event_types.count("tool_execution_completed") == 1
+            assert event_types.count("completed") == 1
+            assert (
+                verification_db.query(AssistantAdminFeedback)
+                .filter_by(organization_id=ids["organization_id"])
+                .count()
+                == 1
+            )
+            completion = next(
+                event
+                for event in task.events
+                if event.event_type == "tool_execution_completed"
+            )
+            assert completion.payload["execution_attempt_id"] == (
+                issued.execution_attempt_id
+            )
+    finally:
+        _cleanup_engine_feedback_task(engine, ids)
 
 
 def test_agent_office_hides_tasks_from_other_tenants(

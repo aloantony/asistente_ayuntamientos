@@ -32,6 +32,7 @@ from app.assistant.tool_authorization import (
     ToolExecutionAuthorization,
     claim_agent_office_tool_authorization,
     claim_conversation_tool_authorization,
+    complete_tool_authorization,
     lock_conversation_tool_turn,
     tool_input_digest,
 )
@@ -776,6 +777,7 @@ def execute_tool(
     context: ToolContext | None = None,
     allowed: frozenset[str] | None = None,
     authorization: ToolExecutionAuthorization | None = None,
+    defer_commit: bool = False,
 ) -> ToolResult:
     if allowed is not None and name not in allowed:
         return ToolResult(
@@ -803,7 +805,7 @@ def execute_tool(
                 ok=False,
             )
         if isinstance(authorization, ConversationToolAuthorization):
-            authorization_claimed = claim_conversation_tool_authorization(
+            authorization_claim = claim_conversation_tool_authorization(
                 db,
                 authorization,
             )
@@ -813,7 +815,7 @@ def execute_tool(
                 and current_user.id == authorization.actor_id
             )
         elif isinstance(authorization, AgentOfficeToolAuthorization):
-            authorization_claimed = claim_agent_office_tool_authorization(
+            authorization_claim = claim_agent_office_tool_authorization(
                 db,
                 authorization,
             )
@@ -823,14 +825,26 @@ def execute_tool(
                 and tool_context.user_message_id == authorization.user_message_id
             )
         else:
-            authorization_claimed = False
+            authorization_claim = None
             authorization_context_matches = False
-        if not authorization_claimed or not authorization_context_matches:
+        if (
+            authorization_claim is None
+            or authorization_claim.status == "invalid"
+            or not authorization_context_matches
+        ):
             db.rollback()
             return ToolResult(
                 content="Acción mutante denegada: autorización inválida o consumida.",
                 ok=False,
             )
+        if authorization_claim.status == "completed":
+            result = ToolResult(
+                content=authorization_claim.content or "",
+                ok=authorization_claim.ok,
+            )
+            if not defer_commit:
+                db.commit()
+            return result
         if isinstance(authorization, ConversationToolAuthorization) and not (
             lock_conversation_tool_turn(
                 db,
@@ -882,6 +896,23 @@ def execute_tool(
             normalized_input,
             tool_context,
         )
+        if name == "web_search":
+            content = _serialize_web_search_payload(result)
+        elif name == "semantic_search_ordinances":
+            content = _serialize_ordinance_search_payload(result)
+        else:
+            content = json.dumps(result, ensure_ascii=False)
+        if spec.requires_confirmation:
+            if authorization is None:
+                raise ValueError("Mutating execution lost its authorization")
+            complete_tool_authorization(
+                db,
+                authorization,
+                content=content,
+                ok=True,
+            )
+            if not defer_commit:
+                db.commit()
     except HTTPException as error:
         db.rollback()
         return ToolResult(
@@ -898,12 +929,6 @@ def execute_tool(
             ok=False,
         )
 
-    if name == "web_search":
-        content = _serialize_web_search_payload(result)
-    elif name == "semantic_search_ordinances":
-        content = _serialize_ordinance_search_payload(result)
-    else:
-        content = json.dumps(result, ensure_ascii=False)
     return ToolResult(content=content, ok=True)
 
 
@@ -1363,7 +1388,7 @@ def _create_requirement(
             setattr(requirement, field, value)
 
     db.add(requirement)
-    db.commit()
+    db.flush()
     return _serialize_requirement(requirement, full=True)
 
 
@@ -1432,7 +1457,7 @@ def _update_requirement(
     if requested_status is not None:
         requirement.status = requested_status
 
-    db.commit()
+    db.flush()
     return _serialize_requirement(requirement, full=True)
 
 
@@ -1450,7 +1475,7 @@ def _add_requirement_message(
         message_type=tool_input["message_type"],
     )
     db.add(message)
-    db.commit()
+    db.flush()
     return {
         "id": message.id,
         "requirement_id": requirement.id,
@@ -1475,7 +1500,7 @@ def _propose_memory_entry(
         proposed_by_id=current_user.id,
     )
     db.add(entry)
-    db.commit()
+    db.flush()
     return {
         "id": entry.id,
         "organization_id": entry.organization_id,
@@ -1542,7 +1567,7 @@ def _send_admin_feedback(
         submitted_by_id=current_user.id,
     )
     db.add(feedback)
-    db.commit()
+    db.flush()
     return {
         "id": feedback.id,
         "status": feedback.status,
@@ -1584,6 +1609,7 @@ def _create_agent_office_task(
         scheduled_for=_parse_optional_datetime(tool_input["scheduled_for"]),
         source_conversation_id=context.conversation_id,
         source_message_id=context.user_message_id,
+        commit=False,
     )
 
     return {
@@ -1653,7 +1679,7 @@ def _propose_transversal_feature(
         proposed_by_id=current_user.id,
     )
     db.add(feature)
-    db.commit()
+    db.flush()
     return {
         "id": feature.id,
         "status": feature.status,
@@ -1762,7 +1788,7 @@ def _record_transversal_feature_acceptance(
     adoption.notes = notes
     adoption.activated_at = activated_at
 
-    db.commit()
+    db.flush()
     return {
         "id": adoption.id,
         "feature_id": adoption.feature_id,

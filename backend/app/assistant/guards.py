@@ -1,5 +1,6 @@
 """Code-level assistant guards that do not depend on prompt obedience."""
 
+import hashlib
 import json
 import logging
 import re
@@ -27,8 +28,10 @@ from app.assistant.tools import (
     ToolSpec,
 )
 from app.assistant.tool_authorization import (
+    CONVERSATION_AUTHORIZATION_STATE_KEY,
     ConversationToolAuthorization,
     issue_conversation_tool_authorization,
+    recover_conversation_tool_authorization,
     tool_input_digest,
 )
 from app.users.models import User
@@ -36,6 +39,8 @@ from app.users.models import User
 logger = logging.getLogger(__name__)
 _TOOL_SPEC_UNSET = object()
 MAX_FINALIZED_CONFIRMATION_EXCHANGES = 32
+CONFIRMATION_SUFFIX_ROUTING_KEY = "_confirmation_suffix"
+CONFIRMATION_RESPONSE_ROUTING_KEY = "_confirmation_response"
 
 GENERIC_EXPLICIT_CONFIRMATIONS = frozenset(
     {
@@ -128,6 +133,45 @@ def dump_conversation_state(conversation: AssistantConversation, state: dict) ->
     conversation.state = json.dumps(state, ensure_ascii=False) if state else None
 
 
+def confirmation_safe_history_content(
+    message: AssistantMessage,
+) -> str | None:
+    routing = _load_message_routing(message)
+    if isinstance(routing.get(CONFIRMATION_RESPONSE_ROUTING_KEY), dict):
+        return None
+    suffix = routing.get(CONFIRMATION_SUFFIX_ROUTING_KEY)
+    if not isinstance(suffix, dict):
+        return message.content
+    suffix_length = int(suffix.get("length") or 0)
+    expected_digest = suffix.get("sha256")
+    if (
+        suffix_length <= 0
+        or suffix_length > len(message.content)
+        or not isinstance(expected_digest, str)
+    ):
+        return message.content
+    stored_suffix = message.content[-suffix_length:]
+    if not secrets.compare_digest(
+        hashlib.sha256(stored_suffix.encode("utf-8")).hexdigest(),
+        expected_digest,
+    ):
+        return message.content
+    functional_content = message.content[:-suffix_length].rstrip()
+    return functional_content or None
+
+
+def message_has_confirmation_suffix_metadata(
+    message: AssistantMessage,
+) -> bool:
+    routing = _load_message_routing(message)
+    return isinstance(routing.get(CONFIRMATION_SUFFIX_ROUTING_KEY), dict)
+
+
+def message_is_confirmation_response(message: AssistantMessage) -> bool:
+    routing = _load_message_routing(message)
+    return isinstance(routing.get(CONFIRMATION_RESPONSE_ROUTING_KEY), dict)
+
+
 def _record_finalized_confirmation_exchange(
     state: dict,
     pending: dict,
@@ -154,17 +198,71 @@ def _record_finalized_confirmation_exchange(
             and exchange.get("confirmation_id") == confirmation_id
         )
     ]
-    exchanges.append(
-        {
-            "confirmation_id": confirmation_id,
-            "prompted_at_assistant_message_id": prompt_message_id,
-            "response_user_message_id": response_user_message_id,
-            "outcome": outcome,
-        }
-    )
+    exchange = {
+        "confirmation_id": confirmation_id,
+        "prompted_at_assistant_message_id": prompt_message_id,
+        "response_user_message_id": response_user_message_id,
+        "outcome": outcome,
+    }
+    suffix_metadata = pending.get("confirmation_suffix")
+    if isinstance(suffix_metadata, dict):
+        exchange["confirmation_suffix"] = deepcopy(suffix_metadata)
+    exchanges.append(exchange)
     state["finalized_confirmation_exchanges"] = exchanges[
         -MAX_FINALIZED_CONFIRMATION_EXCHANGES:
     ]
+
+
+def _load_message_routing(message: AssistantMessage) -> dict:
+    if not message.routing:
+        return {}
+    try:
+        value = json.loads(message.routing)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _store_message_routing(message: AssistantMessage, routing: dict) -> None:
+    message.routing = json.dumps(routing, ensure_ascii=False) if routing else None
+
+
+def _record_confirmation_suffix_metadata(
+    message: AssistantMessage,
+    confirmation_prompt: str,
+) -> dict:
+    prompt_start = len(message.content) - len(confirmation_prompt)
+    if prompt_start < 0 or not message.content.endswith(confirmation_prompt):
+        raise ValueError("Confirmation prompt is missing from assistant message")
+    suffix_start = prompt_start
+    if message.content[max(0, prompt_start - 2) : prompt_start] == "\n\n":
+        suffix_start -= 2
+    suffix = message.content[suffix_start:]
+    metadata = {
+        "length": len(suffix),
+        "sha256": hashlib.sha256(suffix.encode("utf-8")).hexdigest(),
+        "prompt_sha256": hashlib.sha256(
+            confirmation_prompt.encode("utf-8")
+        ).hexdigest(),
+    }
+    routing = _load_message_routing(message)
+    routing[CONFIRMATION_SUFFIX_ROUTING_KEY] = metadata
+    _store_message_routing(message, routing)
+    return metadata
+
+
+def _mark_confirmation_response_message(
+    message: AssistantMessage,
+    *,
+    confirmation_id: str | None,
+    outcome: str,
+) -> None:
+    routing = _load_message_routing(message)
+    routing[CONFIRMATION_RESPONSE_ROUTING_KEY] = {
+        "confirmation_id": confirmation_id,
+        "outcome": outcome,
+    }
+    _store_message_routing(message, routing)
 
 
 def check_tool_confirmation(
@@ -241,17 +339,45 @@ def check_tool_confirmation(
     consumed = state.get("last_consumed_confirmation")
     if (
         isinstance(consumed, dict)
-        and consumed.get("tool") == tool_name
-        and consumed.get("input_digest") == current_digest
         and int(consumed.get("consumed_at_user_message_id") or 0)
         == user_message.id
     ):
-        db.commit()
-        return ConfirmationToolResult(
-            content=CONFIRMATION_ALREADY_CONSUMED_TOOL_RESULT,
-            ok=False,
-            status="already_consumed",
+        exact_consumed_effect = (
+            consumed.get("tool") == tool_name
+            and consumed.get("input_digest") == current_digest
         )
+        if exact_consumed_effect:
+            try:
+                recovered = recover_conversation_tool_authorization(
+                    state,
+                    confirmation_id=str(consumed.get("confirmation_id") or ""),
+                    tool=tool_name,
+                    input_digest=current_digest,
+                    conversation_id=locked_conversation.id,
+                    user_message_id=user_message.id,
+                    actor_id=current_user.id,
+                )
+            except ValueError as error:
+                db.commit()
+                return ConfirmationToolResult(
+                    content=f"No se puede recuperar la acción confirmada: {error}",
+                    ok=False,
+                    status="invalid",
+                )
+            if recovered is not None:
+                db.commit()
+                return recovered
+        pending_intent = state.get(CONVERSATION_AUTHORIZATION_STATE_KEY)
+        if exact_consumed_effect or isinstance(pending_intent, dict):
+            # A changed effect must not replace a still-retriable intent. Once
+            # that intent has completed and left the ledger, another call in
+            # the same model turn may create a separate confirmation proposal.
+            db.commit()
+            return ConfirmationToolResult(
+                content=CONFIRMATION_ALREADY_CONSUMED_TOOL_RESULT,
+                ok=False,
+                status="already_consumed",
+            )
 
     pending = state.get("pending_confirmation")
     if isinstance(pending, dict):
@@ -298,6 +424,11 @@ def check_tool_confirmation(
                 "confirmed_at_user_message_id": response_message_id,
                 "consumed_at_user_message_id": user_message.id,
             }
+            _mark_confirmation_response_message(
+                user_message,
+                confirmation_id=confirmation_id,
+                outcome="confirmed",
+            )
             _record_finalized_confirmation_exchange(
                 state,
                 pending,
@@ -403,6 +534,11 @@ def process_pending_confirmation_response(
             ),
             "cancelled_at_user_message_id": user_message.id,
         }
+        _mark_confirmation_response_message(
+            user_message,
+            confirmation_id=pending.get("confirmation_id"),
+            outcome="cancelled",
+        )
         _record_finalized_confirmation_exchange(
             state,
             pending,
@@ -481,9 +617,12 @@ def finalize_confirmation_turn(
         pending.pop("response_prompted_at_assistant_message_id", None)
 
     if confirmation_prompt is not None:
-        if not assistant_message.content.endswith(confirmation_prompt):
-            raise ValueError("Confirmation prompt is missing from assistant message")
+        suffix_metadata = _record_confirmation_suffix_metadata(
+            assistant_message,
+            confirmation_prompt,
+        )
         pending["prompted_at_assistant_message_id"] = assistant_message.id
+        pending["confirmation_suffix"] = suffix_metadata
 
     dump_conversation_state(conversation, state)
 

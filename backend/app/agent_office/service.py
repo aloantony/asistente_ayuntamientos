@@ -277,6 +277,23 @@ def get_task_for_user(db: Session, current_user: User, task_id: int) -> AgentOff
     return task
 
 
+def lock_task_for_transition(
+    db: Session,
+    task_id: int,
+) -> AgentOfficeTask | None:
+    return db.scalar(
+        select(AgentOfficeTask)
+        .options(
+            selectinload(AgentOfficeTask.events),
+            selectinload(AgentOfficeTask.requested_by),
+            selectinload(AgentOfficeTask.approved_by),
+        )
+        .where(AgentOfficeTask.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 def list_tasks_for_user(
     db: Session,
     current_user: User,
@@ -397,6 +414,7 @@ def create_task(
     scheduled_for: datetime | None = None,
     source_conversation_id: int | None = None,
     source_message_id: int | None = None,
+    commit: bool = True,
 ) -> AgentOfficeTask:
     ensure_organization_exists(db, organization_id)
     require_agent_office_permission(db, current_user, organization_id, "agent_office.create")
@@ -452,8 +470,11 @@ def create_task(
         },
         created_by_id=current_user.id,
     )
-    db.commit()
-    return get_task_for_user(db, current_user, task.id)
+    if commit:
+        db.commit()
+        return get_task_for_user(db, current_user, task.id)
+    db.flush()
+    return task
 
 
 def approve_or_cancel_task(
@@ -464,7 +485,16 @@ def approve_or_cancel_task(
     decision: str,
     notes: str | None = None,
 ) -> AgentOfficeTask:
-    require_agent_office_permission(db, current_user, task.organization_id, "agent_office.approve")
+    locked_task = lock_task_for_transition(db, task.id)
+    if locked_task is None or not user_can_view_task(db, current_user, locked_task):
+        raise HTTPException(status_code=404, detail="Agent office task not found")
+    task = locked_task
+    require_agent_office_permission(
+        db,
+        current_user,
+        task.organization_id,
+        "agent_office.approve",
+    )
     now = datetime.now(timezone.utc)
     if decision == "cancel":
         if task.status in {"running", "completed"}:
@@ -493,13 +523,55 @@ def approve_or_cancel_task(
 
 
 def mark_task_queued(db: Session, current_user: User, task: AgentOfficeTask) -> AgentOfficeTask:
-    require_agent_office_permission(db, current_user, task.organization_id, "agent_office.execute")
+    locked_task = lock_task_for_transition(db, task.id)
+    if locked_task is None or not user_can_view_task(db, current_user, locked_task):
+        raise HTTPException(status_code=404, detail="Agent office task not found")
+    task = locked_task
+    require_agent_office_permission(
+        db,
+        current_user,
+        task.organization_id,
+        "agent_office.execute",
+    )
     if task.status not in {"approved", "failed"}:
         raise HTTPException(status_code=409, detail="Only approved or failed tasks can be queued")
     task.status = "queued"
     task.error_message = None
     add_task_event(db, task, "queued", "Task queued for agent office execution.", created_by_id=current_user.id)
     db.commit()
+    return get_task_for_user(db, current_user, task.id)
+
+
+def mark_task_queue_failed(
+    db: Session,
+    current_user: User,
+    task_id: int,
+    error: Exception,
+) -> AgentOfficeTask:
+    task = lock_task_for_transition(db, task_id)
+    if task is None or not user_can_view_task(db, current_user, task):
+        raise HTTPException(status_code=404, detail="Agent office task not found")
+    require_agent_office_permission(
+        db,
+        current_user,
+        task.organization_id,
+        "agent_office.execute",
+    )
+    if task.status == "queued":
+        task.status = "failed"
+        task.error_message = str(error)[:2000]
+        task.completed_at = datetime.now(timezone.utc)
+        add_task_event(
+            db,
+            task,
+            "failed",
+            task.error_message,
+            created_by_id=current_user.id,
+        )
+        db.commit()
+        return get_task_for_user(db, current_user, task.id)
+    # A worker or reviewer won the row lock first. Never overwrite its state.
+    db.rollback()
     return get_task_for_user(db, current_user, task.id)
 
 
@@ -594,6 +666,7 @@ def _run_tool_action(db: Session, user: User, task: AgentOfficeTask) -> dict:
         context,
         allowed=agent.tool_names,
         authorization=authorization,
+        defer_commit=True,
     )
     return {
         "mode": "tool",
@@ -680,33 +753,97 @@ def _task_result_error_message(result: dict) -> str:
     return f"Agent office action {action} returned an unsuccessful result."
 
 
+def _latest_task_execution_attempt(
+    db: Session,
+    task_id: int,
+) -> AgentOfficeTaskEvent | None:
+    return db.scalar(
+        select(AgentOfficeTaskEvent)
+        .where(
+            AgentOfficeTaskEvent.task_id == task_id,
+            AgentOfficeTaskEvent.event_type == "started",
+        )
+        .order_by(AgentOfficeTaskEvent.id.desc())
+        .limit(1)
+    )
+
+
+def _running_attempt_is_incomplete(
+    db: Session,
+    task: AgentOfficeTask,
+) -> bool:
+    attempt = _latest_task_execution_attempt(db, task.id)
+    if attempt is None:
+        return False
+    terminal_event = db.scalar(
+        select(AgentOfficeTaskEvent.id)
+        .where(
+            AgentOfficeTaskEvent.task_id == task.id,
+            AgentOfficeTaskEvent.id > attempt.id,
+            AgentOfficeTaskEvent.event_type.in_(
+                {"completed", "failed", "draft_ready", "cancelled"}
+            ),
+        )
+        .order_by(AgentOfficeTaskEvent.id.desc())
+        .limit(1)
+    )
+    return terminal_event is None
+
+
+def _task_is_terminal(task: AgentOfficeTask) -> bool:
+    return task.status in {
+        "waiting_approval",
+        "completed",
+        "failed",
+        "cancelled",
+    }
+
+
 def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOfficeTask:
     owns_session = db is None
     session = db or SessionLocal()
     try:
-        task = session.scalar(
-            select(AgentOfficeTask)
-            .options(selectinload(AgentOfficeTask.events))
-            .where(AgentOfficeTask.id == task_id)
-        )
+        task = lock_task_for_transition(session, task_id)
         if task is None:
             raise ValueError(f"Agent office task not found: {task_id}")
-        if task.status not in {"approved", "queued"}:
-            raise ValueError(f"Task cannot run from status {task.status}")
-        if task.requires_human_approval and task.approval_policy == "before_execution" and task.approved_by_id is None:
+        if _task_is_terminal(task) or task.status == "pending_approval":
+            session.rollback()
+            return task
+        if task.status == "running":
+            if not _running_attempt_is_incomplete(session, task):
+                session.rollback()
+                return task
+        elif task.status in {"approved", "queued"}:
+            task.status = "running"
+            task.started_at = datetime.now(timezone.utc)
+            task.error_message = None
+            add_task_event(
+                session,
+                task,
+                "started",
+                "Agent office task execution started.",
+            )
+            session.flush()
+        else:
+            session.rollback()
+            return task
+        if (
+            task.requires_human_approval
+            and task.approval_policy == "before_execution"
+            and task.approved_by_id is None
+        ):
             raise ValueError("Task requires human approval before execution")
         user = task.requested_by or task.approved_by
-        if user is None:
+        if user is None or not user.is_active:
             raise ValueError("Task has no user context for RBAC execution")
 
-        now = datetime.now(timezone.utc)
-        task.status = "running"
-        task.started_at = now
-        task.error_message = None
-        add_task_event(session, task, "started", "Agent office task execution started.")
-        session.commit()
-
         result = execute_task_body(session, user, task)
+        task = lock_task_for_transition(session, task_id)
+        if task is None:
+            raise ValueError(f"Agent office task not found: {task_id}")
+        if task.status == "cancelled":
+            session.rollback()
+            return task
         task.result_json = json.dumps(result, ensure_ascii=False)
         task.completed_at = datetime.now(timezone.utc)
         if result.get("ok") is False:
@@ -732,12 +869,17 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
         session.commit()
         return task
     except Exception as error:
-        if "task" in locals() and task is not None:
+        session.rollback()
+        task = lock_task_for_transition(session, task_id)
+        if task is not None and not _task_is_terminal(task):
             task.status = "failed"
             task.error_message = str(error)[:2000]
             task.completed_at = datetime.now(timezone.utc)
             add_task_event(session, task, "failed", task.error_message)
             session.commit()
+            return task
+        if task is not None:
+            session.rollback()
             return task
         raise
     finally:
