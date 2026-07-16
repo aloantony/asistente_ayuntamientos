@@ -31,12 +31,13 @@ from app.assistant.tools import (
     normalize_tool_input,
     prepare_ordinance_search_embedding,
 )
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization
 from app.ordinances.embeddings import (
     EmbeddingWorkerCleanupError,
-    supervised_embedding_claim_lease_seconds,
+    supervised_embedding_cleanup_margin_seconds,
 )
 from app.rbac.permissions import has_permission
 from app.requirements.models import Requirement
@@ -226,6 +227,7 @@ class ExternalReadClaim:
     claim_id: str
     execution_attempt_id: int
     tool_input: dict
+    provider_deadline_at: datetime
 
 
 def ensure_organization_exists(db: Session, organization_id: int) -> Organization:
@@ -876,16 +878,18 @@ def _task_execution_user(task: AgentOfficeTask) -> User:
     return user
 
 
-def _parse_claim_expiry(value: object) -> datetime:
+def _parse_claim_datetime(value: object, *, field: str) -> datetime:
     if not isinstance(value, str):
-        raise ValueError("External read claim has no valid lease")
+        raise ValueError(f"External read claim has no valid {field}")
     try:
-        expiry = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError as error:
-        raise ValueError("External read claim has no valid lease") from error
-    if expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
-    return expiry
+        raise ValueError(
+            f"External read claim has no valid {field}"
+        ) from error
+    if parsed.tzinfo is None:
+        raise ValueError(f"External read claim has no valid {field}")
+    return parsed.astimezone(timezone.utc)
 
 
 def _latest_external_read_claim(
@@ -929,6 +933,10 @@ def _claim_external_read_action(
     attempt = _latest_task_execution_attempt(db, task.id)
     if attempt is None:
         raise ValueError("Agent office task has no execution attempt")
+    if _latest_attempt_is_quarantined(db, task.id):
+        raise EmbeddingWorkerCleanupError(
+            "External read attempt is quarantined after indeterminate cleanup"
+        )
     tool_input = _tool_input_for_task(task)
     _validate_task_tool_scope(db, task, tool_input)
     agent = OFFICE_AGENTS[task.department]
@@ -968,12 +976,30 @@ def _claim_external_read_action(
             or payload.get("input_digest") != input_digest
         ):
             raise ValueError("External read execution intent changed")
-        if _parse_claim_expiry(payload.get("lease_expires_at")) > now:
+        provider_deadline_at = _parse_claim_datetime(
+            payload.get("provider_deadline_at"),
+            field="provider deadline",
+        )
+        lease_expires_at = _parse_claim_datetime(
+            payload.get("lease_expires_at"),
+            field="lease",
+        )
+        minimum_lease_expiry = provider_deadline_at + timedelta(
+            seconds=supervised_embedding_cleanup_margin_seconds()
+        )
+        if lease_expires_at < minimum_lease_expiry:
+            raise ValueError(
+                "External read lease does not cover provider cleanup"
+            )
+        if lease_expires_at > now:
             return None
 
     claim_id = uuid.uuid4().hex
-    lease_expires_at = now + timedelta(
-        seconds=supervised_embedding_claim_lease_seconds()
+    provider_deadline_at = now + timedelta(
+        seconds=settings.embeddings_timeout_seconds
+    )
+    lease_expires_at = provider_deadline_at + timedelta(
+        seconds=supervised_embedding_cleanup_margin_seconds()
     )
     add_task_event(
         db,
@@ -985,6 +1011,7 @@ def _claim_external_read_action(
             "execution_attempt_id": attempt.id,
             "tool": task.requested_action,
             "input_digest": input_digest,
+            "provider_deadline_at": provider_deadline_at.isoformat(),
             "lease_expires_at": lease_expires_at.isoformat(),
         },
         created_by_id=user.id,
@@ -994,6 +1021,7 @@ def _claim_external_read_action(
         claim_id=claim_id,
         execution_attempt_id=attempt.id,
         tool_input=canonical_input,
+        provider_deadline_at=provider_deadline_at,
     )
 
 
@@ -1074,7 +1102,8 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
             # FOR UPDATE.  In particular, the embeddings HTTP request cannot
             # retain a transaction, row lock or advisory lock.
             prepared_embedding = prepare_ordinance_search_embedding(
-                external_claim.tool_input
+                external_claim.tool_input,
+                provider_deadline_at=external_claim.provider_deadline_at,
             )
 
             task = lock_task_for_transition(session, task_id)
@@ -1137,6 +1166,24 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
     except Exception as error:
         session.rollback()
         task = lock_task_for_transition(session, task_id)
+        if task is not None and isinstance(error, EmbeddingWorkerCleanupError):
+            if not _latest_attempt_is_quarantined(session, task.id):
+                add_task_event(
+                    session,
+                    task,
+                    EXTERNAL_READ_QUARANTINE_EVENT,
+                    (
+                        "External provider worker cleanup could not be "
+                        "confirmed; automatic retry is quarantined."
+                    ),
+                )
+            if task.status != "failed":
+                task.status = "failed"
+                task.error_message = str(error)[:2000]
+                task.completed_at = datetime.now(timezone.utc)
+                add_task_event(session, task, "failed", task.error_message)
+            session.commit()
+            return task
         if (
             task is not None
             and task.status == "running"
@@ -1153,16 +1200,6 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
             task.status = "failed"
             task.error_message = str(error)[:2000]
             task.completed_at = datetime.now(timezone.utc)
-            if isinstance(error, EmbeddingWorkerCleanupError):
-                add_task_event(
-                    session,
-                    task,
-                    EXTERNAL_READ_QUARANTINE_EVENT,
-                    (
-                        "External provider worker cleanup could not be "
-                        "confirmed; automatic retry is quarantined."
-                    ),
-                )
             add_task_event(session, task, "failed", task.error_message)
             session.commit()
             return task

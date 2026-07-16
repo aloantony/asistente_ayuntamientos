@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     embeddings_model: str = "local-hash-384"
     embeddings_dimensions: int = 384
     embeddings_timeout_seconds: float = 60.0
+    embeddings_max_concurrent_workers: int = 4
     telegram_enabled: bool = False
     telegram_bot_token: str | None = None
     telegram_webhook_secret: str | None = None
@@ -343,6 +344,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "embeddings_timeout_seconds must be finite and between "
                 "0.1 and 120 seconds"
+            )
+        return value
+
+    @field_validator("embeddings_max_concurrent_workers")
+    @classmethod
+    def validate_embeddings_max_concurrent_workers(cls, value: int) -> int:
+        if not 1 <= value <= 32:
+            raise ValueError(
+                "embeddings_max_concurrent_workers must be between 1 and 32"
             )
         return value
 
