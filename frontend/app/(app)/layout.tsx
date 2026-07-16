@@ -193,18 +193,6 @@ function useDarkMode() {
   return { dark, toggle };
 }
 
-function getUserInitials(fullName: string) {
-  const initials = fullName
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-
-  return initials || "U";
-}
-
 function getOnboardingStorageKey(userId: number) {
   return `${ONBOARDING_STORAGE_PREFIX}:${userId}`;
 }
@@ -368,14 +356,13 @@ export default function AppLayout({
     (userHasPermission(user, "maintenance.view") ||
       userHasPermission(user, "maintenance.manage"));
   const brandName = getMunicipalBrandName(user);
-  const userInitials = getUserInitials(user.full_name);
 
   const onboardingSteps: OnboardingStep[] = [
     {
       id: "theme",
       eyebrow: "Tema",
       title: "Claro u oscuro",
-      body: "Cambia el modo visual desde este icono. Lo recordaremos en este navegador.",
+      body: "Cambia el modo visual desde el control situado al pie del menú lateral. Lo recordaremos en este navegador.",
     },
     ...(canUseAssistant
       ? [
@@ -383,7 +370,7 @@ export default function AppLayout({
             id: "assistant" as const,
             eyebrow: "Anacleto",
             title: "Asistente municipal",
-            body: "Abre el chat para consultar información visible, organizar trabajo o preparar borradores supervisados.",
+            body: "Abre Anacleto desde la sección Inteligencia del menú lateral para consultar información, organizar trabajo o preparar borradores supervisados.",
           },
         ]
       : []),
@@ -391,7 +378,7 @@ export default function AppLayout({
       id: "account",
       eyebrow: "Cuenta",
       title: "Tu perfil",
-      body: "Revisa aquí tus datos, organización y permisos dentro del ayuntamiento.",
+      body: "Entra en Mi cuenta, dentro de la sección Gestión del menú lateral, para revisar tus datos, organización y permisos.",
     },
   ];
 
@@ -633,6 +620,7 @@ export default function AppLayout({
           >
             {dark ? (
               <svg
+                aria-hidden="true"
                 fill="none"
                 height="17"
                 stroke="currentColor"
@@ -647,6 +635,7 @@ export default function AppLayout({
               </svg>
             ) : (
               <svg
+                aria-hidden="true"
                 fill="none"
                 height="17"
                 stroke="currentColor"
@@ -684,144 +673,67 @@ export default function AppLayout({
           </button>
         </div>
       </aside>
-      <div className="app-main">
-        <header
-          className={
-            showOnboarding
-              ? `app-topbar onboarding-active onboarding-step-${activeOnboardingStep.id}`
-              : "app-topbar"
-          }
+      {showOnboarding ? (
+        <div
+          aria-labelledby="app-onboarding-title"
+          className="app-onboarding-layer"
+          id="app-onboarding-popover"
+          role="dialog"
         >
-          <div className="app-topbar-actions">
-            <button
-              aria-describedby={
-                showOnboarding && activeOnboardingStep.id === "theme"
-                  ? "app-onboarding-popover"
-                  : undefined
-              }
-              aria-label={themeToggleLabel}
-              aria-pressed={dark}
-              className="app-topbar-theme"
-              onClick={handleThemeToggle}
-              title={themeToggleLabel}
-              type="button"
-            >
-              {dark ? (
-                <svg
-                  aria-hidden="true"
-                  fill="none"
-                  height="17"
-                  stroke="currentColor"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="1.6"
-                  viewBox="0 0 24 24"
-                  width="17"
-                >
-                  <circle cx="12" cy="12" r="4" />
-                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-                </svg>
-              ) : (
-                <svg
-                  aria-hidden="true"
-                  fill="none"
-                  height="17"
-                  stroke="currentColor"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="1.6"
-                  viewBox="0 0 24 24"
-                  width="17"
-                >
-                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                </svg>
-              )}
-            </button>
-            {canUseAssistant ? (
+          <button
+            aria-label="Cerrar ayuda inicial"
+            className="app-onboarding-scrim"
+            onClick={dismissOnboarding}
+            type="button"
+          />
+          <section className="app-onboarding-note">
+            <p className="eyebrow">{activeOnboardingStep.eyebrow}</p>
+            <h2 id="app-onboarding-title">{activeOnboardingStep.title}</h2>
+            <p>{activeOnboardingStep.body}</p>
+            {activeOnboardingStep.id === "theme" ? (
               <button
-                aria-describedby={
-                  showOnboarding && activeOnboardingStep.id === "assistant"
-                    ? "app-onboarding-popover"
-                    : undefined
-                }
-                aria-label="Abrir asistente"
-                className="app-topbar-anacleto"
-                onClick={() => router.push("/asistente")}
-                title="Abrir asistente"
+                className="accent-button"
+                onClick={handleThemeToggle}
                 type="button"
               >
-                <svg aria-hidden="true" height="15" viewBox="0 0 24 24" width="15">
-                  <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />
-                </svg>
+                Probar ahora
               </button>
             ) : null}
-            <button
-              aria-describedby={
-                showOnboarding && activeOnboardingStep.id === "account"
-                  ? "app-onboarding-popover"
-                  : undefined
-              }
-              aria-label="Abrir mi cuenta"
-              className="app-topbar-user"
-              onClick={() => router.push("/cuenta")}
-              title={user.full_name}
-              type="button"
-            >
-              {userInitials}
-            </button>
-          </div>
-          {showOnboarding ? (
             <div
-              aria-labelledby="app-onboarding-title"
-              className="app-onboarding-layer"
-              id="app-onboarding-popover"
-              role="dialog"
+              className="app-onboarding-controls"
+              aria-label="Pasos de la ayuda inicial"
             >
               <button
-                aria-label="Cerrar ayuda inicial"
-                className="app-onboarding-scrim"
-                onClick={dismissOnboarding}
+                className="secondary-button"
+                disabled={safeOnboardingIndex === 0}
+                onClick={goToPreviousOnboardingStep}
                 type="button"
-              />
-              <section
-                className={`app-onboarding-note app-onboarding-note-${activeOnboardingStep.id}`}
               >
-                <p className="eyebrow">{activeOnboardingStep.eyebrow}</p>
-                <h2 id="app-onboarding-title">{activeOnboardingStep.title}</h2>
-                <p>{activeOnboardingStep.body}</p>
-                {activeOnboardingStep.id === "theme" ? (
-                  <button className="accent-button" onClick={handleThemeToggle} type="button">
-                    Probar ahora
-                  </button>
-                ) : null}
-                <div className="app-onboarding-controls" aria-label="Pasos de la ayuda inicial">
-                  <button
-                    className="secondary-button"
-                    disabled={safeOnboardingIndex === 0}
-                    onClick={goToPreviousOnboardingStep}
-                    type="button"
-                  >
-                    Anterior
-                  </button>
-                  <span aria-live="polite">
-                    {safeOnboardingIndex + 1}/{onboardingSteps.length}
-                  </span>
-                  <button
-                    className="secondary-button"
-                    disabled={safeOnboardingIndex === onboardingSteps.length - 1}
-                    onClick={goToNextOnboardingStep}
-                    type="button"
-                  >
-                    Siguiente
-                  </button>
-                </div>
-                <button className="app-onboarding-dismiss" onClick={dismissOnboarding} type="button">
-                  Cerrar ayuda
-                </button>
-              </section>
+                Anterior
+              </button>
+              <span aria-live="polite">
+                {safeOnboardingIndex + 1}/{onboardingSteps.length}
+              </span>
+              <button
+                className="secondary-button"
+                disabled={safeOnboardingIndex === onboardingSteps.length - 1}
+                onClick={goToNextOnboardingStep}
+                type="button"
+              >
+                Siguiente
+              </button>
             </div>
-          ) : null}
-        </header>
+            <button
+              className="app-onboarding-dismiss"
+              onClick={dismissOnboarding}
+              type="button"
+            >
+              Cerrar ayuda
+            </button>
+          </section>
+        </div>
+      ) : null}
+      <div className="app-main">
         <main className={contentClassName}>
           {children}
         </main>
