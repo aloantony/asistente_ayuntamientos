@@ -32,9 +32,10 @@ from app.assistant.schemas import (
 from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import (
     ToolContext,
+    ToolResult,
+    UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
     execute_tool,
     get_available_tool_specs,
-    web_search_urls_from_result,
 )
 from app.assistant.turn import build_history, tool_result_for_activity
 from app.core.config import settings
@@ -143,7 +144,11 @@ def build_realtime_client_secret_payload(
     current_user: User,
     conversation: AssistantConversation,
 ) -> dict:
-    tools = get_available_tool_specs(db, current_user)
+    tools = get_available_tool_specs(
+        db,
+        current_user,
+        allow_web_reader=False,
+    )
     realtime_tools = [_to_realtime_tool(tool.definition) for tool in tools]
     input_audio = {
         "turn_detection": {
@@ -349,26 +354,49 @@ def execute_realtime_tool_call(
     db.commit()
 
     try:
-        tools = get_available_tool_specs(db, current_user)
-        allowed_tool_names = frozenset(tool.name for tool in tools)
-        guarded_result = check_tool_confirmation(
-            db,
-            conversation,
-            user_message,
-            payload.name,
-            tool_input,
-        )
-        result = guarded_result or execute_tool(
+        tools = get_available_tool_specs(
             db,
             current_user,
-            payload.name,
-            tool_input,
-            ToolContext(
-                conversation_id=conversation.id,
-                user_message_id=user_message.id,
-                allowed_web_urls=_realtime_allowed_web_urls(turn),
+            allow_web_reader=False,
+        )
+        allowed_tool_names = frozenset(tool.name for tool in tools)
+        tools_by_name = {tool.name: tool for tool in tools}
+        tool_context = ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            untrusted_external_content_seen=(
+                turn.get("untrusted_external_content_seen") is True
             ),
-            allowed=allowed_tool_names,
+        )
+        selected_tool = tools_by_name.get(payload.name)
+        if (
+            tool_context.untrusted_external_content_seen
+            and selected_tool is not None
+            and not selected_tool.read_only
+        ):
+            guarded_result = None
+            result = ToolResult(
+                content=UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+                ok=False,
+            )
+        else:
+            guarded_result = check_tool_confirmation(
+                db,
+                conversation,
+                user_message,
+                payload.name,
+                tool_input,
+            )
+            result = guarded_result or execute_tool(
+                db,
+                current_user,
+                payload.name,
+                tool_input,
+                tool_context,
+                allowed=allowed_tool_names,
+            )
+        untrusted_external_content_seen = (
+            tool_context.untrusted_external_content_seen
         )
         action = {
             "call_id": payload.call_id,
@@ -397,6 +425,9 @@ def execute_realtime_tool_call(
                 "Realtime tool call is no longer active"
             )
 
+        if untrusted_external_content_seen:
+            turn["untrusted_external_content_seen"] = True
+
         if confirmation_context is not None:
             turn["confirmation"] = _serialize_confirmation_reference(
                 confirmation_context
@@ -407,11 +438,7 @@ def execute_realtime_tool_call(
             input_mode="voice",
             turn_user_message_id=user_message.id,
         )
-        output = (
-            result.content
-            if payload.name == "read_web_page" and result.ok
-            else tool_result_for_activity(payload.name, result.content)
-        )
+        output = tool_result_for_activity(payload.name, result.content)
         if confirmation_prompt:
             output = json.dumps(
                 {"status": "confirmation_required"},
@@ -670,15 +697,6 @@ def _archive_realtime_turn(
 ) -> None:
     turn["status"] = status
     turn.pop("confirmation", None)
-    for call in _turn_calls(turn).values():
-        if not isinstance(call, dict):
-            continue
-        action = call.get("action")
-        if isinstance(action, dict) and action.get("tool") == "read_web_page":
-            # The realtime model needs the full bounded text while its turn is
-            # active. Once sealed, retain only the same compact audit metadata
-            # used by text turns.
-            call["output"] = action.get("result")
     for response in _turn_responses(turn).values():
         if isinstance(response, dict):
             response.pop("assistant_text", None)
@@ -893,25 +911,6 @@ def _turn_calls(turn: dict) -> dict:
         calls = {}
         turn["calls"] = calls
     return calls
-
-
-def _realtime_allowed_web_urls(turn: dict) -> set[str]:
-    """Rebuild ephemeral provenance from prior searches in this realtime turn."""
-    calls = _turn_calls(turn)
-    urls: set[str] = set()
-    for call_id in turn.get("call_order", []):
-        call = calls.get(call_id)
-        if not isinstance(call, dict) or call.get("status") != "finished":
-            continue
-        action = call.get("action")
-        if (
-            not isinstance(action, dict)
-            or action.get("tool") != "web_search"
-            or action.get("ok") is not True
-        ):
-            continue
-        urls.update(web_search_urls_from_result(action.get("result")))
-    return urls
 
 
 def _turn_responses(turn: dict) -> dict:

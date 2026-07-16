@@ -4395,6 +4395,14 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   font-weight: 600;
 }
 
+.assistant-realtime-web-note {
+  width: 100%;
+  margin: 0;
+  padding: 0 2px;
+  text-align: right;
+  font-size: 12px;
+}
+
 .voice-stop-button {
   min-height: 30px;
   border: 1px solid var(--border);

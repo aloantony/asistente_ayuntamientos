@@ -1,5 +1,6 @@
 """Model-first turn engine for the municipal assistant."""
 
+import hashlib
 import json
 import logging
 import re
@@ -54,6 +55,7 @@ from app.assistant.tools import (
     ToolContext,
     ToolResult,
     ToolSpec,
+    UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
     execute_tool,
     get_available_tool_specs,
 )
@@ -67,6 +69,8 @@ MAX_TOOL_RESULT_CHARS = 4000
 ATTACHMENT_TOOL_INPUT_REDACTION = {"redacted": True}
 ATTACHMENT_TOOL_NAME_REDACTION = "attachment_tool_redacted"
 ATTACHMENT_TOOL_CALL_ID_PREFIX = "attachment-tool-call-redacted"
+MAX_WEB_READER_AUDIT_REDIRECTS = 6
+MAX_WEB_READER_AUDIT_URL_CHARS = 2000
 
 
 def tool_result_for_activity(tool_name: str, content: str) -> str:
@@ -77,31 +81,89 @@ def tool_result_for_activity(tool_name: str, content: str) -> str:
             return content[:MAX_TOOL_RESULT_CHARS]
         if isinstance(payload, dict) and isinstance(payload.get("text"), str):
             text = payload["text"]
+            redirect_chain = payload.get("redirect_chain")
+            if not isinstance(redirect_chain, list):
+                redirect_chain = []
+            redirect_chain = [
+                str(url)[:MAX_WEB_READER_AUDIT_URL_CHARS]
+                for url in redirect_chain[:MAX_WEB_READER_AUDIT_REDIRECTS]
+            ]
             activity_payload = {
-                "source_url": payload.get("source_url"),
-                "final_url": payload.get("final_url"),
+                "source_url": str(payload.get("source_url") or "")[
+                    :MAX_WEB_READER_AUDIT_URL_CHARS
+                ],
+                "final_url": str(payload.get("final_url") or "")[
+                    :MAX_WEB_READER_AUDIT_URL_CHARS
+                ],
                 "title": str(payload.get("title") or "")[:300],
-                "content_type": payload.get("content_type"),
-                "text_chars": len(text),
+                "query": str(payload.get("query") or "")[:400],
+                "provider": str(payload.get("provider") or "")[:100],
+                "rank": payload.get("rank"),
+                "content_type": str(payload.get("content_type") or "")[:100],
+                "content_length_bytes": payload.get("content_length_bytes"),
+                "text_char_count": payload.get("text_char_count", len(text)),
+                "text_sha256": payload.get("text_sha256")
+                or hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "text_truncated": payload.get("text_truncated") is True,
                 "redirects": payload.get("redirects"),
+                "redirect_chain": redirect_chain,
                 "untrusted_content": True,
-                "text_preview": text[:500],
             }
             compact = json.dumps(
                 activity_payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            if len(compact) >= MAX_TOOL_RESULT_CHARS:
-                activity_payload.pop("text_preview")
-                activity_payload.pop("final_url")
-                compact = json.dumps(
-                    activity_payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            return compact
+            if len(compact) < MAX_TOOL_RESULT_CHARS:
+                return compact
+
+            chain_bytes = json.dumps(
+                redirect_chain,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            activity_payload["redirect_chain"] = {
+                "count": len(redirect_chain),
+                "sha256": hashlib.sha256(chain_bytes).hexdigest(),
+                "summarized": True,
+            }
+            compact = json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(compact) < MAX_TOOL_RESULT_CHARS:
+                return compact
+
+            source_url = activity_payload["source_url"]
+            activity_payload["source_url"] = source_url[:256]
+            activity_payload["source_url_sha256"] = hashlib.sha256(
+                source_url.encode("utf-8")
+            ).hexdigest()
+            activity_payload["source_url_truncated"] = len(source_url) > 256
+            activity_payload["title"] = activity_payload["title"][:100]
+            compact = json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(compact) < MAX_TOOL_RESULT_CHARS:
+                return compact
+
+            # Keep the exact final URL used for citation. The remaining
+            # high-variance display fields have hashes or bounded prefixes.
+            query = activity_payload["query"]
+            activity_payload["query"] = query[:128]
+            activity_payload["query_sha256"] = hashlib.sha256(
+                query.encode("utf-8")
+            ).hexdigest()
+            activity_payload["query_truncated"] = len(query) > 128
+            activity_payload["title"] = ""
+            return json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
     limit = (
         MAX_ORDINANCE_TOOL_RESULT_CHARS
         if tool_name == "semantic_search_ordinances"
@@ -492,6 +554,14 @@ def _run_agent_turn_events(
                 elif tool_calls_used >= tool_call_budget:
                     result = ToolResult(content=TOOL_CALL_BUDGET_RESULT, ok=False)
                     force_synthesis_reason = "tool_call_budget"
+                elif (
+                    tool_context.untrusted_external_content_seen
+                    and not tool.read_only
+                ):
+                    result = ToolResult(
+                        content=UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+                        ok=False,
+                    )
                 else:
                     tool_calls_used += 1
                     guarded_result = None

@@ -32,6 +32,7 @@ from app.assistant.web_search import (
     normalize_web_query,
     web_search_client,
 )
+from app.core.config import settings
 from app.geo.access import (
     get_visible_entity,
     has_any_map_view_permission,
@@ -754,13 +755,33 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
+class WebSearchProvenance:
+    source_url: str
+    query: str
+    provider: str
+    rank: int
+
+
+@dataclass
 class ToolContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
     attachment_content_seen: bool = False
     # Ephemeral provenance for one assistant turn. It is never persisted as an
     # authorization that a later turn can reuse.
-    allowed_web_urls: set[str] = field(default_factory=set)
+    web_search_provenance: dict[str, WebSearchProvenance] = field(
+        default_factory=dict
+    )
+    # Once a search snippet or page body has entered the model context, no
+    # mutating tool may run for the remainder of this turn.
+    untrusted_external_content_seen: bool = False
+
+
+UNTRUSTED_EXTERNAL_MUTATION_BLOCKED = (
+    "No se ejecutó la herramienta de escritura porque este turno ya ha recibido "
+    "contenido web externo no confiable. Inicia un nuevo mensaje para realizar "
+    "la acción después de revisar la información."
+)
 
 
 ATTACHMENT_CONTENT_TOOL_RESULT = (
@@ -791,6 +812,12 @@ def execute_tool(
     spec = TOOL_CATALOG.get(name)
     if spec is None:
         return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
+
+    if resolved_context.untrusted_external_content_seen and not spec.read_only:
+        return ToolResult(
+            content=UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+            ok=False,
+        )
 
     try:
         result = spec.executor(db, current_user, tool_input, resolved_context)
@@ -1064,15 +1091,22 @@ def _web_search(
         provider=web_search_client.provider_name,
         results=results,
     )
-    for result in payload["results"]:
+    for rank, result in enumerate(payload["results"], start=1):
         try:
-            context.allowed_web_urls.add(
-                web_reader.normalize_web_page_url(result["url"])
+            source_url = web_reader.normalize_web_page_url(result["url"])
+            context.web_search_provenance[source_url] = WebSearchProvenance(
+                source_url=source_url,
+                query=query,
+                provider=str(payload["provider"]),
+                rank=rank,
             )
         except (KeyError, TypeError, web_reader.UnsafeWebPageURLError):
             # Search result normalization already filters malformed URLs. Keep
             # this fail-closed guard in case a provider contract drifts.
             continue
+    # Titles and snippets are external content too. A successful search cannot
+    # be followed by a write in the same turn, even if no page body is read.
+    context.untrusted_external_content_seen = True
     return payload
 
 
@@ -1082,6 +1116,11 @@ def _read_web_page(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
+    if not settings.assistant_web_reader_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="La lectura completa de páginas web está desactivada",
+        )
     if not has_permission(current_user, "assistant.web.search", db):
         raise HTTPException(
             status_code=403,
@@ -1089,45 +1128,29 @@ def _read_web_page(
         )
 
     normalized_url = web_reader.normalize_web_page_url(tool_input["url"])
-    if normalized_url not in context.allowed_web_urls:
+    provenance = context.web_search_provenance.get(normalized_url)
+    if provenance is None:
         raise ValueError(
             "url debe proceder de web_search en este mismo turno"
         )
     try:
-        return web_reader.read_web_page(normalized_url).as_dict()
+        page = web_reader.read_web_page(normalized_url).as_dict()
     except web_reader.UnsafeWebPageURLError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except web_reader.WebPageUnavailableError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+    context.untrusted_external_content_seen = True
+    return {
+        **page,
+        "source_url": provenance.source_url,
+        "query": provenance.query,
+        "provider": provenance.provider,
+        "rank": provenance.rank,
+    }
 
 
 def _serialize_web_search_payload(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
-
-def web_search_urls_from_result(content: object) -> set[str]:
-    """Recover only normalized URLs present in a complete web-search result."""
-    if not isinstance(content, str):
-        return set()
-    try:
-        payload = json.loads(content)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return set()
-    if not isinstance(payload, dict) or not isinstance(
-        payload.get("results"),
-        list,
-    ):
-        return set()
-
-    urls: set[str] = set()
-    for result in payload["results"]:
-        if not isinstance(result, dict):
-            continue
-        try:
-            urls.add(web_reader.normalize_web_page_url(result.get("url")))
-        except web_reader.UnsafeWebPageURLError:
-            continue
-    return urls
 
 
 def _serialize_ordinance_search_payload(payload: dict) -> str:
@@ -2011,6 +2034,8 @@ def get_available_tool_specs(
     db: Session,
     current_user: User,
     tool_names: frozenset[str] | None = None,
+    *,
+    allow_web_reader: bool = True,
 ) -> list[ToolSpec]:
     requested_tool_names = tool_names or frozenset(TOOL_CATALOG)
     return [
@@ -2020,6 +2045,13 @@ def get_available_tool_specs(
         and (
             name not in {"web_search", "read_web_page"}
             or web_search_client.enabled
+        )
+        and (
+            name != "read_web_page"
+            or (
+                allow_web_reader
+                and settings.assistant_web_reader_enabled
+            )
         )
         and (
             spec.required_permission is None

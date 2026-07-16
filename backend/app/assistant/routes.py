@@ -144,6 +144,7 @@ def get_assistant_status(
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
 ) -> AssistantStatusRead:
     require_assistant_use(db, current_user)
+    available_tools = get_available_tool_specs(db, current_user)
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
         runtime=settings.assistant_runtime,
@@ -158,7 +159,13 @@ def get_assistant_status(
         realtime_voice_model=(
             settings.assistant_realtime_model if realtime_voice_enabled() else None
         ),
-        tools=[tool.metadata for tool in get_available_tool_specs(db, current_user)],
+        web_page_reader_enabled=any(
+            tool.name == "read_web_page" for tool in available_tools
+        ),
+        # Full page bodies are deliberately excluded from Realtime state. Web
+        # search snippets remain available in voice sessions.
+        realtime_web_page_reader_enabled=False,
+        tools=[tool.metadata for tool in available_tools],
     )
 
 

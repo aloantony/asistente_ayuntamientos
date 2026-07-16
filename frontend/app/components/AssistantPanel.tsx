@@ -388,17 +388,18 @@ function getWebResults(action: AssistantAction) {
 
   if (action.tool === "read_web_page") {
     const page = parsed.data as Record<string, unknown>;
-    if (!page.source_url) {
+    if (!page.final_url || !page.source_url) {
       return [];
     }
-    const textChars = Number(page.text_chars ?? 0);
+    const textChars = Number(page.text_char_count ?? 0);
+    const sourceUrl = String(page.source_url);
     return [
       {
-        title: String(page.title ?? page.source_url),
-        url: String(page.source_url),
+        title: String(page.title ?? page.final_url),
+        url: String(page.final_url),
         snippet: Number.isFinite(textChars)
-          ? `${textChars.toLocaleString("es-ES")} caracteres extraídos.`
-          : "Fuente leída.",
+          ? `${textChars.toLocaleString("es-ES")} caracteres extraídos. Origen localizado: ${sourceUrl}`
+          : `Fuente leída. Origen localizado: ${sourceUrl}`,
         publishedAt: "",
       },
     ];
@@ -891,6 +892,11 @@ export function AssistantPanel({
     !["idle", "done", "interrupted", "error"].includes(voiceState);
   const attachmentSendBlocked =
     attachmentsBlockedByVoice && selectedAttachments.length > 0;
+  const showRealtimeWebReaderNotice =
+    voiceModeEnabled &&
+    realtimeVoiceAvailable &&
+    Boolean(assistantStatus?.web_page_reader_enabled) &&
+    !assistantStatus?.realtime_web_page_reader_enabled;
   const voiceStatus = (() => {
     if (voiceState === "connecting") {
       return "Conectando voz…";
@@ -2583,6 +2589,13 @@ export function AssistantPanel({
                       </button>
                     ) : null}
                   </div>
+                ) : null}
+
+                {showRealtimeWebReaderNotice ? (
+                  <p className="muted assistant-realtime-web-note">
+                    En voz realtime la búsqueda web muestra snippets. La lectura
+                    completa de páginas está disponible solo en el chat escrito.
+                  </p>
                 ) : null}
 
                 {voiceError ? (
