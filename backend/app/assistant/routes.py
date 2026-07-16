@@ -1051,7 +1051,7 @@ def execute_realtime_voice_tool_call(
             detail=str(error),
         ) from None
     return {
-        "call_id": payload.call_id,
+        "call_id": action["call_id"],
         "ok": action["ok"],
         "output": output,
         "action": action,

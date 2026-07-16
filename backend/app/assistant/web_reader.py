@@ -14,11 +14,14 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import logging
 import multiprocessing
 import re
+import selectors
 import signal
 import socket
 import ssl
+import threading
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -54,7 +57,6 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # The process startup has no extra grace period: it consumes the configured
 # fetch deadline. Once the deadline expires, cleanup is additionally bounded by
 # these joins (at most 0.55 seconds under normal OS process semantics).
-WEB_READER_RESULT_POLL_SECONDS = 0.05
 WEB_READER_NORMAL_JOIN_SECONDS = 0.05
 WEB_READER_TERMINATE_JOIN_SECONDS = 0.15
 WEB_READER_KILL_JOIN_SECONDS = 0.35
@@ -65,6 +67,13 @@ WEB_READER_MAX_CLEANUP_OVERHEAD_SECONDS = (
 )
 MAX_WEB_PAGE_IPC_BYTES = 512 * 1024
 MAX_WEB_PAGE_WORKER_ERROR_CHARS = 300
+WEB_READER_ADMISSION_WAIT_SECONDS = 0.05
+WEB_READER_IPC_CHUNK_BYTES = 64 * 1024
+
+logger = logging.getLogger(__name__)
+_WEB_READER_ADMISSION = threading.BoundedSemaphore(
+    settings.web_page_max_concurrent_readers
+)
 
 
 class UnsafeWebPageURLError(ValueError):
@@ -124,6 +133,33 @@ class _WebReaderConfig:
     max_response_bytes: int
     max_redirects: int
     max_text_chars: int
+
+
+class _AdmissionLease:
+    """Release one global reader slot exactly once across racing owners."""
+
+    def __init__(self, semaphore) -> None:
+        self._semaphore = semaphore
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._semaphore.release()
+
+
+class _LaunchState:
+    """Coordinate ownership when ``Process.start`` outlives the request."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.complete = False
+        self.started = False
+        self.error: BaseException | None = None
+        self.cancel_requested = False
 
 
 class _TextHTMLParser(HTMLParser):
@@ -334,99 +370,275 @@ def _run_supervised_web_reader(
     config: _WebReaderConfig,
 ) -> WebPage:
     deadline = monotonic() + config.timeout_seconds
-    process_context = multiprocessing.get_context("spawn")
-    receive_connection, send_connection = process_context.Pipe(duplex=False)
-    process = process_context.Process(
-        target=_web_reader_worker,
-        args=(send_connection, source_url, config, deadline),
-        daemon=True,
-    )
-    started = False
+    lease = _acquire_reader_admission(deadline)
+    lease_owned_by_main = True
+    receive_socket = None
+    send_socket = None
+    process = None
+    process_started = False
     received_message = False
     try:
         try:
-            process.start()
-            started = True
-        except Exception as error:
+            process_context = multiprocessing.get_context("spawn")
+            _require_reader_deadline(deadline)
+            receive_socket, send_socket = socket.socketpair(
+                socket.AF_UNIX,
+                socket.SOCK_STREAM,
+            )
+            _require_reader_deadline(deadline)
+            process = process_context.Process(
+                target=_web_reader_worker,
+                args=(send_socket, source_url, config, deadline),
+                daemon=True,
+            )
+            _require_reader_deadline(deadline)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise WebPageUnavailableError(
+                "No se pudieron reservar recursos para la lectura web aislada"
+            ) from error
+
+        launch_state = _LaunchState()
+        launch_done = threading.Event()
+        launcher = threading.Thread(
+            target=_launch_web_reader_process,
+            args=(
+                process,
+                send_socket,
+                launch_state,
+                launch_done,
+                lease,
+            ),
+            name="web-reader-launcher",
+            daemon=True,
+        )
+        try:
+            launcher.start()
+        except (OSError, RuntimeError) as error:
+            raise WebPageUnavailableError(
+                "No se pudo iniciar el supervisor de lectura web"
+            ) from error
+
+        remaining = deadline - monotonic()
+        launched_in_time = remaining > 0 and launch_done.wait(remaining)
+        if not launched_in_time:
+            with launch_state.lock:
+                launch_state.cancel_requested = True
+                launch_completed_during_race = launch_state.complete
+                process_started = launch_state.started
+            if not launch_completed_during_race:
+                # The launcher owns the still-blocked ``Process.start`` call.
+                # When it returns, it will kill/reap any child and free the slot.
+                lease_owned_by_main = False
+                process = None
+                send_socket = None
+                raise WebPageUnavailableError(
+                    "La lectura de la página agotó el tiempo"
+                )
+
+        with launch_state.lock:
+            process_started = launch_state.started
+            launch_error = launch_state.error
+        if launch_error is not None or not process_started:
             raise WebPageUnavailableError(
                 "No se pudo iniciar el proceso aislado de lectura web"
-            ) from error
-        finally:
-            # The child owns its duplicated sending endpoint after start.
-            send_connection.close()
+            ) from launch_error
 
+        # The launcher closed the parent's sending endpoint after start.
+        send_socket = None
         raw_message = _wait_for_worker_message(
-            receive_connection,
-            process,
+            receive_socket,
             deadline=deadline,
         )
         received_message = True
         return _decode_worker_message(raw_message, source_url, config)
     finally:
-        receive_connection.close()
-        if not started:
-            # ``Process.close`` is valid before start and releases handles held
-            # by a failed spawn attempt.
-            process.close()
+        _safe_socket_close(receive_socket)
+        _safe_socket_close(send_socket)
+        if lease_owned_by_main:
+            try:
+                if process is not None:
+                    if process_started:
+                        _cleanup_worker_process(
+                            process,
+                            allow_normal_exit=received_message,
+                        )
+                    else:
+                        _close_unstarted_process(process)
+            finally:
+                lease.release()
+
+
+def _acquire_reader_admission(deadline: float) -> _AdmissionLease:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise WebPageUnavailableError("La lectura de la página agotó el tiempo")
+    try:
+        acquired = _WEB_READER_ADMISSION.acquire(
+            timeout=min(remaining, WEB_READER_ADMISSION_WAIT_SECONDS)
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise WebPageUnavailableError(
+            "No se pudo reservar capacidad para la lectura web"
+        ) from error
+    if not acquired:
+        raise WebPageUnavailableError(
+            "La capacidad de lectura web está ocupada; inténtalo de nuevo"
+        )
+    return _AdmissionLease(_WEB_READER_ADMISSION)
+
+
+def _require_reader_deadline(deadline: float) -> None:
+    if deadline - monotonic() <= 0:
+        raise WebPageUnavailableError("La lectura de la página agotó el tiempo")
+
+
+def _launch_web_reader_process(
+    process,
+    send_socket,
+    state: _LaunchState,
+    done: threading.Event,
+    lease: _AdmissionLease,
+) -> None:
+    started = False
+    error: BaseException | None = None
+    try:
+        process.start()
+        started = True
+    except BaseException as launch_error:
+        error = launch_error
+    finally:
+        _safe_socket_close(send_socket)
+
+    with state.lock:
+        state.started = started
+        state.error = error
+        state.complete = True
+        cleanup_late_launch = state.cancel_requested
+        done.set()
+
+    if not cleanup_late_launch:
+        return
+    try:
+        if started:
+            _cleanup_worker_process(process, allow_normal_exit=False)
         else:
-            _cleanup_worker_process(
-                process,
-                allow_normal_exit=received_message,
-            )
+            _close_unstarted_process(process)
+    except WebPageUnavailableError:
+        logger.exception("Late web-reader process cleanup failed")
+    finally:
+        lease.release()
 
 
 def _wait_for_worker_message(
-    receive_connection,
-    process,
+    receive_socket,
     *,
     deadline: float,
 ) -> bytes:
-    while True:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise WebPageUnavailableError(
-                "La lectura de la página agotó el tiempo"
-            )
-        wait_seconds = min(remaining, WEB_READER_RESULT_POLL_SECONDS)
-        if receive_connection.poll(wait_seconds):
+    chunks: list[bytes] = []
+    total = 0
+    selector = None
+    try:
+        receive_socket.setblocking(False)
+        selector = selectors.DefaultSelector()
+        selector.register(receive_socket, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise WebPageUnavailableError(
+                    "La lectura de la página agotó el tiempo"
+                )
             try:
-                return receive_connection.recv_bytes(MAX_WEB_PAGE_IPC_BYTES)
-            except (EOFError, OSError) as error:
+                events = selector.select(remaining)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise WebPageUnavailableError(
+                    "No se pudo supervisar el proceso aislado de lectura web"
+                ) from error
+            if not events:
+                raise WebPageUnavailableError(
+                    "La lectura de la página agotó el tiempo"
+                )
+            try:
+                chunk = receive_socket.recv(
+                    min(
+                        WEB_READER_IPC_CHUNK_BYTES,
+                        MAX_WEB_PAGE_IPC_BYTES + 1 - total,
+                    )
+                )
+            except BlockingIOError:
+                continue
+            except OSError as error:
                 raise WebPageUnavailableError(
                     "El proceso aislado devolvió una respuesta no válida"
                 ) from error
-        if not process.is_alive():
-            # Avoid racing a final pipe flush immediately before process exit.
-            if receive_connection.poll(0):
-                continue
-            raise WebPageUnavailableError(
-                "El proceso aislado de lectura web terminó sin resultado"
-            )
+            if not chunk:
+                if not chunks:
+                    raise WebPageUnavailableError(
+                        "El proceso aislado de lectura web terminó sin resultado"
+                    )
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_WEB_PAGE_IPC_BYTES:
+                raise WebPageUnavailableError(
+                    "La respuesta aislada supera el límite de IPC"
+                )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise WebPageUnavailableError(
+            "No se pudo supervisar el proceso aislado de lectura web"
+        ) from error
+    finally:
+        if selector is not None:
+            try:
+                selector.close()
+            except (OSError, RuntimeError, ValueError):
+                pass
 
 
 def _cleanup_worker_process(process, *, allow_normal_exit: bool) -> None:
     """Reap a worker with bounded joins and never return a live child."""
-    if allow_normal_exit:
-        process.join(timeout=WEB_READER_NORMAL_JOIN_SECONDS)
-    if process.is_alive():
-        process.terminate()
-        process.join(timeout=WEB_READER_TERMINATE_JOIN_SECONDS)
-    if process.is_alive():
-        process.kill()
-        process.join(timeout=WEB_READER_KILL_JOIN_SECONDS)
-    if process.is_alive():
-        # SIGKILL should make this unreachable on the supported Linux runtime.
-        # Do not use an unbounded join: surface the failed isolation boundary.
+    try:
+        if allow_normal_exit:
+            process.join(timeout=WEB_READER_NORMAL_JOIN_SECONDS)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=WEB_READER_TERMINATE_JOIN_SECONDS)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=WEB_READER_KILL_JOIN_SECONDS)
+        if process.is_alive():
+            raise WebPageUnavailableError(
+                "No se pudo detener el proceso aislado de lectura web"
+            )
+        process.join(timeout=0)
+        process.close()
+    except WebPageUnavailableError:
+        raise
+    except (OSError, RuntimeError, ValueError, AssertionError) as error:
         raise WebPageUnavailableError(
-            "No se pudo detener el proceso aislado de lectura web"
-        )
-    # Reap an already-exited process without adding another grace period.
-    process.join(timeout=0)
-    process.close()
+            "No se pudo limpiar el proceso aislado de lectura web"
+        ) from error
+
+
+def _close_unstarted_process(process) -> None:
+    try:
+        process.close()
+    except (OSError, RuntimeError, ValueError, AssertionError) as error:
+        raise WebPageUnavailableError(
+            "No se pudo liberar el proceso aislado de lectura web"
+        ) from error
+
+
+def _safe_socket_close(value) -> None:
+    if value is None:
+        return
+    try:
+        value.close()
+    except (OSError, RuntimeError, ValueError):
+        pass
 
 
 def _web_reader_worker(
-    send_connection,
+    send_socket,
     source_url: str,
     config: _WebReaderConfig,
     deadline: float,
@@ -459,12 +671,12 @@ def _web_reader_worker(
                 "status": "unavailable",
                 "message": "El proceso aislado no pudo leer la página",
             }
-        _send_worker_message(send_connection, message)
+        _send_worker_message(send_socket, message)
     finally:
-        send_connection.close()
+        _safe_socket_close(send_socket)
 
 
-def _send_worker_message(send_connection, message: dict[str, object]) -> None:
+def _send_worker_message(send_socket, message: dict[str, object]) -> None:
     try:
         payload = json.dumps(
             message,
@@ -487,10 +699,15 @@ def _send_worker_message(send_connection, message: dict[str, object]) -> None:
             separators=(",", ":"),
         ).encode("ascii")
     try:
-        send_connection.send_bytes(payload)
+        send_socket.sendall(payload)
     except (BrokenPipeError, EOFError, OSError):
         # The caller timed out or disconnected and will reap this process.
         pass
+    finally:
+        try:
+            send_socket.shutdown(socket.SHUT_WR)
+        except (OSError, RuntimeError, ValueError):
+            pass
 
 
 def _decode_worker_message(

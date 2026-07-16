@@ -1821,13 +1821,15 @@ export function useAssistantController({
     draft: RealtimeTurnDraft,
     callId: string,
     action: AssistantAction,
+    displayedCallId: string = callId,
   ) {
     if (draft.finalized) {
       return;
     }
-    const nextAction = { ...action, call_id: callId };
+    const nextAction = { ...action, call_id: displayedCallId };
     const existingIndex = draft.actions.findIndex(
-      (candidate) => candidate.call_id === callId,
+      (candidate) =>
+        candidate.call_id === callId || candidate.call_id === displayedCallId,
     );
     if (existingIndex >= 0) {
       draft.actions[existingIndex] = nextAction;
@@ -2023,7 +2025,13 @@ export function useAssistantController({
     try {
       await ensureRealtimeTurnStarted(draft);
       const result = await postRealtimeToolCallWithReplay(draft, record);
-      if (result.call_id !== record.callId) {
+      const redactedServerCallId = /^redacted-[0-9a-f]{64}$/.test(
+        result.call_id,
+      );
+      if (
+        result.call_id !== record.callId &&
+        (!redactedServerCallId || result.action.call_id !== result.call_id)
+      ) {
         throw new Error("El servidor devolvió otra llamada de herramienta.");
       }
       replaceRealtimeUserMessage(draft, result.user_message);
@@ -2032,7 +2040,7 @@ export function useAssistantController({
       updateRealtimeAction(draft, record.callId, {
         ...result.action,
         status: "finished",
-      });
+      }, result.call_id);
     } catch (requestError) {
       if (draft.requestAbortController.signal.aborted) {
         throw requestError;

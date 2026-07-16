@@ -55,9 +55,12 @@ from app.assistant.tools import (
     ToolContext,
     ToolResult,
     ToolSpec,
-    UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+    REDACTED_UNTRUSTED_TOOL_NAME,
+    UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
     execute_tool,
     get_available_tool_specs,
+    redacted_untrusted_tool_input,
+    tool_is_blocked_after_untrusted_content,
 )
 from app.core.config import settings
 from app.rbac.locking import lock_authorization_graph
@@ -503,12 +506,40 @@ def _run_agent_turn_events(
                     else raw_tool_input
                 )
                 tool = tools_by_name.get(block.name)
+                post_taint_blocked = (
+                    False
+                    if attachment_tainted
+                    else tool_is_blocked_after_untrusted_content(
+                        block.name,
+                        raw_tool_input,
+                        tool_context,
+                        allow_web_reader=True,
+                    )
+                )
+                persisted_tool_input = (
+                    dict(ATTACHMENT_TOOL_INPUT_REDACTION)
+                    if attachment_tainted
+                    else (
+                        redacted_untrusted_tool_input()
+                        if post_taint_blocked
+                        else raw_tool_input
+                    )
+                )
+                persisted_tool_name = (
+                    ATTACHMENT_TOOL_NAME_REDACTION
+                    if attachment_tainted
+                    else (
+                        REDACTED_UNTRUSTED_TOOL_NAME
+                        if post_taint_blocked
+                        else block.name
+                    )
+                )
                 yield TurnEvent(
                     "tool_activity",
                     {
-                        "tool": block.name,
+                        "tool": persisted_tool_name,
                         "status": "started",
-                        "input": audited_tool_input,
+                        "input": persisted_tool_input,
                     },
                 )
                 signature = tool_call_signature(block.name, audited_tool_input)
@@ -554,13 +585,9 @@ def _run_agent_turn_events(
                 elif tool_calls_used >= tool_call_budget:
                     result = ToolResult(content=TOOL_CALL_BUDGET_RESULT, ok=False)
                     force_synthesis_reason = "tool_call_budget"
-                elif (
-                    tool_context.untrusted_external_content_seen
-                    and tool is not None
-                    and not tool.read_only
-                ):
+                elif post_taint_blocked:
                     result = ToolResult(
-                        content=UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+                        content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
                         ok=False,
                     )
                 else:
@@ -603,18 +630,21 @@ def _run_agent_turn_events(
                         # again later in this same turn.
                         seen_read_calls.clear()
                 action = {
-                    "tool": block.name,
+                    "tool": persisted_tool_name,
                     "ok": result.ok,
-                    "input": audited_tool_input,
-                    "result": tool_result_for_activity(block.name, result.content),
+                    "input": persisted_tool_input,
+                    "result": tool_result_for_activity(
+                        persisted_tool_name,
+                        result.content,
+                    ),
                 }
                 actions.append(action)
                 yield TurnEvent(
                     "tool_activity",
                     {
-                        "tool": block.name,
+                        "tool": persisted_tool_name,
                         "status": "finished",
-                        "input": audited_tool_input,
+                        "input": persisted_tool_input,
                         "ok": result.ok,
                         "result": action["result"],
                     },

@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     hermes_agent_api_key: str | None = None
     hermes_agent_model: str = "hermes-agent"
     hermes_agent_real_data_allowed: bool = False
+    hermes_agent_native_tools_disabled_confirmed: bool = False
     hermes_agent_timeout_seconds: float = 120.0
     hermes_agent_health_timeout_seconds: float = 3.0
     hermes_web_base_url: str = "http://127.0.0.1:8643/v1"
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
     assistant_web_reader_enabled: bool = False
     web_page_timeout_seconds: float = 10.0
     web_page_dns_timeout_seconds: float = 3.0
+    web_page_max_concurrent_readers: int = 4
     web_page_max_response_bytes: int = 2 * 1024 * 1024
     web_page_max_redirects: int = 3
     web_page_max_text_chars: int = 12000
@@ -386,6 +388,15 @@ class Settings(BaseSettings):
         if not 1024 <= value <= 10 * 1024 * 1024:
             raise ValueError(
                 "web_page_max_response_bytes must be between 1024 and 10485760"
+            )
+        return value
+
+    @field_validator("web_page_max_concurrent_readers")
+    @classmethod
+    def validate_web_page_max_concurrent_readers(cls, value: int) -> int:
+        if not 1 <= value <= 32:
+            raise ValueError(
+                "web_page_max_concurrent_readers must be between 1 and 32"
             )
         return value
 

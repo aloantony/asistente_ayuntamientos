@@ -1,6 +1,7 @@
 """Realtime voice orchestration for Anacleto."""
 
 import hashlib
+import hmac
 import json
 import logging
 from copy import deepcopy
@@ -31,11 +32,15 @@ from app.assistant.schemas import (
 )
 from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import (
+    REDACTED_UNTRUSTED_TOOL_NAME,
     ToolContext,
     ToolResult,
-    UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+    UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
     execute_tool,
     get_available_tool_specs,
+    redacted_untrusted_call_id,
+    redacted_untrusted_tool_input,
+    tool_is_blocked_after_untrusted_content,
 )
 from app.assistant.turn import build_history, tool_result_for_activity
 from app.core.config import settings
@@ -291,7 +296,6 @@ def execute_realtime_tool_call(
         raise AssistantRealtimeConflictError("Realtime turn does not exist")
 
     user_message = _get_realtime_user_message(db, locked_conversation, turn)
-    request_digest = _tool_call_digest(payload.name, payload.arguments)
     tool_input = dict(payload.arguments or {})
     calls = _turn_calls(turn)
     if not isinstance(turn.get(REALTIME_UNTRUSTED_CONTENT_KEY), bool):
@@ -300,8 +304,41 @@ def execute_realtime_tool_call(
         turn[REALTIME_UNTRUSTED_CONTENT_KEY] = (
             _realtime_turn_has_untrusted_external_content(turn, calls)
         )
+    tool_context = ToolContext(
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+        untrusted_external_content_seen=(
+            _realtime_turn_has_untrusted_external_content(turn, calls)
+        ),
+    )
+    post_taint_blocked = tool_is_blocked_after_untrusted_content(
+        payload.name,
+        tool_input,
+        tool_context,
+        allow_web_reader=False,
+    )
+    persisted_call_id = (
+        redacted_untrusted_call_id(payload.call_id)
+        if post_taint_blocked
+        else payload.call_id
+    )
+    persisted_tool_name = (
+        REDACTED_UNTRUSTED_TOOL_NAME
+        if post_taint_blocked
+        else payload.name
+    )
+    persisted_tool_input = (
+        redacted_untrusted_tool_input()
+        if post_taint_blocked
+        else deepcopy(tool_input)
+    )
+    request_digest = _tool_call_digest(
+        payload.name,
+        payload.arguments,
+        keyed=post_taint_blocked,
+    )
     recovered_expired_call = _recover_expired_realtime_tool_calls(turn)
-    existing = calls.get(payload.call_id)
+    existing = calls.get(persisted_call_id)
     if isinstance(existing, dict):
         if existing.get("request_digest") != request_digest:
             raise AssistantRealtimeConflictError(
@@ -348,14 +385,14 @@ def execute_realtime_tool_call(
             "Realtime tool calls must be executed sequentially"
         )
 
-    calls[payload.call_id] = {
+    calls[persisted_call_id] = {
         "request_digest": request_digest,
         "status": "started",
-        "name": payload.name,
-        "input": deepcopy(tool_input),
+        "name": persisted_tool_name,
+        "input": persisted_tool_input,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
-    turn.setdefault("call_order", []).append(payload.call_id)
+    turn.setdefault("call_order", []).append(persisted_call_id)
     state[REALTIME_STATE_KEY] = realtime_state
     dump_conversation_state(locked_conversation, state)
     db.commit()
@@ -367,23 +404,10 @@ def execute_realtime_tool_call(
             allow_web_reader=False,
         )
         allowed_tool_names = frozenset(tool.name for tool in tools)
-        tools_by_name = {tool.name: tool for tool in tools}
-        tool_context = ToolContext(
-            conversation_id=conversation.id,
-            user_message_id=user_message.id,
-            untrusted_external_content_seen=(
-                _realtime_turn_has_untrusted_external_content(turn)
-            ),
-        )
-        selected_tool = tools_by_name.get(payload.name)
-        if (
-            tool_context.untrusted_external_content_seen
-            and selected_tool is not None
-            and not selected_tool.read_only
-        ):
+        if post_taint_blocked:
             guarded_result = None
             result = ToolResult(
-                content=UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+                content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
                 ok=False,
             )
         else:
@@ -401,16 +425,20 @@ def execute_realtime_tool_call(
                 tool_input,
                 tool_context,
                 allowed=allowed_tool_names,
+                allow_web_reader_after_taint=False,
             )
         untrusted_external_content_seen = (
             tool_context.untrusted_external_content_seen
         )
         action = {
-            "call_id": payload.call_id,
-            "tool": payload.name,
+            "call_id": persisted_call_id,
+            "tool": persisted_tool_name,
             "ok": result.ok,
-            "input": tool_input,
-            "result": tool_result_for_activity(payload.name, result.content),
+            "input": persisted_tool_input,
+            "result": tool_result_for_activity(
+                persisted_tool_name,
+                result.content,
+            ),
         }
 
         confirmation_context = _confirmation_context_from_result(guarded_result)
@@ -422,7 +450,7 @@ def execute_realtime_tool_call(
         if turn is None:
             raise AssistantRealtimeConflictError("Realtime turn state was lost")
         calls = _turn_calls(turn)
-        stored_call = calls.get(payload.call_id)
+        stored_call = calls.get(persisted_call_id)
         if not isinstance(stored_call, dict):
             raise AssistantRealtimeConflictError(
                 "Realtime tool call state was lost"
@@ -445,7 +473,7 @@ def execute_realtime_tool_call(
             input_mode="voice",
             turn_user_message_id=user_message.id,
         )
-        output = tool_result_for_activity(payload.name, result.content)
+        output = tool_result_for_activity(persisted_tool_name, result.content)
         if confirmation_prompt:
             output = json.dumps(
                 {"status": "confirmation_required"},
@@ -470,15 +498,16 @@ def execute_realtime_tool_call(
     except Exception:
         logger.exception(
             "Realtime tool call ended with an indeterminate result: call_id=%s",
-            payload.call_id,
+            persisted_call_id,
         )
         db.rollback()
         action, output, user_message = _mark_realtime_tool_call_indeterminate(
             db,
             conversation,
             turn_id,
-            payload,
-            tool_input,
+            persisted_call_id,
+            persisted_tool_name,
+            persisted_tool_input,
         )
         return action, output, user_message, None, False
 
@@ -784,7 +813,8 @@ def _mark_realtime_tool_call_indeterminate(
     db: Session,
     conversation: AssistantConversation,
     turn_id: str,
-    payload: AssistantRealtimeToolCallCreate,
+    call_id: str,
+    tool_name: str,
     tool_input: dict,
 ) -> tuple[dict, str, AssistantMessage]:
     locked_conversation = lock_conversation_for_confirmation(db, conversation.id)
@@ -792,7 +822,7 @@ def _mark_realtime_tool_call_indeterminate(
     turn = _find_realtime_turn(realtime_state, turn_id)
     if turn is None:
         raise AssistantRealtimeConflictError("Realtime turn state was lost")
-    stored_call = _turn_calls(turn).get(payload.call_id)
+    stored_call = _turn_calls(turn).get(call_id)
     if not isinstance(stored_call, dict):
         raise AssistantRealtimeConflictError("Realtime tool call state was lost")
     if stored_call.get("status") == "indeterminate":
@@ -800,8 +830,8 @@ def _mark_realtime_tool_call_indeterminate(
     else:
         action = _set_realtime_tool_call_indeterminate(
             stored_call,
-            call_id=payload.call_id,
-            name=payload.name,
+            call_id=call_id,
+            name=tool_name,
             tool_input=tool_input,
         )
     locked_conversation.updated_at = func.now()
@@ -1104,7 +1134,12 @@ def _text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _tool_call_digest(name: str, arguments: dict) -> str:
+def _tool_call_digest(
+    name: str,
+    arguments: dict,
+    *,
+    keyed: bool = False,
+) -> str:
     serialized = json.dumps(
         {"name": name, "arguments": arguments},
         ensure_ascii=False,
@@ -1115,7 +1150,13 @@ def _tool_call_digest(name: str, arguments: dict) -> str:
         raise AssistantRealtimeConflictError(
             "Realtime tool call arguments are too large"
         )
-    return _text_digest(serialized)
+    if not keyed:
+        return _text_digest(serialized)
+    return hmac.new(
+        settings.secret_key.encode("utf-8"),
+        b"assistant-realtime-post-taint-request\0" + serialized.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _response_digest(payload: AssistantRealtimeTurnCreate) -> str:
