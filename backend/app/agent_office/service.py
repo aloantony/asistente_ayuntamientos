@@ -1,6 +1,7 @@
 import json
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException, status as http_status
@@ -24,10 +25,13 @@ from app.assistant.tool_authorization import (
     tool_input_digest,
 )
 from app.assistant.tools import (
+    PreparedOrdinanceSearchEmbedding,
     ToolContext,
     execute_tool,
     normalize_tool_input,
+    prepare_ordinance_search_embedding,
 )
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization
@@ -209,6 +213,22 @@ MUTATING_ACTIONS = {
     "send_admin_feedback",
     "create_agent_office_task",
 }
+EXTERNAL_READ_ACTIONS = frozenset({"semantic_search_ordinances"})
+EXTERNAL_READ_CLAIM_EVENT = "external_read_claimed"
+# Keep the durable lease substantially longer than the configured provider
+# timeout.  This prevents a healthy request from being duplicated while still
+# allowing a crashed read-only attempt to be recovered later.
+EXTERNAL_READ_CLAIM_LEASE_SECONDS = max(
+    300,
+    int(settings.embeddings_timeout_seconds * 3) + 60,
+)
+
+
+@dataclass(frozen=True)
+class ExternalReadClaim:
+    claim_id: str
+    execution_attempt_id: int
+    tool_input: dict
 
 
 def ensure_organization_exists(db: Session, organization_id: int) -> Organization:
@@ -497,7 +517,10 @@ def approve_or_cancel_task(
     )
     now = datetime.now(timezone.utc)
     if decision == "cancel":
-        if task.status in {"running", "completed"}:
+        if task.status == "completed" or (
+            task.status == "running"
+            and task.requested_action not in EXTERNAL_READ_ACTIONS
+        ):
             raise HTTPException(status_code=409, detail="Task cannot be cancelled in its current status")
         task.status = "cancelled"
         task.completed_at = now
@@ -625,7 +648,13 @@ def _decode_tool_content(content: str) -> Any:
         return content
 
 
-def _run_tool_action(db: Session, user: User, task: AgentOfficeTask) -> dict:
+def _run_tool_action(
+    db: Session,
+    user: User,
+    task: AgentOfficeTask,
+    *,
+    prepared_ordinance_embedding: PreparedOrdinanceSearchEmbedding | None = None,
+) -> dict:
     agent = OFFICE_AGENTS[task.department]
     if task.requested_action not in TOOL_ACTIONS:
         raise ValueError(f"Unsupported tool action: {task.requested_action}")
@@ -638,6 +667,7 @@ def _run_tool_action(db: Session, user: User, task: AgentOfficeTask) -> dict:
     context = ToolContext(
         conversation_id=task.source_conversation_id,
         user_message_id=task.source_message_id,
+        prepared_ordinance_embedding=prepared_ordinance_embedding,
     )
     authorization = None
     if task.requested_action in MUTATING_ACTIONS:
@@ -723,12 +753,23 @@ def _run_preparatory_action(task: AgentOfficeTask) -> dict:
     }
 
 
-def execute_task_body(db: Session, user: User, task: AgentOfficeTask) -> dict:
+def execute_task_body(
+    db: Session,
+    user: User,
+    task: AgentOfficeTask,
+    *,
+    prepared_ordinance_embedding: PreparedOrdinanceSearchEmbedding | None = None,
+) -> dict:
     if task.requested_action == "daily_briefing":
         return _run_daily_briefing(db, user, task)
     if task.requested_action in {"triage", "prepare_document_work"}:
         return _run_preparatory_action(task)
-    return _run_tool_action(db, user, task)
+    return _run_tool_action(
+        db,
+        user,
+        task,
+        prepared_ordinance_embedding=prepared_ordinance_embedding,
+    )
 
 
 def _task_result_error_message(result: dict) -> str:
@@ -799,9 +840,160 @@ def _task_is_terminal(task: AgentOfficeTask) -> bool:
     }
 
 
+def _task_execution_user(task: AgentOfficeTask) -> User:
+    if (
+        task.requires_human_approval
+        and task.approval_policy == "before_execution"
+        and task.approved_by_id is None
+    ):
+        raise ValueError("Task requires human approval before execution")
+    user = task.requested_by or task.approved_by
+    if user is None or not user.is_active:
+        raise ValueError("Task has no user context for RBAC execution")
+    return user
+
+
+def _parse_claim_expiry(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("External read claim has no valid lease")
+    try:
+        expiry = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("External read claim has no valid lease") from error
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry
+
+
+def _latest_external_read_claim(
+    db: Session,
+    *,
+    task_id: int,
+    execution_attempt_id: int,
+) -> AgentOfficeTaskEvent | None:
+    claims = db.scalars(
+        select(AgentOfficeTaskEvent)
+        .where(
+            AgentOfficeTaskEvent.task_id == task_id,
+            AgentOfficeTaskEvent.event_type == EXTERNAL_READ_CLAIM_EVENT,
+        )
+        .order_by(AgentOfficeTaskEvent.id.desc())
+    ).all()
+    return next(
+        (
+            event
+            for event in claims
+            if event.payload.get("execution_attempt_id")
+            == execution_attempt_id
+        ),
+        None,
+    )
+
+
+def _claim_external_read_action(
+    db: Session,
+    user: User,
+    task: AgentOfficeTask,
+) -> ExternalReadClaim | None:
+    """Claim one external read while the caller owns the task row lock.
+
+    The caller must commit immediately after this function returns a claim and
+    before invoking the provider.  A live claim makes concurrent workers
+    return without issuing another request.  Once the lease expires, retrying
+    is safe because this path is strictly read-only.
+    """
+
+    attempt = _latest_task_execution_attempt(db, task.id)
+    if attempt is None:
+        raise ValueError("Agent office task has no execution attempt")
+    tool_input = _tool_input_for_task(task)
+    _validate_task_tool_scope(db, task, tool_input)
+    agent = OFFICE_AGENTS[task.department]
+    if task.requested_action not in agent.tool_names:
+        raise ValueError(
+            f"Action {task.requested_action} is not available for department "
+            f"{task.department}"
+        )
+    if task.requested_action == "semantic_search_ordinances" and not has_permission(
+        user,
+        "ordinances.compare",
+        db,
+    ):
+        raise ValueError("Permission required: ordinances.compare")
+
+    canonical_input = normalize_tool_input(
+        db,
+        user,
+        task.requested_action,
+        tool_input,
+        ToolContext(
+            conversation_id=task.source_conversation_id,
+            user_message_id=task.source_message_id,
+        ),
+    )
+    input_digest = tool_input_digest(task.requested_action, canonical_input)
+    latest_claim = _latest_external_read_claim(
+        db,
+        task_id=task.id,
+        execution_attempt_id=attempt.id,
+    )
+    now = datetime.now(timezone.utc)
+    if latest_claim is not None:
+        payload = latest_claim.payload
+        if (
+            payload.get("tool") != task.requested_action
+            or payload.get("input_digest") != input_digest
+        ):
+            raise ValueError("External read execution intent changed")
+        if _parse_claim_expiry(payload.get("lease_expires_at")) > now:
+            return None
+
+    claim_id = uuid.uuid4().hex
+    lease_expires_at = now + timedelta(
+        seconds=EXTERNAL_READ_CLAIM_LEASE_SECONDS
+    )
+    add_task_event(
+        db,
+        task,
+        EXTERNAL_READ_CLAIM_EVENT,
+        "Read-only external action claimed before provider execution.",
+        payload={
+            "claim_id": claim_id,
+            "execution_attempt_id": attempt.id,
+            "tool": task.requested_action,
+            "input_digest": input_digest,
+            "lease_expires_at": lease_expires_at.isoformat(),
+        },
+        created_by_id=user.id,
+    )
+    db.flush()
+    return ExternalReadClaim(
+        claim_id=claim_id,
+        execution_attempt_id=attempt.id,
+        tool_input=canonical_input,
+    )
+
+
+def _external_read_claim_is_current(
+    db: Session,
+    task: AgentOfficeTask,
+    claim: ExternalReadClaim,
+) -> bool:
+    latest_claim = _latest_external_read_claim(
+        db,
+        task_id=task.id,
+        execution_attempt_id=claim.execution_attempt_id,
+    )
+    return (
+        latest_claim is not None
+        and latest_claim.payload.get("claim_id") == claim.claim_id
+    )
+
+
 def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOfficeTask:
     owns_session = db is None
     session = db or SessionLocal()
+    external_claim: ExternalReadClaim | None = None
     try:
         task = lock_task_for_transition(session, task_id)
         if task is None:
@@ -809,6 +1001,7 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
         if _task_is_terminal(task) or task.status == "pending_approval":
             session.rollback()
             return task
+        started_new_attempt = False
         if task.status == "running":
             if not _running_attempt_is_incomplete(session, task):
                 session.rollback()
@@ -824,24 +1017,74 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
                 "Agent office task execution started.",
             )
             session.flush()
+            started_new_attempt = True
         else:
             session.rollback()
             return task
-        if (
-            task.requires_human_approval
-            and task.approval_policy == "before_execution"
-            and task.approved_by_id is None
-        ):
-            raise ValueError("Task requires human approval before execution")
-        user = task.requested_by or task.approved_by
-        if user is None or not user.is_active:
-            raise ValueError("Task has no user context for RBAC execution")
 
-        result = execute_task_body(session, user, task)
+        if started_new_attempt:
+            # Persist the attempt before invoking execute_tool.  If that call
+            # rolls its transaction back, the audit history still records a
+            # single durable started -> failed sequence.  Reacquiring the row
+            # lock here is mandatory: every DB-local mutator keeps this lock
+            # through its effect, authorization ledger and terminal event.
+            session.commit()
+            task = lock_task_for_transition(session, task_id)
+            if task is None:
+                raise ValueError(f"Agent office task not found: {task_id}")
+            if task.status != "running":
+                session.rollback()
+                return task
+        user = _task_execution_user(task)
+
+        prepared_embedding: PreparedOrdinanceSearchEmbedding | None = None
+        if task.requested_action in EXTERNAL_READ_ACTIONS:
+            external_claim = _claim_external_read_action(session, user, task)
+            if external_claim is None:
+                # Another worker owns a live durable claim.  It will finalize
+                # the task; this worker must not duplicate the provider call.
+                session.rollback()
+                return task
+            session.commit()
+
+            # No Session operation occurs between this commit and the next
+            # FOR UPDATE.  In particular, the embeddings HTTP request cannot
+            # retain a transaction, row lock or advisory lock.
+            prepared_embedding = prepare_ordinance_search_embedding(
+                external_claim.tool_input
+            )
+
+            task = lock_task_for_transition(session, task_id)
+            if task is None:
+                raise ValueError(f"Agent office task not found: {task_id}")
+            if task.status != "running" or not _external_read_claim_is_current(
+                session,
+                task,
+                external_claim,
+            ):
+                # Human cancellation or a later recovery claim wins.  The
+                # read-only provider result is intentionally discarded.
+                session.rollback()
+                return task
+            user = _task_execution_user(task)
+
+        result = execute_task_body(
+            session,
+            user,
+            task,
+            prepared_ordinance_embedding=prepared_embedding,
+        )
         task = lock_task_for_transition(session, task_id)
         if task is None:
             raise ValueError(f"Agent office task not found: {task_id}")
-        if task.status == "cancelled":
+        if task.status != "running" or (
+            external_claim is not None
+            and not _external_read_claim_is_current(
+                session,
+                task,
+                external_claim,
+            )
+        ):
             session.rollback()
             return task
         task.result_json = json.dumps(result, ensure_ascii=False)
@@ -871,6 +1114,18 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
     except Exception as error:
         session.rollback()
         task = lock_task_for_transition(session, task_id)
+        if (
+            task is not None
+            and task.status == "running"
+            and external_claim is not None
+            and not _external_read_claim_is_current(
+                session,
+                task,
+                external_claim,
+            )
+        ):
+            session.rollback()
+            return task
         if task is not None and not _task_is_terminal(task):
             task.status = "failed"
             task.error_message = str(error)[:2000]
