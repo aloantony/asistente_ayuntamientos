@@ -368,6 +368,8 @@ def execute_realtime_tool_call(
             "input": tool_input,
             "result": result.content[:MAX_TOOL_RESULT_CHARS],
         }
+        if result.ui_action is not None:
+            action["ui_action"] = result.ui_action
 
         confirmation_context = _confirmation_context_from_result(guarded_result)
         locked_conversation = lock_conversation_for_confirmation(

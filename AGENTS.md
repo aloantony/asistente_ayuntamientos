@@ -138,6 +138,53 @@ and do not require the runtime lease.
 - Frontend changes should run the relevant lint/build checks.
 - Never claim tests passed without real command output.
 
+## Assistant embedded-surface review
+
+Every task that adds or materially changes a user-facing workflow, screen,
+module, or entity detail must explicitly evaluate whether that functionality
+should also be available inside the assistant's embedded-window system.
+
+Before handoff, classify the functionality as one of:
+
+- `embed now`: it should be exposed in the assistant as part of this task;
+- `embed later`: it is a valid candidate, but a named dependency or product
+  decision prevents including it safely in the current scope;
+- `not embeddable`: embedding would not improve the workflow or would create an
+  unjustified security, usability, or maintenance cost.
+
+Record the classification and a short reason in the task handoff or PR. A
+classification is required even when no embedded-view code changes.
+
+Use these criteria during the review:
+
+- the user benefits from continuing the conversation while viewing or editing
+  the functionality;
+- the view has bounded, structured context such as an organization, project,
+  requirement, or other internal entity ID;
+- the existing APIs, authorization rules, and tenant isolation can be reused;
+- the workflow remains usable in the desktop dialog and full-screen mobile
+  presentation;
+- opening or replaying the view can be made deterministic and idempotent.
+
+For `embed now` work:
+
+- extend the closed `open_app_view` surface/context contract in
+  `backend/app/assistant/tools.py` and the strict frontend registry/parser in
+  `frontend/app/lib/assistantAppViews.ts`;
+- prefer extending an existing surface context over creating a nearly
+  duplicate surface;
+- mount reusable application components inside
+  `AssistantEmbeddedWindow`; never execute model-provided HTML, component
+  names, paths, or URLs, and do not introduce an iframe escape hatch;
+- enforce RBAC, organization isolation, and referenced-entity visibility in
+  the backend. A UI descriptor never grants access by itself;
+- preserve `call_id`/action identity across text SSE and realtime, suppress
+  stale-turn openings, avoid reopening historical actions automatically, and
+  keep only bounded, sanitized view context for conversational continuity;
+- cover allowed and denied access, malformed context, persistence/replay,
+  idempotency, and relevant desktop/mobile behavior with tests or explicit
+  verification.
+
 ## Database migration safety
 
 - Treat every Alembic revision applied to a persistent database as immutable. Never delete, rename or rewrite it; reconcile mistakes with a successor revision.

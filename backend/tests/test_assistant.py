@@ -222,6 +222,7 @@ def test_status_exposes_single_assistant_contract_and_filtered_tools(
     tool_names = {tool["name"] for tool in body["tools"]}
     assert "create_requirement" in tool_names
     assert "list_requirements" in tool_names
+    assert "open_app_view" in tool_names
     assert "web_search" not in tool_names
 
 
@@ -1142,6 +1143,80 @@ def test_realtime_read_tool_replays_calls_and_persists_server_actions(
     assert json.loads(stored_messages[-1].actions or "[]") == [tool_body["action"]]
 
 
+def test_realtime_open_app_view_replays_same_structured_ui_action(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Inventario de caminos",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Abre el inventario de caminos",
+    )
+    assert started.status_code == 200
+    arguments = {
+        "surface": "requirements",
+        "requirement_id": requirement.id,
+    }
+
+    first = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_open_realtime",
+        name="open_app_view",
+        arguments=arguments,
+    )
+    replay = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_open_realtime",
+        name="open_app_view",
+        arguments=arguments,
+    )
+
+    assert first.status_code == 200
+    body = first.json()
+    assert body["ok"] is True
+    assert body["replayed"] is False
+    assert body["action"]["call_id"] == "call_open_realtime"
+    assert body["action"]["ui_action"] == json.loads(body["output"])
+    assert body["action"]["ui_action"]["surface"] == "requirements"
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert replay.json()["action"] == body["action"]
+
+    completed = post_realtime_turn_complete(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        response_id=f"response-{turn_id}",
+        assistant_text="He abierto la necesidad.",
+    )
+    assert completed.status_code == 200
+    assert completed.json()["assistant_message"]["actions"] == [body["action"]]
+
+
 def test_realtime_tool_exception_is_cached_as_indeterminate(
     client,
     db,
@@ -1949,6 +2024,7 @@ def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
         assert mutation_calls == []
         assert json.loads(normal_reply.actions or "[]") == [
             {
+                "call_id": "stale-mutation",
                 "tool": "test_mutation",
                 "ok": False,
                 "input": {},
@@ -2205,6 +2281,250 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     assert assistant_message["actions"][0]["ok"] is True
     assert len(gateway.calls) == 2
     assert gateway.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+def test_open_app_view_persists_structured_ui_action(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Renovar el alumbrado",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_open_requirement",
+                            "open_app_view",
+                            {
+                                "surface": "requirements",
+                                "requirement_id": requirement.id,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He abierto la necesidad para revisarla.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Abre la necesidad"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    action = response.json()["messages"][-1]["actions"][0]
+    assert action["call_id"] == "call_open_requirement"
+    assert action["tool"] == "open_app_view"
+    assert action["ok"] is True
+    assert action["ui_action"] == json.loads(action["result"])
+    assert action["ui_action"]["type"] == "ui.open_embedded"
+    assert action["ui_action"]["version"] == 1
+    assert action["ui_action"]["surface"] == "requirements"
+    assert action["ui_action"]["context"] == {
+        "requirement_id": requirement.id,
+        "organization_id": organization.id,
+    }
+    assert action["ui_action"]["id"]
+
+
+def test_open_app_view_rejects_missing_permission_and_hidden_target(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Organización del usuario")
+    grant_permissions(user, organization, ["assistant.use"])
+
+    denied = assistant_tools.execute_tool(
+        db,
+        user,
+        "open_app_view",
+        {"surface": "requirements"},
+        allowed=frozenset({"open_app_view"}),
+    )
+
+    assert denied.ok is False
+    assert denied.ui_action is None
+    assert "Permission required: requirements.view" in denied.content
+
+    arbitrary_url = assistant_tools.execute_tool(
+        db,
+        user,
+        "open_app_view",
+        {"surface": "map", "url": "https://example.invalid"},
+        allowed=frozenset({"open_app_view"}),
+    )
+    assert arbitrary_url.ok is False
+    assert arbitrary_url.ui_action is None
+    assert arbitrary_url.content == "Entrada inválida: parámetros no admitidos: url"
+
+    other_organization = make_organization(name="Organización ajena")
+    hidden_requirement = Requirement(
+        organization_id=other_organization.id,
+        title="Necesidad reservada",
+    )
+    db.add(hidden_requirement)
+    db.commit()
+
+    hidden = assistant_tools.execute_tool(
+        db,
+        user,
+        "open_app_view",
+        {
+            "surface": "requirements",
+            "requirement_id": hidden_requirement.id,
+        },
+        allowed=frozenset({"open_app_view"}),
+    )
+
+    assert hidden.ok is False
+    assert hidden.ui_action is None
+    assert hidden.content == "Error (404): App view target not found"
+
+
+def test_open_app_view_limits_server_derived_title_to_frontend_contract(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Organización con vista")
+    grant_permissions(
+        user,
+        organization,
+        ["assistant.use", "requirements.view"],
+    )
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="x" * 255,
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "open_app_view",
+        {"surface": "requirements", "requirement_id": requirement.id},
+        allowed=frozenset({"open_app_view"}),
+    )
+
+    assert result.ok is True
+    assert result.ui_action is not None
+    assert result.ui_action["title"].startswith("Necesidad · ")
+    assert len(result.ui_action["title"]) == 255
+
+
+def test_stale_read_only_ui_action_is_not_executed(
+    db,
+    assistant_user,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    conversation = AssistantConversation(
+        title="Acción visual desactualizada",
+        status="active",
+        channel="web",
+        created_by=user,
+    )
+    stale_message = AssistantMessage(
+        conversation=conversation,
+        role="user",
+        content="Abre el mapa anterior",
+    )
+    latest_message = AssistantMessage(
+        conversation=conversation,
+        role="user",
+        content="Mejor abre otra cosa",
+    )
+    db.add_all([conversation, stale_message, latest_message])
+    db.commit()
+    calls: list[str] = []
+
+    def execute_ui_action(*args, **kwargs):
+        calls.append("executed")
+        return assistant_tools.ToolResult(
+            content='{"type":"ui.open_embedded"}',
+            ok=True,
+            ui_action={"type": "ui.open_embedded"},
+        )
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", execute_ui_action)
+    tool = assistant_tools.ToolSpec(
+        name="open_app_view",
+        label="Abrir ventana",
+        description="Abre una ventana interna.",
+        input_schema={"type": "object", "properties": {}},
+        executor=lambda *args, **kwargs: {},
+        read_only=True,
+        domain="navigation",
+        emits_ui_action=True,
+    )
+
+    result = assistant_turn._execute_tool_for_current_turn(
+        db=db,
+        current_user=user,
+        conversation=conversation,
+        user_message=stale_message,
+        tool=tool,
+        tool_name="open_app_view",
+        tool_input={"surface": "map"},
+        context=assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=stale_message.id,
+        ),
+        allowed=frozenset({"open_app_view"}),
+    )
+
+    assert calls == []
+    assert result.ok is False
+    assert result.ui_action is None
+    assert result.content == assistant_turn.STALE_MUTATING_TOOL_RESULT
+
+    current_result = assistant_turn._execute_tool_for_current_turn(
+        db=db,
+        current_user=user,
+        conversation=conversation,
+        user_message=latest_message,
+        tool=tool,
+        tool_name="open_app_view",
+        tool_input={"surface": "map"},
+        context=assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=latest_message.id,
+        ),
+        allowed=frozenset({"open_app_view"}),
+    )
+
+    assert calls == ["executed"]
+    assert current_result.ok is True
+    assert current_result.ui_action == {"type": "ui.open_embedded"}
+    assert db.in_transaction() is False
 
 
 def get_conversation_state(db, conversation_id: int) -> dict:
@@ -3795,6 +4115,63 @@ def test_history_is_capped(monkeypatch, db, assistant_user):
     ]
 
 
+def test_history_keeps_sanitized_latest_embedded_view_context(
+    monkeypatch,
+    db,
+    assistant_user,
+):
+    user, _ = assistant_user
+    conversation = AssistantConversation(title="Conversación", created_by_id=user.id)
+    db.add(conversation)
+    db.flush()
+    db.add(
+        AssistantMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="He abierto la necesidad.",
+            actions=json.dumps(
+                [
+                    {
+                        "tool": "open_app_view",
+                        "ok": True,
+                        "ui_action": {
+                            "type": "ui.open_embedded",
+                            "version": 1,
+                            "surface": "requirements",
+                            "title": "Texto que no entra en contexto",
+                            "context": {
+                                "organization_id": 7,
+                                "requirement_id": 42,
+                                "url": "https://example.invalid/no-debe-aparecer",
+                            },
+                        },
+                    }
+                ]
+            ),
+        )
+    )
+    db.add(
+        AssistantMessage(
+            conversation_id=conversation.id,
+            role="user",
+            content="Ya lo corregí, revísalo.",
+        )
+    )
+    db.commit()
+    db.refresh(conversation)
+    monkeypatch.setattr(settings, "assistant_history_max_messages", 2)
+
+    history = build_history(conversation)
+
+    latest_content = history[-1]["content"]
+    assert latest_content.startswith("Ya lo corregí, revísalo.")
+    assert '"surface":"requirements"' in latest_content
+    assert '"organization_id":7' in latest_content
+    assert '"requirement_id":42' in latest_content
+    assert "example.invalid" not in latest_content
+    assert "Texto que no entra" not in latest_content
+
+
 def test_sse_stream_emits_deltas_tool_activity_and_done(
     client,
     assistant_user,
@@ -3847,12 +4224,78 @@ def test_sse_stream_emits_deltas_tool_activity_and_done(
         "done",
     ]
     assert events[1]["data"]["status"] == "started"
+    assert events[1]["data"]["call_id"] == "call_1"
     assert events[2]["data"]["status"] == "finished"
+    assert events[2]["data"]["call_id"] == "call_1"
     assert events[2]["data"]["ok"] is True
     assert events[3]["data"]["text"] == "Respuesta "
     assert events[-1]["data"]["message"]["content"] == "Respuesta final."
     assert events[-1]["data"]["message"]["agent_key"] == "anacleto"
+    assert events[-1]["data"]["message"]["actions"][0]["call_id"] == "call_1"
     assert len(gateway.calls) == 2
+
+
+def test_sse_open_app_view_emits_same_ui_action_as_done(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Plan de accesibilidad",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.commit()
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_open_sse",
+                            "open_app_view",
+                            {
+                                "surface": "requirements",
+                                "requirement_id": requirement.id,
+                            },
+                        )
+                    ],
+                ),
+                fake_response("end_turn", [text_block("Vista abierta.")]),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Muéstrame la necesidad"},
+        headers=headers_for(user),
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    events = parse_sse(body)
+    finished = next(
+        event
+        for event in events
+        if event["event"] == "tool_activity"
+        and event["data"]["status"] == "finished"
+    )
+    done = next(event for event in events if event["event"] == "done")
+    assert finished["data"]["call_id"] == "call_open_sse"
+    assert finished["data"]["ui_action"] == done["data"]["message"]["actions"][0][
+        "ui_action"
+    ]
 
 
 def test_sse_precondition_errors_are_http(client, assistant_user, use_gateway):

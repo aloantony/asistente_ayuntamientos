@@ -13,6 +13,7 @@ import {
   MapPin,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightOpen,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -23,6 +24,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -38,7 +40,12 @@ import {
   type AssistantVoiceState,
   type User,
 } from "./types";
+import {
+  getAssistantAppViewFromAction,
+  type AssistantAppView,
+} from "../lib/assistantAppViews";
 import { createBargeInDetector, createSilenceDetector } from "../lib/voice";
+import { AssistantEmbeddedWindow } from "./AssistantEmbeddedWindow";
 
 // Ask the browser for echo cancellation / noise suppression so the mic stays
 // usable while the assistant is speaking (barge-in without hearing itself) and
@@ -300,6 +307,9 @@ function parseActionResult(result: string): ParsedActionResult {
 }
 
 function getActionIcon(tool: string): LucideIcon {
+  if (tool === "open_app_view") {
+    return PanelRightOpen;
+  }
   if (tool === "get_map_items") {
     return MapPin;
   }
@@ -325,6 +335,10 @@ function getActionSummary(action: AssistantAction) {
 
   if (!action.ok) {
     return "La herramienta devolvio un error.";
+  }
+
+  if (action.tool === "open_app_view") {
+    return "Ventana interactiva preparada.";
   }
 
   const parsed = parseActionResult(action.result);
@@ -429,6 +443,41 @@ function AssistantMapActions({ actions }: { actions: AssistantAction[] }) {
           </span>
           <em>Ver en mapa</em>
         </a>
+      ))}
+    </div>
+  );
+}
+
+function AssistantAppViewActions({
+  actions,
+  onOpen,
+}: {
+  actions: AssistantAction[];
+  onOpen: (view: AssistantAppView, trigger: HTMLButtonElement) => void;
+}) {
+  const views = actions.flatMap((action) => {
+    const view = getAssistantAppViewFromAction(action);
+    return view ? [view] : [];
+  });
+  if (views.length === 0) {
+    return null;
+  }
+  return (
+    <div className="assistant-app-view-actions" aria-label="Vistas de la aplicación">
+      {views.map((view) => (
+        <button
+          className="assistant-app-view-card"
+          key={view.id}
+          onClick={(event) => onOpen(view, event.currentTarget)}
+          type="button"
+        >
+          <PanelRightOpen aria-hidden="true" size={17} />
+          <span>
+            <strong>{view.title}</strong>
+            <small>Funcionalidad interactiva de la aplicación</small>
+          </span>
+          <em>Abrir ventana</em>
+        </button>
       ))}
     </div>
   );
@@ -671,6 +720,12 @@ export function AssistantPanel({
     null,
   );
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [activeAppView, setActiveAppView] = useState<AssistantAppView | null>(
+    null,
+  );
+  const appViewReturnFocusRef = useRef<HTMLButtonElement | null>(null);
+  const autoOpenConversationIdRef = useRef<number | null>(null);
+  const seenAppViewIdsRef = useRef(new Set<string>());
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const silenceDetectorRef = useRef<ReturnType<typeof createSilenceDetector> | null>(
@@ -713,6 +768,36 @@ export function AssistantPanel({
       speechSupported);
   const voiceCaptureAvailable = realtimeVoiceAvailable || speechTranscriptionEnabled;
   const useRealtimeVoice = voiceModeEnabled && realtimeVoiceAvailable;
+  const availableAppViews = useMemo(
+    () =>
+      selectedConversation?.messages.flatMap((message) =>
+        message.actions.flatMap((action) => {
+          const view = getAssistantAppViewFromAction(action);
+          return view ? [view] : [];
+        }),
+      ) ?? [],
+    [selectedConversation?.messages],
+  );
+  const openAppView = useCallback(
+    (view: AssistantAppView, trigger: HTMLButtonElement | null = null) => {
+      appViewReturnFocusRef.current = trigger;
+      seenAppViewIdsRef.current.add(view.id);
+      setActiveAppView(view);
+    },
+    [],
+  );
+  const closeAppView = useCallback(() => {
+    const returnFocus = appViewReturnFocusRef.current;
+    appViewReturnFocusRef.current = null;
+    setActiveAppView(null);
+    window.requestAnimationFrame(() => {
+      if (returnFocus?.isConnected) {
+        returnFocus.focus({ preventScroll: true });
+      } else {
+        messageTextareaRef.current?.focus({ preventScroll: true });
+      }
+    });
+  }, []);
   const voiceStatus = (() => {
     if (voiceState === "connecting") {
       return "Conectando voz…";
@@ -774,6 +859,26 @@ export function AssistantPanel({
   useEffect(() => {
     draftMessageRef.current = draftMessage;
   }, [draftMessage]);
+
+  useEffect(() => {
+    const conversationId = selectedConversation?.id ?? null;
+    if (autoOpenConversationIdRef.current !== conversationId) {
+      autoOpenConversationIdRef.current = conversationId;
+      seenAppViewIdsRef.current = new Set(
+        availableAppViews.map((view) => view.id),
+      );
+      appViewReturnFocusRef.current = null;
+      setActiveAppView(null);
+      return;
+    }
+
+    const newView = availableAppViews.find(
+      (view) => !seenAppViewIdsRef.current.has(view.id),
+    );
+    if (newView) {
+      openAppView(newView);
+    }
+  }, [availableAppViews, openAppView, selectedConversation?.id]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -1957,6 +2062,10 @@ export function AssistantPanel({
                           )}
                         </div>
                         <AssistantMapActions actions={message.actions} />
+                        <AssistantAppViewActions
+                          actions={message.actions}
+                          onOpen={openAppView}
+                        />
                         {message.actions.length > 0 ? (
                           <ActionTimeline
                             actions={message.actions}
@@ -2184,6 +2293,15 @@ export function AssistantPanel({
         </main>
 
       </div>
+
+      {activeAppView ? (
+        <AssistantEmbeddedWindow
+          key={activeAppView.id}
+          currentUser={currentUser}
+          onRequestClose={closeAppView}
+          view={activeAppView}
+        />
+      ) : null}
 
       {conversationContextMenu ? (
         <div
