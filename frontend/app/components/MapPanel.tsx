@@ -12,6 +12,11 @@ import { userHasPermission } from "./types";
 
 type MapPanelProps = {
   user: User;
+  embeddedContext?: {
+    organizationId?: number;
+    entityType?: GeoEntityType;
+    entityId?: number;
+  };
 };
 
 type EntityTypeFilter = "all" | GeoEntityType;
@@ -101,7 +106,7 @@ function defaultOrganizationId(user: User) {
   return user.organizations?.[0]?.id ? String(user.organizations[0].id) : "";
 }
 
-export function MapPanel({ user }: MapPanelProps) {
+export function MapPanel({ user, embeddedContext }: MapPanelProps) {
   const searchParams = useSearchParams();
   const { getStoredToken, handleRequestError } = useSession();
   const [entityType, setEntityType] = useState<EntityTypeFilter>("all");
@@ -132,8 +137,11 @@ export function MapPanel({ user }: MapPanelProps) {
   const canCreateRequirements =
     canEditMap && userHasPermission(user, "requirements.create");
   const canCreateProjects = canEditMap && userHasPermission(user, "projects.create");
-  const focusedEntityType = parseEntityTypeParam(searchParams.get("entity_type"));
-  const focusedEntityId = parseNumberParam(searchParams.get("entity_id"));
+  const focusedEntityType =
+    embeddedContext?.entityType ??
+    parseEntityTypeParam(searchParams.get("entity_type"));
+  const focusedEntityId =
+    embeddedContext?.entityId ?? parseNumberParam(searchParams.get("entity_id"));
   const focusedLatitude = parseNumberParam(searchParams.get("lat"));
   const focusedLongitude = parseNumberParam(searchParams.get("lng"));
   const focusedZoom = parseNumberParam(searchParams.get("zoom"));
@@ -159,6 +167,9 @@ export function MapPanel({ user }: MapPanelProps) {
       params.set("entity_type", focusedEntityType);
       params.set("entity_id", String(focusedEntityId));
     }
+    if (embeddedContext?.organizationId) {
+      params.set("organization_id", String(embeddedContext.organizationId));
+    }
     if (status.trim()) {
       params.set("status", status.trim());
     }
@@ -167,7 +178,14 @@ export function MapPanel({ user }: MapPanelProps) {
     }
     params.set("limit", "500");
     return params;
-  }, [entityType, focusedEntityId, focusedEntityType, includeArchived, status]);
+  }, [
+    embeddedContext?.organizationId,
+    entityType,
+    focusedEntityId,
+    focusedEntityType,
+    includeArchived,
+    status,
+  ]);
 
   useEffect(() => {
     if (!canViewMap) {
@@ -298,7 +316,9 @@ export function MapPanel({ user }: MapPanelProps) {
       kind,
       latitude: mapContextMenu.latitude,
       longitude: mapContextMenu.longitude,
-      organizationId: defaultOrganizationId(user),
+      organizationId: embeddedContext?.organizationId
+        ? String(embeddedContext.organizationId)
+        : defaultOrganizationId(user),
       title: "",
       description: "",
     });
@@ -325,6 +345,15 @@ export function MapPanel({ user }: MapPanelProps) {
     const organizationId = Number.parseInt(registrationDraft.organizationId, 10);
     if (!Number.isInteger(organizationId)) {
       setRegistrationError("Selecciona la organización municipal.");
+      return;
+    }
+    if (
+      embeddedContext?.organizationId !== undefined &&
+      organizationId !== embeddedContext.organizationId
+    ) {
+      setRegistrationError(
+        "La organización debe coincidir con la vista del mapa abierta.",
+      );
       return;
     }
     const title = registrationDraft.title.trim();
@@ -393,11 +422,18 @@ export function MapPanel({ user }: MapPanelProps) {
         },
       });
 
-      setItems((currentItems) => [
-        mapItem,
-        ...currentItems.filter((item) => getItemKey(item) !== getItemKey(mapItem)),
-      ]);
-      setSelectedItem(mapItem);
+      const belongsToEmbeddedContext =
+        embeddedContext?.organizationId === undefined ||
+        mapItem.location.organization_id === embeddedContext.organizationId;
+      if (belongsToEmbeddedContext) {
+        setItems((currentItems) => [
+          mapItem,
+          ...currentItems.filter(
+            (item) => getItemKey(item) !== getItemKey(mapItem),
+          ),
+        ]);
+        setSelectedItem(mapItem);
+      }
       setManualFocusLocation({
         latitude: registrationDraft.latitude,
         longitude: registrationDraft.longitude,
@@ -535,7 +571,12 @@ export function MapPanel({ user }: MapPanelProps) {
                   <dd>{selectedItem.location.label}</dd>
                 </div>
               </dl>
-              <Link className="secondary-button map-detail-link" href={normalizeDetailPath(selectedItem)}>
+              <Link
+                className="secondary-button map-detail-link"
+                href={normalizeDetailPath(selectedItem)}
+                rel={embeddedContext ? "noreferrer" : undefined}
+                target={embeddedContext ? "_blank" : undefined}
+              >
                 Abrir {selectedItem.entity_type === "requirement" ? "necesidad" : "proyectos"}
               </Link>
             </>
@@ -657,6 +698,7 @@ export function MapPanel({ user }: MapPanelProps) {
               Organización
               <select
                 value={registrationDraft.organizationId}
+                disabled={embeddedContext?.organizationId !== undefined}
                 onChange={(event) =>
                   setRegistrationDraft({
                     ...registrationDraft,
@@ -665,6 +707,15 @@ export function MapPanel({ user }: MapPanelProps) {
                 }
               >
                 <option value="">Selecciona organización</option>
+                {embeddedContext?.organizationId !== undefined &&
+                !(user.organizations ?? []).some(
+                  (organization) =>
+                    organization.id === embeddedContext.organizationId,
+                ) ? (
+                  <option value={embeddedContext.organizationId}>
+                    Organización {embeddedContext.organizationId}
+                  </option>
+                ) : null}
                 {(user.organizations ?? []).map((organization) => (
                   <option key={organization.id} value={organization.id}>
                     {organization.name}

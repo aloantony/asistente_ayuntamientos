@@ -945,6 +945,7 @@ export function useAssistantController({
       return [
         ...actions,
         {
+          call_id: event.call_id,
           tool: event.tool,
           ok: false,
           input: event.input,
@@ -957,17 +958,24 @@ export function useAssistantController({
     const next = [...actions];
     let pendingIndex = -1;
     for (let index = next.length - 1; index >= 0; index -= 1) {
-      if (next[index].tool === event.tool && next[index].status === "started") {
+      if (
+        next[index].status === "started" &&
+        (event.call_id
+          ? next[index].call_id === event.call_id
+          : next[index].tool === event.tool)
+      ) {
         pendingIndex = index;
         break;
       }
     }
     const finishedAction: AssistantAction = {
+      call_id: event.call_id,
       tool: event.tool,
       ok: Boolean(event.ok),
       input: event.input,
       result: event.result ?? "",
       status: "finished",
+      ui_action: event.ui_action,
     };
     if (pendingIndex >= 0) {
       next[pendingIndex] = finishedAction;
