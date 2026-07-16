@@ -19,7 +19,10 @@ import {
 } from "../lib/geo";
 import { useSession } from "../lib/session";
 import { AssetMaintenancePanel } from "./AssetMaintenancePanel";
-import { MunicipalityMapDirectory } from "./MunicipalityMapDirectory";
+import {
+  MunicipalityMapDirectory,
+  type MunicipalityMapFocus,
+} from "./MunicipalityMapDirectory";
 import {
   MunicipalMap,
   type MapBaseLayer,
@@ -61,6 +64,7 @@ type LayeredGeoMapItem = GeoMapItem & {
 };
 
 const MAP_PREFERENCES_KEY = "municipal-map-preferences-v1";
+const MUNICIPAL_CAPITAL_ZOOM = 14;
 const MAP_LAYER_COLORS: Record<GeoEntityType, string> = {
   requirement: "#c0603a",
   project: "#2f74d0",
@@ -1463,6 +1467,13 @@ export function MapPanel({ user }: MapPanelProps) {
       })()
     : null;
 
+  function handleViewMunicipalityOnMap(location: MunicipalityMapFocus) {
+    setManualFocusLocation(location);
+    setManualFocusZoom(MUNICIPAL_CAPITAL_ZOOM);
+    setSelectedItem(null);
+    setActiveView("territory");
+  }
+
   if (!canViewMap && !canViewMunicipalities) {
     return (
       <section className="panel map-panel">
@@ -1519,7 +1530,10 @@ export function MapPanel({ user }: MapPanelProps) {
       </div>
 
       {activeView === "municipalities" ? (
-        <MunicipalityMapDirectory user={user} />
+        <MunicipalityMapDirectory
+          user={user}
+          onViewOnMap={canViewMap ? handleViewMunicipalityOnMap : undefined}
+        />
       ) : (
         <>
 

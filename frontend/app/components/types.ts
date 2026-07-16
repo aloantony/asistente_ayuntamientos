@@ -90,9 +90,54 @@ export type MunicipalitySummary = {
   autonomous_community: string;
 };
 
+export type ReferenceDatasetVersion = {
+  dataset_key: string;
+  title: string;
+  version_label: string;
+  reference_date: string;
+  catalog_url: string;
+  download_url: string;
+  member_name: string;
+  archive_sha256: string;
+  content_sha256: string;
+  license_name: string;
+  license_url: string;
+  attribution: string;
+  retrieved_at: string;
+  national_row_count: number;
+  target_row_count: number;
+};
+
+export type MunicipalityOfficialGeography = {
+  source_municipality_code: string;
+  relationship_id: number;
+  geographic_code: string;
+  source_province_code: string;
+  source_province_name: string;
+  source_municipality_name: string;
+  source_population: number;
+  surface_km2: number;
+  perimeter_m: number;
+  capital_ine_code: string;
+  capital_name: string;
+  capital_population: number;
+  mtn25_sheet: string;
+  longitude: number;
+  latitude: number;
+  coordinate_origin: string;
+  altitude_m: number;
+  altitude_origin: string;
+  crs: string;
+  dataset_version: ReferenceDatasetVersion;
+};
+
 export type Municipality = MunicipalitySummary & {
   country: string;
   ine_code: string | null;
+  ine_check_digit: string | null;
+  directory_reference_date: string | null;
+  directory_source_url: string | null;
+  directory_source_sha256: string | null;
   population: number | null;
   population_reference_year: number | null;
   population_source_url: string | null;
@@ -107,6 +152,7 @@ export type Municipality = MunicipalitySummary & {
   geographic_notes: string | null;
   administrative_notes: string | null;
   status: MunicipalityStatus;
+  official_geography?: MunicipalityOfficialGeography | null;
   created_at: string;
   updated_at: string;
 };

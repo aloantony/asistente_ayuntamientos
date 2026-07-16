@@ -761,10 +761,12 @@ export function MunicipalMap({
       const coordinates: [number, number] = [focusLatitude, focusLongitude];
       focusMarkerRef.current = L.circleMarker(coordinates, {
         className: "municipal-map-focus-ring",
-        color: "transparent",
-        fillColor: "transparent",
+        color: "#3caf8c",
+        fillColor: "#3caf8c",
+        fillOpacity: 0.16,
+        opacity: 0.92,
         radius: 22,
-        weight: 0,
+        weight: 4,
       })
         .addTo(map)
         .bindPopup(

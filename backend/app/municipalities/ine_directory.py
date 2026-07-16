@@ -13,6 +13,7 @@ import io
 import json
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -77,7 +78,7 @@ class IneDirectoryError(ValueError):
 @dataclass(frozen=True)
 class IneDirectorySourceSpec:
     year: int
-    reference_date: str
+    reference_date: date
     workbook_url: str
     title: str
     headers: tuple[str, ...]
@@ -90,7 +91,7 @@ class IneDirectorySourceSpec:
 INE_DIRECTORY_SOURCE_SPECS = {
     2026: IneDirectorySourceSpec(
         year=2026,
-        reference_date="2026-01-01",
+        reference_date=date(2026, 1, 1),
         workbook_url=(
             "https://www.ine.es/daco/daco42/codmun/diccionario26.xlsx"
         ),
@@ -128,7 +129,7 @@ class IneDirectoryRecord:
 
 @dataclass(frozen=True)
 class DirectoryProvenance:
-    reference_date: str
+    reference_date: date
     source_url: str
     source_sha256: str
 
@@ -186,7 +187,7 @@ class DirectorySyncPlan:
             "ok": not self.blocking_issues,
             "mode": "apply" if applied else "dry-run",
             "directory_source": {
-                "reference_date": self.directory_provenance.reference_date,
+                "reference_date": self.directory_provenance.reference_date.isoformat(),
                 "url": self.directory_provenance.source_url,
                 "sha256": self.directory_provenance.source_sha256,
                 "rows": self.source_rows,
@@ -616,6 +617,10 @@ def build_directory_sync_plan(
             "autonomous_community": CASTILLA_Y_LEON_NAME,
             "country": COUNTRY_NAME,
             "ine_code": ine_code,
+            "ine_check_digit": record.check_digit,
+            "directory_reference_date": directory_provenance.reference_date,
+            "directory_source_url": directory_provenance.source_url,
+            "directory_source_sha256": directory_provenance.source_sha256,
             "population": population.population,
             "population_reference_year": population_provenance.reference_year,
             "population_source_url": population_provenance.source_url,

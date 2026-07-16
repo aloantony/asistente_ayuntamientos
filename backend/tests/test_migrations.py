@@ -15,7 +15,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260716_0025"
+HEAD_REVISION = "20260716_0026"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -32,6 +32,66 @@ POPULATION_PROVENANCE_CHECKS = {
     "ck_municipalities_population_source_url",
     "ck_municipalities_population_source_sha256",
 }
+DIRECTORY_PROVENANCE_COLUMNS = {
+    "ine_check_digit",
+    "directory_reference_date",
+    "directory_source_url",
+    "directory_source_sha256",
+}
+DIRECTORY_PROVENANCE_CHECKS = {
+    "ck_municipalities_directory_provenance_complete",
+    "ck_municipalities_ine_check_digit",
+    "ck_municipalities_directory_has_ine_code",
+    "ck_municipalities_directory_source_url",
+    "ck_municipalities_directory_source_sha256",
+}
+REFERENCE_DATASET_COLUMNS = {
+    "id",
+    "dataset_key",
+    "title",
+    "version_label",
+    "reference_date",
+    "catalog_url",
+    "download_url",
+    "member_name",
+    "archive_sha256",
+    "content_sha256",
+    "license_name",
+    "license_url",
+    "attribution",
+    "retrieved_at",
+    "national_row_count",
+    "target_row_count",
+    "created_at",
+    "updated_at",
+}
+MUNICIPALITY_GEOGRAPHY_COLUMNS = {
+    "id",
+    "municipality_id",
+    "dataset_version_id",
+    "is_current",
+    "source_municipality_code",
+    "relationship_id",
+    "geographic_code",
+    "source_province_code",
+    "source_province_name",
+    "source_municipality_name",
+    "source_population",
+    "surface_km2",
+    "perimeter_m",
+    "capital_ine_code",
+    "capital_name",
+    "capital_population",
+    "mtn25_sheet",
+    "longitude",
+    "latitude",
+    "coordinate_origin",
+    "altitude_m",
+    "altitude_origin",
+    "crs",
+    "created_at",
+    "updated_at",
+}
 
 
 def assert_pgvector_extension(engine: Engine) -> None:
@@ -43,6 +103,43 @@ def assert_pgvector_extension(engine: Engine) -> None:
                 ")"
             )
         ).scalar_one() is True
+
+
+def assert_reference_geography_schema(inspector: Inspector) -> None:
+    municipality_columns = {
+        column["name"] for column in inspector.get_columns("municipalities")
+    }
+    municipality_checks = {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints("municipalities")
+    }
+    assert DIRECTORY_PROVENANCE_COLUMNS <= municipality_columns
+    assert DIRECTORY_PROVENANCE_CHECKS <= municipality_checks
+
+    assert {
+        column["name"]
+        for column in inspector.get_columns("reference_dataset_versions")
+    } == REFERENCE_DATASET_COLUMNS
+    assert {
+        column["name"]
+        for column in inspector.get_columns("municipality_geography_snapshots")
+    } == MUNICIPALITY_GEOGRAPHY_COLUMNS
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_dataset_versions")
+        if not index.get("duplicates_constraint")
+    } == {"ix_ref_datasets_key_reference_date"}
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("municipality_geography_snapshots")
+        if not index.get("duplicates_constraint")
+    } == {"ix_muni_geo_dataset_version_id", "uq_muni_geo_current"}
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "municipality_geography_snapshots"
+        )
+    } == {("municipality_id",), ("dataset_version_id",)}
 
 ASSET_INVENTORY_SCHEMA = {
     "municipal_asset_categories": {
@@ -762,6 +859,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_maintenance_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_reference_geography_schema(upgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -798,6 +896,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_maintenance_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_reference_geography_schema(reupgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -827,6 +926,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_reference_geography_schema(inspect(engine))
 
         run_alembic(migration_database_url, "downgrade", "20260713_0021")
         downgraded_inspector = inspect(engine)
@@ -848,6 +948,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_reference_geography_schema(inspect(engine))
     finally:
         engine.dispose()
 
@@ -959,6 +1060,199 @@ def test_population_provenance_migration_is_additive_and_reversible(
                 ),
                 {"municipality_id": municipality_id},
             ).scalar_one_or_none() is None
+    finally:
+        engine.dispose()
+
+
+def test_reference_geography_migration_from_0025_is_constrained_and_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community, ine_code,
+                        population
+                    ) VALUES (
+                        'Reference geography town', 'Ávila',
+                        'Castilla y León', '05001', 214
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        inspector = inspect(engine)
+        assert_reference_geography_schema(inspector)
+
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE municipalities
+                        SET ine_check_digit = '3'
+                        WHERE id = :municipality_id
+                        """
+                    ),
+                    {"municipality_id": municipality_id},
+                )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE municipalities
+                    SET ine_check_digit = '3',
+                        directory_reference_date = DATE '2026-01-01',
+                        directory_source_url =
+                            'https://www.ine.es/daco/daco42/codmun/diccionario26.xlsx',
+                        directory_source_sha256 = :source_sha256
+                    WHERE id = :municipality_id
+                    """
+                ),
+                {
+                    "municipality_id": municipality_id,
+                    "source_sha256": "a" * 64,
+                },
+            )
+            dataset_version_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_dataset_versions (
+                        dataset_key, title, version_label, reference_date,
+                        catalog_url, download_url, member_name,
+                        archive_sha256, content_sha256, license_name,
+                        license_url, attribution, retrieved_at,
+                        national_row_count, target_row_count
+                    ) VALUES (
+                        'ign_ngmep_municipalities', 'NGMEP', 'NGMEP 2026',
+                        DATE '2026-03-31', 'https://example.test/catalog',
+                        'https://example.test/download', 'MUNICIPIOS.csv',
+                        :archive_sha256, :content_sha256, 'CC BY 4.0',
+                        'https://creativecommons.org/licenses/by/4.0/',
+                        'IGN', TIMESTAMPTZ '2026-07-16 20:00:00+00',
+                        8132, 2248
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "archive_sha256": "b" * 64,
+                    "content_sha256": "c" * 64,
+                },
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO municipality_geography_snapshots (
+                        municipality_id, dataset_version_id,
+                        source_municipality_code, relationship_id,
+                        geographic_code, source_province_code,
+                        source_province_name, source_municipality_name,
+                        source_population, surface_km2, perimeter_m,
+                        capital_ine_code, capital_name, capital_population,
+                        mtn25_sheet, longitude, latitude, coordinate_origin,
+                        altitude_m, altitude_origin
+                    ) VALUES (
+                        :municipality_id, :dataset_version_id,
+                        '05001000000', 1050013, '05003', '05', 'Ávila',
+                        'Adanero', 214, 31.417781, 24382,
+                        '05001000101', 'Adanero', 214, '0481-2',
+                        -4.604007136, 40.943787890,
+                        'Detección automática', 908, 'MDT'
+                    )
+                    """
+                ),
+                {
+                    "municipality_id": municipality_id,
+                    "dataset_version_id": dataset_version_id,
+                },
+            )
+
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                second_dataset_id = connection.execute(
+                    text(
+                        """
+                        INSERT INTO reference_dataset_versions (
+                            dataset_key, title, version_label, reference_date,
+                            catalog_url, download_url, member_name,
+                            archive_sha256, content_sha256, license_name,
+                            license_url, attribution, retrieved_at,
+                            national_row_count, target_row_count
+                        ) VALUES (
+                            'ign_ngmep_municipalities', 'NGMEP', 'NGMEP 2027',
+                            DATE '2027-03-31', 'https://example.test/catalog',
+                            'https://example.test/download', 'MUNICIPIOS.csv',
+                            :archive_sha256, :content_sha256, 'CC BY 4.0',
+                            'https://creativecommons.org/licenses/by/4.0/',
+                            'IGN', TIMESTAMPTZ '2027-07-16 20:00:00+00',
+                            8132, 2248
+                        ) RETURNING id
+                        """
+                    ),
+                    {
+                        "archive_sha256": "d" * 64,
+                        "content_sha256": "e" * 64,
+                    },
+                ).scalar_one()
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO municipality_geography_snapshots (
+                            municipality_id, dataset_version_id,
+                            source_municipality_code, relationship_id,
+                            geographic_code, source_province_code,
+                            source_province_name, source_municipality_name,
+                            source_population, surface_km2, perimeter_m,
+                            capital_ine_code, capital_name, capital_population,
+                            mtn25_sheet, longitude, latitude,
+                            coordinate_origin, altitude_m, altitude_origin
+                        ) VALUES (
+                            :municipality_id, :dataset_version_id,
+                            '05001000000', 1050013, '05003', '05', 'Ávila',
+                            'Adanero', 214, 31.417781, 24382,
+                            '05001000101', 'Adanero', 214, '0481-2',
+                            -4.604007136, 40.943787890,
+                            'Detección automática', 908, 'MDT'
+                        )
+                        """
+                    ),
+                    {
+                        "municipality_id": municipality_id,
+                        "dataset_version_id": second_dataset_id,
+                    },
+                )
+
+        run_alembic(migration_database_url, "downgrade", "20260716_0025")
+        downgraded = inspect(engine)
+        assert {
+            "reference_dataset_versions",
+            "municipality_geography_snapshots",
+        }.isdisjoint(downgraded.get_table_names())
+        assert DIRECTORY_PROVENANCE_COLUMNS.isdisjoint(
+            {
+                column["name"]
+                for column in downgraded.get_columns("municipalities")
+            }
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT population FROM municipalities WHERE id = :municipality_id"
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one() == 214
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_geography_schema(inspect(engine))
     finally:
         engine.dispose()
 

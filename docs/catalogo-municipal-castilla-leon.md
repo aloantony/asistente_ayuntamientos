@@ -82,38 +82,62 @@ La carga completa los datos que las fuentes seleccionadas permiten afirmar con
 trazabilidad:
 
 - nombre oficial;
-- código INE;
+- código INE, dígito de control y procedencia completa del directorio;
 - provincia, comunidad autónoma y país;
 - tipo `municipality` y estado activo;
 - población total, año de referencia, URL de fuente y SHA-256;
-- densidad solo cuando ya existe una superficie válida.
+- superficie oficial IGN y densidad derivada con la población INE;
+- una instantánea NGMEP versionada con perímetro, identificadores `ID_REL` y
+  `COD_GEO`, población NGMEP de contraste y hoja MTN25;
+- capital municipal con código, nombre, población, longitud, latitud, altitud,
+  CRS y orígenes de coordenadas y altitud;
+- artefacto fuente con fecha de referencia y recuperación, URLs de catálogo y
+  descarga, hashes del ZIP y CSV, licencia y atribución.
 
-No se rellenan superficie, códigos postales, perfil rural/urbano, perfil
-económico, turismo ni notas mediante inferencias. El XLSX de población también
-ofrece hombres y mujeres, pero el modelo actual solo conserva el total; el
-informe del dry-run hace visible ese dato no almacenado.
+El punto NGMEP identifica el núcleo de población de la capitalidad; no es un
+centroide geométrico ni el límite del término municipal. La población municipal
+incluida en NGMEP se conserva dentro de su instantánea para auditoría, pero no
+sustituye la cifra INE canónica: en la versión revisada hay 1.245 diferencias.
+
+No se rellenan códigos postales, perfil rural/urbano, perfil económico, turismo
+ni notas mediante inferencias. El XLSX de población también ofrece hombres y
+mujeres, pero el modelo actual solo conserva el total; el informe del dry-run
+hace visible ese dato no almacenado.
+
+La geografía se carga con:
+
+```bash
+python -m app.municipalities.ngmep_geography
+python -m app.municipalities.ngmep_geography --apply
+```
+
+El primer comando es un dry-run. Ambos verifican los hashes fijados del ZIP y
+de `MUNICIPIOS.csv`, la cabecera, los 8.132 municipios nacionales, los 2.248 de
+Castilla y León y los nueve recuentos provinciales. El proceso casa únicamente
+por código INE, conserva versiones anteriores, bloquea una fuente más antigua o
+incoherente y es transaccional e idempotente.
 
 ## Evolución recomendada del backend
 
-La siguiente ampliación no debería consistir en añadir más columnas de texto
-libre a `municipalities`. Conviene modelar hechos fechados y con procedencia:
+La procedencia administrativa vigente y la geografía NGMEP ya están modeladas
+como datos oficiales verificables. Las siguientes ampliaciones tampoco deberían
+consistir en añadir más columnas de texto libre a `municipalities`:
 
 1. Una tabla de indicadores municipales con código de indicador, periodo,
    valor, unidad, dimensiones (por ejemplo sexo o edad), fuente y revisión. Así
    se conserva la serie histórica en vez de sobrescribir una única población.
-2. Procedencia administrativa del propio catálogo: fecha de referencia, URL,
-   hash, dígito de control, altas, bajas, cambios de nombre y alias históricos.
-3. Superficie oficial con fuente y fecha; la densidad debe ser derivada y no
-   editable de forma independiente.
-4. Centroide y límite municipal versionados en la capa geográfica existente,
-   con CRS y licencia. Una geometría oficial no debe mezclarse con ubicaciones
-   operativas creadas por usuarios.
-5. Códigos postales en una relación estructurada y temporal, no en un campo
+2. Historial administrativo de altas, bajas, cambios de nombre y alias. La
+   carga actual conserva la procedencia vigente, no todos los estados pasados.
+3. Límite municipal oficial versionado. El punto de capital ya está separado
+   de las ubicaciones operativas, pero no representa una geometría superficial.
+4. Códigos postales en una relación estructurada y temporal, no en un campo
    `Text`, porque un municipio puede tener varios y un código puede abarcar más
    de un ámbito.
-6. Directorio institucional (web, sede electrónica, DIR3 y contactos) con
+5. Directorio institucional (web, sede electrónica, DIR3 y contactos) con
    fuente y fecha de verificación; entidades locales menores y núcleos de
    población deben ser entidades relacionadas, no perfiles textuales.
+6. Mancomunidades, comarcas y entidades locales menores con identidad propia,
+   vigencia y relaciones muchos-a-muchos.
 
 Los perfiles económicos y turísticos pueden mantenerse como resúmenes
 editoriales, pero las comparaciones y automatizaciones deben apoyarse en
@@ -121,8 +145,7 @@ indicadores oficiales versionados.
 
 ## Fuentes de enriquecimiento evaluadas
 
-Hay dos fuentes oficiales adicionales especialmente útiles, pero sus datos no
-deben volcarse sin ampliar antes el modelo de procedencia y relaciones:
+Se evaluaron dos fuentes oficiales adicionales:
 
 - **Registro de municipios de la Junta de Castilla y León**, actualizado a
   diario y publicado con licencia CC BY 4.0:
@@ -131,23 +154,24 @@ deben volcarse sin ampliar antes el modelo de procedencia y relaciones:
   mancomunidades, entidades locales menores y la comarca estatutaria cuando
   aplica. Las mancomunidades y entidades menores son relaciones, no texto de
   perfil: deben importarse desde sus conjuntos propios y con claves estables.
-- **NGMEP 2026 del IGN/CNIG**, actualizado el 31 de marzo de 2026 y compatible
+- **NGMEP 2026 del IGN/CNIG**, actualizado el 31 de marzo de 2026 y publicado
   con CC BY 4.0:
   <https://centrodedescargas.cnig.es/CentroDescargas/detalleArchivo?sec=9000004>.
   Aporta `ID_REL`, superficie oficial, perímetro, capital municipal, población
   de la capital, coordenadas ETRS89, origen de coordenadas, altitud y origen de
   altitud. El punto publicado corresponde a la capital o entidad poblacional;
-  no debe etiquetarse como centroide geométrico del término municipal.
+  no debe etiquetarse como centroide geométrico del término municipal. Esta
+  fuente ya está implementada mediante versiones de artefacto e instantáneas
+  municipales; la Junta sigue siendo candidata para las relaciones restantes.
 
-El encaje propuesto es:
+El encaje implementado para NGMEP es:
 
 - superficie y perímetro como hechos geográficos fechados y con fuente; a
   partir de la superficie se deriva la densidad;
-- capital municipal como entidad relacionada, con código y población propios;
+- capital municipal con código y población propios dentro de la instantánea;
 - punto de capital en una capa geográfica oficial diferenciada de ubicaciones
   operativas, conservando CRS, origen, altitud, licencia y versión;
-- `ID_REL`, códigos de provincia/comunidad y cambios administrativos en un
-  historial del catálogo;
+- `ID_REL` y códigos geográficos conservados por versión;
 - mancomunidades, comarca y entidades locales menores en tablas relacionales;
 - presencia de comercio y otros datos sectoriales como indicadores fechados,
   no como perfiles libres.

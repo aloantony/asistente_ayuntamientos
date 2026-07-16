@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
 from app.core.pagination import PageParams, page_params, paginate
@@ -38,7 +38,11 @@ def list_municipalities(
 ) -> list[Municipality]:
     require_municipality_permission(db, current_user, "municipalities.view")
 
-    query = select(Municipality).order_by(Municipality.name, Municipality.id)
+    query = (
+        select(Municipality)
+        .options(selectinload(Municipality.official_geography))
+        .order_by(Municipality.name, Municipality.id)
+    )
     if q:
         search_text = f"%{q.strip()}%"
         query = query.where(
@@ -179,7 +183,11 @@ def apply_density(
 
 
 def get_existing_municipality(db: Session, municipality_id: int) -> Municipality:
-    municipality = db.get(Municipality, municipality_id)
+    municipality = db.scalar(
+        select(Municipality)
+        .options(selectinload(Municipality.official_geography))
+        .where(Municipality.id == municipality_id)
+    )
     if municipality is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

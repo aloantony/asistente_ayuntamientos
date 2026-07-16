@@ -150,12 +150,35 @@ docker compose exec -T backend \
 ```
 
 The command creates missing official municipalities by five-digit INE code,
-normalizes their official identity, and records the population snapshot with
-its year, URL and SHA-256. It reports but does not delete or merge legacy rows
-that are absent from the official directory. For an offline run, pass
+normalizes their official identity, and records the directory date, control
+digit, URL and SHA-256 alongside the population provenance. It reports but does
+not delete or merge legacy rows that are absent from the official directory.
+For an offline run, pass
 `--directory-workbook /path/diccionario26.xlsx` and
 `--population-archive /path/pobmun.zip`; both reviewed checksums are still
 enforced. See [docs/catalogo-municipal-castilla-leon.md](docs/catalogo-municipal-castilla-leon.md).
+
+Load the reviewed IGN NGMEP 2026 reference geography only after the directory
+sync. The dry-run validates both ZIP and CSV hashes, all 8,132 national rows,
+the 2,248 Castilla y León codes and every provincial count:
+
+```bash
+docker compose exec -T backend \
+  python -m app.municipalities.ngmep_geography --year 2026
+
+docker compose exec -T backend \
+  python -m app.municipalities.ngmep_geography --year 2026 --apply
+```
+
+The import creates a versioned official snapshot with surface, perimeter,
+capital code/name/population, MTN25 sheet, ETRS89 coordinates, altitude, field
+origins, source hashes and CC BY 4.0 attribution. It mirrors the current
+surface to `Municipality` and derives density from the canonical INE population.
+NGMEP population is retained only for comparison because it is not identical
+to the INE population snapshot. The published point identifies the population
+nucleus of the municipal capital; it is not a centroid of the municipal term.
+For an offline run, pass `--archive /path/BD_Municipios-Entidades.zip`; the
+reviewed archive and inner CSV hashes remain mandatory.
 
 Synchronize the reviewed INE 2025 municipal population snapshot only after the
 migration is applied. The first command is a mandatory dry-run and never writes

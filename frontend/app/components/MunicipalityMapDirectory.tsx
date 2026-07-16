@@ -2,7 +2,9 @@
 
 import {
   Building2,
+  ExternalLink,
   FileText,
+  MapPin,
   MapPinOff,
   RefreshCw,
   Search,
@@ -25,9 +27,22 @@ const numberFormatter = new Intl.NumberFormat("es-ES");
 const decimalFormatter = new Intl.NumberFormat("es-ES", {
   maximumFractionDigits: 2,
 });
+const referenceDateFormatter = new Intl.DateTimeFormat("es-ES", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+  timeZone: "UTC",
+});
 
 type MunicipalityMapDirectoryProps = {
   user: User;
+  onViewOnMap?: (location: MunicipalityMapFocus) => void;
+};
+
+export type MunicipalityMapFocus = {
+  latitude: number;
+  longitude: number;
+  label: string;
 };
 
 function isAbortError(error: unknown) {
@@ -46,8 +61,17 @@ function municipalityLocation(municipality: Municipality) {
   return `${municipality.province} · ${municipality.autonomous_community}`;
 }
 
+function formatReferenceDate(value: string) {
+  return referenceDateFormatter.format(new Date(`${value}T00:00:00Z`));
+}
+
+function formatCoordinates(latitude: number, longitude: number) {
+  return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+}
+
 export function MunicipalityMapDirectory({
   user,
+  onViewOnMap,
 }: MunicipalityMapDirectoryProps) {
   const searchId = useId();
   const archivedId = useId();
@@ -76,6 +100,7 @@ export function MunicipalityMapDirectory({
     municipalities.find(
       (municipality) => municipality.id === selectedMunicipalityId,
     ) ?? null;
+  const officialGeography = selectedMunicipality?.official_geography ?? null;
 
   useEffect(() => {
     if (!canViewMunicipalities) {
@@ -438,17 +463,123 @@ export function MunicipalityMapDirectory({
                 </section>
               </div>
 
-              <div className={styles.mapNotice}>
-                <MapPinOff aria-hidden="true" />
-                <div>
-                  <strong>Ubicación cartográfica pendiente</strong>
-                  <p>
-                    El centroide municipal aún no está disponible en los datos
-                    cartográficos. La ficha muestra únicamente información
-                    territorial verificada.
+              {officialGeography ? (
+                <section className={styles.officialLocation}>
+                  <div className={styles.officialLocationHeader}>
+                    <div>
+                      <MapPin aria-hidden="true" />
+                      <div>
+                        <span>Referencia cartográfica oficial</span>
+                        <h4>
+                          Capital municipal: {officialGeography.capital_name}
+                        </h4>
+                      </div>
+                    </div>
+                    {onViewOnMap ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onViewOnMap({
+                            latitude: officialGeography.latitude,
+                            longitude: officialGeography.longitude,
+                            label: `Capital municipal de ${selectedMunicipality.name}`,
+                          })
+                        }
+                      >
+                        <MapPin aria-hidden="true" />
+                        Ver en el mapa
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <p className={styles.locationClarification}>
+                    Punto del núcleo de capitalidad publicado por el IGN; no es
+                    el centroide del término municipal.
                   </p>
+
+                  <dl className={styles.locationFacts}>
+                    <div>
+                      <dt>Coordenadas</dt>
+                      <dd>
+                        {formatCoordinates(
+                          officialGeography.latitude,
+                          officialGeography.longitude,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Altitud</dt>
+                      <dd>
+                        {formatOptionalNumber(
+                          officialGeography.altitude_m,
+                          " m",
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Población de la capital</dt>
+                      <dd>
+                        {numberFormatter.format(
+                          officialGeography.capital_population,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Perímetro municipal</dt>
+                      <dd>
+                        {formatOptionalNumber(
+                          officialGeography.perimeter_m / 1000,
+                          " km",
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Hoja MTN25</dt>
+                      <dd>{officialGeography.mtn25_sheet}</dd>
+                    </div>
+                    <div>
+                      <dt>Sistema de referencia</dt>
+                      <dd>{officialGeography.crs}</dd>
+                    </div>
+                  </dl>
+
+                  <div className={styles.sourceLine}>
+                    <div>
+                      <strong>
+                        {officialGeography.dataset_version.version_label}
+                      </strong>
+                      <span>
+                        Referencia {formatReferenceDate(
+                          officialGeography.dataset_version.reference_date,
+                        )} · {officialGeography.coordinate_origin}
+                        {" · "}
+                        {officialGeography.altitude_origin}
+                      </span>
+                    </div>
+                    <a
+                      href={officialGeography.dataset_version.catalog_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {officialGeography.dataset_version.attribution}
+                      {" · "}
+                      {officialGeography.dataset_version.license_name}
+                      <ExternalLink aria-hidden="true" />
+                    </a>
+                  </div>
+                </section>
+              ) : (
+                <div className={styles.mapNotice}>
+                  <MapPinOff aria-hidden="true" />
+                  <div>
+                    <strong>Capital municipal aún no georreferenciada</strong>
+                    <p>
+                      No hay una referencia oficial NGMEP disponible para este
+                      registro municipal.
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
             </>
           ) : (
             <div className={styles.detailEmpty}>

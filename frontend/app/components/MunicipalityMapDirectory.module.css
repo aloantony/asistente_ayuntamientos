@@ -113,7 +113,9 @@
 
 .searchControl input:focus-visible,
 .selector:focus-visible,
-.errorState button:focus-visible {
+.errorState button:focus-visible,
+.officialLocationHeader button:focus-visible,
+.sourceLine a:focus-visible {
   border-color: var(--accent);
   outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
   outline-offset: 2px;
@@ -406,6 +408,154 @@
   white-space: pre-wrap;
 }
 
+.officialLocation {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+}
+
+.officialLocationHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.officialLocationHeader > div {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.officialLocationHeader > div > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.officialLocationHeader span {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.officialLocationHeader h4 {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.officialLocationHeader button {
+  display: inline-flex;
+  min-height: 36px;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.officialLocationHeader button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.locationClarification {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.locationFacts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.locationFacts > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.locationFacts dt {
+  color: var(--text-muted);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.locationFacts dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11.5px;
+}
+
+.sourceLine {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sourceLine > div {
+  display: grid;
+  gap: 3px;
+}
+
+.sourceLine strong,
+.sourceLine span {
+  font-size: 10.5px;
+}
+
+.sourceLine span {
+  color: var(--text-muted);
+}
+
+.sourceLine a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-align: right;
+  text-decoration: none;
+}
+
+.sourceLine a:hover {
+  text-decoration: underline;
+}
+
+.sourceLine a svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
 .mapNotice {
   display: flex;
   align-items: flex-start;
@@ -583,6 +733,10 @@
   .detailGrid {
     grid-template-columns: 1fr;
   }
+
+  .locationFacts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -612,10 +766,28 @@
   .selector {
     min-height: 250px;
   }
+
+  .officialLocationHeader,
+  .sourceLine {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .officialLocationHeader button {
+    justify-content: center;
+  }
+
+  .sourceLine a {
+    text-align: left;
+  }
 }
 
 @media (max-width: 520px) {
   .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .locationFacts {
     grid-template-columns: 1fr;
   }
 

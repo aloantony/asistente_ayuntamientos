@@ -130,7 +130,7 @@ def test_directory_parser_preserves_codes_and_validates_province_counts() -> Non
     assert list(records) == ["05001", "09137"]
     assert records["05001"].province == "Ávila"
     assert records["09137"].check_digit == "0"
-    assert source.reference_date == "2026-01-01"
+    assert source.reference_date.isoformat() == "2026-01-01"
     assert source.source_sha256 == spec.expected_sha256
 
 
@@ -204,6 +204,10 @@ def test_directory_sync_creates_missing_updates_existing_and_is_idempotent(db) -
     }
     assert official["09137"].name == "Fuentelcésped"
     assert official["09137"].autonomous_community == "Castilla y León"
+    assert official["09137"].ine_check_digit == "0"
+    assert official["09137"].directory_reference_date.isoformat() == "2026-01-01"
+    assert official["09137"].directory_source_url.endswith("diccionario26.xlsx")
+    assert official["09137"].directory_source_sha256 == "b" * 64
     assert official["09137"].population == 290
     assert official["09137"].density == 145.0
     assert official["05001"].province == "Ávila"
