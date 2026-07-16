@@ -55,6 +55,38 @@ MAX_TOOL_RESULT_CHARS = 4000
 
 
 def tool_result_for_activity(tool_name: str, content: str) -> str:
+    if tool_name == "read_web_page":
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return content[:MAX_TOOL_RESULT_CHARS]
+        if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+            text = payload["text"]
+            activity_payload = {
+                "source_url": payload.get("source_url"),
+                "final_url": payload.get("final_url"),
+                "title": str(payload.get("title") or "")[:300],
+                "content_type": payload.get("content_type"),
+                "text_chars": len(text),
+                "text_truncated": payload.get("text_truncated") is True,
+                "redirects": payload.get("redirects"),
+                "untrusted_content": True,
+                "text_preview": text[:500],
+            }
+            compact = json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(compact) >= MAX_TOOL_RESULT_CHARS:
+                activity_payload.pop("text_preview")
+                activity_payload.pop("final_url")
+                compact = json.dumps(
+                    activity_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            return compact
     limit = (
         MAX_ORDINANCE_TOOL_RESULT_CHARS
         if tool_name == "semantic_search_ordinances"
@@ -252,6 +284,10 @@ def _run_agent_turn_events(
     tools_by_name = {tool.name: tool for tool in tools}
     tool_definitions = [tool.definition for tool in tools]
     tool_names = frozenset(tool.name for tool in tools)
+    tool_context = ToolContext(
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+    )
     system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
     messages = build_history(conversation)
     safety_identifier = build_assistant_safety_identifier(current_user.id)
@@ -377,10 +413,7 @@ def _run_agent_turn_events(
                         tool=tool,
                         tool_name=block.name,
                         tool_input=tool_input,
-                        context=ToolContext(
-                            conversation_id=conversation.id,
-                            user_message_id=user_message.id,
-                        ),
+                        context=tool_context,
                         allowed=tool_names,
                     )
                     if track_repetition:

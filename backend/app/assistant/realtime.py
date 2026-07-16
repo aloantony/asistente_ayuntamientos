@@ -30,7 +30,12 @@ from app.assistant.schemas import (
     AssistantRealtimeTurnStartCreate,
 )
 from app.assistant.safety import build_assistant_safety_identifier
-from app.assistant.tools import ToolContext, execute_tool, get_available_tool_specs
+from app.assistant.tools import (
+    ToolContext,
+    execute_tool,
+    get_available_tool_specs,
+    web_search_urls_from_result,
+)
 from app.assistant.turn import build_history, tool_result_for_activity
 from app.core.config import settings
 from app.users.models import User
@@ -361,6 +366,7 @@ def execute_realtime_tool_call(
             ToolContext(
                 conversation_id=conversation.id,
                 user_message_id=user_message.id,
+                allowed_web_urls=_realtime_allowed_web_urls(turn),
             ),
             allowed=allowed_tool_names,
         )
@@ -401,7 +407,11 @@ def execute_realtime_tool_call(
             input_mode="voice",
             turn_user_message_id=user_message.id,
         )
-        output = tool_result_for_activity(payload.name, result.content)
+        output = (
+            result.content
+            if payload.name == "read_web_page" and result.ok
+            else tool_result_for_activity(payload.name, result.content)
+        )
         if confirmation_prompt:
             output = json.dumps(
                 {"status": "confirmation_required"},
@@ -660,6 +670,15 @@ def _archive_realtime_turn(
 ) -> None:
     turn["status"] = status
     turn.pop("confirmation", None)
+    for call in _turn_calls(turn).values():
+        if not isinstance(call, dict):
+            continue
+        action = call.get("action")
+        if isinstance(action, dict) and action.get("tool") == "read_web_page":
+            # The realtime model needs the full bounded text while its turn is
+            # active. Once sealed, retain only the same compact audit metadata
+            # used by text turns.
+            call["output"] = action.get("result")
     for response in _turn_responses(turn).values():
         if isinstance(response, dict):
             response.pop("assistant_text", None)
@@ -874,6 +893,25 @@ def _turn_calls(turn: dict) -> dict:
         calls = {}
         turn["calls"] = calls
     return calls
+
+
+def _realtime_allowed_web_urls(turn: dict) -> set[str]:
+    """Rebuild ephemeral provenance from prior searches in this realtime turn."""
+    calls = _turn_calls(turn)
+    urls: set[str] = set()
+    for call_id in turn.get("call_order", []):
+        call = calls.get(call_id)
+        if not isinstance(call, dict) or call.get("status") != "finished":
+            continue
+        action = call.get("action")
+        if (
+            not isinstance(action, dict)
+            or action.get("tool") != "web_search"
+            or action.get("ok") is not True
+        ):
+            continue
+        urls.update(web_search_urls_from_result(action.get("result")))
+    return urls
 
 
 def _turn_responses(turn: dict) -> dict:

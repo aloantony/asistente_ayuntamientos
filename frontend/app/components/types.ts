@@ -1365,6 +1365,7 @@ export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
   list_available_transversal_features: "Consultar funcionalidades disponibles",
   record_transversal_feature_acceptance: "Registrar activación transversal",
   web_search: "Buscar en web",
+  read_web_page: "Leer fuente web",
 };
 
 export function formatAssistantTool(
