@@ -454,6 +454,7 @@ def _run_agent_turn_events(
                     force_synthesis_reason = "tool_call_budget"
                 elif (
                     tool_context.untrusted_external_content_seen
+                    and tool is not None
                     and not tool.read_only
                 ):
                     result = ToolResult(

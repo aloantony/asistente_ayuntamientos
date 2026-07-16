@@ -1,10 +1,11 @@
-"""Read public web pages without exposing an unrestricted server-side fetcher.
+"""Read public pages without exposing an unrestricted server-side fetcher.
 
 The reader is intentionally narrower than a browser: it performs anonymous
 GET requests, never executes JavaScript, and only accepts bounded HTML or
-plain-text responses. DNS answers are resolved in a cancellable child process
-and validated before the connection. The socket is pinned to the validated
-address so a DNS rebinding cannot redirect the request into a private network.
+plain-text responses. Every operation influenced by the remote endpoint -- DNS,
+validation, connect/TLS, headers, redirects, body reads and text extraction --
+runs in one disposable process. The parent supervises that process with one
+absolute deadline and accepts only a bounded, validated IPC result.
 """
 
 from __future__ import annotations
@@ -12,11 +13,14 @@ from __future__ import annotations
 import hashlib
 import http.client
 import ipaddress
+import json
 import multiprocessing
 import re
+import signal
 import socket
 import ssl
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from time import monotonic
@@ -45,6 +49,22 @@ BLOCKED_HOSTNAMES = frozenset(
 )
 BLOCKED_HOST_SUFFIXES = (".internal", ".lan", ".local", ".localhost")
 CHARSET_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,50}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+# The process startup has no extra grace period: it consumes the configured
+# fetch deadline. Once the deadline expires, cleanup is additionally bounded by
+# these joins (at most 0.55 seconds under normal OS process semantics).
+WEB_READER_RESULT_POLL_SECONDS = 0.05
+WEB_READER_NORMAL_JOIN_SECONDS = 0.05
+WEB_READER_TERMINATE_JOIN_SECONDS = 0.15
+WEB_READER_KILL_JOIN_SECONDS = 0.35
+WEB_READER_MAX_CLEANUP_OVERHEAD_SECONDS = (
+    WEB_READER_NORMAL_JOIN_SECONDS
+    + WEB_READER_TERMINATE_JOIN_SECONDS
+    + WEB_READER_KILL_JOIN_SECONDS
+)
+MAX_WEB_PAGE_IPC_BYTES = 512 * 1024
+MAX_WEB_PAGE_WORKER_ERROR_CHARS = 300
 
 
 class UnsafeWebPageURLError(ValueError):
@@ -94,6 +114,16 @@ class _DownloadedPage:
     body: bytes
     redirects: int
     redirect_chain: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _WebReaderConfig:
+    app_version: str
+    timeout_seconds: float
+    dns_timeout_seconds: float
+    max_response_bytes: int
+    max_redirects: int
+    max_text_chars: int
 
 
 class _TextHTMLParser(HTMLParser):
@@ -277,23 +307,337 @@ def normalize_web_page_url(value: object) -> str:
 
 
 def read_web_page(value: object) -> WebPage:
-    """Download and extract a public page under strict SSRF and size controls."""
-    source_url = normalize_web_page_url(value)
-    try:
-        downloaded = _download(source_url)
-        title, extracted = _extract_text(
-            downloaded.body,
-            content_type=downloaded.content_type,
-            charset=downloaded.charset,
-        )
-    except (UnsafeWebPageURLError, WebPageUnavailableError):
-        raise
-    except (TimeoutError, socket.timeout) as error:
-        raise WebPageUnavailableError("La lectura de la página agotó el tiempo") from error
-    except (OSError, http.client.HTTPException, ssl.SSLError) as error:
-        raise WebPageUnavailableError("No se pudo conectar con la página") from error
+    """Read a page in one supervised process under a real total deadline.
 
-    text, truncated = _limit_text(extracted, settings.web_page_max_text_chars)
+    Process creation is charged to ``web_page_timeout_seconds``. Normal process
+    reaping, terminate and kill joins may add at most
+    ``WEB_READER_MAX_CLEANUP_OVERHEAD_SECONDS`` after that deadline.
+    """
+    source_url = normalize_web_page_url(value)
+    config = _web_reader_config()
+    return _run_supervised_web_reader(source_url, config)
+
+
+def _web_reader_config() -> _WebReaderConfig:
+    return _WebReaderConfig(
+        app_version=settings.app_version,
+        timeout_seconds=settings.web_page_timeout_seconds,
+        dns_timeout_seconds=settings.web_page_dns_timeout_seconds,
+        max_response_bytes=settings.web_page_max_response_bytes,
+        max_redirects=settings.web_page_max_redirects,
+        max_text_chars=settings.web_page_max_text_chars,
+    )
+
+
+def _run_supervised_web_reader(
+    source_url: str,
+    config: _WebReaderConfig,
+) -> WebPage:
+    deadline = monotonic() + config.timeout_seconds
+    process_context = multiprocessing.get_context("spawn")
+    receive_connection, send_connection = process_context.Pipe(duplex=False)
+    process = process_context.Process(
+        target=_web_reader_worker,
+        args=(send_connection, source_url, config, deadline),
+        daemon=True,
+    )
+    started = False
+    received_message = False
+    try:
+        try:
+            process.start()
+            started = True
+        except Exception as error:
+            raise WebPageUnavailableError(
+                "No se pudo iniciar el proceso aislado de lectura web"
+            ) from error
+        finally:
+            # The child owns its duplicated sending endpoint after start.
+            send_connection.close()
+
+        raw_message = _wait_for_worker_message(
+            receive_connection,
+            process,
+            deadline=deadline,
+        )
+        received_message = True
+        return _decode_worker_message(raw_message, source_url, config)
+    finally:
+        receive_connection.close()
+        if not started:
+            # ``Process.close`` is valid before start and releases handles held
+            # by a failed spawn attempt.
+            process.close()
+        else:
+            _cleanup_worker_process(
+                process,
+                allow_normal_exit=received_message,
+            )
+
+
+def _wait_for_worker_message(
+    receive_connection,
+    process,
+    *,
+    deadline: float,
+) -> bytes:
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise WebPageUnavailableError(
+                "La lectura de la página agotó el tiempo"
+            )
+        wait_seconds = min(remaining, WEB_READER_RESULT_POLL_SECONDS)
+        if receive_connection.poll(wait_seconds):
+            try:
+                return receive_connection.recv_bytes(MAX_WEB_PAGE_IPC_BYTES)
+            except (EOFError, OSError) as error:
+                raise WebPageUnavailableError(
+                    "El proceso aislado devolvió una respuesta no válida"
+                ) from error
+        if not process.is_alive():
+            # Avoid racing a final pipe flush immediately before process exit.
+            if receive_connection.poll(0):
+                continue
+            raise WebPageUnavailableError(
+                "El proceso aislado de lectura web terminó sin resultado"
+            )
+
+
+def _cleanup_worker_process(process, *, allow_normal_exit: bool) -> None:
+    """Reap a worker with bounded joins and never return a live child."""
+    if allow_normal_exit:
+        process.join(timeout=WEB_READER_NORMAL_JOIN_SECONDS)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=WEB_READER_TERMINATE_JOIN_SECONDS)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=WEB_READER_KILL_JOIN_SECONDS)
+    if process.is_alive():
+        # SIGKILL should make this unreachable on the supported Linux runtime.
+        # Do not use an unbounded join: surface the failed isolation boundary.
+        raise WebPageUnavailableError(
+            "No se pudo detener el proceso aislado de lectura web"
+        )
+    # Reap an already-exited process without adding another grace period.
+    process.join(timeout=0)
+    process.close()
+
+
+def _web_reader_worker(
+    send_connection,
+    source_url: str,
+    config: _WebReaderConfig,
+    deadline: float,
+) -> None:
+    """Child entry point. It sends exactly one bounded JSON message."""
+    try:
+        try:
+            page = _read_web_page_in_worker(
+                source_url,
+                config=config,
+                deadline=deadline,
+            )
+            message: dict[str, object] = {"status": "ok", "page": page.as_dict()}
+        except UnsafeWebPageURLError as error:
+            message = {"status": "unsafe", "message": _bounded_error(error)}
+        except (TimeoutError, socket.timeout):
+            message = {
+                "status": "timeout",
+                "message": "La lectura de la página agotó el tiempo",
+            }
+        except WebPageUnavailableError as error:
+            message = {"status": "unavailable", "message": _bounded_error(error)}
+        except (OSError, http.client.HTTPException, ssl.SSLError):
+            message = {
+                "status": "unavailable",
+                "message": "No se pudo conectar con la página",
+            }
+        except BaseException:
+            message = {
+                "status": "unavailable",
+                "message": "El proceso aislado no pudo leer la página",
+            }
+        _send_worker_message(send_connection, message)
+    finally:
+        send_connection.close()
+
+
+def _send_worker_message(send_connection, message: dict[str, object]) -> None:
+    try:
+        payload = json.dumps(
+            message,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        payload = (
+            b'{"status":"unavailable","message":"Respuesta aislada no '
+            b'v\\u00e1lida"}'
+        )
+    if len(payload) > MAX_WEB_PAGE_IPC_BYTES:
+        payload = json.dumps(
+            {
+                "status": "unavailable",
+                "message": "La respuesta aislada supera el límite de IPC",
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    try:
+        send_connection.send_bytes(payload)
+    except (BrokenPipeError, EOFError, OSError):
+        # The caller timed out or disconnected and will reap this process.
+        pass
+
+
+def _decode_worker_message(
+    raw_message: bytes,
+    source_url: str,
+    config: _WebReaderConfig,
+) -> WebPage:
+    try:
+        message = json.loads(raw_message.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WebPageUnavailableError(
+            "El proceso aislado devolvió una respuesta no válida"
+        ) from error
+    if not isinstance(message, dict):
+        raise WebPageUnavailableError(
+            "El proceso aislado devolvió una respuesta no válida"
+        )
+    status = message.get("status")
+    if status == "ok":
+        return _web_page_from_worker_payload(
+            message.get("page"),
+            expected_source_url=source_url,
+            config=config,
+        )
+    worker_message = message.get("message")
+    safe_message = (
+        worker_message[:MAX_WEB_PAGE_WORKER_ERROR_CHARS]
+        if isinstance(worker_message, str) and worker_message
+        else "El proceso aislado no pudo leer la página"
+    )
+    if status == "unsafe":
+        raise UnsafeWebPageURLError(safe_message)
+    if isinstance(status, str) and status in {"timeout", "unavailable"}:
+        raise WebPageUnavailableError(safe_message)
+    raise WebPageUnavailableError(
+        "El proceso aislado devolvió una respuesta no válida"
+    )
+
+
+def _web_page_from_worker_payload(
+    value: object,
+    *,
+    expected_source_url: str,
+    config: _WebReaderConfig,
+) -> WebPage:
+    if not isinstance(value, dict):
+        raise WebPageUnavailableError("El resultado aislado no es válido")
+    try:
+        source_url = normalize_web_page_url(value["source_url"])
+        final_url = normalize_web_page_url(value["final_url"])
+        title = value["title"]
+        content_type = value["content_type"]
+        text = value["text"]
+        content_length_bytes = value["content_length_bytes"]
+        text_char_count = value["text_char_count"]
+        text_sha256 = value["text_sha256"]
+        text_truncated = value["text_truncated"]
+        redirects = value["redirects"]
+        raw_redirect_chain = value["redirect_chain"]
+    except (KeyError, TypeError, UnsafeWebPageURLError) as error:
+        raise WebPageUnavailableError("El resultado aislado no es válido") from error
+
+    if source_url != expected_source_url or _url_origin(final_url) != _url_origin(
+        source_url
+    ):
+        raise WebPageUnavailableError("El resultado aislado cambió el origen autorizado")
+    if (
+        not isinstance(title, str)
+        or not title
+        or len(title) > MAX_WEB_PAGE_TITLE_CHARS
+        or not isinstance(content_type, str)
+        or content_type not in ALLOWED_CONTENT_TYPES
+        or not isinstance(text, str)
+        or not text
+        or len(text) > config.max_text_chars
+        or isinstance(content_length_bytes, bool)
+        or not isinstance(content_length_bytes, int)
+        or not 0 <= content_length_bytes <= config.max_response_bytes
+        or isinstance(text_char_count, bool)
+        or not isinstance(text_char_count, int)
+        or text_char_count != len(text)
+        or not isinstance(text_sha256, str)
+        or not SHA256_PATTERN.fullmatch(text_sha256)
+        or text_sha256 != hashlib.sha256(text.encode("utf-8")).hexdigest()
+        or not isinstance(text_truncated, bool)
+        or isinstance(redirects, bool)
+        or not isinstance(redirects, int)
+        or not 0 <= redirects <= config.max_redirects
+        or value.get("untrusted_content") is not True
+        or not isinstance(raw_redirect_chain, list)
+        or len(raw_redirect_chain) != redirects + 1
+    ):
+        raise WebPageUnavailableError("El resultado aislado no es válido")
+    try:
+        redirect_chain = tuple(
+            normalize_web_page_url(item) for item in raw_redirect_chain
+        )
+    except (TypeError, UnsafeWebPageURLError) as error:
+        raise WebPageUnavailableError("El resultado aislado no es válido") from error
+    if (
+        not redirect_chain
+        or redirect_chain[0] != source_url
+        or redirect_chain[-1] != final_url
+        or any(_url_origin(item) != _url_origin(source_url) for item in redirect_chain)
+    ):
+        raise WebPageUnavailableError("El resultado aislado no es válido")
+    return WebPage(
+        source_url=source_url,
+        final_url=final_url,
+        title=title,
+        content_type=content_type,
+        text=text,
+        content_length_bytes=content_length_bytes,
+        text_char_count=text_char_count,
+        text_sha256=text_sha256,
+        text_truncated=text_truncated,
+        redirects=redirects,
+        redirect_chain=redirect_chain,
+    )
+
+
+def _bounded_error(error: BaseException) -> str:
+    message = str(error).strip()
+    return (message or "No se pudo leer la página")[
+        :MAX_WEB_PAGE_WORKER_ERROR_CHARS
+    ]
+
+
+def _read_web_page_in_worker(
+    value: object,
+    *,
+    config: _WebReaderConfig,
+    deadline: float,
+) -> WebPage:
+    """Perform the complete untrusted operation inside the disposable child."""
+    source_url = normalize_web_page_url(value)
+    if deadline - monotonic() <= 0:
+        raise TimeoutError("web page total deadline exceeded")
+    downloaded = _download(source_url, config=config, deadline=deadline)
+    title, extracted = _extract_text(
+        downloaded.body,
+        content_type=downloaded.content_type,
+        charset=downloaded.charset,
+    )
+    if deadline - monotonic() <= 0:
+        raise TimeoutError("web page total deadline exceeded")
+    text, truncated = _limit_text(extracted, config.max_text_chars)
     if not text:
         raise WebPageUnavailableError("La página no contiene texto extraíble")
     text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -312,19 +656,23 @@ def read_web_page(value: object) -> WebPage:
     )
 
 
-def _download(source_url: str) -> _DownloadedPage:
+def _download(
+    source_url: str,
+    *,
+    config: _WebReaderConfig,
+    deadline: float,
+) -> _DownloadedPage:
     current_url = source_url
     source_origin = _url_origin(source_url)
     redirect_chain = [source_url]
-    deadline = monotonic() + settings.web_page_timeout_seconds
-    for redirect_count in range(settings.web_page_max_redirects + 1):
+    for redirect_count in range(config.max_redirects + 1):
         parsed = urlsplit(current_url)
         remaining_timeout = deadline - monotonic()
         if remaining_timeout <= 0:
             raise TimeoutError("web page total deadline exceeded")
         addresses = _resolve_public_addresses(
             parsed,
-            timeout=min(settings.web_page_dns_timeout_seconds, remaining_timeout),
+            timeout=min(config.dns_timeout_seconds, remaining_timeout),
         )
         remaining_timeout = deadline - monotonic()
         if remaining_timeout <= 0:
@@ -342,14 +690,15 @@ def _download(source_url: str) -> _DownloadedPage:
                 headers={
                     "Accept": "text/html,application/xhtml+xml,text/plain",
                     "Accept-Encoding": "identity",
-                    "User-Agent": f"AsistenteAyuntamientos/{settings.app_version}",
+                    "User-Agent": f"AsistenteAyuntamientos/{config.app_version}",
                 },
             )
+            _set_connection_timeout(connection, deadline)
             response = connection.getresponse()
             status = int(response.status)
             if status in REDIRECT_STATUSES:
                 location = response.getheader("Location")
-                if redirect_count >= settings.web_page_max_redirects:
+                if redirect_count >= config.max_redirects:
                     raise WebPageUnavailableError(
                         "La página supera el límite de redirecciones"
                     )
@@ -386,7 +735,7 @@ def _download(source_url: str) -> _DownloadedPage:
             )
             if (
                 content_length is not None
-                and content_length > settings.web_page_max_response_bytes
+                and content_length > config.max_response_bytes
             ):
                 raise WebPageUnavailableError(
                     "La página supera el límite máximo de bytes"
@@ -395,9 +744,9 @@ def _download(source_url: str) -> _DownloadedPage:
                 response,
                 connection,
                 deadline=deadline,
-                max_bytes=settings.web_page_max_response_bytes,
+                max_bytes=config.max_response_bytes,
             )
-            if len(body) > settings.web_page_max_response_bytes:
+            if len(body) > config.max_response_bytes:
                 raise WebPageUnavailableError(
                     "La página supera el límite máximo de bytes"
                 )
@@ -450,6 +799,15 @@ def _read_bounded_body(response, connection, *, deadline: float, max_bytes: int)
     return b"".join(chunks)
 
 
+def _set_connection_timeout(connection, deadline: float) -> None:
+    remaining_timeout = deadline - monotonic()
+    if remaining_timeout <= 0:
+        raise TimeoutError("web page total deadline exceeded")
+    connected_socket = getattr(connection, "sock", None)
+    if connected_socket is not None:
+        connected_socket.settimeout(remaining_timeout)
+
+
 def _resolve_public_addresses(
     parsed: SplitResult,
     *,
@@ -466,11 +824,21 @@ def _resolve_public_addresses(
         _require_public_ip(literal)
         return (str(literal),)
 
-    raw_addresses = _resolve_hostname_in_subprocess(
-        hostname,
-        port,
-        timeout=timeout,
-    )
+    if timeout <= 0:
+        raise TimeoutError("web page DNS deadline exceeded")
+    try:
+        with _dns_deadline(timeout):
+            records = socket.getaddrinfo(
+                hostname,
+                port,
+                family=socket.AF_UNSPEC,
+                type=socket.SOCK_STREAM,
+            )
+    except socket.gaierror as error:
+        raise WebPageUnavailableError(
+            "No se pudo resolver el host de la página"
+        ) from error
+    raw_addresses = tuple(str(record[4][0]) for record in records[:64])
 
     addresses: list[str] = []
     for raw_address in raw_addresses:
@@ -489,77 +857,35 @@ def _resolve_public_addresses(
     return tuple(addresses)
 
 
-def _resolve_hostname_in_subprocess(
-    hostname: str,
-    port: int,
-    *,
-    timeout: float,
-) -> tuple[str, ...]:
-    """Resolve DNS in a process that can be terminated at the deadline."""
+@contextmanager
+def _dns_deadline(timeout: float):
+    """Bound libc DNS inside the already-isolated worker on Linux.
+
+    The parent process remains the authoritative total deadline and will kill
+    the whole worker even on platforms without ``setitimer``.
+    """
     if timeout <= 0:
         raise TimeoutError("web page DNS deadline exceeded")
+    if not all(
+        hasattr(signal, name)
+        for name in ("SIGALRM", "ITIMER_REAL", "setitimer")
+    ):
+        yield
+        return
 
-    process_context = multiprocessing.get_context("spawn")
-    receive_connection, send_connection = process_context.Pipe(duplex=False)
-    process = process_context.Process(
-        target=_dns_lookup_worker,
-        args=(send_connection, hostname, port),
-        daemon=True,
-    )
-    try:
-        process.start()
-    except Exception as error:
-        receive_connection.close()
-        send_connection.close()
-        raise WebPageUnavailableError(
-            "No se pudo iniciar la resolución DNS de la página"
-        ) from error
-    send_connection.close()
+    def raise_dns_timeout(signum, frame) -> None:
+        raise TimeoutError("web page DNS deadline exceeded")
 
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, raise_dns_timeout)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
-        if not receive_connection.poll(timeout):
-            raise TimeoutError("web page DNS deadline exceeded")
-        try:
-            status, payload = receive_connection.recv()
-        except EOFError as error:
-            raise WebPageUnavailableError(
-                "No se pudo resolver el host de la página"
-            ) from error
-        if status != "ok" or not isinstance(payload, list):
-            raise WebPageUnavailableError(
-                "No se pudo resolver el host de la página"
-            )
-        return tuple(str(value) for value in payload[:64])
+        yield
     finally:
-        receive_connection.close()
-        process.join(timeout=0.1)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=0.5)
-        if process.is_alive():
-            process.kill()
-            process.join()
-        process.close()
-
-
-def _dns_lookup_worker(send_connection, hostname: str, port: int) -> None:
-    """Child-process entry point; never expose resolver errors to the caller."""
-    try:
-        records = socket.getaddrinfo(
-            hostname,
-            port,
-            family=socket.AF_UNSPEC,
-            type=socket.SOCK_STREAM,
-        )
-        addresses = [str(record[4][0]) for record in records[:64]]
-        send_connection.send(("ok", addresses))
-    except BaseException:
-        try:
-            send_connection.send(("error", None))
-        except BaseException:
-            pass
-    finally:
-        send_connection.close()
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def _reject_blocked_hostname(hostname: str) -> None:
