@@ -9,7 +9,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from time import monotonic
 
-from sqlalchemy import func, select
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.assistant.attachments import (
@@ -49,6 +49,7 @@ from app.assistant.prompts import (
     build_system_prompt,
 )
 from app.assistant.safety import build_assistant_safety_identifier
+from app.assistant.tool_authorization import ConversationToolAuthorization
 from app.assistant.tools import (
     ATTACHMENT_CONTENT_TOOL_RESULT,
     MAX_ORDINANCE_TOOL_RESULT_CHARS,
@@ -223,10 +224,6 @@ figuran en la conversación. No anuncies nuevas consultas ni prometas seguir
 trabajando. Distingue lo comprobado de lo que quedó pendiente y explica de forma
 breve cualquier limitación o error de herramienta.
 """.strip()
-STALE_MUTATING_TOOL_RESULT = (
-    "No se ejecutó la herramienta porque este turno quedó desactualizado por "
-    "un mensaje posterior del usuario."
-)
 TOKEN_PATTERN = re.compile(r"[a-záéíóúüñ0-9]+", re.IGNORECASE)
 TOOL_INTENT_STOPWORDS = {
     "a",
@@ -563,9 +560,6 @@ def _run_agent_turn_events(
                     result = _execute_tool_for_current_turn(
                         db=db,
                         current_user=current_user,
-                        conversation=conversation,
-                        user_message=user_message,
-                        tool=tool,
                         tool_name=block.name,
                         tool_input={},
                         context=ToolContext(
@@ -613,6 +607,7 @@ def _run_agent_turn_events(
                             user_message,
                             block.name,
                             raw_tool_input,
+                            current_user=current_user,
                             tool_spec=tool,
                         )
                     if tool is not None:
@@ -621,18 +616,27 @@ def _run_agent_turn_events(
                         )
                         if required_confirmation is not None:
                             confirmation_context = required_confirmation
-                    result = guarded_result or _execute_tool_for_current_turn(
-                        db=db,
-                        current_user=current_user,
-                        conversation=conversation,
-                        user_message=user_message,
-                        tool=tool,
-                        tool_name=block.name,
-                        tool_input=raw_tool_input,
-                        context=tool_context,
-                        allowed=tool_names,
-                        attachment_tainted=False,
-                    )
+                    if isinstance(guarded_result, ConfirmationToolResult):
+                        result = guarded_result
+                    else:
+                        authorization = (
+                            guarded_result
+                            if isinstance(
+                                guarded_result,
+                                ConversationToolAuthorization,
+                            )
+                            else None
+                        )
+                        result = _execute_tool_for_current_turn(
+                            db=db,
+                            current_user=current_user,
+                            tool_name=block.name,
+                            tool_input=raw_tool_input,
+                            context=tool_context,
+                            allowed=tool_names,
+                            authorization=authorization,
+                            attachment_tainted=False,
+                        )
                     if track_repetition:
                         seen_read_calls.add(signature)
                         if _is_non_retryable_tool_failure(result):
@@ -940,13 +944,11 @@ def _execute_tool_for_current_turn(
     *,
     db: Session,
     current_user: User,
-    conversation: AssistantConversation,
-    user_message: AssistantMessage,
-    tool: ToolSpec | None,
     tool_name: str,
     tool_input: dict,
     context: ToolContext,
     allowed: frozenset[str],
+    authorization: ConversationToolAuthorization | None = None,
     attachment_tainted: bool = False,
 ) -> ToolResult:
     if attachment_tainted:
@@ -961,40 +963,16 @@ def _execute_tool_for_current_turn(
             allowed=allowed,
         )
 
-    if tool is None or tool.read_only:
-        return execute_tool(
-            db,
-            current_user,
-            tool_name,
-            tool_input,
-            context,
-            allowed=allowed,
-        )
-
-    lock_conversation_for_confirmation(db, conversation.id)
-    latest_user_message_id = db.scalar(
-        select(AssistantMessage.id)
-        .where(
-            AssistantMessage.conversation_id == conversation.id,
-            AssistantMessage.role == "user",
-        )
-        .order_by(AssistantMessage.id.desc())
-        .limit(1)
-    )
-    if latest_user_message_id != user_message.id:
-        db.commit()
-        return ToolResult(content=STALE_MUTATING_TOOL_RESULT, ok=False)
-
-    # Mutating executors commit or roll back their own transaction. Calling the
-    # executor while this row lock is held makes the latest-turn check atomic
-    # with the mutation.
+    execution_kwargs = {"allowed": allowed}
+    if authorization is not None:
+        execution_kwargs["authorization"] = authorization
     return execute_tool(
         db,
         current_user,
         tool_name,
         tool_input,
         context,
-        allowed=allowed,
+        **execution_kwargs,
     )
 
 
@@ -1043,6 +1021,20 @@ def build_history(
 ) -> list[dict]:
     state = load_conversation_state(conversation)
     excluded_confirmation_message_ids: set[int] = set()
+    exchanges = state.get("finalized_confirmation_exchanges")
+    if isinstance(exchanges, list):
+        for exchange in exchanges:
+            if not isinstance(exchange, dict):
+                continue
+            for field in (
+                "prompted_at_assistant_message_id",
+                "response_user_message_id",
+            ):
+                message_id = int(exchange.get(field) or 0)
+                if message_id:
+                    excluded_confirmation_message_ids.add(message_id)
+    # Backward compatibility for confirmations finalized before the bounded
+    # exchange list existed.
     for key in ("last_consumed_confirmation", "last_cancelled_confirmation"):
         confirmation = state.get(key)
         if not isinstance(confirmation, dict):
@@ -1050,6 +1042,13 @@ def build_history(
         message_id = int(confirmation.get("prompted_at_assistant_message_id") or 0)
         if message_id:
             excluded_confirmation_message_ids.add(message_id)
+        response_message_id = int(
+            confirmation.get("confirmed_at_user_message_id")
+            or confirmation.get("cancelled_at_user_message_id")
+            or 0
+        )
+        if response_message_id:
+            excluded_confirmation_message_ids.add(response_message_id)
     messages: list[dict] = []
     for message in conversation.messages:
         if (

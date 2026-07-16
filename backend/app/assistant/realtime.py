@@ -31,6 +31,7 @@ from app.assistant.schemas import (
     AssistantRealtimeTurnStartCreate,
 )
 from app.assistant.safety import build_assistant_safety_identifier
+from app.assistant.tool_authorization import ConversationToolAuthorization
 from app.assistant.tools import (
     REDACTED_UNTRUSTED_TOOL_NAME,
     ToolContext,
@@ -418,17 +419,27 @@ def execute_realtime_tool_call(
                 user_message,
                 payload.name,
                 tool_input,
+                current_user=current_user,
                 tool_spec=tools_by_name.get(payload.name),
             )
-            result = guarded_result or execute_tool(
-                db,
-                current_user,
-                payload.name,
-                tool_input,
-                tool_context,
-                allowed=allowed_tool_names,
-                allow_web_reader_after_taint=False,
-            )
+            if isinstance(guarded_result, ConfirmationToolResult):
+                result = guarded_result
+            else:
+                authorization = (
+                    guarded_result
+                    if isinstance(guarded_result, ConversationToolAuthorization)
+                    else None
+                )
+                result = execute_tool(
+                    db,
+                    current_user,
+                    payload.name,
+                    tool_input,
+                    tool_context,
+                    allowed=allowed_tool_names,
+                    authorization=authorization,
+                    allow_web_reader_after_taint=False,
+                )
         untrusted_external_content_seen = (
             tool_context.untrusted_external_content_seen
         )

@@ -1,8 +1,53 @@
+import json
+
 import pytest
 
 from conftest import headers_for
 
+from app.agent_office.models import AgentOfficeTask, AgentOfficeTaskEvent
+from app.assistant.models import AssistantAdminFeedback
+from app.assistant.tool_authorization import (
+    AGENT_OFFICE_AUTHORIZATION_CLAIM_EVENT,
+    claim_agent_office_tool_authorization,
+    issue_agent_office_tool_authorization,
+    tool_input_digest,
+)
+from app.assistant.tools import execute_tool, normalize_tool_input
 from app.requirements.models import Requirement, RequirementMessage
+
+
+def _make_authorizable_feedback_task(
+    db,
+    organization,
+    user,
+    *,
+    status="approved",
+    approved=True,
+):
+    task = AgentOfficeTask(
+        organization_id=organization.id,
+        title="Enviar feedback supervisado",
+        description="Prueba de autorización tipada.",
+        department="admin_feedback",
+        requested_action="send_admin_feedback",
+        status=status,
+        approval_policy="before_execution",
+        requires_human_approval=True,
+        requested_by_id=user.id,
+        approved_by_id=user.id if approved else None,
+    )
+    db.add(task)
+    db.commit()
+    return task
+
+
+def _feedback_input(organization_id: int, *, title="Incidencia autorizada"):
+    return {
+        "organization_id": organization_id,
+        "category": "bug",
+        "title": title,
+        "description": "Descripción exacta autorizada.",
+    }
 
 
 def _run_cross_organization_requirement_task(
@@ -410,6 +455,199 @@ def test_agent_office_forces_approval_for_mutating_actions(
     assert requirement is not None
     assert requirement.status == "draft"
     assert requirement.source_type == "conversation"
+
+
+def test_agent_office_authorization_rejects_unapproved_task(
+    db,
+    make_user,
+    make_organization,
+):
+    organization = make_organization("Ayuntamiento sin aprobación")
+    user = make_user(is_superuser=True)
+    task = _make_authorizable_feedback_task(
+        db,
+        organization,
+        user,
+        status="pending_approval",
+        approved=False,
+    )
+    tool_input = _feedback_input(organization.id)
+    canonical_input = normalize_tool_input(
+        db,
+        user,
+        "send_admin_feedback",
+        tool_input,
+    )
+
+    with pytest.raises(ValueError, match="cannot authorize tools"):
+        issue_agent_office_tool_authorization(
+            db,
+            task_id=task.id,
+            actor_id=user.id,
+            tool="send_admin_feedback",
+            input_digest=tool_input_digest(
+                "send_admin_feedback",
+                canonical_input,
+            ),
+        )
+
+
+def test_agent_office_authorization_rejects_inactive_actor(
+    db,
+    make_user,
+    make_organization,
+):
+    organization = make_organization("Ayuntamiento con actor inactivo")
+    user = make_user(is_superuser=True, is_active=False)
+    task = _make_authorizable_feedback_task(db, organization, user)
+    canonical_input = normalize_tool_input(
+        db,
+        user,
+        "send_admin_feedback",
+        _feedback_input(organization.id),
+    )
+
+    with pytest.raises(ValueError, match="actor is not active"):
+        issue_agent_office_tool_authorization(
+            db,
+            task_id=task.id,
+            actor_id=user.id,
+            tool="send_admin_feedback",
+            input_digest=tool_input_digest(
+                "send_admin_feedback",
+                canonical_input,
+            ),
+        )
+
+
+def test_agent_office_authorization_allows_exact_payload_once(
+    db,
+    make_user,
+    make_organization,
+):
+    organization = make_organization("Ayuntamiento con autorización exacta")
+    user = make_user(is_superuser=True)
+    task = _make_authorizable_feedback_task(db, organization, user)
+    tool_input = _feedback_input(organization.id)
+    canonical_input = normalize_tool_input(
+        db,
+        user,
+        "send_admin_feedback",
+        tool_input,
+    )
+    authorization = issue_agent_office_tool_authorization(
+        db,
+        task_id=task.id,
+        actor_id=user.id,
+        tool="send_admin_feedback",
+        input_digest=tool_input_digest("send_admin_feedback", canonical_input),
+    )
+
+    first = execute_tool(
+        db,
+        user,
+        "send_admin_feedback",
+        tool_input,
+        authorization=authorization,
+    )
+    replay = execute_tool(
+        db,
+        user,
+        "send_admin_feedback",
+        tool_input,
+        authorization=authorization,
+    )
+
+    assert first.ok is True
+    assert replay.ok is False
+    assert "inválida o consumida" in replay.content
+    assert db.query(AssistantAdminFeedback).count() == 1
+
+
+def test_agent_office_authorization_rejects_different_payload_and_is_consumed(
+    db,
+    make_user,
+    make_organization,
+):
+    organization = make_organization("Ayuntamiento con payload protegido")
+    user = make_user(is_superuser=True)
+    task = _make_authorizable_feedback_task(db, organization, user)
+    exact_input = _feedback_input(organization.id)
+    canonical_input = normalize_tool_input(
+        db,
+        user,
+        "send_admin_feedback",
+        exact_input,
+    )
+    authorization = issue_agent_office_tool_authorization(
+        db,
+        task_id=task.id,
+        actor_id=user.id,
+        tool="send_admin_feedback",
+        input_digest=tool_input_digest("send_admin_feedback", canonical_input),
+    )
+
+    changed = execute_tool(
+        db,
+        user,
+        "send_admin_feedback",
+        _feedback_input(organization.id, title="Payload distinto"),
+        authorization=authorization,
+    )
+    exact_replay = execute_tool(
+        db,
+        user,
+        "send_admin_feedback",
+        exact_input,
+        authorization=authorization,
+    )
+
+    assert changed.ok is False
+    assert "efectos actuales" in changed.content
+    assert exact_replay.ok is False
+    assert "inválida o consumida" in exact_replay.content
+    assert db.query(AssistantAdminFeedback).count() == 0
+
+
+def test_agent_office_claim_history_has_no_replay_window_after_100_events(
+    db,
+    make_user,
+    make_organization,
+):
+    organization = make_organization("Ayuntamiento sin ventana de replay")
+    user = make_user(is_superuser=True)
+    task = _make_authorizable_feedback_task(db, organization, user)
+    canonical_input = normalize_tool_input(
+        db,
+        user,
+        "send_admin_feedback",
+        _feedback_input(organization.id),
+    )
+    authorization = issue_agent_office_tool_authorization(
+        db,
+        task_id=task.id,
+        actor_id=user.id,
+        tool="send_admin_feedback",
+        input_digest=tool_input_digest("send_admin_feedback", canonical_input),
+    )
+    assert claim_agent_office_tool_authorization(db, authorization) is True
+    db.add_all(
+        [
+            AgentOfficeTaskEvent(
+                task_id=task.id,
+                event_type=AGENT_OFFICE_AUTHORIZATION_CLAIM_EVENT,
+                message="Evento posterior de prueba.",
+                payload_json=json.dumps(
+                    {"token_digest": f"posterior-{index}", "accepted": True}
+                ),
+                created_by_id=user.id,
+            )
+            for index in range(101)
+        ]
+    )
+    db.commit()
+
+    assert claim_agent_office_tool_authorization(db, authorization) is False
 
 
 def test_agent_office_hides_tasks_from_other_tenants(

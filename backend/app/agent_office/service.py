@@ -19,7 +19,15 @@ from app.agent_office.models import (
     AgentOfficeTask,
     AgentOfficeTaskEvent,
 )
-from app.assistant.tools import ToolContext, execute_tool
+from app.assistant.tool_authorization import (
+    issue_agent_office_tool_authorization,
+    tool_input_digest,
+)
+from app.assistant.tools import (
+    ToolContext,
+    execute_tool,
+    normalize_tool_input,
+)
 from app.db.session import SessionLocal
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization
@@ -555,16 +563,37 @@ def _run_tool_action(db: Session, user: User, task: AgentOfficeTask) -> dict:
         )
     tool_input = _tool_input_for_task(task)
     _validate_task_tool_scope(db, task, tool_input)
+    context = ToolContext(
+        conversation_id=task.source_conversation_id,
+        user_message_id=task.source_message_id,
+    )
+    authorization = None
+    if task.requested_action in MUTATING_ACTIONS:
+        canonical_input = normalize_tool_input(
+            db,
+            user,
+            task.requested_action,
+            tool_input,
+            context,
+        )
+        authorization = issue_agent_office_tool_authorization(
+            db,
+            task_id=task.id,
+            actor_id=user.id,
+            tool=task.requested_action,
+            input_digest=tool_input_digest(
+                task.requested_action,
+                canonical_input,
+            ),
+        )
     result = execute_tool(
         db,
         user,
         task.requested_action,
         tool_input,
-        ToolContext(
-            conversation_id=task.source_conversation_id,
-            user_message_id=task.source_message_id,
-        ),
+        context,
         allowed=agent.tool_names,
+        authorization=authorization,
     )
     return {
         "mode": "tool",

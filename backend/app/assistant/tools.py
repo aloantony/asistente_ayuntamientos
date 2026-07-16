@@ -11,7 +11,8 @@ import hmac
 import json
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import quote
@@ -27,6 +28,15 @@ from app.assistant.models import (
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
+)
+from app.assistant.tool_authorization import (
+    AgentOfficeToolAuthorization,
+    ConversationToolAuthorization,
+    ToolExecutionAuthorization,
+    claim_agent_office_tool_authorization,
+    claim_conversation_tool_authorization,
+    lock_conversation_tool_turn,
+    tool_input_digest,
 )
 from app.assistant.web_search import (
     MAX_WEB_QUERY_CHARS,
@@ -64,6 +74,7 @@ from app.requirements.routes import (
 from app.users.models import User
 
 ToolExecutor = Callable[..., object]
+ToolInputNormalizer = Callable[[Session, User, dict, "ToolContext"], dict]
 ToolApprovalPolicy = Literal["never", "explicit"]
 ToolSideEffect = Literal["none", "database_write"]
 
@@ -736,6 +747,7 @@ class ToolSpec:
     description: str
     input_schema: dict
     executor: ToolExecutor
+    input_normalizer: ToolInputNormalizer
     read_only: bool
     domain: str
     side_effect: ToolSideEffect
@@ -745,6 +757,15 @@ class ToolSpec:
     @property
     def requires_confirmation(self) -> bool:
         return self.approval_policy == "explicit"
+
+    def normalize_input(
+        self,
+        db: Session,
+        current_user: User,
+        tool_input: dict,
+        context: "ToolContext",
+    ) -> dict:
+        return self.input_normalizer(db, current_user, tool_input, context)
 
     @property
     def definition(self) -> dict:
@@ -779,6 +800,7 @@ class WebSearchProvenance:
 class ToolContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
+    lock_effects: bool = False
     attachment_content_seen: bool = False
     # Ephemeral provenance for one assistant turn. It is never persisted as an
     # authorization that a later turn can reuse.
@@ -883,16 +905,17 @@ def execute_tool(
     tool_input: dict,
     context: ToolContext | None = None,
     allowed: frozenset[str] | None = None,
+    authorization: ToolExecutionAuthorization | None = None,
     *,
     allow_web_reader_after_taint: bool = True,
 ) -> ToolResult:
-    resolved_context = context or ToolContext()
-    if resolved_context.attachment_content_seen:
+    tool_context = context or ToolContext()
+    if tool_context.attachment_content_seen:
         return ToolResult(content=ATTACHMENT_CONTENT_TOOL_RESULT, ok=False)
     if tool_is_blocked_after_untrusted_content(
         name,
         tool_input,
-        resolved_context,
+        tool_context,
         allow_web_reader=allow_web_reader_after_taint,
     ):
         return ToolResult(
@@ -916,8 +939,96 @@ def execute_tool(
     if spec is None:
         return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
 
+    if spec.requires_confirmation:
+        if authorization is None:
+            return ToolResult(
+                content=(
+                    "Acción mutante denegada: falta una autorización one-shot "
+                    "emitida por la guarda de confirmación."
+                ),
+                ok=False,
+            )
+        if spec.side_effect != "database_write":
+            return ToolResult(
+                content="Acción mutante denegada: tipo de efecto no soportado.",
+                ok=False,
+            )
+        if isinstance(authorization, ConversationToolAuthorization):
+            authorization_claimed = claim_conversation_tool_authorization(
+                db,
+                authorization,
+            )
+            authorization_context_matches = (
+                tool_context.conversation_id == authorization.conversation_id
+                and tool_context.user_message_id == authorization.user_message_id
+                and current_user.id == authorization.actor_id
+            )
+        elif isinstance(authorization, AgentOfficeToolAuthorization):
+            authorization_claimed = claim_agent_office_tool_authorization(
+                db,
+                authorization,
+            )
+            authorization_context_matches = (
+                current_user.id == authorization.actor_id
+                and tool_context.conversation_id == authorization.conversation_id
+                and tool_context.user_message_id == authorization.user_message_id
+            )
+        else:
+            authorization_claimed = False
+            authorization_context_matches = False
+        if not authorization_claimed or not authorization_context_matches:
+            db.rollback()
+            return ToolResult(
+                content="Acción mutante denegada: autorización inválida o consumida.",
+                ok=False,
+            )
+        if isinstance(authorization, ConversationToolAuthorization) and not (
+            lock_conversation_tool_turn(
+                db,
+                conversation_id=authorization.conversation_id,
+                user_message_id=authorization.user_message_id,
+            )
+        ):
+            return ToolResult(
+                content=(
+                    "Acción mutante denegada: el turno fue sustituido por un "
+                    "mensaje posterior."
+                ),
+                ok=False,
+            )
+        # Current mutating tools are short, database-local operations. The
+        # conversation lock intentionally spans only this DB transaction; a
+        # future external or long-running tool must use a durable workflow and
+        # must not be added to this path.
+        tool_context = replace(tool_context, lock_effects=True)
+
     try:
-        result = spec.executor(db, current_user, tool_input, resolved_context)
+        normalized_input = spec.normalize_input(
+            db,
+            current_user,
+            tool_input,
+            tool_context,
+        )
+        if spec.requires_confirmation and (
+            authorization is None
+            or authorization.tool != name
+            or authorization.input_digest
+            != tool_input_digest(name, normalized_input)
+        ):
+            db.rollback()
+            return ToolResult(
+                content=(
+                    "Acción mutante denegada: los efectos actuales no coinciden "
+                    "con la confirmación consumida."
+                ),
+                ok=False,
+            )
+        result = spec.executor(
+            db,
+            current_user,
+            normalized_input,
+            tool_context,
+        )
     except HTTPException as error:
         db.rollback()
         return ToolResult(
@@ -1438,41 +1549,19 @@ def _create_requirement(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    normalized_input = normalize_create_requirement_input(tool_input)
-    organization_id = normalized_input["organization_id"]
-    title = normalized_input["title"]
-
-    ensure_organization_exists(db, organization_id)
-    require_requirement_permission(
-        db,
-        current_user,
-        organization_id,
-        "requirements.create",
-    )
-    project_id = normalized_input.get("project_id")
-    ensure_project_matches_organization(
-        db,
-        project_id=project_id,
-        organization_id=organization_id,
-    )
-
-    priority = normalized_input["priority"]
-    if priority not in VALID_PRIORITIES:
-        raise ValueError(f"priority inválida: {priority}")
-
     requirement = Requirement(
-        organization_id=organization_id,
-        project_id=project_id,
-        title=title,
-        priority=priority,
-        status="draft",
-        source_type="conversation",
+        organization_id=tool_input["organization_id"],
+        project_id=tool_input.get("project_id"),
+        title=tool_input["title"],
+        priority=tool_input["priority"],
+        status=tool_input["status"],
+        source_type=tool_input["source_type"],
         created_by_id=current_user.id,
     )
     for field in REQUIREMENT_CONTENT_FIELDS:
         if field == "title":
             continue
-        value = normalized_input.get(field)
+        value = tool_input.get(field)
         if value is not None:
             setattr(requirement, field, value)
 
@@ -1508,7 +1597,12 @@ def normalize_create_requirement_input(tool_input: dict) -> dict:
         value = tool_input.get(field)
         if value is not None:
             normalized[field] = str(value)
-    normalized["priority"] = tool_input.get("priority") or "medium"
+    priority = str(tool_input.get("priority") or "medium").strip()
+    if priority not in VALID_PRIORITIES:
+        raise ValueError(f"priority inválida: {priority}")
+    normalized["priority"] = priority
+    normalized["status"] = "draft"
+    normalized["source_type"] = "conversation"
     return normalized
 
 
@@ -1524,18 +1618,8 @@ def _update_requirement(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
-    # View access is the floor: without it, a no-op update would leak the
-    # serialized requirement to users who cannot read it.
-    require_requirement_view(db, current_user, requirement)
-
+    requirement = get_existing_requirement(db, tool_input["requirement_id"])
     requested_status = tool_input.get("status")
-    if requested_status is not None and requested_status not in {"draft", "submitted"}:
-        raise ValueError("El asistente solo puede usar los estados draft y submitted")
-    requested_priority = tool_input.get("priority")
-    if requested_priority is not None and requested_priority not in VALID_PRIORITIES:
-        raise ValueError(f"priority inválida: {requested_priority}")
-
     content_updates = {
         field: tool_input[field]
         for field in (*REQUIREMENT_CONTENT_FIELDS, "priority")
@@ -1543,15 +1627,7 @@ def _update_requirement(
     }
     project_id_present = "project_id" in tool_input
 
-    if content_updates or project_id_present or requested_status is not None:
-        require_requirement_content_edit(db, current_user, requirement)
-
     if project_id_present:
-        ensure_project_matches_organization(
-            db,
-            project_id=tool_input["project_id"],
-            organization_id=requirement.organization_id,
-        )
         requirement.project_id = tool_input["project_id"]
 
     for field, value in content_updates.items():
@@ -1569,18 +1645,12 @@ def _add_requirement_message(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    requirement = get_existing_requirement(db, int(tool_input["requirement_id"]))
-    require_requirement_view(db, current_user, requirement)
-
-    message_type = tool_input.get("message_type") or "note"
-    if message_type not in {"note", "question", "answer", "clarification"}:
-        raise ValueError("message_type inválido para el asistente")
-
+    requirement = get_existing_requirement(db, tool_input["requirement_id"])
     message = RequirementMessage(
         requirement_id=requirement.id,
         author_id=current_user.id,
-        body=str(tool_input["body"]),
-        message_type=message_type,
+        body=tool_input["body"],
+        message_type=tool_input["message_type"],
     )
     db.add(message)
     db.commit()
@@ -1597,41 +1667,12 @@ def _propose_memory_entry(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    organization_id = int(tool_input["organization_id"])
-    ensure_organization_exists(db, organization_id)
-    if not has_permission(
-        current_user,
-        "assistant.memory.propose",
-        db,
-        organization_id=organization_id,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Permission required: assistant.memory.propose",
-        )
-
-    category = str(tool_input["category"]).strip()
-    if category not in VALID_MEMORY_CATEGORIES:
-        raise ValueError(f"category inválida: {category}")
-
-    content = str(tool_input["content"]).strip()
-    if not content:
-        raise ValueError("content no puede estar vacío")
-    if len(content) > 1000:
-        raise ValueError("content no puede superar 1000 caracteres")
-
-    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
-    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
-        raise ValueError(f"sensitivity inválida: {sensitivity}")
-    if sensitivity == "normal" and PERSONAL_DATA_PATTERN.search(content):
-        sensitivity = "personal"
-
     entry = AssistantMemoryEntry(
-        organization_id=organization_id,
-        category=category,
-        content=content,
-        sensitivity=sensitivity,
-        status="proposed",
+        organization_id=tool_input["organization_id"],
+        category=tool_input["category"],
+        content=tool_input["content"],
+        sensitivity=tool_input["sensitivity"],
+        status=tool_input["status"],
         source_conversation_id=context.conversation_id,
         source_message_id=context.user_message_id,
         proposed_by_id=current_user.id,
@@ -1675,6 +1716,8 @@ def normalize_admin_feedback_input(tool_input: dict) -> dict:
         "title": _clean_transversal_text("title", tool_input["title"], 255),
         "description": description,
         "priority": priority,
+        "organization_id": None,
+        "status": "submitted",
     }
     if tool_input.get("organization_id") is not None:
         normalized["organization_id"] = _normalize_positive_identifier(
@@ -1690,28 +1733,13 @@ def _send_admin_feedback(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    normalized_input = normalize_admin_feedback_input(tool_input)
-    organization_id = normalized_input.get("organization_id")
-    if organization_id is not None:
-        ensure_organization_exists(db, organization_id)
-        if not has_permission(
-            current_user,
-            "assistant.use",
-            db,
-            organization_id=organization_id,
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="Permission required: assistant.use",
-            )
-
     feedback = AssistantAdminFeedback(
-        organization_id=organization_id,
-        category=normalized_input["category"],
-        title=normalized_input["title"],
-        description=normalized_input["description"],
-        priority=normalized_input["priority"],
-        status="submitted",
+        organization_id=tool_input["organization_id"],
+        category=tool_input["category"],
+        title=tool_input["title"],
+        description=tool_input["description"],
+        priority=tool_input["priority"],
+        status=tool_input["status"],
         source_conversation_id=context.conversation_id,
         source_message_id=context.user_message_id,
         submitted_by_id=current_user.id,
@@ -1743,24 +1771,20 @@ def _create_agent_office_task(
 ) -> dict:
     from app.agent_office.service import create_task
 
-    input_payload = tool_input.get("input")
-    if input_payload is not None and not isinstance(input_payload, dict):
-        raise ValueError("input debe ser un objeto")
-
     task = create_task(
         db,
         current_user,
-        organization_id=int(tool_input["organization_id"]),
-        title=str(tool_input["title"]).strip(),
-        description=str(tool_input["description"]).strip(),
-        department=tool_input.get("department"),
-        requested_action=tool_input.get("requested_action"),
-        priority=str(tool_input.get("priority") or "medium"),
-        approval_policy=tool_input.get("approval_policy"),
-        requires_human_approval=tool_input.get("requires_human_approval"),
-        input_payload=input_payload,
-        due_at=_parse_optional_datetime(tool_input.get("due_at")),
-        scheduled_for=_parse_optional_datetime(tool_input.get("scheduled_for")),
+        organization_id=tool_input["organization_id"],
+        title=tool_input["title"],
+        description=tool_input["description"],
+        department=tool_input["department"],
+        requested_action=tool_input["requested_action"],
+        priority=tool_input["priority"],
+        approval_policy=tool_input["approval_policy"],
+        requires_human_approval=tool_input["requires_human_approval"],
+        input_payload=tool_input["input"],
+        due_at=_parse_optional_datetime(tool_input["due_at"]),
+        scheduled_for=_parse_optional_datetime(tool_input["scheduled_for"]),
         source_conversation_id=context.conversation_id,
         source_message_id=context.user_message_id,
     )
@@ -1814,44 +1838,21 @@ def _propose_transversal_feature(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    requirement = get_existing_requirement(db, int(tool_input["source_requirement_id"]))
-    require_requirement_view(db, current_user, requirement)
-
-    title = _clean_transversal_text(
-        "title",
-        tool_input["title"],
-        MAX_TRANSVERSAL_TITLE_CHARS,
-    )
-    summary = _clean_transversal_text(
-        "summary",
-        tool_input["summary"],
-        MAX_TRANSVERSAL_TEXT_CHARS,
-    )
-    rationale = _clean_transversal_text(
-        "rationale",
-        tool_input["rationale"],
-        MAX_TRANSVERSAL_TEXT_CHARS,
-    )
-
-    category = str(tool_input["category"]).strip()
-    if category not in VALID_TRANSVERSAL_FEATURE_CATEGORIES:
-        raise ValueError(f"category inválida: {category}")
-
-    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
-    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
-        raise ValueError(f"sensitivity inválida: {sensitivity}")
+    requirement = get_existing_requirement(db, tool_input["source_requirement_id"])
+    if requirement.organization_id != tool_input["source_organization_id"]:
+        raise ValueError("Source requirement organization changed")
 
     feature = AssistantTransversalFeature(
         source_requirement_id=requirement.id,
         source_organization_id=requirement.organization_id,
         source_conversation_id=context.conversation_id,
         source_message_id=context.user_message_id,
-        title=title,
-        summary=summary,
-        rationale=rationale,
-        category=category,
-        sensitivity=sensitivity,
-        status="proposed",
+        title=tool_input["title"],
+        summary=tool_input["summary"],
+        rationale=tool_input["rationale"],
+        category=tool_input["category"],
+        sensitivity=tool_input["sensitivity"],
+        status=tool_input["status"],
         proposed_by_id=current_user.id,
     )
     db.add(feature)
@@ -1920,7 +1921,7 @@ def _record_transversal_feature_acceptance(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    feature = db.get(AssistantTransversalFeature, int(tool_input["feature_id"]))
+    feature = db.get(AssistantTransversalFeature, tool_input["feature_id"])
     if feature is None:
         raise HTTPException(status_code=404, detail="Transversal feature not found")
     if feature.status != "available":
@@ -1929,22 +1930,8 @@ def _record_transversal_feature_acceptance(
             detail="Transversal feature is not available",
         )
 
-    organization_id = int(tool_input["organization_id"])
-    ensure_organization_exists(db, organization_id)
-    if not has_permission(
-        current_user,
-        "assistant.use",
-        db,
-        organization_id=organization_id,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Permission required: assistant.use",
-        )
-
-    notes = tool_input.get("notes")
-    if notes is not None:
-        notes = _clean_transversal_text("notes", notes, MAX_TRANSVERSAL_TEXT_CHARS)
+    organization_id = tool_input["organization_id"]
+    notes = tool_input["notes"]
 
     adoption = db.scalar(
         select(AssistantTransversalFeatureAdoption).where(
@@ -1952,7 +1939,15 @@ def _record_transversal_feature_acceptance(
             AssistantTransversalFeatureAdoption.organization_id == organization_id,
         )
     )
-    new_status = "active" if feature.auto_activatable else "activation_pending"
+    new_status = tool_input["resulting_status"]
+    expected_status = (
+        "active" if feature.auto_activatable else "activation_pending"
+    )
+    if new_status != expected_status:
+        raise ValueError("Transversal feature activation effect changed")
+    expected_operation = "update" if adoption is not None else "create"
+    if tool_input["adoption_operation"] != expected_operation:
+        raise ValueError("Transversal feature adoption effect changed")
     activated_at = datetime.now(timezone.utc) if new_status == "active" else None
 
     if adoption is None:
@@ -1980,6 +1975,380 @@ def _record_transversal_feature_acceptance(
         if adoption.activated_at
         else None,
     }
+
+
+def _identity_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    return deepcopy(tool_input)
+
+
+def _require_effect_requirement(
+    db: Session,
+    requirement_id: int,
+    *,
+    lock_effects: bool,
+) -> Requirement:
+    query = select(Requirement).where(Requirement.id == requirement_id)
+    if lock_effects:
+        query = query.with_for_update()
+    requirement = db.scalar(query.execution_options(populate_existing=True))
+    if requirement is None:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+    return requirement
+
+
+def _normalize_create_requirement_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    normalized = normalize_create_requirement_input(tool_input)
+    organization_id = normalized["organization_id"]
+    ensure_organization_exists(db, organization_id)
+    require_requirement_permission(
+        db,
+        current_user,
+        organization_id,
+        "requirements.create",
+    )
+    ensure_project_matches_organization(
+        db,
+        project_id=normalized.get("project_id"),
+        organization_id=organization_id,
+    )
+    return normalized
+
+
+def _normalize_update_requirement_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    requirement_id = _normalize_positive_identifier(
+        tool_input.get("requirement_id"),
+        "requirement_id",
+    )
+    requirement = _require_effect_requirement(
+        db,
+        requirement_id,
+        lock_effects=context.lock_effects,
+    )
+    require_requirement_view(db, current_user, requirement)
+    normalized: dict = {
+        "requirement_id": requirement_id,
+        "organization_id": requirement.organization_id,
+    }
+    requested_status = tool_input.get("status")
+    if requested_status is not None:
+        requested_status = str(requested_status).strip()
+        if requested_status not in {"draft", "submitted"}:
+            raise ValueError(
+                "El asistente solo puede usar los estados draft y submitted"
+            )
+        normalized["status"] = requested_status
+    for field in REQUIREMENT_CONTENT_FIELDS:
+        if field in tool_input and tool_input[field] is not None:
+            normalized[field] = str(tool_input[field])
+    if tool_input.get("priority") is not None:
+        priority = str(tool_input["priority"]).strip()
+        if priority not in VALID_PRIORITIES:
+            raise ValueError(f"priority inválida: {priority}")
+        normalized["priority"] = priority
+    if "project_id" in tool_input:
+        project_id = tool_input["project_id"]
+        if project_id is not None:
+            project_id = _normalize_positive_identifier(project_id, "project_id")
+        ensure_project_matches_organization(
+            db,
+            project_id=project_id,
+            organization_id=requirement.organization_id,
+        )
+        normalized["project_id"] = project_id
+    if len(normalized) > 2:
+        require_requirement_content_edit(db, current_user, requirement)
+    return normalized
+
+
+def _normalize_add_requirement_message_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    requirement_id = _normalize_positive_identifier(
+        tool_input.get("requirement_id"),
+        "requirement_id",
+    )
+    requirement = _require_effect_requirement(
+        db,
+        requirement_id,
+        lock_effects=context.lock_effects,
+    )
+    require_requirement_view(db, current_user, requirement)
+    if "body" not in tool_input:
+        raise ValueError("body es obligatorio")
+    message_type = str(tool_input.get("message_type") or "note").strip()
+    if message_type not in {"note", "question", "answer", "clarification"}:
+        raise ValueError("message_type inválido para el asistente")
+    return {
+        "requirement_id": requirement.id,
+        "organization_id": requirement.organization_id,
+        "body": str(tool_input["body"]),
+        "message_type": message_type,
+    }
+
+
+def _normalize_memory_entry_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    organization_id = _normalize_positive_identifier(
+        tool_input.get("organization_id"),
+        "organization_id",
+    )
+    ensure_organization_exists(db, organization_id)
+    if not has_permission(
+        current_user,
+        "assistant.memory.propose",
+        db,
+        organization_id=organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.memory.propose",
+        )
+    category = str(tool_input.get("category") or "").strip()
+    if category not in VALID_MEMORY_CATEGORIES:
+        raise ValueError(f"category inválida: {category}")
+    content = str(tool_input.get("content") or "").strip()
+    if not content:
+        raise ValueError("content no puede estar vacío")
+    if len(content) > 1000:
+        raise ValueError("content no puede superar 1000 caracteres")
+    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
+    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
+        raise ValueError(f"sensitivity inválida: {sensitivity}")
+    if sensitivity == "normal" and PERSONAL_DATA_PATTERN.search(content):
+        sensitivity = "personal"
+    return {
+        "organization_id": organization_id,
+        "category": category,
+        "content": content,
+        "sensitivity": sensitivity,
+        "status": "proposed",
+    }
+
+
+def _normalize_agent_office_task_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    from app.agent_office.models import AGENT_OFFICE_PRIORITIES
+    from app.agent_office.service import (
+        normalize_task_request,
+        require_agent_office_permission,
+    )
+
+    organization_id = _normalize_positive_identifier(
+        tool_input.get("organization_id"),
+        "organization_id",
+    )
+    ensure_organization_exists(db, organization_id)
+    require_agent_office_permission(
+        db,
+        current_user,
+        organization_id,
+        "agent_office.create",
+    )
+    title = str(tool_input.get("title") or "").strip()
+    description = str(tool_input.get("description") or "").strip()
+    if not title or not description:
+        raise ValueError("title y description son obligatorios")
+    priority = str(tool_input.get("priority") or "medium").strip()
+    if priority not in AGENT_OFFICE_PRIORITIES:
+        raise ValueError(f"priority inválida: {priority}")
+    input_payload = tool_input.get("input")
+    if input_payload is not None and not isinstance(input_payload, dict):
+        raise ValueError("input debe ser un objeto")
+    department, action, policy, approval_required, status = normalize_task_request(
+        title=title,
+        description=description,
+        department=tool_input.get("department"),
+        requested_action=tool_input.get("requested_action"),
+        approval_policy=tool_input.get("approval_policy"),
+        requires_human_approval=tool_input.get("requires_human_approval"),
+    )
+    normalized_input_payload = dict(input_payload or {})
+    normalized_input_payload["organization_id"] = organization_id
+    due_at = _parse_optional_datetime(tool_input.get("due_at"))
+    scheduled_for = _parse_optional_datetime(tool_input.get("scheduled_for"))
+    return {
+        "organization_id": organization_id,
+        "title": title,
+        "description": description,
+        "department": department,
+        "requested_action": action,
+        "priority": priority,
+        "approval_policy": policy,
+        "requires_human_approval": approval_required,
+        "status": status,
+        "input": normalized_input_payload,
+        "due_at": due_at.isoformat() if due_at is not None else None,
+        "scheduled_for": (
+            scheduled_for.isoformat() if scheduled_for is not None else None
+        ),
+    }
+
+
+def _normalize_admin_feedback_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    normalized = normalize_admin_feedback_input(tool_input)
+    organization_id = normalized.get("organization_id")
+    if organization_id is not None:
+        ensure_organization_exists(db, organization_id)
+        if not has_permission(
+            current_user,
+            "assistant.use",
+            db,
+            organization_id=organization_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Permission required: assistant.use",
+            )
+    return normalized
+
+
+def _normalize_transversal_feature_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    for field in ("title", "summary", "rationale", "category"):
+        if field not in tool_input:
+            raise ValueError(f"{field} es obligatorio")
+    requirement_id = _normalize_positive_identifier(
+        tool_input.get("source_requirement_id"),
+        "source_requirement_id",
+    )
+    requirement = _require_effect_requirement(
+        db,
+        requirement_id,
+        lock_effects=context.lock_effects,
+    )
+    require_requirement_view(db, current_user, requirement)
+    category = str(tool_input.get("category") or "").strip()
+    if category not in VALID_TRANSVERSAL_FEATURE_CATEGORIES:
+        raise ValueError(f"category inválida: {category}")
+    sensitivity = str(tool_input.get("sensitivity") or "normal").strip()
+    if sensitivity not in VALID_MEMORY_SENSITIVITIES:
+        raise ValueError(f"sensitivity inválida: {sensitivity}")
+    return {
+        "source_requirement_id": requirement.id,
+        "source_organization_id": requirement.organization_id,
+        "title": _clean_transversal_text(
+            "title", tool_input.get("title"), MAX_TRANSVERSAL_TITLE_CHARS
+        ),
+        "summary": _clean_transversal_text(
+            "summary", tool_input.get("summary"), MAX_TRANSVERSAL_TEXT_CHARS
+        ),
+        "rationale": _clean_transversal_text(
+            "rationale", tool_input.get("rationale"), MAX_TRANSVERSAL_TEXT_CHARS
+        ),
+        "category": category,
+        "sensitivity": sensitivity,
+        "status": "proposed",
+    }
+
+
+def _normalize_transversal_acceptance_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    feature_id = _normalize_positive_identifier(
+        tool_input.get("feature_id"),
+        "feature_id",
+    )
+    feature_query = select(AssistantTransversalFeature).where(
+        AssistantTransversalFeature.id == feature_id
+    )
+    if context.lock_effects:
+        feature_query = feature_query.with_for_update()
+    feature = db.scalar(feature_query.execution_options(populate_existing=True))
+    if feature is None:
+        raise HTTPException(status_code=404, detail="Transversal feature not found")
+    if feature.status != "available":
+        raise HTTPException(
+            status_code=409,
+            detail="Transversal feature is not available",
+        )
+    organization_id = _normalize_positive_identifier(
+        tool_input.get("organization_id"),
+        "organization_id",
+    )
+    ensure_organization_exists(db, organization_id)
+    if not has_permission(
+        current_user,
+        "assistant.use",
+        db,
+        organization_id=organization_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: assistant.use",
+        )
+    adoption_query = select(AssistantTransversalFeatureAdoption).where(
+        AssistantTransversalFeatureAdoption.feature_id == feature.id,
+        AssistantTransversalFeatureAdoption.organization_id == organization_id,
+    )
+    if context.lock_effects:
+        adoption_query = adoption_query.with_for_update()
+    adoption = db.scalar(adoption_query.execution_options(populate_existing=True))
+    notes = tool_input.get("notes")
+    if notes is not None:
+        notes = _clean_transversal_text(
+            "notes", notes, MAX_TRANSVERSAL_TEXT_CHARS
+        )
+    return {
+        "feature_id": feature.id,
+        "organization_id": organization_id,
+        "notes": notes,
+        "resulting_status": (
+            "active" if feature.auto_activatable else "activation_pending"
+        ),
+        "adoption_operation": "update" if adoption is not None else "create",
+    }
+
+
+_TOOL_INPUT_NORMALIZERS: dict[str, ToolInputNormalizer] = {
+    "create_requirement": _normalize_create_requirement_tool_input,
+    "update_requirement": _normalize_update_requirement_tool_input,
+    "add_requirement_message": _normalize_add_requirement_message_tool_input,
+    "propose_memory_entry": _normalize_memory_entry_tool_input,
+    "create_agent_office_task": _normalize_agent_office_task_tool_input,
+    "send_admin_feedback": _normalize_admin_feedback_tool_input,
+    "propose_transversal_feature": _normalize_transversal_feature_tool_input,
+    "record_transversal_feature_acceptance": (
+        _normalize_transversal_acceptance_tool_input
+    ),
+}
 
 
 _EXECUTORS = {
@@ -2137,12 +2506,19 @@ def _build_tool_catalog() -> dict[str, ToolSpec]:
         name = definition["name"]
         metadata = _TOOL_METADATA[name]
         _validate_tool_policy(name, metadata)
+        input_normalizer = _TOOL_INPUT_NORMALIZERS.get(
+            name,
+            _identity_tool_input,
+        )
+        if metadata["read_only"] is False and name not in _TOOL_INPUT_NORMALIZERS:
+            raise ValueError(f"Mutating tool {name} must declare an input normalizer")
         catalog[name] = ToolSpec(
             name=name,
             label=metadata["label"],
             description=definition.get("description", ""),
             input_schema=definition.get("input_schema", {"type": "object"}),
             executor=_EXECUTORS[name],
+            input_normalizer=input_normalizer,
             read_only=metadata["read_only"],
             domain=metadata["domain"],
             side_effect=metadata["side_effect"],
@@ -2181,6 +2557,24 @@ def get_tool_definitions(tool_names: frozenset[str]) -> list[dict]:
         for name in TOOL_CATALOG
         if name in tool_names
     ]
+
+
+def normalize_tool_input(
+    db: Session,
+    current_user: User,
+    name: str,
+    tool_input: dict,
+    context: ToolContext | None = None,
+) -> dict:
+    spec = TOOL_CATALOG.get(name)
+    if spec is None:
+        raise ValueError(f"Herramienta desconocida: {name}")
+    return spec.normalize_input(
+        db,
+        current_user,
+        tool_input,
+        context or ToolContext(),
+    )
 
 
 def get_available_tool_specs(
