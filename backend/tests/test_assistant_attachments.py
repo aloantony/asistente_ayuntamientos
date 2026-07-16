@@ -616,6 +616,44 @@ def test_execute_tool_denies_attachment_taint_before_catalog_executor(
     assert executor_calls == []
 
 
+def test_attachment_taint_precedes_web_provenance_and_blocks_reader(
+    db,
+    attachment_user,
+    monkeypatch,
+):
+    user, _organization = attachment_user
+    source_url = "https://example.org/fuente-autorizada"
+    context = assistant_tools.ToolContext(
+        attachment_content_seen=True,
+        web_search_provenance={
+            source_url: assistant_tools.WebSearchProvenance(
+                source_url=source_url,
+                query="consulta previa",
+                provider="brave",
+                rank=1,
+            )
+        },
+        untrusted_external_content_seen=True,
+    )
+    monkeypatch.setattr(
+        assistant_tools.web_reader,
+        "read_web_page",
+        lambda _url: pytest.fail("attachment turn must not perform web egress"),
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "read_web_page",
+        {"url": source_url},
+        context,
+        allowed=frozenset({"read_web_page"}),
+    )
+
+    assert result.ok is False
+    assert result.content == assistant_tools.ATTACHMENT_CONTENT_TOOL_RESULT
+
+
 def test_attachment_is_revalidated_after_extraction_before_message_persistence(
     client,
     db,
