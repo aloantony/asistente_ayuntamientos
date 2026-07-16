@@ -35,13 +35,7 @@ class Settings(BaseSettings):
     assistant_attachment_max_context_chars: int = 6000
     assistant_attachment_total_context_chars: int = 12000
     assistant_attachment_max_extract_bytes: int = 5 * 1024 * 1024
-    assistant_attachment_extraction_timeout_seconds: float = 5.0
-    assistant_attachment_worker_cpu_seconds: int = 3
-    assistant_attachment_worker_memory_bytes: int = 384 * 1024 * 1024
-    assistant_attachment_worker_max_fds: int = 32
-    assistant_attachment_max_archive_members: int = 512
-    assistant_attachment_max_archive_member_bytes: int = 5 * 1024 * 1024
-    assistant_attachment_max_compression_ratio: float = 100.0
+    assistant_attachment_text_max_concurrency: int = 4
     hermes_agent_base_url: str = "http://127.0.0.1:8642/v1"
     hermes_agent_api_key: str | None = None
     hermes_agent_model: str = "hermes-agent"
@@ -358,45 +352,12 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("assistant_attachment_extraction_timeout_seconds")
+    @field_validator("assistant_attachment_text_max_concurrency")
     @classmethod
-    def validate_assistant_attachment_timeout(cls, value: float) -> float:
-        if not isfinite(value) or not 0.1 <= value <= 30:
+    def validate_attachment_text_concurrency(cls, value: int) -> int:
+        if not 1 <= value <= 64:
             raise ValueError(
-                "assistant_attachment_extraction_timeout_seconds must be "
-                "between 0.1 and 30 seconds"
-            )
-        return value
-
-    @field_validator(
-        "assistant_attachment_worker_cpu_seconds",
-        "assistant_attachment_worker_max_fds",
-        "assistant_attachment_max_archive_members",
-        "assistant_attachment_max_archive_member_bytes",
-    )
-    @classmethod
-    def validate_positive_attachment_worker_limit(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("assistant attachment worker limits must be positive")
-        return value
-
-    @field_validator("assistant_attachment_worker_memory_bytes")
-    @classmethod
-    def validate_attachment_worker_memory(cls, value: int) -> int:
-        if not 64 * 1024 * 1024 <= value <= 2 * 1024 * 1024 * 1024:
-            raise ValueError(
-                "assistant_attachment_worker_memory_bytes must be between "
-                "64 MiB and 2 GiB"
-            )
-        return value
-
-    @field_validator("assistant_attachment_max_compression_ratio")
-    @classmethod
-    def validate_attachment_compression_ratio(cls, value: float) -> float:
-        if not isfinite(value) or not 1 <= value <= 10_000:
-            raise ValueError(
-                "assistant_attachment_max_compression_ratio must be between "
-                "1 and 10000"
+                "assistant_attachment_text_max_concurrency must be between 1 and 64"
             )
         return value
 

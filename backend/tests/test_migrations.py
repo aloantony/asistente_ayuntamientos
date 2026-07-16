@@ -15,7 +15,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260716_0026"
+HEAD_REVISION = "20260716_0027"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -41,18 +41,30 @@ ASSISTANT_ATTACHMENT_SCHEMA = {
         "position",
         "context_status",
         "context_char_count",
+        "authorization_checked_at",
+        "authorized_by_id",
+        "authorized_organization_id",
+        "authorized_project_id",
+        "authorized_document_checksum_sha256",
+        "authorization_scope",
         "created_at",
         "updated_at",
     },
     "indexes": {
         "ix_assistant_message_attachments_message_id",
         "ix_assistant_message_attachments_document_id",
+        "ix_assistant_message_attachments_authorized_by_id",
     },
-    "foreign_keys": {("message_id",), ("document_id",)},
+    "foreign_keys": {
+        ("message_id",),
+        ("document_id",),
+        ("authorized_by_id",),
+    },
     "checks": {
         "ck_assistant_message_attachments_position",
         "ck_assistant_message_attachments_context_status",
         "ck_assistant_message_attachments_context_char_count",
+        "ck_assistant_message_attachments_authorization_scope",
     },
     "unique_constraints": {
         "uq_assistant_message_attachments_message_document",
@@ -1073,6 +1085,137 @@ def test_document_project_scope_preflight_rejects_inconsistent_existing_row(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == "20260716_0025"
         assert_document_project_scope_is_simple(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_attachment_audit_upgrade_preserves_legacy_rows_and_blocks_downgrade(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0026")
+    engine = create_engine(migration_database_url)
+
+    try:
+        checksum = "a" * 64
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    "INSERT INTO users (email, hashed_password, full_name) "
+                    "VALUES ('attachment-audit@example.test', 'hash', "
+                    "'Attachment audit') RETURNING id"
+                )
+            ).scalar_one()
+            organization_id = connection.execute(
+                text(
+                    "INSERT INTO organizations (name) "
+                    "VALUES ('Attachment audit organization') RETURNING id"
+                )
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO organization_users (organization_id, user_id) "
+                    "VALUES (:organization_id, :user_id)"
+                ),
+                {"organization_id": organization_id, "user_id": user_id},
+            )
+            project_id = connection.execute(
+                text(
+                    "INSERT INTO projects (name, organization_id) "
+                    "VALUES ('Attachment audit project', :organization_id) "
+                    "RETURNING id"
+                ),
+                {"organization_id": organization_id},
+            ).scalar_one()
+            document_id = connection.execute(
+                text(
+                    "INSERT INTO documents ("
+                    "organization_id, project_id, original_filename, "
+                    "stored_filename, storage_key, content_type, size_bytes, "
+                    "checksum_sha256, uploaded_by_id"
+                    ") VALUES ("
+                    ":organization_id, :project_id, 'audit.txt', 'audit.txt', "
+                    ":storage_key, 'text/plain', 6, :checksum, :user_id"
+                    ") RETURNING id"
+                ),
+                {
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "storage_key": (
+                        f"organizations/{organization_id}/projects/"
+                        f"{project_id}/audit.txt"
+                    ),
+                    "checksum": checksum,
+                    "user_id": user_id,
+                },
+            ).scalar_one()
+            conversation_id = connection.execute(
+                text(
+                    "INSERT INTO assistant_conversations (title, created_by_id) "
+                    "VALUES ('Attachment audit', :user_id) RETURNING id"
+                ),
+                {"user_id": user_id},
+            ).scalar_one()
+            message_id = connection.execute(
+                text(
+                    "INSERT INTO assistant_messages ("
+                    "conversation_id, role, content"
+                    ") VALUES (:conversation_id, 'user', 'audit') RETURNING id"
+                ),
+                {"conversation_id": conversation_id},
+            ).scalar_one()
+            relation_id = connection.execute(
+                text(
+                    "INSERT INTO assistant_message_attachments ("
+                    "message_id, document_id, position, context_status, "
+                    "context_char_count"
+                    ") VALUES ("
+                    ":message_id, :document_id, 0, 'ready', 6"
+                    ") RETURNING id"
+                ),
+                {"message_id": message_id, "document_id": document_id},
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "20260716_0027")
+        with engine.connect() as connection:
+            audit = connection.execute(
+                text(
+                    "SELECT authorized_by_id, authorized_organization_id, "
+                    "authorized_project_id, "
+                    "authorized_document_checksum_sha256, authorization_scope, "
+                    "authorization_checked_at IS NOT NULL AS checked "
+                    "FROM assistant_message_attachments WHERE id = :id"
+                ),
+                {"id": relation_id},
+            ).mappings().one()
+        assert dict(audit) == {
+            "authorized_by_id": user_id,
+            "authorized_organization_id": organization_id,
+            "authorized_project_id": project_id,
+            "authorized_document_checksum_sha256": checksum,
+            "authorization_scope": "legacy_unverified",
+            "checked": True,
+        }
+
+        result = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260716_0026",
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "contains 1 attachment audit row(s)" in result.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260716_0027"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM assistant_message_attachments "
+                    "WHERE id = :id"
+                ),
+                {"id": relation_id},
+            ).scalar_one() == 1
     finally:
         engine.dispose()
 

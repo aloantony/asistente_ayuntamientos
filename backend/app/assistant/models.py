@@ -176,6 +176,13 @@ class AssistantMessageAttachment(TimestampMixin, Base):
             "context_char_count >= 0",
             name="ck_assistant_message_attachments_context_char_count",
         ),
+        CheckConstraint(
+            "authorization_scope in ("
+            "'superuser', 'documents.manage', 'documents.view', "
+            "'legacy_unverified'"
+            ")",
+            name="ck_assistant_message_attachments_authorization_scope",
+        ),
         UniqueConstraint(
             "message_id",
             "document_id",
@@ -207,12 +214,38 @@ class AssistantMessageAttachment(TimestampMixin, Base):
         server_default="0",
         nullable=False,
     )
+    authorization_checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    authorized_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    authorized_organization_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    authorized_project_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    authorized_document_checksum_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    authorization_scope: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
 
     message: Mapped["AssistantMessage"] = relationship(
         "AssistantMessage",
         back_populates="attachments",
     )
     document: Mapped["Document"] = relationship("Document")
+    authorized_by: Mapped["User | None"] = relationship("User")
 
     @property
     def filename(self) -> str:

@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.assistant.attachments import (
     PreparedAttachment,
+    authorize_and_prepare_attachments_for_commit,
     attachment_payload,
     build_turn_attachment_context,
+    ensure_attachment_preparation_within_deadline,
     persist_message_attachments,
-    revalidate_prepared_attachments,
 )
 from app.assistant.gateway import (
     AICompletion,
@@ -46,6 +47,7 @@ from app.assistant.prompts import (
 )
 from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import (
+    ATTACHMENT_CONTENT_TOOL_RESULT,
     MAX_ORDINANCE_TOOL_RESULT_CHARS,
     ToolContext,
     ToolResult,
@@ -59,6 +61,7 @@ from app.users.models import User
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 4000
+ATTACHMENT_TOOL_INPUT_REDACTION = {"redacted": True}
 
 
 def tool_result_for_activity(tool_name: str, content: str) -> str:
@@ -226,11 +229,6 @@ def _run_agent_turn_events(
     current_attachments = prepared_attachments or []
     if current_attachments and input_mode != "text":
         raise ValueError("Assistant attachments are supported only for text input")
-    current_attachments = revalidate_prepared_attachments(
-        db,
-        current_user,
-        current_attachments,
-    )
 
     # Lock before inserting the message: concurrent FK inserts followed by a
     # row-lock upgrade can deadlock. The first commit releases this short lock.
@@ -246,17 +244,38 @@ def _run_agent_turn_events(
         content=user_text,
     )
     db.add(user_message)
-    persist_message_attachments(db, user_message, current_attachments)
     if conversation.title == "Conversación":
         conversation.title = user_text[:255]
     conversation.updated_at = func.now()
-    db.flush()
-    confirmation_context = process_pending_confirmation_response(
-        db,
-        conversation,
-        user_message,
-    )
-    db.commit()
+    try:
+        db.flush()
+        confirmation_context = process_pending_confirmation_response(
+            db,
+            conversation,
+            user_message,
+        )
+        # This is the linear authorization boundary for attachment turns.
+        # Authorization evidence and document identity remain locked until the
+        # message+relation commit below, then no lock crosses provider I/O.
+        current_attachments = authorize_and_prepare_attachments_for_commit(
+            db,
+            current_user,
+            current_attachments,
+            turn_deadline=turn_deadline,
+        )
+        persist_message_attachments(
+            db,
+            user_message,
+            current_attachments,
+            authorized_by_id=current_user.id,
+        )
+        db.flush()
+        if current_attachments:
+            ensure_attachment_preparation_within_deadline(turn_deadline)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(user_message)
     db.refresh(conversation)
 
@@ -269,23 +288,8 @@ def _run_agent_turn_events(
         },
     )
 
-    tools = get_available_tool_specs(db, current_user)
-    if current_attachments:
-        # Attachment text is authorized for this turn only and must never be
-        # captured as automatic long-term memory or sent to an egress tool.
-        attachment_disabled_read_tools = {
-            "propose_memory_entry",
-            "web_search",
-            "read_web_page",
-        }
-        attachment_disabled_domains = {"web", "memory"}
-        tools = [
-            tool
-            for tool in tools
-            if tool.read_only
-            and tool.domain not in attachment_disabled_domains
-            and tool.name not in attachment_disabled_read_tools
-        ]
+    attachment_tainted = bool(current_attachments)
+    tools = [] if attachment_tainted else get_available_tool_specs(db, current_user)
     tools_by_name = {tool.name: tool for tool in tools}
     tool_definitions = [tool.definition for tool in tools]
     tool_names = frozenset(tool.name for tool in tools)
@@ -364,19 +368,46 @@ def _run_agent_turn_events(
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                tool_input = dict(block.input)
+                raw_tool_input = dict(block.input)
+                audited_tool_input = (
+                    dict(ATTACHMENT_TOOL_INPUT_REDACTION)
+                    if attachment_tainted
+                    else raw_tool_input
+                )
                 tool = tools_by_name.get(block.name)
                 yield TurnEvent(
                     "tool_activity",
                     {
                         "tool": block.name,
                         "status": "started",
-                        "input": tool_input,
+                        "input": audited_tool_input,
                     },
                 )
-                signature = tool_call_signature(block.name, tool_input)
+                signature = tool_call_signature(block.name, audited_tool_input)
                 track_repetition = tool is None or tool.read_only
-                if _turn_timed_out(turn_deadline):
+                if attachment_tainted:
+                    # The provider receives no tool definitions for attachment
+                    # turns, but a hallucinated tool block must still fail
+                    # closed if it reaches this code path. Never pass its
+                    # untrusted arguments to confirmations or executors.
+                    result = _execute_tool_for_current_turn(
+                        db=db,
+                        current_user=current_user,
+                        conversation=conversation,
+                        user_message=user_message,
+                        tool=tool,
+                        tool_name=block.name,
+                        tool_input={},
+                        context=ToolContext(
+                            conversation_id=conversation.id,
+                            user_message_id=user_message.id,
+                            attachment_content_seen=True,
+                        ),
+                        allowed=tool_names,
+                        attachment_tainted=True,
+                    )
+                    force_synthesis_reason = "attachment_tools_disabled"
+                elif _turn_timed_out(turn_deadline):
                     result = ToolResult(content=TURN_TIMEOUT_TOOL_RESULT, ok=False)
                     force_synthesis_reason = "turn_timeout"
                 elif not execute_round:
@@ -406,7 +437,7 @@ def _run_agent_turn_events(
                             conversation,
                             user_message,
                             block.name,
-                            tool_input,
+                            raw_tool_input,
                         )
                     if tool is not None and block.name in CONFIRMATION_REQUIRED_TOOLS:
                         required_confirmation = _confirmation_context_from_result(
@@ -421,12 +452,13 @@ def _run_agent_turn_events(
                         user_message=user_message,
                         tool=tool,
                         tool_name=block.name,
-                        tool_input=tool_input,
+                        tool_input=raw_tool_input,
                         context=ToolContext(
                             conversation_id=conversation.id,
                             user_message_id=user_message.id,
                         ),
                         allowed=tool_names,
+                        attachment_tainted=False,
                     )
                     if track_repetition:
                         seen_read_calls.add(signature)
@@ -439,7 +471,7 @@ def _run_agent_turn_events(
                 action = {
                     "tool": block.name,
                     "ok": result.ok,
-                    "input": tool_input,
+                    "input": audited_tool_input,
                     "result": tool_result_for_activity(block.name, result.content),
                 }
                 actions.append(action)
@@ -448,7 +480,7 @@ def _run_agent_turn_events(
                     {
                         "tool": block.name,
                         "status": "finished",
-                        "input": tool_input,
+                        "input": audited_tool_input,
                         "ok": result.ok,
                         "result": action["result"],
                     },
@@ -701,7 +733,20 @@ def _execute_tool_for_current_turn(
     tool_input: dict,
     context: ToolContext,
     allowed: frozenset[str],
+    attachment_tainted: bool = False,
 ) -> ToolResult:
+    if attachment_tainted:
+        if not context.attachment_content_seen:
+            return ToolResult(content=ATTACHMENT_CONTENT_TOOL_RESULT, ok=False)
+        return execute_tool(
+            db,
+            current_user,
+            tool_name,
+            tool_input,
+            context,
+            allowed=allowed,
+        )
+
     if tool is None or tool.read_only:
         return execute_tool(
             db,
