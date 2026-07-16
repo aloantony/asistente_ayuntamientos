@@ -23,7 +23,13 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { fetchMunicipality } from "../lib/fetchers";
 import {
   fetchMunicipalAssetSummary,
@@ -1144,6 +1150,7 @@ export function MunicipalWorkspace() {
   const [error, setError] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
   const requestSequenceRef = useRef(0);
+  const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const contexts = user ? getMunicipalContexts(user) : [];
   const selectedContext =
@@ -1325,6 +1332,32 @@ export function MunicipalWorkspace() {
   const activeTabDefinition =
     TAB_DEFINITIONS.find((tab) => tab.id === activeTab) ?? TAB_DEFINITIONS[0];
 
+  function handleTabKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    currentIndex: number,
+  ) {
+    let nextIndex: number | null = null;
+
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % TAB_DEFINITIONS.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex =
+        (currentIndex - 1 + TAB_DEFINITIONS.length) % TAB_DEFINITIONS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = TAB_DEFINITIONS.length - 1;
+    }
+
+    if (nextIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    setActiveTab(TAB_DEFINITIONS[nextIndex].id);
+    tabButtonRefs.current[nextIndex]?.focus();
+  }
+
   return (
     <section className={styles.workspace}>
       <header className={styles.masthead}>
@@ -1377,13 +1410,17 @@ export function MunicipalWorkspace() {
       ) : null}
 
       <nav aria-label="Áreas del ayuntamiento" className={styles.tabs} role="tablist">
-        {TAB_DEFINITIONS.map(({ id, label, icon: Icon }) => (
+        {TAB_DEFINITIONS.map(({ id, label, icon: Icon }, index) => (
           <button
             aria-controls={`municipal-panel-${id}`}
             aria-selected={activeTab === id}
             id={`municipal-tab-${id}`}
             key={id}
             onClick={() => setActiveTab(id)}
+            onKeyDown={(event) => handleTabKeyDown(event, index)}
+            ref={(element) => {
+              tabButtonRefs.current[index] = element;
+            }}
             role="tab"
             tabIndex={activeTab === id ? 0 : -1}
             type="button"
