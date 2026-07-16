@@ -3754,6 +3754,85 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   line-height: 1.55;
 }
 
+.assistant-message-attachments {
+  width: min(100%, 560px);
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.assistant-message.user .assistant-message-attachments {
+  justify-items: end;
+}
+
+.assistant-message-attachment {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 30px;
+  gap: 9px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 7px;
+  background: var(--surface);
+}
+
+.assistant-message-attachment-preview {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--fill);
+}
+
+.assistant-message-attachment-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.assistant-message-attachment-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.assistant-message-attachment-copy strong,
+.assistant-message-attachment-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-message-attachment-copy strong {
+  font-size: 12.5px;
+}
+
+.assistant-message-attachment-copy small {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.assistant-message-attachment > button,
+.assistant-selected-attachments button,
+.assistant-attach-button {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.assistant-message-attachment > button {
+  width: 30px;
+  height: 30px;
+}
+
 .assistant-message-content.markdown-content {
   white-space: normal;
 }
@@ -4033,6 +4112,87 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   margin: 0 auto 22px;
 }
 
+.assistant-attachment-picker {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 11px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-soft);
+}
+
+.assistant-attachment-picker-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.assistant-attachment-picker-head label {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.assistant-attachment-picker-head select {
+  min-width: 0;
+  height: 36px;
+}
+
+.assistant-attachment-picker-head button {
+  min-height: 36px;
+}
+
+.assistant-attachment-picker > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.assistant-attachment-input {
+  display: none;
+}
+
+.assistant-attachment-options {
+  max-height: 180px;
+  display: grid;
+  gap: 5px;
+  overflow-y: auto;
+}
+
+.assistant-attachment-options > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 9px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: left;
+}
+
+.assistant-attachment-options > button.selected {
+  border-color: var(--accent);
+  background: var(--fill);
+}
+
+.assistant-attachment-options span,
+.assistant-attachment-options small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-attachment-options small {
+  color: var(--text-muted);
+}
+
 .assistant-composer {
   width: 100%;
   display: flex;
@@ -4043,6 +4203,37 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   padding: 13px 16px 11px;
   background: var(--surface-raised);
   box-shadow: var(--shadow-raised);
+}
+
+.assistant-selected-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.assistant-selected-attachments > span {
+  min-width: 0;
+  max-width: 260px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 6px 5px 9px;
+  background: var(--fill);
+  font-size: 11px;
+}
+
+.assistant-selected-attachments strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-selected-attachments button {
+  width: 20px;
+  height: 20px;
+  flex: none;
 }
 
 .assistant-composer-foot {
@@ -4070,6 +4261,23 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.assistant-attach-button {
+  width: 34px;
+  height: 34px;
+  flex: none;
+}
+
+.assistant-attach-button:hover:not(:disabled),
+.assistant-attach-button.active {
+  color: var(--accent-contrast);
+  background: var(--accent);
+}
+
+.assistant-attachment-error {
+  margin: 0 4px;
+  font-size: 12px;
 }
 
 .assistant-composer:focus-within {

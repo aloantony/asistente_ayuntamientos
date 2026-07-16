@@ -18,11 +18,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.assistant.attachments import prepare_attachments
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
 from app.assistant.models import (
     AssistantAdminFeedback,
     AssistantConversation,
     AssistantConversationFolder,
+    AssistantMessage,
+    AssistantMessageAttachment,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
@@ -81,6 +84,7 @@ from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
+from app.documents.models import Document
 from app.organizations.access import get_accessible_organizations_query
 from app.rbac.permissions import has_permission
 from app.users.models import User
@@ -743,6 +747,12 @@ def send_message(
             detail="Assistant is not configured",
         )
 
+    prepared_attachments = prepare_attachments(
+        db,
+        current_user,
+        payload.attachment_ids,
+    )
+
     try:
         run_agent_turn(
             db,
@@ -751,6 +761,7 @@ def send_message(
             payload.content,
             agent_gateway,
             input_mode=payload.input_mode,
+            prepared_attachments=prepared_attachments,
         )
     except AssistantRealtimeConflictError as error:
         raise HTTPException(
@@ -788,6 +799,12 @@ def send_message_stream(
             detail="Assistant is not configured",
         )
 
+    prepared_attachments = prepare_attachments(
+        db,
+        current_user,
+        payload.attachment_ids,
+    )
+
     def event_stream():
         try:
             for event in run_agent_turn_events(
@@ -797,6 +814,7 @@ def send_message_stream(
                 payload.content,
                 agent_gateway,
                 input_mode=payload.input_mode,
+                prepared_attachments=prepared_attachments,
             ):
                 yield format_sse_event(event)
         except AssistantUnavailableError:
@@ -1103,7 +1121,12 @@ def get_own_conversation(
 ) -> AssistantConversation:
     conversation = db.scalar(
         select(AssistantConversation)
-        .options(selectinload(AssistantConversation.messages))
+        .options(
+            selectinload(AssistantConversation.messages)
+            .selectinload(AssistantMessage.attachments)
+            .selectinload(AssistantMessageAttachment.document)
+            .selectinload(Document.project)
+        )
         .where(AssistantConversation.id == conversation_id)
         # The conversation is usually already in the identity map when this
         # runs after a commit; repopulate so the response includes the

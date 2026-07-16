@@ -15,7 +15,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260716_0025"
+HEAD_REVISION = "20260716_0026"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -33,6 +33,33 @@ POPULATION_PROVENANCE_CHECKS = {
     "ck_municipalities_population_source_sha256",
 }
 
+ASSISTANT_ATTACHMENT_SCHEMA = {
+    "columns": {
+        "id",
+        "message_id",
+        "document_id",
+        "position",
+        "context_status",
+        "context_char_count",
+        "created_at",
+        "updated_at",
+    },
+    "indexes": {
+        "ix_assistant_message_attachments_message_id",
+        "ix_assistant_message_attachments_document_id",
+    },
+    "foreign_keys": {("message_id",), ("document_id",)},
+    "checks": {
+        "ck_assistant_message_attachments_position",
+        "ck_assistant_message_attachments_context_status",
+        "ck_assistant_message_attachments_context_char_count",
+    },
+    "unique_constraints": {
+        "uq_assistant_message_attachments_message_document",
+        "uq_assistant_message_attachments_message_position",
+    },
+}
+
 
 def assert_pgvector_extension(engine: Engine) -> None:
     with engine.connect() as connection:
@@ -43,6 +70,30 @@ def assert_pgvector_extension(engine: Engine) -> None:
                 ")"
             )
         ).scalar_one() is True
+
+
+def assert_assistant_attachment_schema(inspector: Inspector) -> None:
+    table_name = "assistant_message_attachments"
+    assert {
+        column["name"] for column in inspector.get_columns(table_name)
+    } == ASSISTANT_ATTACHMENT_SCHEMA["columns"]
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(table_name)
+        if not index.get("duplicates_constraint")
+    } == ASSISTANT_ATTACHMENT_SCHEMA["indexes"]
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(table_name)
+    } == ASSISTANT_ATTACHMENT_SCHEMA["foreign_keys"]
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(table_name)
+    } == ASSISTANT_ATTACHMENT_SCHEMA["checks"]
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(table_name)
+    } == ASSISTANT_ATTACHMENT_SCHEMA["unique_constraints"]
 
 ASSET_INVENTORY_SCHEMA = {
     "municipal_asset_categories": {
@@ -762,6 +813,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_maintenance_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_assistant_attachment_schema(upgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -787,6 +839,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
+        assert "assistant_message_attachments" not in (
+            downgraded_inspector.get_table_names()
+        )
 
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
@@ -798,6 +853,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_maintenance_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_assistant_attachment_schema(reupgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -827,6 +883,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_assistant_attachment_schema(inspect(engine))
 
         run_alembic(migration_database_url, "downgrade", "20260713_0021")
         downgraded_inspector = inspect(engine)
@@ -837,6 +894,9 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
+        assert "assistant_message_attachments" not in (
+            downgraded_inspector.get_table_names()
+        )
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
@@ -848,6 +908,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
+        assert_assistant_attachment_schema(inspect(engine))
     finally:
         engine.dispose()
 

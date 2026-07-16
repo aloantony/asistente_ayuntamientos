@@ -481,6 +481,7 @@ export async function streamAssistantMessage(
   handlers: AssistantStreamHandlers,
   inputMode: "text" | "voice" = "text",
   signal?: AbortSignal,
+  attachmentIds: number[] = [],
 ) {
   await consumeAssistantStream(
     (streamSignal) =>
@@ -490,13 +491,29 @@ export async function streamAssistantMessage(
         "El asistente no ha podido responder.",
         {
           method: "POST",
-          body: JSON.stringify({ content, input_mode: inputMode }),
+          body: JSON.stringify({
+            content,
+            input_mode: inputMode,
+            attachment_ids: attachmentIds,
+          }),
           signal: streamSignal,
         },
       ),
     handlers,
     signal,
   );
+}
+
+export async function fetchAssistantAttachmentBlob(
+  documentId: number,
+  accessToken: string,
+) {
+  const response = await performAdminRequest(
+    `/documents/${documentId}/download`,
+    accessToken,
+    "No se pudo abrir el archivo adjunto.",
+  );
+  return response.blob();
 }
 
 export async function streamAssistantVoiceTurn(
