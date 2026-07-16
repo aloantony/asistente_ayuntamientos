@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -63,6 +64,8 @@ from app.requirements.routes import (
 from app.users.models import User
 
 ToolExecutor = Callable[..., object]
+ToolApprovalPolicy = Literal["never", "explicit"]
+ToolSideEffect = Literal["none", "database_write"]
 
 VALID_PRIORITIES = {"low", "medium", "high", "urgent"}
 VALID_MEMORY_CATEGORIES = {
@@ -735,7 +738,13 @@ class ToolSpec:
     executor: ToolExecutor
     read_only: bool
     domain: str
+    side_effect: ToolSideEffect
+    approval_policy: ToolApprovalPolicy
     required_permission: str | None = None
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return self.approval_policy == "explicit"
 
     @property
     def definition(self) -> dict:
@@ -752,6 +761,8 @@ class ToolSpec:
             "label": self.label,
             "read_only": self.read_only,
             "domain": self.domain,
+            "side_effect": self.side_effect,
+            "approval_policy": self.approval_policy,
             "required_permission": self.required_permission,
         }
 
@@ -1996,92 +2007,126 @@ _TOOL_METADATA: dict[str, dict] = {
         "label": "Consultar organizaciones",
         "read_only": True,
         "domain": "organizations",
+        "side_effect": "none",
+        "approval_policy": "never",
     },
     "list_projects": {
         "label": "Consultar proyectos",
         "read_only": True,
         "domain": "projects",
+        "side_effect": "none",
+        "approval_policy": "never",
     },
     "get_map_items": {
         "label": "Consultar mapa",
         "read_only": True,
         "domain": "map",
+        "side_effect": "none",
+        "approval_policy": "never",
         "required_permission": "map.view",
     },
     "web_search": {
         "label": "Buscar en web",
         "read_only": True,
         "domain": "web",
+        "side_effect": "none",
+        "approval_policy": "never",
         "required_permission": "assistant.web.search",
     },
     "read_web_page": {
         "label": "Leer fuente web",
         "read_only": True,
         "domain": "web",
+        "side_effect": "none",
+        "approval_policy": "never",
         "required_permission": "assistant.web.search",
     },
     "semantic_search_ordinances": {
         "label": "Buscar ordenanzas",
         "read_only": True,
         "domain": "ordinances",
+        "side_effect": "none",
+        "approval_policy": "never",
         "required_permission": "ordinances.compare",
     },
     "list_requirements": {
         "label": "Consultar necesidades",
         "read_only": True,
         "domain": "requirements",
+        "side_effect": "none",
+        "approval_policy": "never",
     },
     "get_requirement": {
         "label": "Leer necesidad",
         "read_only": True,
         "domain": "requirements",
+        "side_effect": "none",
+        "approval_policy": "never",
     },
     "create_requirement": {
         "label": "Crear necesidad",
         "read_only": False,
         "domain": "requirements",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
     },
     "update_requirement": {
         "label": "Actualizar necesidad",
         "read_only": False,
         "domain": "requirements",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
     },
     "add_requirement_message": {
         "label": "Añadir nota a necesidad",
         "read_only": False,
         "domain": "requirements",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
     },
     "propose_memory_entry": {
         "label": "Proponer memoria",
         "read_only": False,
         "domain": "memory",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
         "required_permission": "assistant.memory.propose",
     },
     "create_agent_office_task": {
         "label": "Crear tarea supervisada",
         "read_only": False,
         "domain": "agent_office",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
         "required_permission": "agent_office.create",
     },
     "send_admin_feedback": {
         "label": "Enviar feedback al admin",
         "read_only": False,
         "domain": "feedback",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
     },
     "propose_transversal_feature": {
         "label": "Proponer funcionalidad transversal",
         "read_only": False,
         "domain": "transversal_features",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
     },
     "list_available_transversal_features": {
         "label": "Consultar funcionalidades disponibles",
         "read_only": True,
         "domain": "transversal_features",
+        "side_effect": "none",
+        "approval_policy": "never",
     },
     "record_transversal_feature_acceptance": {
         "label": "Registrar activación transversal",
         "read_only": False,
         "domain": "transversal_features",
+        "side_effect": "database_write",
+        "approval_policy": "explicit",
     },
 }
 
@@ -2091,6 +2136,7 @@ def _build_tool_catalog() -> dict[str, ToolSpec]:
     for definition in _TOOL_DEFINITIONS:
         name = definition["name"]
         metadata = _TOOL_METADATA[name]
+        _validate_tool_policy(name, metadata)
         catalog[name] = ToolSpec(
             name=name,
             label=metadata["label"],
@@ -2099,9 +2145,30 @@ def _build_tool_catalog() -> dict[str, ToolSpec]:
             executor=_EXECUTORS[name],
             read_only=metadata["read_only"],
             domain=metadata["domain"],
+            side_effect=metadata["side_effect"],
+            approval_policy=metadata["approval_policy"],
             required_permission=metadata.get("required_permission"),
         )
     return catalog
+
+
+def _validate_tool_policy(name: str, metadata: dict) -> None:
+    read_only = metadata.get("read_only")
+    side_effect = metadata.get("side_effect")
+    approval_policy = metadata.get("approval_policy")
+    if read_only is True:
+        if side_effect != "none" or approval_policy != "never":
+            raise ValueError(
+                f"Read-only tool {name} must have no side effect or approval"
+            )
+        return
+    if read_only is False:
+        if side_effect != "database_write" or approval_policy != "explicit":
+            raise ValueError(
+                f"Mutating tool {name} must declare a side effect and explicit approval"
+            )
+        return
+    raise ValueError(f"Tool {name} must declare read_only as a boolean")
 
 
 TOOL_CATALOG = _build_tool_catalog()

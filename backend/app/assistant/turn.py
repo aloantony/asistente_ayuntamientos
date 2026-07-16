@@ -32,12 +32,12 @@ from app.assistant.gateway import (
     AssistantUnavailableError,
 )
 from app.assistant.guards import (
-    CONFIRMATION_REQUIRED_TOOLS,
     ConfirmationReference,
     ConfirmationToolResult,
     build_confirmation_prompt,
     check_tool_confirmation,
     finalize_confirmation_turn,
+    load_conversation_state,
     lock_conversation_for_confirmation,
     process_pending_confirmation_response,
 )
@@ -613,8 +613,9 @@ def _run_agent_turn_events(
                             user_message,
                             block.name,
                             raw_tool_input,
+                            tool_spec=tool,
                         )
-                    if tool is not None and block.name in CONFIRMATION_REQUIRED_TOOLS:
+                    if tool is not None:
                         required_confirmation = _confirmation_context_from_result(
                             guarded_result
                         )
@@ -1040,9 +1041,21 @@ def build_history(
     attachment_context_message_id: int | None = None,
     attachment_context: str = "",
 ) -> list[dict]:
+    state = load_conversation_state(conversation)
+    excluded_confirmation_message_ids: set[int] = set()
+    for key in ("last_consumed_confirmation", "last_cancelled_confirmation"):
+        confirmation = state.get(key)
+        if not isinstance(confirmation, dict):
+            continue
+        message_id = int(confirmation.get("prompted_at_assistant_message_id") or 0)
+        if message_id:
+            excluded_confirmation_message_ids.add(message_id)
     messages: list[dict] = []
     for message in conversation.messages:
-        if not message.content:
+        if (
+            not message.content
+            or message.id in excluded_confirmation_message_ids
+        ):
             continue
         content = message.content
         if message.id == attachment_context_message_id and attachment_context:

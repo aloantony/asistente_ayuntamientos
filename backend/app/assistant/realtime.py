@@ -404,6 +404,7 @@ def execute_realtime_tool_call(
             allow_web_reader=False,
         )
         allowed_tool_names = frozenset(tool.name for tool in tools)
+        tools_by_name = {tool.name: tool for tool in tools}
         if post_taint_blocked:
             guarded_result = None
             result = ToolResult(
@@ -417,6 +418,7 @@ def execute_realtime_tool_call(
                 user_message,
                 payload.name,
                 tool_input,
+                tool_spec=tools_by_name.get(payload.name),
             )
             result = guarded_result or execute_tool(
                 db,
