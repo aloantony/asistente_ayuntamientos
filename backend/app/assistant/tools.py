@@ -733,6 +733,14 @@ class ToolSpec:
 class ToolContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
+    attachment_content_seen: bool = False
+
+
+ATTACHMENT_CONTENT_TOOL_RESULT = (
+    "No se ejecutó la herramienta porque este turno contiene adjuntos y está "
+    "aislado de todas las herramientas. Responde únicamente con el contexto "
+    "del turno sin repetir argumentos de herramienta."
+)
 
 
 def execute_tool(
@@ -743,6 +751,10 @@ def execute_tool(
     context: ToolContext | None = None,
     allowed: frozenset[str] | None = None,
 ) -> ToolResult:
+    resolved_context = context or ToolContext()
+    if resolved_context.attachment_content_seen:
+        return ToolResult(content=ATTACHMENT_CONTENT_TOOL_RESULT, ok=False)
+
     if allowed is not None and name not in allowed:
         return ToolResult(
             content=f"Herramienta no disponible para este agente: {name}",
@@ -754,7 +766,7 @@ def execute_tool(
         return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
 
     try:
-        result = spec.executor(db, current_user, tool_input, context or ToolContext())
+        result = spec.executor(db, current_user, tool_input, resolved_context)
     except HTTPException as error:
         db.rollback()
         return ToolResult(

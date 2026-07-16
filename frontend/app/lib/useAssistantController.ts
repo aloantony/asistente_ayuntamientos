@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AssistantAction,
   AssistantAttachmentCandidate,
@@ -603,16 +603,23 @@ export function useAssistantController({
   // streaming does not resume audio after its playback was cut.
   const speechInterruptedRef = useRef(false);
   const attachmentPreviewUrlsRef = useRef(new Map<number, string>());
+  const attachmentPreviewRequestsRef = useRef(
+    new Map<number, Promise<string>>(),
+  );
+  const attachmentPreviewGenerationRef = useRef(0);
+
+  const revokeAttachmentPreviewUrls = useCallback(() => {
+    attachmentPreviewGenerationRef.current += 1;
+    for (const url of attachmentPreviewUrlsRef.current.values()) {
+      URL.revokeObjectURL(url);
+    }
+    attachmentPreviewUrlsRef.current.clear();
+    attachmentPreviewRequestsRef.current.clear();
+  }, []);
 
   useEffect(() => {
-    const previewUrls = attachmentPreviewUrlsRef.current;
-    return () => {
-      for (const url of previewUrls.values()) {
-        URL.revokeObjectURL(url);
-      }
-      previewUrls.clear();
-    };
-  }, []);
+    return revokeAttachmentPreviewUrls;
+  }, [revokeAttachmentPreviewUrls]);
 
   if (speechPlayerRef.current === null) {
     speechPlayerRef.current = createSpeechPlayer({
@@ -656,6 +663,7 @@ export function useAssistantController({
   ) {
     const nextId = detail?.id ?? null;
     if (selectedIdRef.current !== nextId) {
+      revokeAttachmentPreviewUrls();
       speechPlayerRef.current?.stop();
       stopRealtimeVoice({ interrupted: true });
       setVoiceState("idle");
@@ -872,19 +880,42 @@ export function useAssistantController({
     if (existingUrl) {
       return existingUrl;
     }
-    const blob = await fetchAssistantAttachmentBlob(
-      documentId,
-      getStoredToken(),
-    );
-    const url = URL.createObjectURL(blob);
-    attachmentPreviewUrlsRef.current.set(documentId, url);
-    return url;
+    const existingRequest = attachmentPreviewRequestsRef.current.get(documentId);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const generation = attachmentPreviewGenerationRef.current;
+    const request = (async () => {
+      const blob = await fetchAssistantAttachmentBlob(
+        documentId,
+        getStoredToken(),
+      );
+      const url = URL.createObjectURL(blob);
+      if (attachmentPreviewGenerationRef.current !== generation) {
+        URL.revokeObjectURL(url);
+        return "";
+      }
+      attachmentPreviewUrlsRef.current.set(documentId, url);
+      return url;
+    })();
+    attachmentPreviewRequestsRef.current.set(documentId, request);
+    try {
+      return await request;
+    } finally {
+      if (attachmentPreviewRequestsRef.current.get(documentId) === request) {
+        attachmentPreviewRequestsRef.current.delete(documentId);
+      }
+    }
   }
 
   async function openAttachment(documentId: number) {
     setAttachmentError("");
     try {
       const url = await loadAttachmentPreview(documentId);
+      if (!url) {
+        return;
+      }
       const link = document.createElement("a");
       link.href = url;
       link.rel = "noopener noreferrer";

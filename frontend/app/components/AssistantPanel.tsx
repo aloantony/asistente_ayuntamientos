@@ -594,7 +594,7 @@ const ATTACHMENT_STATUS_LABELS: Record<
   pending: "Preparando",
   ready: "Texto usado solo en este turno",
   empty: "Sin texto extraíble",
-  unsupported: "Formato sin lectura automática",
+  unsupported: "Formato adjunto, pero no analizado",
   vision_unavailable: "Imagen adjunta · visión no disponible",
   too_large: "Demasiado grande para lectura automática",
   unavailable: "Archivo no disponible",
@@ -622,23 +622,25 @@ function MessageAttachmentCard({
 }) {
   const isImage = attachment.content_type.startsWith("image/");
   const [previewUrl, setPreviewUrl] = useState("");
+  const [previewState, setPreviewState] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
 
-  useEffect(() => {
-    if (!isImage) {
+  async function handleLoadPreview() {
+    if (!isImage || previewState === "loading") {
       return;
     }
-    let active = true;
-    void onLoadPreview(attachment.document_id)
-      .then((url) => {
-        if (active) {
-          setPreviewUrl(url);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [attachment.document_id, isImage, onLoadPreview]);
+    setPreviewState("loading");
+    try {
+      const url = await onLoadPreview(attachment.document_id);
+      if (url) {
+        setPreviewUrl(url);
+      }
+      setPreviewState("idle");
+    } catch {
+      setPreviewState("error");
+    }
+  }
 
   return (
     <div className="assistant-message-attachment">
@@ -646,9 +648,27 @@ function MessageAttachmentCard({
         {previewUrl ? (
           // The URL is an authenticated local blob, never a remote source.
           // eslint-disable-next-line @next/next/no-img-element
-          <img alt="" src={previewUrl} />
+          <img alt={`Vista previa de ${attachment.filename}`} src={previewUrl} />
         ) : isImage ? (
-          <FileImage aria-hidden size={20} />
+          <button
+            aria-label={`Cargar vista previa de ${attachment.filename}`}
+            disabled={previewState === "loading"}
+            onClick={() => void handleLoadPreview()}
+            title={
+              previewState === "error"
+                ? "Reintentar vista previa"
+                : "Cargar vista previa"
+            }
+            type="button"
+          >
+            {previewState === "loading" ? (
+              <Loader2 aria-hidden className="spinning-icon" size={18} />
+            ) : previewState === "error" ? (
+              <CircleAlert aria-hidden size={18} />
+            ) : (
+              <FileImage aria-hidden size={20} />
+            )}
+          </button>
         ) : (
           <FileText aria-hidden size={20} />
         )}
@@ -2311,8 +2331,9 @@ export function AssistantPanel({
                       </button>
                     </div>
                     <p>
-                      El archivo queda guardado en el proyecto; su contenido solo
-                      se autoriza como contexto para este turno.
+                      Solo se lee texto .txt UTF-8 y únicamente en este turno.
+                      PDF, Word y Excel se adjuntan sin analizar; las imágenes se
+                      previsualizan solo cuando lo pides.
                     </p>
                     <div className="assistant-attachment-options">
                       {isLoadingAttachments ? (
