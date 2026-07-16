@@ -270,6 +270,9 @@ export function MapPanel({ user }: MapPanelProps) {
     requestedFocusedEntityType === "asset" && !canViewAssets
       ? null
       : requestedFocusedEntityType;
+  const focusedOrganizationId = parseNumberParam(
+    searchParams.get("organization_id"),
+  );
   const focusedEntityId = parseNumberParam(searchParams.get("entity_id"));
   const focusedLatitude = parseNumberParam(searchParams.get("lat"));
   const focusedLongitude = parseNumberParam(searchParams.get("lng"));
@@ -296,6 +299,9 @@ export function MapPanel({ user }: MapPanelProps) {
       params.set("entity_type", focusedEntityType);
       params.set("entity_id", String(focusedEntityId));
     }
+    if (focusedOrganizationId !== null) {
+      params.set("organization_id", String(focusedOrganizationId));
+    }
     if (status.trim()) {
       params.set("status", status.trim());
     }
@@ -309,6 +315,7 @@ export function MapPanel({ user }: MapPanelProps) {
     entityType,
     focusedEntityId,
     focusedEntityType,
+    focusedOrganizationId,
     includeArchived,
     status,
   ]);

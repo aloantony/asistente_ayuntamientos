@@ -431,6 +431,18 @@
   height: 13px;
 }
 
+.itemActions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.itemActions button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 .categoryDot {
   width: 10px;
   height: 10px;
@@ -784,7 +796,7 @@
 }
 
 .actionCell {
-  width: 48px;
+  width: 82px;
   text-align: right;
 }
 

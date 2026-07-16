@@ -285,7 +285,7 @@ export default function HomePage() {
     }
     if (canSeeOrdinances) {
       tasks.push(
-        fetchOrdinancesTotal()
+        fetchOrdinancesTotal(municipalOrganization?.municipality?.id)
           .then((total) => isActive && setOrdinancesTotal(total))
           .catch(() => isActive && setOrdinancesTotal(null)),
       );
@@ -379,7 +379,9 @@ export default function HomePage() {
       cards.push({
         key: "ordinances",
         label: "Ordenanzas",
-        href: canSeeAdmin ? "/admin/ordenanzas" : "/ayuntamiento",
+        href: canSeeAdmin
+          ? "/admin/ordenanzas"
+          : "/ayuntamiento?tab=ordinances",
         icon: "ordinances",
         value: ordinancesTotal,
       });

@@ -152,7 +152,12 @@ function formatDuration(minutes: number | null) {
 
 function getEligibleOrganizations(user: User) {
   return (user.organizations ?? [])
-    .filter((organization) => organization.status !== "archived")
+    .filter(
+      (organization) =>
+        organization.status !== "archived" &&
+        (typeof organization.municipality_id === "number" ||
+          typeof organization.municipality?.id === "number"),
+    )
     .sort((left, right) => {
       if (left.status !== right.status) {
         return left.status === "active" ? -1 : 1;
@@ -249,11 +254,15 @@ function NoOrganizationState() {
   );
 }
 
-export function MaintenanceDashboard() {
+export function MaintenanceDashboard({
+  initialOrganizationId,
+}: {
+  initialOrganizationId?: number | null;
+}) {
   const { user, handleRequestError } = useSession();
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
-  >(null);
+  >(initialOrganizationId ?? null);
   const [assets, setAssets] = useState<MunicipalAsset[]>([]);
   const [assetsTotal, setAssetsTotal] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
@@ -498,10 +507,6 @@ export function MaintenanceDashboard() {
     view,
   ]);
 
-  const assetsById = useMemo(
-    () => new Map(assets.map((asset) => [asset.id, asset])),
-    [assets],
-  );
   const assetFilterIsComplete =
     assetsTotal !== null && assetsTotal <= assets.length;
   const activeFilterCount = [
@@ -525,6 +530,15 @@ export function MaintenanceDashboard() {
 
   function changeOrganization(organizationId: number) {
     setSelectedOrganizationId(organizationId);
+    setAssets([]);
+    setAssetsTotal(null);
+    setMetrics(null);
+    setOrders([]);
+    setOrdersTotal(0);
+    setSummaryError("");
+    setOrdersError("");
+    setIsLoadingSummary(true);
+    setIsLoadingOrders(true);
     setFilterDraft(EMPTY_FILTERS);
     setAppliedFilters(EMPTY_FILTERS);
     setView("open");
@@ -553,6 +567,8 @@ export function MaintenanceDashboard() {
 
   const organizationLabel =
     selectedOrganization.municipality?.name ?? selectedOrganization.name;
+  const inventoryHref = `/inventario?organization_id=${selectedOrganization.id}`;
+  const mapHref = `/mapa?organization_id=${selectedOrganization.id}`;
 
   return (
     <section className={styles.dashboard}>
@@ -592,11 +608,11 @@ export function MaintenanceDashboard() {
           )}
 
           <div className={styles.heroActions}>
-            <Link className={styles.secondaryLink} href="/inventario">
+            <Link className={styles.secondaryLink} href={inventoryHref}>
               Abrir inventario
             </Link>
             {canViewMap ? (
-              <Link className={styles.secondaryLink} href="/mapa">
+              <Link className={styles.secondaryLink} href={mapHref}>
                 Abrir mapa
               </Link>
             ) : null}
@@ -686,11 +702,11 @@ export function MaintenanceDashboard() {
               <li>Ubícalos en el mapa y programa sus intervenciones.</li>
             </ol>
             <div className={styles.emptyActions}>
-              <Link className={styles.primaryLink} href="/inventario">
+              <Link className={styles.primaryLink} href={inventoryHref}>
                 {canCreateAssets ? "Crear el primer activo" : "Abrir inventario"}
               </Link>
               {canViewMap ? (
-                <Link className={styles.secondaryLink} href="/mapa">
+                <Link className={styles.secondaryLink} href={mapHref}>
                   Revisar mapa municipal
                 </Link>
               ) : null}
@@ -877,11 +893,11 @@ export function MaintenanceDashboard() {
                     : "Prueba otra vista o elimina alguno de los filtros aplicados."}
                 </p>
                 <div className={styles.emptyActions}>
-                  <Link className={styles.primaryLink} href="/inventario">
+                  <Link className={styles.primaryLink} href={inventoryHref}>
                     Abrir inventario
                   </Link>
                   {canViewMap ? (
-                    <Link className={styles.secondaryLink} href="/mapa">
+                    <Link className={styles.secondaryLink} href={mapHref}>
                       Abrir mapa
                     </Link>
                   ) : null}
@@ -898,10 +914,7 @@ export function MaintenanceDashboard() {
               <ol className={styles.orderList}>
                 {orders.map((order) => {
                   const category = orderCategory(order);
-                  const asset = assetsById.get(order.asset_id);
-                  const canOpenMap = Boolean(
-                    canViewMap && asset?.location_id,
-                  );
+                  const canOpenMap = canViewMap;
 
                   return (
                     <li className={styles.orderRow} key={order.id}>
@@ -969,14 +982,14 @@ export function MaintenanceDashboard() {
                       <div className={styles.rowAction}>
                         {canOpenMap ? (
                           <Link
-                            href={`/mapa?entity_type=asset&entity_id=${order.asset_id}`}
+                            href={`/mapa?organization_id=${selectedOrganization.id}&entity_type=asset&entity_id=${order.asset_id}`}
                           >
                             {canOperateMaintenance
                               ? "Gestionar en mapa"
                               : "Ver en mapa"}
                           </Link>
                         ) : (
-                          <span>Sin ubicación cartográfica</span>
+                          <span>Mapa no disponible para esta cuenta</span>
                         )}
                       </div>
                     </li>

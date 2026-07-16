@@ -93,9 +93,13 @@ export function fetchMunicipalitiesTotal() {
   );
 }
 
-export function fetchOrdinancesTotal() {
+export function fetchOrdinancesTotal(municipalityId?: number) {
+  const params = new URLSearchParams({ limit: "1" });
+  if (municipalityId) {
+    params.set("municipality_id", String(municipalityId));
+  }
   return fetchTotal(
-    "/ordinances?limit=1",
+    `/ordinances?${params.toString()}`,
     "No se pudo contar la lista de ordenanzas.",
   );
 }

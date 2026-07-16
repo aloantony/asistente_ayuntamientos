@@ -319,7 +319,13 @@ function inventoryErrorMessage(error: unknown, fallback: string) {
   return messages[error.message] ?? (error.message || fallback);
 }
 
-export function AssetInventory({ user }: { user: User }) {
+export function AssetInventory({
+  user,
+  initialOrganizationId,
+}: {
+  user: User;
+  initialOrganizationId?: number | null;
+}) {
   const { getStoredToken, handleRequestError } = useSession();
   const organizations = useMemo(
     () =>
@@ -328,8 +334,10 @@ export function AssetInventory({ user }: { user: User }) {
       ),
     [user.organizations],
   );
-  const [organizationId, setOrganizationId] = useState(
-    organizations[0]?.id ?? 0,
+  const [organizationId, setOrganizationId] = useState(() =>
+    organizations.some(({ id }) => id === initialOrganizationId)
+      ? (initialOrganizationId ?? 0)
+      : (organizations[0]?.id ?? 0),
   );
   const [categories, setCategories] = useState<MunicipalAssetCategory[]>([]);
   const [types, setTypes] = useState<MunicipalAssetType[]>([]);
@@ -355,6 +363,7 @@ export function AssetInventory({ user }: { user: User }) {
     useState<TaxonomyEditor | null>(null);
   const [taxonomyFormError, setTaxonomyFormError] = useState("");
   const [isSavingTaxonomy, setIsSavingTaxonomy] = useState(false);
+  const [archiveTarget, setArchiveTarget] = useState<string | null>(null);
   const assetEditorRef = useRef<HTMLElement | null>(null);
   const taxonomyEditorRef = useRef<HTMLElement | null>(null);
   const handleRequestErrorRef = useRef(handleRequestError);
@@ -381,6 +390,8 @@ export function AssetInventory({ user }: { user: User }) {
   const canCreate = hasCreatePermission && canWriteOrganization;
   const canEdit = hasEditPermission && canWriteOrganization;
   const canArchive = hasArchivePermission && canWriteOrganization;
+  const canViewMap =
+    userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
 
   const activeCategories = useMemo(
     () => categories.filter((category) => category.status === "active"),
@@ -424,7 +435,17 @@ export function AssetInventory({ user }: { user: User }) {
     setFilters(EMPTY_FILTERS);
     setQueryInput("");
     setPage(0);
+    setCategories([]);
+    setTypes([]);
+    setCategoryTotal(0);
+    setTypeTotal(0);
+    setAssets([]);
+    setAssetTotal(0);
+    setMetrics({ total: 0, active: 0, poor: 0 });
+    setTaxonomyError("");
+    setAssetsError("");
     setAssetEditor(null);
+    setIsTaxonomyOpen(false);
     setTaxonomyEditor(null);
     setMessage("");
   }, [organizationId]);
@@ -512,8 +533,17 @@ export function AssetInventory({ user }: { user: User }) {
         if (controller.signal.aborted) {
           return;
         }
-        setAssets(response.items);
         setAssetTotal(response.total);
+        const lastAvailablePage = Math.max(
+          0,
+          Math.ceil(response.total / PAGE_SIZE) - 1,
+        );
+        if (page > lastAvailablePage) {
+          setAssets([]);
+          setPage(lastAvailablePage);
+          return;
+        }
+        setAssets(response.items);
       })
       .catch((error) => {
         if (controller.signal.aborted || isAbortError(error)) {
@@ -594,7 +624,11 @@ export function AssetInventory({ user }: { user: User }) {
     }
     if (activeTypes.length === 0) {
       setIsTaxonomyOpen(true);
-      openCategoryCreate();
+      if (activeCategories.length > 0) {
+        openTypeCreate(activeCategories[0].id);
+      } else {
+        openCategoryCreate();
+      }
       return;
     }
     setMessage("");
@@ -624,7 +658,11 @@ export function AssetInventory({ user }: { user: User }) {
       setAssetFormError("Indica un nombre y un tipo de activo válido.");
       return;
     }
-    if (payload.status === "archived" && !canArchive) {
+    if (
+      payload.status === "archived" &&
+      assetEditor.asset?.status !== "archived" &&
+      !canArchive
+    ) {
       setAssetFormError("No tienes permiso para archivar elementos.");
       return;
     }
@@ -759,7 +797,11 @@ export function AssetInventory({ user }: { user: User }) {
           );
           return;
         }
-        if (draft.status === "archived" && !canArchive) {
+        if (
+          draft.status === "archived" &&
+          category?.status !== "archived" &&
+          !canArchive
+        ) {
           setTaxonomyFormError("No tienes permiso para archivar categorías.");
           return;
         }
@@ -782,6 +824,13 @@ export function AssetInventory({ user }: { user: User }) {
                 sort_order: category.sort_order,
                 status: category.status,
               } as Record<string, unknown>;
+              if (
+                key === "color" &&
+                category.color === null &&
+                value === "#3caf8c"
+              ) {
+                return false;
+              }
               return current[key] !== value;
             }),
           );
@@ -817,7 +866,11 @@ export function AssetInventory({ user }: { user: User }) {
           );
           return;
         }
-        if (draft.status === "archived" && !canArchive) {
+        if (
+          draft.status === "archived" &&
+          assetType?.status !== "archived" &&
+          !canArchive
+        ) {
           setTaxonomyFormError("No tienes permiso para archivar tipos.");
           return;
         }
@@ -878,6 +931,50 @@ export function AssetInventory({ user }: { user: User }) {
     }
   }
 
+  async function archiveRecord(
+    kind: "category" | "type" | "asset",
+    id: number,
+    label: string,
+  ) {
+    if (!canArchive || archiveTarget) {
+      return;
+    }
+    if (!window.confirm(`¿Archivar ${label}?`)) {
+      return;
+    }
+
+    const targetKey = `${kind}:${id}`;
+    const setTargetError = kind === "asset" ? setAssetsError : setTaxonomyError;
+    setArchiveTarget(targetKey);
+    setTargetError("");
+    try {
+      if (kind === "category") {
+        await updateAssetCategory(getStoredToken(), id, { status: "archived" });
+      } else if (kind === "type") {
+        await updateAssetType(getStoredToken(), id, { status: "archived" });
+      } else {
+        await updateMunicipalAsset(getStoredToken(), id, { status: "archived" });
+      }
+      reload(`${label} se ha archivado.`);
+    } catch (error) {
+      const localMessage = inventoryErrorMessage(
+        error,
+        `No se pudo archivar ${label}.`,
+      );
+      if (localMessage) {
+        setTargetError(localMessage);
+      } else {
+        handleRequestError(
+          error,
+          setTargetError,
+          `No se pudo archivar ${label}.`,
+        );
+      }
+    } finally {
+      setArchiveTarget(null);
+    }
+  }
+
   if (!hasViewPermission) {
     return (
       <section className={styles.accessState}>
@@ -925,6 +1022,9 @@ export function AssetInventory({ user }: { user: User }) {
             <label className={styles.organizationPicker}>
               <span>Organización</span>
               <select
+                disabled={
+                  isSavingAsset || isSavingTaxonomy || archiveTarget !== null
+                }
                 value={organizationId}
                 onChange={(event) => setOrganizationId(Number(event.target.value))}
               >
@@ -1071,14 +1171,34 @@ export function AssetInventory({ user }: { user: User }) {
                           {category.status === "archived" ? " · Archivada" : ""}
                         </small>
                       </span>
-                      {canEdit ? (
-                        <button
-                          aria-label={`Editar categoría ${category.name}`}
-                          onClick={() => openCategoryEdit(category)}
-                          type="button"
-                        >
-                          <Pencil aria-hidden="true" />
-                        </button>
+                      {canEdit || (canArchive && category.status !== "archived") ? (
+                        <span className={styles.itemActions}>
+                          {canEdit ? (
+                            <button
+                              aria-label={`Editar categoría ${category.name}`}
+                              onClick={() => openCategoryEdit(category)}
+                              type="button"
+                            >
+                              <Pencil aria-hidden="true" />
+                            </button>
+                          ) : null}
+                          {canArchive && category.status !== "archived" ? (
+                            <button
+                              aria-label={`Archivar categoría ${category.name}`}
+                              disabled={archiveTarget !== null}
+                              onClick={() =>
+                                void archiveRecord(
+                                  "category",
+                                  category.id,
+                                  `la categoría ${category.name}`,
+                                )
+                              }
+                              type="button"
+                            >
+                              <Archive aria-hidden="true" />
+                            </button>
+                          ) : null}
+                        </span>
                       ) : null}
                     </li>
                   ))}
@@ -1117,14 +1237,34 @@ export function AssetInventory({ user }: { user: User }) {
                           {assetType.status === "archived" ? " · Archivado" : ""}
                         </small>
                       </span>
-                      {canEdit ? (
-                        <button
-                          aria-label={`Editar tipo ${assetType.name}`}
-                          onClick={() => openTypeEdit(assetType)}
-                          type="button"
-                        >
-                          <Pencil aria-hidden="true" />
-                        </button>
+                      {canEdit || (canArchive && assetType.status !== "archived") ? (
+                        <span className={styles.itemActions}>
+                          {canEdit ? (
+                            <button
+                              aria-label={`Editar tipo ${assetType.name}`}
+                              onClick={() => openTypeEdit(assetType)}
+                              type="button"
+                            >
+                              <Pencil aria-hidden="true" />
+                            </button>
+                          ) : null}
+                          {canArchive && assetType.status !== "archived" ? (
+                            <button
+                              aria-label={`Archivar tipo ${assetType.name}`}
+                              disabled={archiveTarget !== null}
+                              onClick={() =>
+                                void archiveRecord(
+                                  "type",
+                                  assetType.id,
+                                  `el tipo ${assetType.name}`,
+                                )
+                              }
+                              type="button"
+                            >
+                              <Archive aria-hidden="true" />
+                            </button>
+                          ) : null}
+                        </span>
                       ) : null}
                     </li>
                   ))}
@@ -1183,6 +1323,14 @@ export function AssetInventory({ user }: { user: User }) {
                       )
                     }
                   >
+                    {taxonomyEditor.assetType &&
+                    !activeCategories.some(
+                      ({ id }) => id === taxonomyEditor.assetType?.category_id,
+                    ) ? (
+                      <option value={taxonomyEditor.assetType.category_id}>
+                        {taxonomyEditor.assetType.category.name} (archivada)
+                      </option>
+                    ) : null}
                     {activeCategories.map((category) => (
                       <option key={category.id} value={category.id}>
                         {category.name}
@@ -1761,7 +1909,9 @@ export function AssetInventory({ user }: { user: User }) {
                     <th>Estado</th>
                     <th>Ubicación</th>
                     <th>Actualizado</th>
-                    {canEdit ? <th><span className={styles.visuallyHidden}>Acciones</span></th> : null}
+                    {canEdit || canArchive ? (
+                      <th><span className={styles.visuallyHidden}>Acciones</span></th>
+                    ) : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -1797,24 +1947,48 @@ export function AssetInventory({ user }: { user: User }) {
                         </span>
                       </td>
                       <td data-label="Ubicación">
-                        <Link
-                          className={styles.mapLink}
-                          href={`/mapa?entity_type=asset&entity_id=${asset.id}`}
-                        >
-                          <MapPin aria-hidden="true" />
-                          {asset.location?.label || "Sin ubicar"}
-                        </Link>
+                        {canViewMap ? (
+                          <Link
+                            className={styles.mapLink}
+                            href={`/mapa?organization_id=${organizationId}&entity_type=asset&entity_id=${asset.id}`}
+                          >
+                            <MapPin aria-hidden="true" />
+                            {asset.location?.label || "Sin ubicar"}
+                          </Link>
+                        ) : (
+                          <span>{asset.location?.label || "Sin ubicar"}</span>
+                        )}
                       </td>
                       <td data-label="Actualizado">{formatDate(asset.updated_at)}</td>
-                      {canEdit ? (
+                      {canEdit || canArchive ? (
                         <td className={styles.actionCell}>
-                          <button
-                            aria-label={`Editar ${asset.name}`}
-                            onClick={() => openAssetEdit(asset)}
-                            type="button"
-                          >
-                            <Pencil aria-hidden="true" />
-                          </button>
+                          <span className={styles.itemActions}>
+                            {canEdit ? (
+                              <button
+                                aria-label={`Editar ${asset.name}`}
+                                onClick={() => openAssetEdit(asset)}
+                                type="button"
+                              >
+                                <Pencil aria-hidden="true" />
+                              </button>
+                            ) : null}
+                            {canArchive && asset.status !== "archived" ? (
+                              <button
+                                aria-label={`Archivar ${asset.name}`}
+                                disabled={archiveTarget !== null}
+                                onClick={() =>
+                                  void archiveRecord(
+                                    "asset",
+                                    asset.id,
+                                    `el elemento ${asset.name}`,
+                                  )
+                                }
+                                type="button"
+                              >
+                                <Archive aria-hidden="true" />
+                              </button>
+                            ) : null}
+                          </span>
                         </td>
                       ) : null}
                     </tr>

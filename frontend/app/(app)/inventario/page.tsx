@@ -2,13 +2,28 @@
 
 import { AssetInventory } from "../../components/AssetInventory";
 import { useSession } from "../../lib/session";
+import { useSearchParams } from "next/navigation";
 
 export default function InventarioPage() {
   const { user } = useSession();
+  const searchParams = useSearchParams();
 
   if (!user) {
     return null;
   }
 
-  return <AssetInventory user={user} />;
+  const requestedOrganizationId = Number(
+    searchParams.get("organization_id"),
+  );
+
+  return (
+    <AssetInventory
+      initialOrganizationId={
+        Number.isInteger(requestedOrganizationId) && requestedOrganizationId > 0
+          ? requestedOrganizationId
+          : null
+      }
+      user={user}
+    />
+  );
 }

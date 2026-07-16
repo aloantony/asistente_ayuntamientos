@@ -245,6 +245,11 @@ function getInitials(value: string) {
   return initials || "AY";
 }
 
+function withOrganization(path: string, organizationId: number) {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}organization_id=${organizationId}`;
+}
+
 function permissionValue<T>(
   canView: boolean,
   data: MunicipalCollection<T> | null,
@@ -348,7 +353,11 @@ function ResourceState({
   action?: ReactNode;
 }) {
   return (
-    <div className={styles.resourceState} data-tone={tone}>
+    <div
+      className={styles.resourceState}
+      data-tone={tone}
+      role={tone === "error" ? "alert" : undefined}
+    >
       <Icon aria-hidden="true" size={24} strokeWidth={1.6} />
       <div>
         <h3>{title}</h3>
@@ -577,12 +586,14 @@ function OrdinancesTab({
   error,
   canView,
   canManage,
+  onRetry,
 }: {
   municipality: Municipality;
   ordinances: MunicipalCollection<Ordinance> | null;
   error: string;
   canView: boolean;
   canManage: boolean;
+  onRetry: () => void;
 }) {
   const adminHref = `/admin/ordenanzas?q=${encodeURIComponent(municipality.name)}`;
 
@@ -611,6 +622,11 @@ function OrdinancesTab({
         />
       ) : error ? (
         <ResourceState
+          action={
+            <button className={styles.secondaryAction} onClick={onRetry} type="button">
+              Reintentar
+            </button>
+          }
           description={error}
           icon={CircleAlert}
           title="No se pudo cargar la normativa"
@@ -711,6 +727,8 @@ function FacilitiesTab({
   canViewAssets,
   canViewMaintenance,
   canViewMap,
+  organizationId,
+  onRetry,
 }: {
   assets: MunicipalCollection<MunicipalAsset> | null;
   maintenance: MunicipalCollection<MaintenanceOrder> | null;
@@ -718,20 +736,26 @@ function FacilitiesTab({
   canViewAssets: boolean;
   canViewMaintenance: boolean;
   canViewMap: boolean;
+  organizationId: number;
+  onRetry: () => void;
 }) {
+  const inventoryHref = withOrganization("/inventario", organizationId);
+  const maintenanceHref = withOrganization("/mantenimiento", organizationId);
+  const mapHref = withOrganization("/mapa", organizationId);
+
   return (
     <div className={styles.tabContent}>
       <SectionHeading
         actions={
           <>
             {canViewMap ? (
-              <Link className={styles.secondaryAction} href="/mapa">
+              <Link className={styles.secondaryAction} href={mapHref}>
                 Abrir mapa
                 <MapPin aria-hidden="true" size={15} />
               </Link>
             ) : null}
             {canViewAssets ? (
-              <Link className={styles.primaryAction} href="/inventario">
+              <Link className={styles.primaryAction} href={inventoryHref}>
                 Abrir inventario
                 <ExternalLink aria-hidden="true" size={15} />
               </Link>
@@ -770,7 +794,7 @@ function FacilitiesTab({
               <h2>Activos municipales</h2>
             </div>
             {canViewAssets ? (
-              <Link href="/inventario">Ver todos</Link>
+              <Link href={inventoryHref}>Ver todos</Link>
             ) : null}
           </div>
 
@@ -783,6 +807,15 @@ function FacilitiesTab({
             />
           ) : errors.assets ? (
             <ResourceState
+              action={
+                <button
+                  className={styles.secondaryAction}
+                  onClick={onRetry}
+                  type="button"
+                >
+                  Reintentar
+                </button>
+              }
               description={errors.assets}
               icon={CircleAlert}
               title="Inventario no disponible"
@@ -797,7 +830,14 @@ function FacilitiesTab({
                   </span>
                   <div>
                     <Link
-                      href={`/mapa?entity_type=asset&entity_id=${asset.id}`}
+                      href={
+                        canViewMap && asset.location_id
+                          ? withOrganization(
+                              `/mapa?entity_type=asset&entity_id=${asset.id}`,
+                              organizationId,
+                            )
+                          : inventoryHref
+                      }
                     >
                       {asset.name}
                     </Link>
@@ -817,11 +857,11 @@ function FacilitiesTab({
             <ResourceState
               action={
                 <div className={styles.inlineActions}>
-                  <Link className={styles.primaryAction} href="/inventario">
+                  <Link className={styles.primaryAction} href={inventoryHref}>
                     Configurar inventario
                   </Link>
                   {canViewMap ? (
-                    <Link className={styles.secondaryAction} href="/mapa">
+                    <Link className={styles.secondaryAction} href={mapHref}>
                       Revisar mapa
                     </Link>
                   ) : null}
@@ -841,7 +881,7 @@ function FacilitiesTab({
               <h2>Trabajo abierto</h2>
             </div>
             {canViewMaintenance ? (
-              <Link href="/mantenimiento">Ver órdenes</Link>
+              <Link href={maintenanceHref}>Ver órdenes</Link>
             ) : null}
           </div>
 
@@ -854,6 +894,15 @@ function FacilitiesTab({
             />
           ) : errors.maintenance ? (
             <ResourceState
+              action={
+                <button
+                  className={styles.secondaryAction}
+                  onClick={onRetry}
+                  type="button"
+                >
+                  Reintentar
+                </button>
+              }
               description={errors.maintenance}
               icon={CircleAlert}
               title="Mantenimiento no disponible"
@@ -894,7 +943,7 @@ function FacilitiesTab({
           ) : (
             <ResourceState
               action={
-                <Link className={styles.primaryAction} href="/mantenimiento">
+                <Link className={styles.primaryAction} href={maintenanceHref}>
                   Abrir mantenimiento
                 </Link>
               }
@@ -981,12 +1030,14 @@ function RoadmapTab({
   assets,
   maintenance,
   canViewMap,
+  organizationId,
 }: {
   user: User;
   ordinances: MunicipalCollection<Ordinance> | null;
   assets: MunicipalCollection<MunicipalAsset> | null;
   maintenance: MunicipalCollection<MaintenanceOrder> | null;
   canViewMap: boolean;
+  organizationId: number;
 }) {
   const shortcuts = [
     ...(shouldShowRequirementsPanel(user)
@@ -1012,7 +1063,7 @@ function RoadmapTab({
     ...(canViewMap
       ? [
           {
-            href: "/mapa",
+            href: withOrganization("/mapa", organizationId),
             title: "Mapa municipal",
             description: "Situar necesidades, proyectos y activos sobre el territorio.",
             icon: MapPin,
@@ -1161,11 +1212,20 @@ export function MunicipalWorkspace() {
     null;
   const permissionSignature = (user?.permissions ?? []).slice().sort().join(",");
   const canViewOrdinances = Boolean(
-    user && userHasPermission(user, "ordinances.view"),
+    user &&
+      (userHasPermission(user, "ordinances.view") ||
+        userHasPermission(user, "ordinances.manage")),
   );
-  const canViewAssets = Boolean(user && userHasPermission(user, "assets.view"));
+  const canViewAssets = Boolean(
+    user &&
+      (userHasPermission(user, "assets.view") ||
+        userHasPermission(user, "assets.manage")),
+  );
   const canViewMaintenance = Boolean(
-    user && userHasPermission(user, "maintenance.view"),
+    user &&
+      canViewAssets &&
+      (userHasPermission(user, "maintenance.view") ||
+        userHasPermission(user, "maintenance.manage")),
   );
   const canViewMap = Boolean(
     user &&
@@ -1178,6 +1238,13 @@ export function MunicipalWorkspace() {
         userHasPermission(user, permission),
       ),
   );
+
+  useEffect(() => {
+    const requestedTab = new URLSearchParams(window.location.search).get("tab");
+    if (TAB_DEFINITIONS.some(({ id }) => id === requestedTab)) {
+      setActiveTab(requestedTab as WorkspaceTab);
+    }
+  }, []);
 
   useEffect(() => {
     if (!user || !canViewMunicipalHub(user) || !selectedContext) {
@@ -1354,8 +1421,44 @@ export function MunicipalWorkspace() {
     }
 
     event.preventDefault();
-    setActiveTab(TAB_DEFINITIONS[nextIndex].id);
+    selectWorkspaceTab(TAB_DEFINITIONS[nextIndex].id);
     tabButtonRefs.current[nextIndex]?.focus();
+  }
+
+  function selectWorkspaceTab(tab: WorkspaceTab, moveFocus = false) {
+    setActiveTab(tab);
+    const url = new URL(window.location.href);
+    if (tab === "summary") {
+      url.searchParams.delete("tab");
+    } else {
+      url.searchParams.set("tab", tab);
+    }
+    window.history.replaceState(window.history.state, "", url);
+
+    if (moveFocus) {
+      const tabIndex = TAB_DEFINITIONS.findIndex(({ id }) => id === tab);
+      window.requestAnimationFrame(() => {
+        tabButtonRefs.current[tabIndex]?.focus();
+      });
+    }
+  }
+
+  function changeOrganization(organizationId: number) {
+    requestSequenceRef.current += 1;
+    setSelectedOrganizationId(organizationId);
+    setMunicipality(null);
+    setOrganization(null);
+    setOrdinances(null);
+    setAssets(null);
+    setMaintenance(null);
+    setResourceErrors(EMPTY_RESOURCE_ERRORS);
+    setError("");
+    setIsLoading(true);
+    selectWorkspaceTab("summary");
+  }
+
+  function retryWorkspace() {
+    setLoadAttempt((value) => value + 1);
   }
 
   return (
@@ -1380,10 +1483,9 @@ export function MunicipalWorkspace() {
           {contexts.length > 1 ? (
             <select
               aria-label="Organización y municipio"
-              onChange={(event) => {
-                setSelectedOrganizationId(Number(event.target.value));
-                setActiveTab("summary");
-              }}
+              onChange={(event) =>
+                changeOrganization(Number(event.target.value))
+              }
               value={selectedContext.organization.id}
             >
               {contexts.map(({ organization: item, municipality: summary }) => (
@@ -1416,7 +1518,7 @@ export function MunicipalWorkspace() {
             aria-selected={activeTab === id}
             id={`municipal-tab-${id}`}
             key={id}
-            onClick={() => setActiveTab(id)}
+            onClick={() => selectWorkspaceTab(id)}
             onKeyDown={(event) => handleTabKeyDown(event, index)}
             ref={(element) => {
               tabButtonRefs.current[index] = element;
@@ -1437,7 +1539,12 @@ export function MunicipalWorkspace() {
         role="tabpanel"
       >
         {isLoading ? (
-          <div aria-busy="true" className={styles.loadingState}>
+          <div
+            aria-busy="true"
+            aria-live="polite"
+            className={styles.loadingState}
+            role="status"
+          >
             <RefreshCw aria-hidden="true" size={22} />
             <div>
               <strong>Cargando el espacio municipal</strong>
@@ -1449,7 +1556,7 @@ export function MunicipalWorkspace() {
             action={
               <button
                 className={styles.primaryAction}
-                onClick={() => setLoadAttempt((value) => value + 1)}
+                onClick={retryWorkspace}
                 type="button"
               >
                 Reintentar
@@ -1469,7 +1576,7 @@ export function MunicipalWorkspace() {
             errors={resourceErrors}
             maintenance={maintenance}
             municipality={municipality}
-            onTabChange={setActiveTab}
+            onTabChange={(tab) => selectWorkspaceTab(tab, true)}
             ordinances={ordinances}
             organization={organization}
           />
@@ -1479,6 +1586,7 @@ export function MunicipalWorkspace() {
             canView={canViewOrdinances}
             error={resourceErrors.ordinances}
             municipality={municipality}
+            onRetry={retryWorkspace}
             ordinances={ordinances}
           />
         ) : activeTab === "facilities" ? (
@@ -1489,6 +1597,8 @@ export function MunicipalWorkspace() {
             canViewMap={canViewMap}
             errors={resourceErrors}
             maintenance={maintenance}
+            onRetry={retryWorkspace}
+            organizationId={selectedContext.organization.id}
           />
         ) : activeTab === "people" ? (
           <PeopleTab organization={organization} />
@@ -1498,6 +1608,7 @@ export function MunicipalWorkspace() {
             canViewMap={canViewMap}
             maintenance={maintenance}
             ordinances={ordinances}
+            organizationId={selectedContext.organization.id}
             user={user}
           />
         )}
