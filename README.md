@@ -136,6 +136,27 @@ Apply database migrations:
 docker compose exec backend alembic upgrade head
 ```
 
+Complete or refresh the Castilla y León municipality catalogue from the
+reviewed INE snapshots. The directory is the official relation at 1 January
+2026 (2,248 municipalities) and population is the official revision at
+1 January 2025. Always run and review the dry-run before applying:
+
+```bash
+docker compose exec -T backend \
+  python -m app.municipalities.ine_directory
+
+docker compose exec -T backend \
+  python -m app.municipalities.ine_directory --apply
+```
+
+The command creates missing official municipalities by five-digit INE code,
+normalizes their official identity, and records the population snapshot with
+its year, URL and SHA-256. It reports but does not delete or merge legacy rows
+that are absent from the official directory. For an offline run, pass
+`--directory-workbook /path/diccionario26.xlsx` and
+`--population-archive /path/pobmun.zip`; both reviewed checksums are still
+enforced. See [docs/catalogo-municipal-castilla-leon.md](docs/catalogo-municipal-castilla-leon.md).
+
 Synchronize the reviewed INE 2025 municipal population snapshot only after the
 migration is applied. The first command is a mandatory dry-run and never writes
 to the database. Review its conflicts and unmatched codes before applying:

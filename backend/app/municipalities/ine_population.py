@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.db.model_registry import register_all_models
 from app.db.session import SessionLocal
 from app.municipalities.models import Municipality
 
@@ -362,6 +363,7 @@ def build_population_sync_plan(
     *,
     overwrite_existing: bool = False,
 ) -> PopulationSyncPlan:
+    register_all_models()
     municipalities = list(
         db.scalars(select(Municipality).order_by(Municipality.id)).all()
     )
