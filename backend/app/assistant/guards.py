@@ -1,6 +1,5 @@
 """Code-level assistant guards that do not depend on prompt obedience."""
 
-import hashlib
 import json
 import logging
 import re
@@ -9,6 +8,7 @@ import unicodedata
 from copy import deepcopy
 from dataclasses import dataclass
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,14 +22,20 @@ from app.assistant.prompts import (
 )
 from app.assistant.tools import (
     TOOL_CATALOG,
+    ToolContext,
     ToolResult,
     ToolSpec,
-    normalize_admin_feedback_input,
-    normalize_create_requirement_input,
 )
+from app.assistant.tool_authorization import (
+    ConversationToolAuthorization,
+    issue_conversation_tool_authorization,
+    tool_input_digest,
+)
+from app.users.models import User
 
 logger = logging.getLogger(__name__)
 _TOOL_SPEC_UNSET = object()
+MAX_FINALIZED_CONFIRMATION_EXCHANGES = 32
 
 GENERIC_EXPLICIT_CONFIRMATIONS = frozenset(
     {
@@ -80,6 +86,8 @@ REQUIREMENT_CONFIRMATION_FIELDS = (
     ("acceptance_criteria", "criterios_de_aceptacion"),
     ("open_questions", "preguntas_abiertas"),
     ("priority", "prioridad"),
+    ("status", "estado_al_guardar"),
+    ("source_type", "origen"),
 )
 ADMIN_FEEDBACK_CONFIRMATION_FIELDS = (
     ("category", "categoria"),
@@ -87,6 +95,7 @@ ADMIN_FEEDBACK_CONFIRMATION_FIELDS = (
     ("description", "descripcion"),
     ("priority", "prioridad"),
     ("organization_id", "organizacion_id"),
+    ("status", "estado_al_enviar"),
 )
 
 
@@ -119,6 +128,45 @@ def dump_conversation_state(conversation: AssistantConversation, state: dict) ->
     conversation.state = json.dumps(state, ensure_ascii=False) if state else None
 
 
+def _record_finalized_confirmation_exchange(
+    state: dict,
+    pending: dict,
+    *,
+    response_user_message_id: int,
+    outcome: str,
+) -> None:
+    prompt_message_id = int(
+        pending.get("response_prompted_at_assistant_message_id")
+        or pending.get("prompted_at_assistant_message_id")
+        or 0
+    )
+    if not prompt_message_id or not response_user_message_id:
+        return
+    confirmation_id = pending.get("confirmation_id")
+    exchanges = state.get("finalized_confirmation_exchanges")
+    if not isinstance(exchanges, list):
+        exchanges = []
+    exchanges = [
+        exchange
+        for exchange in exchanges
+        if not (
+            isinstance(exchange, dict)
+            and exchange.get("confirmation_id") == confirmation_id
+        )
+    ]
+    exchanges.append(
+        {
+            "confirmation_id": confirmation_id,
+            "prompted_at_assistant_message_id": prompt_message_id,
+            "response_user_message_id": response_user_message_id,
+            "outcome": outcome,
+        }
+    )
+    state["finalized_confirmation_exchanges"] = exchanges[
+        -MAX_FINALIZED_CONFIRMATION_EXCHANGES:
+    ]
+
+
 def check_tool_confirmation(
     db: Session,
     conversation: AssistantConversation,
@@ -126,8 +174,9 @@ def check_tool_confirmation(
     tool_name: str,
     tool_input: dict,
     *,
+    current_user: User,
     tool_spec: ToolSpec | None | object = _TOOL_SPEC_UNSET,
-) -> ConfirmationToolResult | None:
+) -> ConfirmationToolResult | ConversationToolAuthorization | None:
     if tool_spec is _TOOL_SPEC_UNSET:
         spec = TOOL_CATALOG.get(tool_name)
     elif isinstance(tool_spec, ToolSpec):
@@ -151,7 +200,23 @@ def check_tool_confirmation(
             status="stale",
         )
     try:
-        current_digest = _confirmation_digest(tool_name, tool_input)
+        normalized_input = spec.normalize_input(
+            db,
+            current_user,
+            tool_input,
+            ToolContext(
+                conversation_id=locked_conversation.id,
+                user_message_id=user_message.id,
+            ),
+        )
+        current_digest = tool_input_digest(tool_name, normalized_input)
+    except HTTPException as error:
+        db.rollback()
+        return ConfirmationToolResult(
+            content=f"Entrada inválida para {tool_name}: {error.detail}",
+            ok=False,
+            status="invalid",
+        )
     except (TypeError, ValueError) as error:
         db.commit()
         return ConfirmationToolResult(
@@ -233,11 +298,26 @@ def check_tool_confirmation(
                 "confirmed_at_user_message_id": response_message_id,
                 "consumed_at_user_message_id": user_message.id,
             }
+            _record_finalized_confirmation_exchange(
+                state,
+                pending,
+                response_user_message_id=user_message.id,
+                outcome="confirmed",
+            )
+            authorization = issue_conversation_tool_authorization(
+                state,
+                confirmation_id=confirmation_id,
+                tool=tool_name,
+                input_digest=current_digest,
+                conversation_id=locked_conversation.id,
+                user_message_id=user_message.id,
+                actor_id=current_user.id,
+            )
             dump_conversation_state(locked_conversation, state)
             # This commit is the one-shot boundary. Tool executors run in a new
             # transaction, so their rollback cannot restore the authorization.
             db.commit()
-            return None
+            return authorization
 
         if pending_matches:
             db.commit()
@@ -248,11 +328,20 @@ def check_tool_confirmation(
                 confirmation=reference,
             )
 
-    reference = record_pending_confirmation(
+        if reference is not None:
+            db.commit()
+            return ConfirmationToolResult(
+                content=CONFIRMATION_IN_PROGRESS_TOOL_RESULT,
+                ok=False,
+                status="in_progress",
+                confirmation=reference,
+            )
+
+    reference = _record_pending_confirmation(
         locked_conversation,
         user_message,
         tool_name,
-        tool_input,
+        normalized_input,
     )
     db.commit()
     return ConfirmationToolResult(
@@ -314,6 +403,12 @@ def process_pending_confirmation_response(
             ),
             "cancelled_at_user_message_id": user_message.id,
         }
+        _record_finalized_confirmation_exchange(
+            state,
+            pending,
+            response_user_message_id=user_message.id,
+            outcome="cancelled",
+        )
         dump_conversation_state(locked_conversation, state)
         return None
 
@@ -419,15 +514,49 @@ def record_pending_confirmation(
     user_message: AssistantMessage,
     tool_name: str,
     tool_input: dict,
+    *,
+    db: Session,
+    current_user: User,
+    tool_spec: ToolSpec | None = None,
+) -> ConfirmationReference:
+    spec = tool_spec or TOOL_CATALOG.get(tool_name)
+    if spec is None or not spec.requires_confirmation:
+        raise ValueError(f"Tool does not support confirmation: {tool_name}")
+    normalized_input = spec.normalize_input(
+        db,
+        current_user,
+        tool_input,
+        ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+        ),
+    )
+    existing = _confirmation_reference(
+        load_conversation_state(conversation).get("pending_confirmation")
+    )
+    if existing is not None:
+        return existing
+    return _record_pending_confirmation(
+        conversation,
+        user_message,
+        tool_name,
+        normalized_input,
+    )
+
+
+def _record_pending_confirmation(
+    conversation: AssistantConversation,
+    user_message: AssistantMessage,
+    tool_name: str,
+    normalized_input: dict,
 ) -> ConfirmationReference:
     confirmation_id = secrets.token_urlsafe(12)
     state = load_conversation_state(conversation)
-    confirmed_input = _confirmation_input(tool_name, tool_input)
     pending = {
         "confirmation_id": confirmation_id,
         "tool": tool_name,
-        "input": confirmed_input,
-        "input_digest": _confirmation_digest(tool_name, confirmed_input),
+        "input": deepcopy(normalized_input),
+        "input_digest": tool_input_digest(tool_name, normalized_input),
         "proposed_at_user_message_id": user_message.id,
     }
     state["pending_confirmation"] = pending
@@ -451,25 +580,6 @@ def lock_conversation_for_confirmation(
     if conversation is None:
         raise RuntimeError(f"Assistant conversation not found: {conversation_id}")
     return conversation
-
-
-def _confirmation_digest(tool_name: str, tool_input: dict) -> str:
-    confirmed_input = _confirmation_input(tool_name, tool_input)
-    canonical_payload = json.dumps(
-        {"tool": tool_name, "input": confirmed_input},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
-
-
-def _confirmation_input(tool_name: str, tool_input: dict) -> dict:
-    if tool_name == "create_requirement":
-        return normalize_create_requirement_input(tool_input)
-    if tool_name == "send_admin_feedback":
-        return normalize_admin_feedback_input(tool_input)
-    return deepcopy(tool_input)
 
 
 def _confirmation_reference(pending: object) -> ConfirmationReference | None:
@@ -525,11 +635,8 @@ def _render_confirmation_prompt(
     display_payload = {
         label: reference.tool_input[field]
         for field, label in REQUIREMENT_CONFIRMATION_FIELDS
-        if field in reference.tool_input and field != "priority"
+        if field in reference.tool_input
     }
-    display_payload["prioridad"] = reference.tool_input.get("priority") or "medium"
-    display_payload["estado_al_guardar"] = "draft"
-    display_payload["origen"] = "conversation"
     if input_mode == "voice":
         details = "; ".join(
             f"{label.replace('_', ' ')}: {_plain_confirmation_value(value)}"
@@ -563,9 +670,8 @@ def _render_admin_feedback_confirmation_prompt(
     display_payload = {
         label: reference.tool_input[field]
         for field, label in ADMIN_FEEDBACK_CONFIRMATION_FIELDS
-        if field in reference.tool_input and field != "priority"
+        if field in reference.tool_input
     }
-    display_payload["prioridad"] = reference.tool_input.get("priority") or "medium"
     if input_mode == "voice":
         details = "; ".join(
             f"{label.replace('_', ' ')}: {_plain_confirmation_value(value)}"

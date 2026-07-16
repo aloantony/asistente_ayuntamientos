@@ -2,6 +2,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -14,6 +15,7 @@ from app.assistant import gateway as assistant_gateway
 from app.assistant import guards as assistant_guards
 from app.assistant import hermes_web as assistant_hermes_web
 from app.assistant import realtime as assistant_realtime
+from app.assistant import tool_authorization as assistant_tool_authorization
 from app.assistant import tools as assistant_tools
 from app.assistant import turn as assistant_turn
 from app.assistant import web_search as assistant_web_search
@@ -29,6 +31,8 @@ from app.assistant.models import (
     AssistantConversation,
     AssistantMemoryEntry,
     AssistantMessage,
+    AssistantTransversalFeature,
+    AssistantTransversalFeatureAdoption,
 )
 from app.assistant.speech import SpeechTranscriptionError, build_azure_ssml
 from app.assistant.routes import get_gateway
@@ -37,6 +41,7 @@ from app.assistant.schemas import AssistantRealtimeTurnStartCreate
 from app.assistant.turn import ERROR_REPLY, build_history
 from app.core.config import settings
 from app.main import app
+from app.organizations.models import Organization
 from app.requirements.models import Requirement
 from app.users.models import User
 from conftest import headers_for
@@ -223,25 +228,158 @@ READ_ONLY_ASSISTANT_TOOLS = tuple(
 )
 
 
-def confirmation_probe_input(tool_name: str) -> dict:
-    if tool_name == "create_requirement":
-        return {"organization_id": 1, "title": "Propuesta protegida"}
-    if tool_name == "send_admin_feedback":
-        return {
-            "category": "bug",
-            "title": "Incidencia protegida",
-            "description": "Descripción exacta para la confirmación.",
-        }
-    return {"policy_probe": tool_name}
+def build_mutating_tool_probe(
+    db,
+    make_user,
+    make_organization,
+    tool_name: str,
+) -> tuple[User, dict, dict]:
+    user = make_user(is_superuser=True)
+    organization = make_organization()
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Necesidad canónica",
+        status="draft",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.flush()
+    feature = AssistantTransversalFeature(
+        source_requirement_id=requirement.id,
+        source_organization_id=organization.id,
+        title="Funcionalidad disponible",
+        summary="Resumen municipal anónimo",
+        rationale="Aplicable a otros ayuntamientos",
+        category="process",
+        sensitivity="normal",
+        status="available",
+        auto_activatable=True,
+        proposed_by_id=user.id,
+    )
+    db.add(feature)
+    db.commit()
+    probes = {
+        "create_requirement": (
+            {
+                "organization_id": organization.id,
+                "title": "  Propuesta protegida  ",
+            },
+            {
+                "title": "Propuesta protegida",
+                "priority": "medium",
+                "status": "draft",
+                "source_type": "conversation",
+            },
+        ),
+        "update_requirement": (
+            {"requirement_id": requirement.id, "priority": " high "},
+            {
+                "requirement_id": requirement.id,
+                "organization_id": organization.id,
+                "priority": "high",
+            },
+        ),
+        "add_requirement_message": (
+            {"requirement_id": requirement.id, "body": "Nota exacta"},
+            {
+                "requirement_id": requirement.id,
+                "organization_id": organization.id,
+                "body": "Nota exacta",
+                "message_type": "note",
+            },
+        ),
+        "propose_memory_entry": (
+            {
+                "organization_id": organization.id,
+                "category": " context ",
+                "content": "  Atención para DNI 12345678A  ",
+            },
+            {
+                "category": "context",
+                "content": "Atención para DNI 12345678A",
+                "sensitivity": "personal",
+                "status": "proposed",
+            },
+        ),
+        "create_agent_office_task": (
+            {
+                "organization_id": organization.id,
+                "title": "  Preparar informe  ",
+                "description": "  Revisar la información  ",
+            },
+            {
+                "title": "Preparar informe",
+                "description": "Revisar la información",
+                "department": "front_desk",
+                "requested_action": "triage",
+                "priority": "medium",
+                "approval_policy": "before_execution",
+                "requires_human_approval": True,
+                "status": "pending_approval",
+                "input": {"organization_id": organization.id},
+                "due_at": None,
+                "scheduled_for": None,
+            },
+        ),
+        "send_admin_feedback": (
+            {
+                "category": "bug",
+                "title": "Incidencia protegida",
+                "description": "Descripción exacta para la confirmación.",
+            },
+            {
+                "priority": "medium",
+                "organization_id": None,
+                "status": "submitted",
+            },
+        ),
+        "propose_transversal_feature": (
+            {
+                "source_requirement_id": requirement.id,
+                "title": "  Firma digital  ",
+                "summary": "  Resumen reutilizable  ",
+                "rationale": "  Ahorra trabajo  ",
+                "category": "automation",
+            },
+            {
+                "source_requirement_id": requirement.id,
+                "source_organization_id": organization.id,
+                "title": "Firma digital",
+                "summary": "Resumen reutilizable",
+                "rationale": "Ahorra trabajo",
+                "sensitivity": "normal",
+                "status": "proposed",
+            },
+        ),
+        "record_transversal_feature_acceptance": (
+            {
+                "feature_id": feature.id,
+                "organization_id": organization.id,
+            },
+            {
+                "notes": None,
+                "resulting_status": "active",
+                "adoption_operation": "create",
+            },
+        ),
+    }
+    tool_input, expected_effect = probes[tool_name]
+    return user, tool_input, expected_effect
 
 
 @pytest.mark.parametrize("tool_name", MUTATING_ASSISTANT_TOOLS)
 def test_all_mutating_assistant_tools_require_explicit_confirmation(
     db,
     make_user,
+    make_organization,
     tool_name,
 ):
-    user = make_user()
+    user, tool_input, expected_effect = build_mutating_tool_probe(
+        db,
+        make_user,
+        make_organization,
+        tool_name,
+    )
     conversation = AssistantConversation(
         title=f"Política mutante {tool_name}",
         status="active",
@@ -261,7 +399,8 @@ def test_all_mutating_assistant_tools_require_explicit_confirmation(
         conversation,
         user_message,
         tool_name,
-        confirmation_probe_input(tool_name),
+        tool_input,
+        current_user=user,
     )
 
     spec = assistant_tools.TOOL_CATALOG[tool_name]
@@ -271,6 +410,8 @@ def test_all_mutating_assistant_tools_require_explicit_confirmation(
     assert result.status == "required"
     assert result.confirmation is not None
     assert result.confirmation.tool == tool_name
+    for field, value in expected_effect.items():
+        assert result.confirmation.tool_input[field] == value
 
 
 @pytest.mark.parametrize("tool_name", READ_ONLY_ASSISTANT_TOOLS)
@@ -300,6 +441,7 @@ def test_all_read_only_assistant_tools_skip_confirmation(
         user_message,
         tool_name,
         {"policy_probe": tool_name},
+        current_user=user,
     )
 
     spec = assistant_tools.TOOL_CATALOG[tool_name]
@@ -311,11 +453,120 @@ def test_all_read_only_assistant_tools_skip_confirmation(
     )
 
 
-def test_generic_confirmation_prompt_supports_text_and_voice(
+@pytest.mark.parametrize("tool_name", MUTATING_ASSISTANT_TOOLS)
+def test_execute_tool_denies_direct_mutation_without_guard_authorization(
     db,
     make_user,
+    monkeypatch,
+    tool_name,
 ):
-    user = make_user()
+    user = make_user(is_superuser=True)
+    called = False
+    original_spec = assistant_tools.TOOL_CATALOG[tool_name]
+
+    def forbidden_executor(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"mutated": True}
+
+    monkeypatch.setitem(
+        assistant_tools.TOOL_CATALOG,
+        tool_name,
+        replace(original_spec, executor=forbidden_executor),
+    )
+
+    result = assistant_tools.execute_tool(db, user, tool_name, {})
+
+    assert result.ok is False
+    assert "autorización one-shot" in result.content
+    assert called is False
+
+
+def test_text_turn_keeps_only_first_of_two_different_mutation_confirmations(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    requirement_input = {
+        "organization_id": organization.id,
+        "title": "Primera mutación",
+        "problem": "Debe conservarse como única confirmación activa.",
+    }
+    feedback_input = {
+        "category": "bug",
+        "title": "Segunda mutación",
+        "description": "No debe sustituir la primera propuesta.",
+    }
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_requirement",
+                            "create_requirement",
+                            requirement_input,
+                        ),
+                        tool_use_block(
+                            "call_feedback",
+                            "send_admin_feedback",
+                            feedback_input,
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He preparado la acción que requiere confirmación.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Prepara estas dos acciones"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert [action["ok"] for action in assistant_message["actions"]] == [
+        False,
+        False,
+    ]
+    assert "procesando" in assistant_message["actions"][1]["result"]
+    assert assistant_message["content"].count(
+        "### Borrador pendiente de confirmación"
+    ) == 1
+    assert "Feedback pendiente de confirmación" not in assistant_message["content"]
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert pending["tool"] == "create_requirement"
+    assert pending["input"]["title"] == requirement_input["title"]
+
+
+def test_generic_confirmation_prompt_supports_text_and_voice(
+    db,
+    assistant_user,
+    grant_permissions,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["requirements.edit"])
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Necesidad existente",
+        status="draft",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.flush()
     conversation = AssistantConversation(
         title="Confirmación genérica",
         status="active",
@@ -329,13 +580,14 @@ def test_generic_confirmation_prompt_supports_text_and_voice(
     )
     db.add_all([conversation, user_message])
     db.commit()
-    tool_input = {"requirement_id": 42, "priority": "high"}
+    tool_input = {"requirement_id": requirement.id, "priority": "high"}
     result = assistant_guards.check_tool_confirmation(
         db,
         conversation,
         user_message,
         "update_requirement",
         tool_input,
+        current_user=user,
     )
     assert isinstance(result, assistant_guards.ConfirmationToolResult)
     assert result.confirmation is not None
@@ -355,11 +607,11 @@ def test_generic_confirmation_prompt_supports_text_and_voice(
 
     assert text_prompt is not None
     assert "Actualizar necesidad" in text_prompt
-    assert '"requirement_id": 42' in text_prompt
+    assert f'"requirement_id": {requirement.id}' in text_prompt
     assert '"priority": "high"' in text_prompt
     assert voice_prompt is not None
     assert "Actualizar necesidad" in voice_prompt
-    assert "requirement id: 42" in voice_prompt
+    assert f"requirement id: {requirement.id}" in voice_prompt
     assert "priority: high" in voice_prompt
     assert "###" not in voice_prompt
     assert "**" not in voice_prompt
@@ -368,9 +620,19 @@ def test_generic_confirmation_prompt_supports_text_and_voice(
 
 def test_generic_confirmation_keeps_digest_bound_one_shot_consumption(
     db,
-    make_user,
+    assistant_user,
+    grant_permissions,
 ):
-    user = make_user()
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["requirements.edit"])
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Necesidad existente",
+        status="draft",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.flush()
     conversation = AssistantConversation(
         title="Confirmación genérica one-shot",
         status="active",
@@ -384,13 +646,14 @@ def test_generic_confirmation_keeps_digest_bound_one_shot_consumption(
     )
     db.add_all([conversation, proposed_message])
     db.commit()
-    tool_input = {"requirement_id": 42, "priority": "high"}
+    tool_input = {"requirement_id": requirement.id, "priority": "high"}
     proposal = assistant_guards.check_tool_confirmation(
         db,
         conversation,
         proposed_message,
         "update_requirement",
         tool_input,
+        current_user=user,
     )
     assert isinstance(proposal, assistant_guards.ConfirmationToolResult)
     assert proposal.confirmation is not None
@@ -437,6 +700,7 @@ def test_generic_confirmation_keeps_digest_bound_one_shot_consumption(
         confirmation_message,
         "update_requirement",
         tool_input,
+        current_user=user,
     )
     replay = assistant_guards.check_tool_confirmation(
         db,
@@ -444,11 +708,149 @@ def test_generic_confirmation_keeps_digest_bound_one_shot_consumption(
         confirmation_message,
         "update_requirement",
         tool_input,
+        current_user=user,
     )
 
-    assert first_consumption is None
+    assert isinstance(
+        first_consumption,
+        assistant_tool_authorization.ConversationToolAuthorization,
+    )
     assert isinstance(replay, assistant_guards.ConfirmationToolResult)
     assert replay.status == "already_consumed"
+
+
+def test_transversal_acceptance_rechecks_derived_effect_after_confirmation(
+    db,
+    make_user,
+    make_organization,
+):
+    user = make_user(is_superuser=True)
+    organization = make_organization()
+    requirement = Requirement(
+        organization_id=organization.id,
+        title="Necesidad fuente",
+        status="draft",
+        created_by_id=user.id,
+    )
+    db.add(requirement)
+    db.flush()
+    feature = AssistantTransversalFeature(
+        source_requirement_id=requirement.id,
+        source_organization_id=organization.id,
+        title="Activación protegida",
+        summary="Resumen reutilizable",
+        rationale="Evita una carrera de estado",
+        category="automation",
+        sensitivity="normal",
+        status="available",
+        auto_activatable=True,
+        proposed_by_id=user.id,
+    )
+    conversation = AssistantConversation(
+        title="Confirmación con efecto derivado",
+        status="active",
+        channel="web",
+        created_by=user,
+    )
+    proposal_message = AssistantMessage(
+        conversation=conversation,
+        role="user",
+        content="Activa esta funcionalidad",
+    )
+    db.add_all([feature, conversation, proposal_message])
+    db.commit()
+    tool_input = {
+        "feature_id": feature.id,
+        "organization_id": organization.id,
+    }
+    proposal = assistant_guards.check_tool_confirmation(
+        db,
+        conversation,
+        proposal_message,
+        "record_transversal_feature_acceptance",
+        tool_input,
+        current_user=user,
+    )
+    assert isinstance(proposal, assistant_guards.ConfirmationToolResult)
+    assert proposal.confirmation is not None
+    assert proposal.confirmation.tool_input["resulting_status"] == "active"
+    prompt = assistant_guards.build_confirmation_prompt(
+        conversation,
+        proposal.confirmation,
+        input_mode="text",
+        turn_user_message_id=proposal_message.id,
+    )
+    assert prompt is not None
+    prompt_message = AssistantMessage(
+        conversation=conversation,
+        role="assistant",
+        content=prompt,
+    )
+    db.add(prompt_message)
+    db.flush()
+    assistant_guards.finalize_confirmation_turn(
+        conversation,
+        proposal_message,
+        prompt_message,
+        proposal.confirmation,
+        confirmation_prompt=prompt,
+    )
+    confirmation_message = AssistantMessage(
+        conversation=conversation,
+        role="user",
+        content="Confirmo",
+    )
+    db.add(confirmation_message)
+    db.flush()
+    assistant_guards.process_pending_confirmation_response(
+        db,
+        conversation,
+        confirmation_message,
+    )
+    db.commit()
+    authorization = assistant_guards.check_tool_confirmation(
+        db,
+        conversation,
+        confirmation_message,
+        "record_transversal_feature_acceptance",
+        tool_input,
+        current_user=user,
+    )
+    assert isinstance(
+        authorization,
+        assistant_tool_authorization.ConversationToolAuthorization,
+    )
+
+    feature.auto_activatable = False
+    db.commit()
+    changed_effect = assistant_tools.execute_tool(
+        db,
+        user,
+        "record_transversal_feature_acceptance",
+        tool_input,
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=confirmation_message.id,
+        ),
+        authorization=authorization,
+    )
+    replay = assistant_tools.execute_tool(
+        db,
+        user,
+        "record_transversal_feature_acceptance",
+        tool_input,
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=confirmation_message.id,
+        ),
+        authorization=authorization,
+    )
+
+    assert changed_effect.ok is False
+    assert "efectos actuales" in changed_effect.content
+    assert replay.ok is False
+    assert "inválida o consumida" in replay.content
+    assert db.scalar(select(AssistantTransversalFeatureAdoption)) is None
 
 
 @pytest.mark.parametrize(
@@ -2342,7 +2744,67 @@ def test_realtime_requirement_rejects_feedback_specific_confirmation(
     assert "response_user_message_id" not in pending
 
 
-def test_realtime_confirmation_with_changed_payload_starts_new_proposal(
+def test_realtime_turn_keeps_only_first_different_mutation_confirmation(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    started = post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Prepara dos acciones distintas",
+    )
+    assert started.status_code == 200
+    requirement_input = {
+        "organization_id": organization.id,
+        "title": "Primera acción realtime",
+        "problem": "Debe permanecer como confirmación activa.",
+    }
+
+    first = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_first_mutation",
+        name="create_requirement",
+        arguments=requirement_input,
+    )
+    second = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="call_second_mutation",
+        name="send_admin_feedback",
+        arguments={
+            "category": "bug",
+            "title": "Segunda acción realtime",
+            "description": "No debe sustituir la confirmación activa.",
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["confirmation_prompt"] is not None
+    assert second.status_code == 200
+    assert second.json()["ok"] is False
+    assert second.json()["confirmation_prompt"] is None
+    assert "procesando" in second.json()["output"].lower()
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert pending["tool"] == "create_requirement"
+    assert pending["input"]["title"] == requirement_input["title"]
+
+
+def test_realtime_confirmation_with_changed_payload_keeps_active_proposal(
     client,
     db,
     assistant_user,
@@ -2392,11 +2854,12 @@ def test_realtime_confirmation_with_changed_payload_starts_new_proposal(
     assert changed.status_code == 200
     changed_body = changed.json()
     assert changed_body["ok"] is False
-    assert changed_input["problem"] in changed_body["confirmation_prompt"]
+    assert changed_body["confirmation_prompt"] is None
+    assert "procesando" in changed_body["output"].lower()
     assert db.scalar(select(Requirement)) is None
-    replacement = get_pending_confirmation(db, conversation["id"])
-    assert replacement["confirmation_id"] != original_pending["confirmation_id"]
-    assert replacement["input"]["problem"] == changed_input["problem"]
+    pending = get_pending_confirmation(db, conversation["id"])
+    assert pending["confirmation_id"] == original_pending["confirmation_id"]
+    assert pending["input"]["problem"] == original_input["problem"]
 
 
 def test_realtime_complete_rejects_turn_superseded_by_normal_user_message(
@@ -2542,6 +3005,7 @@ def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
         description="Herramienta mutante para probar el orden de turnos.",
         input_schema={"type": "object", "properties": {}},
         executor=lambda *args, **kwargs: {},
+        input_normalizer=lambda db, user, tool_input, context: dict(tool_input),
         read_only=False,
         domain="test",
         side_effect="database_write",
@@ -2560,6 +3024,7 @@ def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
         tool_input,
         context=None,
         allowed=None,
+        authorization=None,
     ):
         mutation_calls.append(name)
         db.commit()
@@ -4506,7 +4971,7 @@ def test_create_requirement_cancellation_without_tool_call_clears_pending(
     )
 
 
-def test_create_requirement_any_payload_change_restarts_confirmation(
+def test_create_requirement_payload_change_keeps_active_confirmation(
     client,
     assistant_user,
     db,
@@ -4564,12 +5029,12 @@ def test_create_requirement_any_payload_change_restarts_confirmation(
     db.expire_all()
     stored_conversation = db.get(AssistantConversation, conversation["id"])
     assert stored_conversation is not None
-    replacement = json.loads(stored_conversation.state or "{}")[
+    still_active = json.loads(stored_conversation.state or "{}")[
         "pending_confirmation"
     ]
-    assert replacement["input"]["title"] == "Portal ciudadano"
-    assert replacement["input"]["problem"] == changed_input["problem"]
-    assert replacement["confirmation_id"] != original["confirmation_id"]
+    assert still_active["input"]["title"] == "Portal ciudadano"
+    assert still_active["input"]["problem"] == first_input["problem"]
+    assert still_active["confirmation_id"] == original["confirmation_id"]
 
 
 def test_create_requirement_confirmation_cannot_be_replayed(
@@ -4644,14 +5109,25 @@ def test_create_requirement_confirmation_stays_consumed_after_tool_rollback(
     assistant_user,
     db,
     use_gateway,
+    monkeypatch,
 ):
     user, organization = assistant_user
     tool_input = {
         "organization_id": organization.id,
         "title": "Portal ciudadano",
         "problem": "El alta de solicitudes se hace por correo.",
-        "priority": "imposible",
+        "priority": "high",
     }
+    original_spec = assistant_tools.TOOL_CATALOG["create_requirement"]
+
+    def fail_after_authorization(*args, **kwargs):
+        raise ValueError("fallo forzado del ejecutor")
+
+    monkeypatch.setitem(
+        assistant_tools.TOOL_CATALOG,
+        "create_requirement",
+        replace(original_spec, executor=fail_after_authorization),
+    )
     use_gateway(
         FakeGateway(
             [
@@ -4695,7 +5171,7 @@ def test_create_requirement_confirmation_stays_consumed_after_tool_rollback(
     assert failed.status_code == 200
     failed_action = failed.json()["messages"][-1]["actions"][0]
     assert failed_action["ok"] is False
-    assert "priority inválida" in failed_action["result"]
+    assert "fallo forzado del ejecutor" in failed_action["result"]
     db.expire_all()
     stored_conversation = db.get(AssistantConversation, conversation["id"])
     assert stored_conversation is not None
@@ -4719,7 +5195,7 @@ def test_create_requirement_confirmation_stays_consumed_after_tool_rollback(
     assert replacement["confirmation_id"] != pending["confirmation_id"]
 
 
-def test_confirmation_prompt_binding_ignores_replaced_pending(
+def test_record_pending_confirmation_does_not_replace_active_proposal(
     db,
     assistant_user,
 ):
@@ -4746,6 +5222,8 @@ def test_confirmation_prompt_binding_ignores_replaced_pending(
             "title": "Propuesta A",
             "problem": "Problema A",
         },
+        db=db,
+        current_user=user,
     )
     first_prompt = assistant_guards.build_confirmation_prompt(
         conversation,
@@ -4771,66 +5249,19 @@ def test_confirmation_prompt_binding_ignores_replaced_pending(
             "title": "Propuesta B",
             "problem": "Problema B",
         },
+        db=db,
+        current_user=user,
     )
 
-    late_first_reply = AssistantMessage(
-        conversation=conversation,
-        role="assistant",
-        content=f"Respuesta tardía de la propuesta A\n\n{first_prompt}",
-    )
-    db.add(late_first_reply)
-    db.flush()
-    assistant_guards.finalize_confirmation_turn(
-        conversation,
-        first_user_message,
-        late_first_reply,
-        first_reference,
-        confirmation_prompt=first_prompt,
-    )
-
-    state = assistant_guards.load_conversation_state(conversation)
-    pending = state["pending_confirmation"]
-    assert pending["confirmation_id"] == second_reference.confirmation_id
-    assert "prompted_at_assistant_message_id" not in pending
-    assert (
-        assistant_guards.build_confirmation_prompt(
-            conversation,
-            first_reference,
-            input_mode="text",
-            turn_user_message_id=first_user_message.id,
-        )
-        is None
-    )
-
-    second_reply = AssistantMessage(
-        conversation=conversation,
-        role="assistant",
-        content="Respuesta de la propuesta B",
-    )
-    db.add(second_reply)
-    db.flush()
-    second_prompt = assistant_guards.build_confirmation_prompt(
-        conversation,
-        second_reference,
-        input_mode="text",
-        turn_user_message_id=second_user_message.id,
-    )
-    assert second_prompt is not None
-    second_reply.content = f"Respuesta de la propuesta B\n\n{second_prompt}"
-    assistant_guards.finalize_confirmation_turn(
-        conversation,
-        second_user_message,
-        second_reply,
-        second_reference,
-        confirmation_prompt=second_prompt,
-    )
-
-    assert "Propuesta B" in second_prompt
-    assert "Propuesta A" not in second_prompt
+    assert second_reference == first_reference
     pending = assistant_guards.load_conversation_state(conversation)[
         "pending_confirmation"
     ]
-    assert pending["prompted_at_assistant_message_id"] == second_reply.id
+    assert pending["confirmation_id"] == first_reference.confirmation_id
+    assert pending["input"]["title"] == "Propuesta A"
+    assert pending["proposed_at_user_message_id"] == first_user_message.id
+    assert "Propuesta A" in first_prompt
+    assert "Propuesta B" not in first_prompt
 
 
 def test_confirmation_prompt_binding_rejects_hidden_payload(
@@ -4865,6 +5296,8 @@ def test_confirmation_prompt_binding_rejects_hidden_payload(
             "title": "Portal ciudadano",
             "problem": "El alta se hace por correo.",
         },
+        db=db,
+        current_user=user,
     )
     canonical_prompt = assistant_guards.build_confirmation_prompt(
         conversation,
@@ -4923,6 +5356,7 @@ def test_stale_turn_cannot_replace_newer_confirmation_proposal(
             "title": "Propuesta nueva",
             "problem": "Problema nuevo",
         },
+        current_user=user,
     )
     stale_result = assistant_guards.check_tool_confirmation(
         db,
@@ -4934,6 +5368,7 @@ def test_stale_turn_cannot_replace_newer_confirmation_proposal(
             "title": "Propuesta antigua",
             "problem": "Problema antiguo",
         },
+        current_user=user,
     )
 
     assert isinstance(newer_result, assistant_guards.ConfirmationToolResult)
@@ -4974,6 +5409,8 @@ def test_confirmation_claim_cannot_be_rebound_by_slower_turn(
             "title": "Portal ciudadano",
             "problem": "El alta se hace por correo.",
         },
+        db=db,
+        current_user=user,
     )
 
     slower_user_message = AssistantMessage(
@@ -5039,6 +5476,7 @@ def test_confirmation_claim_cannot_be_rebound_by_slower_turn(
             "title": "Propuesta competidora",
             "problem": "No debe sustituir la propuesta confirmada.",
         },
+        current_user=user,
     )
     assert isinstance(competing_result, assistant_guards.ConfirmationToolResult)
     assert competing_result.status == "stale"
@@ -5070,17 +5508,14 @@ def test_confirmation_claim_cannot_be_rebound_by_slower_turn(
 
 def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
     suffix = uuid.uuid4().hex
-    tool_input = {
-        "organization_id": 1,
-        "title": "Portal ciudadano",
-        "problem": "El alta de solicitudes se hace por correo.",
-    }
     with Session(engine, expire_on_commit=False) as seed_db:
         user = User(
             email=f"confirmation-{suffix}@example.com",
             hashed_password="not-used",
             full_name="Confirmation Concurrency Test",
+            is_superuser=True,
         )
+        organization = Organization(name=f"Confirmation Org {suffix}")
         conversation = AssistantConversation(
             title="Confirmación concurrente",
             status="active",
@@ -5105,6 +5540,7 @@ def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
         seed_db.add_all(
             [
                 user,
+                organization,
                 conversation,
                 proposed_message,
                 prompt_message,
@@ -5112,11 +5548,18 @@ def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
             ]
         )
         seed_db.flush()
+        tool_input = {
+            "organization_id": organization.id,
+            "title": "Portal ciudadano",
+            "problem": "El alta de solicitudes se hace por correo.",
+        }
         confirmation_reference = assistant_guards.record_pending_confirmation(
             conversation,
             proposed_message,
             "create_requirement",
             tool_input,
+            db=seed_db,
+            current_user=user,
         )
         confirmation_prompt = assistant_guards.build_confirmation_prompt(
             conversation,
@@ -5144,6 +5587,7 @@ def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
         conversation_id = conversation.id
         confirmation_message_id = confirmation_message.id
         user_id = user.id
+        organization_id = organization.id
         seed_db.commit()
 
     barrier = threading.Barrier(2)
@@ -5160,6 +5604,8 @@ def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
             )
             assert candidate_conversation is not None
             assert candidate_message is not None
+            candidate_user = candidate_db.get(User, user_id)
+            assert candidate_user is not None
             barrier.wait(timeout=15)
             result = assistant_guards.check_tool_confirmation(
                 candidate_db,
@@ -5167,8 +5613,12 @@ def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
                 candidate_message,
                 "create_requirement",
                 tool_input,
+                current_user=candidate_user,
             )
-            return result is None
+            return isinstance(
+                result,
+                assistant_tool_authorization.ConversationToolAuthorization,
+            )
 
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -5193,6 +5643,10 @@ def test_create_requirement_confirmation_has_single_concurrent_consumer(engine):
             stored_user = cleanup_db.get(User, user_id)
             if stored_user is not None:
                 cleanup_db.delete(stored_user)
+                cleanup_db.commit()
+            stored_organization = cleanup_db.get(Organization, organization_id)
+            if stored_organization is not None:
+                cleanup_db.delete(stored_organization)
                 cleanup_db.commit()
 
 
@@ -5257,6 +5711,112 @@ def test_history_is_capped(monkeypatch, db, assistant_user):
         "mensaje 8",
         "mensaje 9",
     ]
+
+
+def test_history_excludes_all_finalized_confirmation_prompts_and_responses(
+    db,
+    assistant_user,
+):
+    user, _ = assistant_user
+    conversation = AssistantConversation(
+        title="Historial sin intercambios de confirmación",
+        created_by_id=user.id,
+    )
+    db.add(conversation)
+    db.flush()
+    messages = [
+        AssistantMessage(
+            conversation=conversation,
+            role="user",
+            content="Solicitud funcional uno",
+        ),
+        AssistantMessage(
+            conversation=conversation,
+            role="assistant",
+            content="Prompt exacto uno",
+        ),
+        AssistantMessage(
+            conversation=conversation,
+            role="user",
+            content="Confirmo",
+        ),
+        AssistantMessage(
+            conversation=conversation,
+            role="assistant",
+            content="Resultado funcional uno",
+        ),
+        AssistantMessage(
+            conversation=conversation,
+            role="user",
+            content="Solicitud funcional dos",
+        ),
+        AssistantMessage(
+            conversation=conversation,
+            role="assistant",
+            content="Prompt exacto dos",
+        ),
+        AssistantMessage(
+            conversation=conversation,
+            role="user",
+            content="No, cancela",
+        ),
+        AssistantMessage(
+            conversation=conversation,
+            role="assistant",
+            content="Resultado funcional dos",
+        ),
+    ]
+    db.add_all(messages)
+    db.flush()
+    assistant_guards.dump_conversation_state(
+        conversation,
+        {
+            "finalized_confirmation_exchanges": [
+                {
+                    "confirmation_id": "confirmed-one",
+                    "prompted_at_assistant_message_id": messages[1].id,
+                    "response_user_message_id": messages[2].id,
+                    "outcome": "confirmed",
+                },
+                {
+                    "confirmation_id": "cancelled-two",
+                    "prompted_at_assistant_message_id": messages[5].id,
+                    "response_user_message_id": messages[6].id,
+                    "outcome": "cancelled",
+                },
+            ]
+        },
+    )
+    db.commit()
+    db.refresh(conversation)
+
+    history = build_history(conversation)
+
+    assert [message["content"] for message in history] == [
+        "Solicitud funcional uno",
+        "Resultado funcional uno",
+        "Solicitud funcional dos",
+        "Resultado funcional dos",
+    ]
+
+
+def test_finalized_confirmation_exchange_history_is_bounded():
+    state: dict = {}
+    for index in range(40):
+        assistant_guards._record_finalized_confirmation_exchange(
+            state,
+            {
+                "confirmation_id": f"confirmation-{index}",
+                "prompted_at_assistant_message_id": index + 1,
+            },
+            response_user_message_id=index + 101,
+            outcome="confirmed",
+        )
+
+    exchanges = state["finalized_confirmation_exchanges"]
+    assert len(exchanges) == assistant_guards.MAX_FINALIZED_CONFIRMATION_EXCHANGES
+    assert exchanges[0]["confirmation_id"] == "confirmation-8"
+    assert exchanges[-1]["confirmation_id"] == "confirmation-39"
 
 
 def test_sse_stream_emits_deltas_tool_activity_and_done(
