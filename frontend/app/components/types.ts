@@ -1269,11 +1269,39 @@ export type AssistantAction = {
   status?: "started" | "finished";
 };
 
+export type AssistantAttachmentContextStatus =
+  | "pending"
+  | "ready"
+  | "empty"
+  | "unsupported"
+  | "vision_unavailable"
+  | "too_large"
+  | "unavailable"
+  | "failed";
+
+export type AssistantMessageAttachment = {
+  id: number;
+  document_id: number;
+  project_id: number;
+  project_name: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  context_status: AssistantAttachmentContextStatus;
+  context_char_count: number;
+};
+
+export type AssistantAttachmentCandidate = {
+  document: Document;
+  project: Project;
+};
+
 export type AssistantMessage = {
   id: number;
   role: "user" | "assistant";
   content: string;
   actions: AssistantAction[];
+  attachments: AssistantMessageAttachment[];
   agent_key: string | null;
   routing: Record<string, unknown> | null;
   created_at: string;
@@ -1295,6 +1323,7 @@ export type AssistantConversationDetail = AssistantConversation & {
 export type AssistantStreamMessageStart = {
   conversation_id: number;
   user_message_id: number;
+  user_message?: AssistantMessage;
 };
 
 export type AssistantStreamToolActivity = {
@@ -1307,6 +1336,7 @@ export type AssistantStreamToolActivity = {
 
 export type AssistantStreamDone = {
   message: AssistantMessage;
+  user_message?: AssistantMessage;
   conversation: AssistantConversation;
 };
 

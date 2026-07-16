@@ -98,11 +98,34 @@ class AssistantActionRead(BaseModel):
     result: str
 
 
+class AssistantMessageAttachmentRead(BaseModel):
+    id: int
+    document_id: int
+    project_id: int
+    project_name: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    context_status: Literal[
+        "ready",
+        "empty",
+        "unsupported",
+        "vision_unavailable",
+        "too_large",
+        "unavailable",
+        "failed",
+    ]
+    context_char_count: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AssistantMessageRead(BaseModel):
     id: int
     role: Literal["user", "assistant"]
     content: str
-    actions: list[AssistantActionRead] = []
+    actions: list[AssistantActionRead] = Field(default_factory=list)
+    attachments: list[AssistantMessageAttachmentRead] = Field(default_factory=list)
     agent_key: str | None = None
     routing: dict | None = None
     created_at: datetime
@@ -242,8 +265,18 @@ class AssistantConversationFolderUpdate(BaseModel):
 class AssistantUserMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=20000)
     input_mode: Literal["text", "voice"] = "text"
+    attachment_ids: list[int] = Field(default_factory=list, max_length=10)
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def validate_attachment_ids(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("attachment_ids must be unique")
+        if any(document_id < 1 for document_id in value):
+            raise ValueError("attachment_ids must contain positive integers")
+        return value
 
 
 class AssistantMemoryUserSummary(BaseModel):

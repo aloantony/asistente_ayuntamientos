@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     assistant_turn_timeout_seconds: float = 120.0
     assistant_gateway_timeout_seconds: float = 30.0
     assistant_history_max_messages: int = 40
+    assistant_max_attachments_per_message: int = 5
+    assistant_attachment_max_context_chars: int = 6000
+    assistant_attachment_total_context_chars: int = 12000
+    assistant_attachment_max_extract_bytes: int = 5 * 1024 * 1024
     hermes_agent_base_url: str = "http://127.0.0.1:8642/v1"
     hermes_agent_api_key: str | None = None
     hermes_agent_model: str = "hermes-agent"
@@ -315,6 +319,36 @@ class Settings(BaseSettings):
     def validate_assistant_timeouts(cls, value: float) -> float:
         if not isfinite(value) or value <= 0:
             raise ValueError("assistant timeouts must be finite and greater than zero")
+        return value
+
+    @field_validator("assistant_max_attachments_per_message")
+    @classmethod
+    def validate_assistant_attachment_count(cls, value: int) -> int:
+        if not 1 <= value <= 10:
+            raise ValueError(
+                "assistant_max_attachments_per_message must be between 1 and 10"
+            )
+        return value
+
+    @field_validator(
+        "assistant_attachment_max_context_chars",
+        "assistant_attachment_total_context_chars",
+    )
+    @classmethod
+    def validate_assistant_attachment_context_chars(cls, value: int) -> int:
+        if not 1 <= value <= 100_000:
+            raise ValueError(
+                "assistant attachment context limits must be between 1 and 100000"
+            )
+        return value
+
+    @field_validator("assistant_attachment_max_extract_bytes")
+    @classmethod
+    def validate_assistant_attachment_extract_bytes(cls, value: int) -> int:
+        if not 1 <= value <= 25 * 1024 * 1024:
+            raise ValueError(
+                "assistant_attachment_max_extract_bytes must be between 1 and 25 MiB"
+            )
         return value
 
     @field_validator("brave_search_timeout_seconds")

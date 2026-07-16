@@ -17,6 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.documents.models import Document
     from app.organizations.models import Organization
     from app.requirements.models import Requirement
     from app.users.models import User
@@ -149,6 +150,89 @@ class AssistantMessage(Base):
         "AssistantConversation",
         back_populates="messages",
     )
+    attachments: Mapped[list["AssistantMessageAttachment"]] = relationship(
+        "AssistantMessageAttachment",
+        back_populates="message",
+        cascade="all, delete-orphan",
+        order_by="AssistantMessageAttachment.position",
+    )
+
+
+class AssistantMessageAttachment(TimestampMixin, Base):
+    __tablename__ = "assistant_message_attachments"
+    __table_args__ = (
+        CheckConstraint(
+            "position >= 0",
+            name="ck_assistant_message_attachments_position",
+        ),
+        CheckConstraint(
+            "context_status in ("
+            "'ready', 'empty', 'unsupported', 'vision_unavailable', "
+            "'too_large', 'unavailable', 'failed'"
+            ")",
+            name="ck_assistant_message_attachments_context_status",
+        ),
+        CheckConstraint(
+            "context_char_count >= 0",
+            name="ck_assistant_message_attachments_context_char_count",
+        ),
+        UniqueConstraint(
+            "message_id",
+            "document_id",
+            name="uq_assistant_message_attachments_message_document",
+        ),
+        UniqueConstraint(
+            "message_id",
+            "position",
+            name="uq_assistant_message_attachments_message_position",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("assistant_messages.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    context_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    context_char_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+
+    message: Mapped["AssistantMessage"] = relationship(
+        "AssistantMessage",
+        back_populates="attachments",
+    )
+    document: Mapped["Document"] = relationship("Document")
+
+    @property
+    def filename(self) -> str:
+        return self.document.original_filename
+
+    @property
+    def content_type(self) -> str:
+        return self.document.content_type
+
+    @property
+    def size_bytes(self) -> int:
+        return self.document.size_bytes
+
+    @property
+    def project_id(self) -> int:
+        return self.document.project_id
+
+    @property
+    def project_name(self) -> str:
+        return self.document.project.name
 
 
 class AssistantMemoryEntry(TimestampMixin, Base):

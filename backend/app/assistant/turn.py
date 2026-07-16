@@ -11,6 +11,12 @@ from time import monotonic
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.assistant.attachments import (
+    PreparedAttachment,
+    attachment_payload,
+    build_turn_attachment_context,
+    persist_message_attachments,
+)
 from app.assistant.gateway import (
     AICompletion,
     AITextDelta,
@@ -173,6 +179,7 @@ def run_agent_turn_events(
     gateway: AIGateway,
     *,
     input_mode: str = "text",
+    prepared_attachments: list[PreparedAttachment] | None = None,
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Stream a turn and reconcile speculative text before its terminal event."""
     streamed_text: list[str] = []
@@ -183,6 +190,7 @@ def run_agent_turn_events(
         user_text,
         gateway,
         input_mode=input_mode,
+        prepared_attachments=prepared_attachments,
     )
     try:
         while True:
@@ -210,6 +218,7 @@ def _run_agent_turn_events(
     gateway: AIGateway,
     *,
     input_mode: str = "text",
+    prepared_attachments: list[PreparedAttachment] | None = None,
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
     turn_deadline = monotonic() + settings.assistant_turn_timeout_seconds
@@ -227,6 +236,8 @@ def _run_agent_turn_events(
         content=user_text,
     )
     db.add(user_message)
+    current_attachments = prepared_attachments or []
+    persist_message_attachments(db, user_message, current_attachments)
     if conversation.title == "Conversación":
         conversation.title = user_text[:255]
     conversation.updated_at = func.now()
@@ -245,15 +256,31 @@ def _run_agent_turn_events(
         {
             "conversation_id": conversation.id,
             "user_message_id": user_message.id,
+            "user_message": _message_payload(user_message),
         },
     )
 
     tools = get_available_tool_specs(db, current_user)
+    if current_attachments:
+        # Attachment text is authorized for this turn only and must never be
+        # captured as automatic long-term memory or sent to an egress tool.
+        attachment_disabled_tools = {
+            "propose_memory_entry",
+            "web_search",
+            "read_web_page",
+        }
+        tools = [
+            tool for tool in tools if tool.name not in attachment_disabled_tools
+        ]
     tools_by_name = {tool.name: tool for tool in tools}
     tool_definitions = [tool.definition for tool in tools]
     tool_names = frozenset(tool.name for tool in tools)
     system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
-    messages = build_history(conversation)
+    messages = build_history(
+        conversation,
+        attachment_context_message_id=user_message.id,
+        attachment_context=build_turn_attachment_context(current_attachments),
+    )
     safety_identifier = build_assistant_safety_identifier(current_user.id)
 
     actions: list[dict] = []
@@ -523,6 +550,7 @@ def _run_agent_turn_events(
         "done",
         {
             "message": _message_payload(assistant_message),
+            "user_message": _message_payload(user_message),
             "conversation": {
                 "id": conversation.id,
                 "title": conversation.title,
@@ -712,6 +740,7 @@ def run_agent_turn(
     gateway: AIGateway,
     *,
     input_mode: str = "text",
+    prepared_attachments: list[PreparedAttachment] | None = None,
 ) -> AssistantMessage:
     events = run_agent_turn_events(
         db,
@@ -720,6 +749,7 @@ def run_agent_turn(
         user_text,
         gateway,
         input_mode=input_mode,
+        prepared_attachments=prepared_attachments,
     )
     while True:
         try:
@@ -728,12 +758,20 @@ def run_agent_turn(
             return stop.value
 
 
-def build_history(conversation: AssistantConversation) -> list[dict]:
-    messages = [
-        {"role": message.role, "content": message.content}
-        for message in conversation.messages
-        if message.content
-    ]
+def build_history(
+    conversation: AssistantConversation,
+    *,
+    attachment_context_message_id: int | None = None,
+    attachment_context: str = "",
+) -> list[dict]:
+    messages: list[dict] = []
+    for message in conversation.messages:
+        if not message.content:
+            continue
+        content = message.content
+        if message.id == attachment_context_message_id and attachment_context:
+            content = f"{content}\n\n{attachment_context}"
+        messages.append({"role": message.role, "content": content})
     max_messages = max(2, settings.assistant_history_max_messages)
     if len(messages) <= max_messages:
         return messages
@@ -958,6 +996,9 @@ def _message_payload(message: AssistantMessage) -> dict:
         "role": message.role,
         "content": message.content,
         "actions": json.loads(message.actions) if message.actions else [],
+        "attachments": [
+            attachment_payload(attachment) for attachment in message.attachments
+        ],
         "agent_key": message.agent_key,
         "routing": json.loads(message.routing) if message.routing else None,
         "created_at": message.created_at.isoformat(),

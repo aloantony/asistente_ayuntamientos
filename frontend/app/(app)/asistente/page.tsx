@@ -171,6 +171,12 @@ function AsistentePageInner() {
         currentUser={user}
         selectedConversation={assistantController.selectedConversation}
         draftMessage={assistantController.draftMessage}
+        attachmentProjects={assistantController.attachmentProjects}
+        availableAttachments={assistantController.availableAttachments}
+        selectedAttachments={assistantController.selectedAttachments}
+        isLoadingAttachments={assistantController.isLoadingAttachments}
+        isUploadingAttachment={assistantController.isUploadingAttachment}
+        attachmentError={assistantController.attachmentError}
         voiceModeEnabled={assistantController.voiceModeEnabled}
         handsFreeEnabled={assistantController.handsFreeEnabled}
         voiceState={assistantController.voiceState}
@@ -184,6 +190,12 @@ function AsistentePageInner() {
           assistantController.includeArchivedConversations
         }
         onDraftMessageChange={assistantController.setDraftMessage}
+        onLoadAttachmentLibrary={assistantController.loadAttachmentLibrary}
+        onToggleAttachment={assistantController.toggleAttachment}
+        onRemoveAttachment={assistantController.removeAttachment}
+        onUploadAttachment={assistantController.uploadAttachment}
+        onLoadAttachmentPreview={assistantController.loadAttachmentPreview}
+        onOpenAttachment={assistantController.openAttachment}
         onVoiceModeChange={assistantController.setVoiceModeEnabled}
         onSelectConversation={handleSelectConversation}
         onStartConversation={assistantController.startConversation}

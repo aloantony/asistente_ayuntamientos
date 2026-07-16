@@ -3,19 +3,24 @@
 import { useEffect, useRef, useState } from "react";
 import type {
   AssistantAction,
+  AssistantAttachmentCandidate,
   AssistantConversation,
   AssistantConversationDetail,
   AssistantConversationFolder,
+  AssistantMessageAttachment,
   AssistantRealtimeResponseStatus,
   AssistantStatus,
   AssistantStreamToolActivity,
   AssistantVoiceState,
+  Document,
+  Project,
 } from "../components/types";
 import {
   adminRequest,
   ApiRequestError,
   completeAssistantRealtimeTurn,
   createAssistantRealtimeSession,
+  fetchAssistantAttachmentBlob,
   sendAssistantRealtimeToolCall,
   startAssistantRealtimeTurn,
   streamAssistantMessage,
@@ -54,6 +59,8 @@ type SendMessageOptions = {
   contentOverride?: string;
   inputMode?: AssistantInputMode;
 };
+
+const MAX_ASSISTANT_ATTACHMENTS = 5;
 
 type RealtimeTurnDraft = {
   clientTurnId: string;
@@ -489,6 +496,22 @@ function toSummary(detail: AssistantConversationDetail): AssistantConversation {
   };
 }
 
+function optimisticAttachment(
+  candidate: AssistantAttachmentCandidate,
+): AssistantMessageAttachment {
+  return {
+    id: -candidate.document.id,
+    document_id: candidate.document.id,
+    project_id: candidate.project.id,
+    project_name: candidate.project.name,
+    filename: candidate.document.original_filename,
+    content_type: candidate.document.content_type,
+    size_bytes: candidate.document.size_bytes,
+    context_status: "pending",
+    context_char_count: 0,
+  };
+}
+
 export function useAssistantController({
   getStoredToken,
   handleRequestError,
@@ -505,6 +528,16 @@ export function useAssistantController({
   const [selectedConversation, setSelectedConversation] =
     useState<AssistantConversationDetail | null>(null);
   const [draftMessage, setDraftMessage] = useState("");
+  const [attachmentProjects, setAttachmentProjects] = useState<Project[]>([]);
+  const [availableAttachments, setAvailableAttachments] = useState<
+    AssistantAttachmentCandidate[]
+  >([]);
+  const [selectedAttachments, setSelectedAttachments] = useState<
+    AssistantAttachmentCandidate[]
+  >([]);
+  const [isLoadingAttachments, setIsLoadingAttachments] = useState(false);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState("");
   const [includeArchivedConversations, setIncludeArchivedConversations] =
     useState(false);
   const [isLoadingAssistant, setIsLoadingAssistant] = useState(false);
@@ -558,6 +591,17 @@ export function useAssistantController({
   // Set true when the user interrupts (barge-in / stop) so a turn that is still
   // streaming does not resume audio after its playback was cut.
   const speechInterruptedRef = useRef(false);
+  const attachmentPreviewUrlsRef = useRef(new Map<number, string>());
+
+  useEffect(() => {
+    const previewUrls = attachmentPreviewUrlsRef.current;
+    return () => {
+      for (const url of previewUrls.values()) {
+        URL.revokeObjectURL(url);
+      }
+      previewUrls.clear();
+    };
+  }, []);
 
   if (speechPlayerRef.current === null) {
     speechPlayerRef.current = createSpeechPlayer({
@@ -650,6 +694,12 @@ export function useAssistantController({
     setConversationFolders([]);
     applySelectedConversation(null);
     setDraftMessage("");
+    setAttachmentProjects([]);
+    setAvailableAttachments([]);
+    setSelectedAttachments([]);
+    setIsLoadingAttachments(false);
+    setIsUploadingAttachment(false);
+    setAttachmentError("");
     setIncludeArchivedConversations(false);
     setIsLoadingAssistant(false);
     setIsSendingMessage(false);
@@ -657,6 +707,166 @@ export function useAssistantController({
     setVoiceState("idle");
     stopRealtimeVoice({ interrupted: true });
     speechPlayerRef.current?.stop();
+  }
+
+  async function loadAttachmentLibrary() {
+    setIsLoadingAttachments(true);
+    setAttachmentError("");
+    try {
+      const token = getStoredToken();
+      const projects = await adminRequest<Project[]>(
+        "/projects",
+        token,
+        "No se pudieron cargar los proyectos con documentos.",
+      );
+      const activeProjects = projects.filter(
+        (project) => project.status !== "archived",
+      );
+      const documentGroups = await Promise.all(
+        activeProjects.map(async (project) => {
+          try {
+            const documents = await adminRequest<Document[]>(
+              `/projects/${project.id}/documents`,
+              token,
+              "No se pudieron cargar los documentos del proyecto.",
+            );
+            return documents.map((document) => ({ document, project }));
+          } catch (requestError) {
+            if (
+              requestError instanceof ApiRequestError &&
+              requestError.status === 403
+            ) {
+              return [];
+            }
+            throw requestError;
+          }
+        }),
+      );
+      setAttachmentProjects(activeProjects);
+      setAvailableAttachments(documentGroups.flat());
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAttachmentError,
+        "No se pudieron cargar los archivos disponibles.",
+      );
+    } finally {
+      setIsLoadingAttachments(false);
+    }
+  }
+
+  function toggleAttachment(candidate: AssistantAttachmentCandidate) {
+    setAttachmentError("");
+    setSelectedAttachments((current) => {
+      if (
+        current.some(
+          (attachment) =>
+            attachment.document.id === candidate.document.id,
+        )
+      ) {
+        return current.filter(
+          (attachment) =>
+            attachment.document.id !== candidate.document.id,
+        );
+      }
+      if (current.length >= MAX_ASSISTANT_ATTACHMENTS) {
+        setAttachmentError(
+          `Puedes adjuntar hasta ${MAX_ASSISTANT_ATTACHMENTS} archivos por mensaje.`,
+        );
+        return current;
+      }
+      return [...current, candidate];
+    });
+  }
+
+  function removeAttachment(documentId: number) {
+    setAttachmentError("");
+    setSelectedAttachments((current) =>
+      current.filter(
+        (attachment) => attachment.document.id !== documentId,
+      ),
+    );
+  }
+
+  async function uploadAttachment(projectId: number, file: File) {
+    if (selectedAttachments.length >= MAX_ASSISTANT_ATTACHMENTS) {
+      setAttachmentError(
+        `Puedes adjuntar hasta ${MAX_ASSISTANT_ATTACHMENTS} archivos por mensaje.`,
+      );
+      return;
+    }
+    const project = attachmentProjects.find(
+      (candidate) => candidate.id === projectId,
+    );
+    if (!project) {
+      setAttachmentError("Selecciona un proyecto para guardar el archivo.");
+      return;
+    }
+
+    setIsUploadingAttachment(true);
+    setAttachmentError("");
+    const formData = new FormData();
+    formData.set("file", file);
+    try {
+      const document = await adminRequest<Document>(
+        `/projects/${project.id}/documents`,
+        getStoredToken(),
+        "No se pudo subir el archivo.",
+        { method: "POST", body: formData },
+      );
+      const candidate = { document, project };
+      setAvailableAttachments((current) => [
+        candidate,
+        ...current.filter(
+          (item) => item.document.id !== document.id,
+        ),
+      ]);
+      setSelectedAttachments((current) =>
+        current.some((item) => item.document.id === document.id)
+          ? current
+          : [...current, candidate],
+      );
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAttachmentError,
+        "No se pudo subir el archivo.",
+      );
+    } finally {
+      setIsUploadingAttachment(false);
+    }
+  }
+
+  async function loadAttachmentPreview(documentId: number) {
+    const existingUrl = attachmentPreviewUrlsRef.current.get(documentId);
+    if (existingUrl) {
+      return existingUrl;
+    }
+    const blob = await fetchAssistantAttachmentBlob(
+      documentId,
+      getStoredToken(),
+    );
+    const url = URL.createObjectURL(blob);
+    attachmentPreviewUrlsRef.current.set(documentId, url);
+    return url;
+  }
+
+  async function openAttachment(documentId: number) {
+    setAttachmentError("");
+    try {
+      const url = await loadAttachmentPreview(documentId);
+      const link = document.createElement("a");
+      link.href = url;
+      link.rel = "noopener noreferrer";
+      link.target = "_blank";
+      link.click();
+    } catch (requestError) {
+      handleRequestError(
+        requestError,
+        setAttachmentError,
+        "No se pudo abrir el archivo adjunto.",
+      );
+    }
   }
 
   async function loadAssistant(
@@ -714,6 +924,8 @@ export function useAssistantController({
 
     applySelectedConversation(null);
     setDraftMessage("");
+    setSelectedAttachments([]);
+    setAttachmentError("");
   }
 
   async function selectConversation(conversationId: number) {
@@ -727,6 +939,8 @@ export function useAssistantController({
       );
       if (selectedIdRef.current !== detail.id) {
         setDraftMessage("");
+        setSelectedAttachments([]);
+        setAttachmentError("");
       }
       applySelectedConversation(detail);
     } catch (requestError) {
@@ -749,6 +963,8 @@ export function useAssistantController({
         { method: "POST", body: JSON.stringify({}) },
       );
       setDraftMessage(initialDraft);
+      setSelectedAttachments([]);
+      setAttachmentError("");
       applySelectedConversation(detail);
       setConversations((existing) => [toSummary(detail), ...existing]);
       return detail;
@@ -774,6 +990,10 @@ export function useAssistantController({
     const content = (options.contentOverride ?? draftMessage).trim();
     const inputMode = options.inputMode ?? "text";
     const usesDraft = options.contentOverride === undefined;
+    const attachmentsForTurn = usesDraft ? selectedAttachments : [];
+    const attachmentIds = attachmentsForTurn.map(
+      (attachment) => attachment.document.id,
+    );
     if (
       !content ||
       !selectedConversation ||
@@ -822,6 +1042,7 @@ export function useAssistantController({
                 role: "user",
                 content,
                 actions: [],
+                attachments: attachmentsForTurn.map(optimisticAttachment),
                 agent_key: null,
                 routing: null,
                 created_at: new Date().toISOString(),
@@ -831,6 +1052,7 @@ export function useAssistantController({
                 role: "assistant",
                 content: "",
                 actions: [],
+                attachments: [],
                 agent_key: "anacleto",
                 routing: null,
                 created_at: new Date().toISOString(),
@@ -841,6 +1063,8 @@ export function useAssistantController({
     );
     if (usesDraft) {
       setDraftMessage("");
+      setSelectedAttachments([]);
+      setAttachmentError("");
     }
 
     try {
@@ -853,7 +1077,10 @@ export function useAssistantController({
                   ...current,
                   messages: current.messages.map((message) =>
                     message.id === -1
-                      ? { ...message, id: event.user_message_id }
+                      ? event.user_message ?? {
+                          ...message,
+                          id: event.user_message_id,
+                        }
                       : message,
                   ),
                 }
@@ -916,8 +1143,10 @@ export function useAssistantController({
                     ...current.messages
                       .filter((message) => message.id !== -2)
                       .map((message) =>
-                        message.id === -1 && streamedUserMessageId !== null
-                          ? { ...message, id: streamedUserMessageId }
+                        message.id === -1 && event.user_message
+                          ? event.user_message
+                          : message.id === -1 && streamedUserMessageId !== null
+                            ? { ...message, id: streamedUserMessageId }
                           : message,
                       ),
                     event.message,
@@ -952,7 +1181,7 @@ export function useAssistantController({
             }
           }
         },
-      }, inputMode, abortController.signal);
+      }, inputMode, abortController.signal, attachmentIds);
     } catch (requestError) {
       const requestWasAborted =
         abortController.signal.aborted || isAbortError(requestError);
@@ -971,6 +1200,17 @@ export function useAssistantController({
       if (selectedIdRef.current === conversationId) {
         if (usesDraft && !requestWasAborted) {
           setDraftMessage(content);
+          setSelectedAttachments((current) => {
+            const selectedIds = new Set(
+              current.map((attachment) => attachment.document.id),
+            );
+            return [
+              ...current,
+              ...attachmentsForTurn.filter(
+                (attachment) => !selectedIds.has(attachment.document.id),
+              ),
+            ];
+          });
         }
         void selectConversation(conversationId);
       }
@@ -1092,6 +1332,7 @@ export function useAssistantController({
                   role: "user",
                   content,
                   actions: [],
+                  attachments: [],
                   agent_key: null,
                   routing: null,
                   created_at: new Date().toISOString(),
@@ -1101,6 +1342,7 @@ export function useAssistantController({
                   role: "assistant",
                   content: "",
                   actions: [],
+                  attachments: [],
                   agent_key: "anacleto",
                   routing: null,
                   created_at: new Date().toISOString(),
@@ -1314,6 +1556,7 @@ export function useAssistantController({
                 role: "user",
                 content: "",
                 actions: [],
+                attachments: [],
                 agent_key: null,
                 routing: null,
                 created_at: now,
@@ -1323,6 +1566,7 @@ export function useAssistantController({
                 role: "assistant",
                 content: "",
                 actions: [],
+                attachments: [],
                 agent_key: "anacleto",
                 routing: null,
                 created_at: now,
@@ -3059,6 +3303,12 @@ export function useAssistantController({
     conversationFolders,
     selectedConversation,
     draftMessage,
+    attachmentProjects,
+    availableAttachments,
+    selectedAttachments,
+    isLoadingAttachments,
+    isUploadingAttachment,
+    attachmentError,
     includeArchivedConversations,
     voiceModeEnabled,
     handsFreeEnabled,
@@ -3072,6 +3322,12 @@ export function useAssistantController({
     setDraftMessage,
     setVoiceModeEnabled,
     loadAssistant,
+    loadAttachmentLibrary,
+    toggleAttachment,
+    removeAttachment,
+    uploadAttachment,
+    loadAttachmentPreview,
+    openAttachment,
     toggleIncludeArchivedConversations,
     selectConversation,
     deselectConversation,

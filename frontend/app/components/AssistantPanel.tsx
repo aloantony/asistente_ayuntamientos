@@ -4,6 +4,8 @@ import {
   CircleAlert,
   Clock3,
   Database,
+  ExternalLink,
+  FileImage,
   FileText,
   Globe2,
   GripVertical,
@@ -11,9 +13,12 @@ import {
   Inbox,
   Loader2,
   MapPin,
+  Paperclip,
   PanelLeftClose,
   PanelLeftOpen,
   Square,
+  Upload,
+  X,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -32,11 +37,14 @@ import {
 import {
   formatAssistantTool,
   type AssistantAction,
+  type AssistantAttachmentCandidate,
   type AssistantConversation,
   type AssistantConversationDetail,
   type AssistantConversationFolder,
+  type AssistantMessageAttachment,
   type AssistantStatus,
   type AssistantVoiceState,
+  type Project,
   type User,
 } from "./types";
 import { createBargeInDetector, createSilenceDetector } from "../lib/voice";
@@ -59,6 +67,12 @@ type AssistantPanelProps = {
   currentUser: User;
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
+  attachmentProjects: Project[];
+  availableAttachments: AssistantAttachmentCandidate[];
+  selectedAttachments: AssistantAttachmentCandidate[];
+  isLoadingAttachments: boolean;
+  isUploadingAttachment: boolean;
+  attachmentError: string;
   voiceModeEnabled: boolean;
   handsFreeEnabled: boolean;
   voiceState: AssistantVoiceState;
@@ -70,6 +84,12 @@ type AssistantPanelProps = {
   assistantError: string;
   includeArchivedConversations: boolean;
   onDraftMessageChange: (value: string) => void;
+  onLoadAttachmentLibrary: () => Promise<void>;
+  onToggleAttachment: (attachment: AssistantAttachmentCandidate) => void;
+  onRemoveAttachment: (documentId: number) => void;
+  onUploadAttachment: (projectId: number, file: File) => Promise<void>;
+  onLoadAttachmentPreview: (documentId: number) => Promise<string>;
+  onOpenAttachment: (documentId: number) => Promise<void>;
   onVoiceModeChange: (enabled: boolean) => void;
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
@@ -567,6 +587,91 @@ function AssistantMarkdown({ content }: { content: string }) {
   );
 }
 
+const ATTACHMENT_STATUS_LABELS: Record<
+  AssistantMessageAttachment["context_status"],
+  string
+> = {
+  pending: "Preparando",
+  ready: "Texto usado solo en este turno",
+  empty: "Sin texto extraíble",
+  unsupported: "Formato sin lectura automática",
+  vision_unavailable: "Imagen adjunta · visión no disponible",
+  too_large: "Demasiado grande para lectura automática",
+  unavailable: "Archivo no disponible",
+  failed: "No se pudo leer",
+};
+
+function formatAttachmentSize(sizeBytes: number) {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${Math.ceil(sizeBytes / 1024)} KB`;
+  }
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function MessageAttachmentCard({
+  attachment,
+  onLoadPreview,
+  onOpen,
+}: {
+  attachment: AssistantMessageAttachment;
+  onLoadPreview: (documentId: number) => Promise<string>;
+  onOpen: (documentId: number) => Promise<void>;
+}) {
+  const isImage = attachment.content_type.startsWith("image/");
+  const [previewUrl, setPreviewUrl] = useState("");
+
+  useEffect(() => {
+    if (!isImage) {
+      return;
+    }
+    let active = true;
+    void onLoadPreview(attachment.document_id)
+      .then((url) => {
+        if (active) {
+          setPreviewUrl(url);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [attachment.document_id, isImage, onLoadPreview]);
+
+  return (
+    <div className="assistant-message-attachment">
+      <div className="assistant-message-attachment-preview">
+        {previewUrl ? (
+          // The URL is an authenticated local blob, never a remote source.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img alt="" src={previewUrl} />
+        ) : isImage ? (
+          <FileImage aria-hidden size={20} />
+        ) : (
+          <FileText aria-hidden size={20} />
+        )}
+      </div>
+      <div className="assistant-message-attachment-copy">
+        <strong title={attachment.filename}>{attachment.filename}</strong>
+        <small>
+          {formatAttachmentSize(attachment.size_bytes)} ·{" "}
+          {ATTACHMENT_STATUS_LABELS[attachment.context_status]}
+        </small>
+      </div>
+      <button
+        aria-label={`Abrir ${attachment.filename}`}
+        onClick={() => void onOpen(attachment.document_id)}
+        title="Abrir archivo"
+        type="button"
+      >
+        <ExternalLink aria-hidden size={15} />
+      </button>
+    </div>
+  );
+}
+
 export function AssistantPanel({
   assistantStatus,
   conversations,
@@ -574,6 +679,12 @@ export function AssistantPanel({
   currentUser,
   selectedConversation,
   draftMessage,
+  attachmentProjects,
+  availableAttachments,
+  selectedAttachments,
+  isLoadingAttachments,
+  isUploadingAttachment,
+  attachmentError,
   voiceModeEnabled,
   handsFreeEnabled,
   voiceState,
@@ -585,6 +696,12 @@ export function AssistantPanel({
   assistantError,
   includeArchivedConversations,
   onDraftMessageChange,
+  onLoadAttachmentLibrary,
+  onToggleAttachment,
+  onRemoveAttachment,
+  onUploadAttachment,
+  onLoadAttachmentPreview,
+  onOpenAttachment,
   onVoiceModeChange,
   onSelectConversation,
   onStartConversation,
@@ -676,6 +793,10 @@ export function AssistantPanel({
     null,
   );
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [isAttachmentPickerOpen, setIsAttachmentPickerOpen] = useState(false);
+  const [attachmentProjectId, setAttachmentProjectId] = useState<number | null>(
+    null,
+  );
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const silenceDetectorRef = useRef<ReturnType<typeof createSilenceDetector> | null>(
@@ -703,6 +824,7 @@ export function AssistantPanel({
   const audioChunksRef = useRef<Blob[]>([]);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const speechTranscriptionEnabled = Boolean(
     assistantStatus?.speech_transcription_enabled,
@@ -759,6 +881,27 @@ export function AssistantPanel({
     );
   }, [conversationFilter, conversations]);
 
+  const projectAttachments = useMemo(
+    () =>
+      availableAttachments.filter(
+        (attachment) => attachment.project.id === attachmentProjectId,
+      ),
+    [attachmentProjectId, availableAttachments],
+  );
+
+  useEffect(() => {
+    if (
+      attachmentProjectId === null ||
+      !attachmentProjects.some((project) => project.id === attachmentProjectId)
+    ) {
+      setAttachmentProjectId(attachmentProjects[0]?.id ?? null);
+    }
+  }, [attachmentProjectId, attachmentProjects]);
+
+  useEffect(() => {
+    setIsAttachmentPickerOpen(false);
+  }, [selectedConversation?.id]);
+
   const conversationGroups = useMemo(() => {
     if (conversationListMode === "folders") {
       return buildFolderConversationGroups(
@@ -780,17 +923,17 @@ export function AssistantPanel({
     draftMessageRef.current = draftMessage;
   }, [draftMessage]);
 
+  const messageScrollSignature = selectedConversation?.messages
+    .map(
+      (message) =>
+        `${message.id}:${message.content.length}:${message.actions.length}:` +
+        message.attachments.length,
+    )
+    .join("|");
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [
-    selectedConversation?.messages
-      .map(
-        (message) =>
-          `${message.id}:${message.content.length}:${message.actions.length}`,
-      )
-      .join("|"),
-    isSendingMessage,
-  ]);
+  }, [messageScrollSignature, isSendingMessage]);
 
   useEffect(() => {
     if (!conversationContextMenu) {
@@ -1212,6 +1355,25 @@ export function AssistantPanel({
     stopListening({ discardAudio: true });
     onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
+  }
+
+  function toggleAttachmentPicker() {
+    const opening = !isAttachmentPickerOpen;
+    setIsAttachmentPickerOpen(opening);
+    if (opening && attachmentProjects.length === 0 && !isLoadingAttachments) {
+      void onLoadAttachmentLibrary();
+    }
+  }
+
+  function handleAttachmentUpload(file: File | undefined) {
+    if (!file || attachmentProjectId === null) {
+      return;
+    }
+    void onUploadAttachment(attachmentProjectId, file).then(() => {
+      if (attachmentInputRef.current) {
+        attachmentInputRef.current.value = "";
+      }
+    });
   }
 
   async function handleConversationFolderChange(
@@ -1973,6 +2135,21 @@ export function AssistantPanel({
                             </p>
                           )}
                         </div>
+                        {message.attachments.length > 0 ? (
+                          <div
+                            className="assistant-message-attachments"
+                            aria-label="Archivos adjuntos"
+                          >
+                            {message.attachments.map((attachment) => (
+                              <MessageAttachmentCard
+                                attachment={attachment}
+                                key={attachment.id}
+                                onLoadPreview={onLoadAttachmentPreview}
+                                onOpen={onOpenAttachment}
+                              />
+                            ))}
+                          </div>
+                        ) : null}
                         <AssistantMapActions actions={message.actions} />
                         {message.actions.length > 0 ? (
                           <ActionTimeline
@@ -2059,7 +2236,121 @@ export function AssistantPanel({
                   </div>
                 ) : null}
 
+                {isAttachmentPickerOpen ? (
+                  <div className="assistant-attachment-picker">
+                    <div className="assistant-attachment-picker-head">
+                      <label>
+                        <span>Proyecto</span>
+                        <select
+                          disabled={isLoadingAttachments}
+                          onChange={(event) =>
+                            setAttachmentProjectId(Number(event.target.value))
+                          }
+                          value={attachmentProjectId ?? ""}
+                        >
+                          {attachmentProjects.map((project) => (
+                            <option key={project.id} value={project.id}>
+                              {project.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <input
+                        accept=".pdf,.txt,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
+                        className="assistant-attachment-input"
+                        onChange={(event) =>
+                          handleAttachmentUpload(event.target.files?.[0])
+                        }
+                        ref={attachmentInputRef}
+                        type="file"
+                      />
+                      <button
+                        className="secondary-button"
+                        disabled={
+                          attachmentProjectId === null ||
+                          isUploadingAttachment ||
+                          selectedAttachments.length >= 5
+                        }
+                        onClick={() => attachmentInputRef.current?.click()}
+                        type="button"
+                      >
+                        {isUploadingAttachment ? (
+                          <Loader2 aria-hidden className="spinning-icon" size={15} />
+                        ) : (
+                          <Upload aria-hidden size={15} />
+                        )}
+                        Subir
+                      </button>
+                    </div>
+                    <p>
+                      El archivo queda guardado en el proyecto; su contenido solo
+                      se autoriza como contexto para este turno.
+                    </p>
+                    <div className="assistant-attachment-options">
+                      {isLoadingAttachments ? (
+                        <span className="muted">Cargando archivos…</span>
+                      ) : projectAttachments.length === 0 ? (
+                        <span className="muted">
+                          No hay archivos disponibles en este proyecto.
+                        </span>
+                      ) : (
+                        projectAttachments.map((attachment) => {
+                          const isSelected = selectedAttachments.some(
+                            (selected) =>
+                              selected.document.id === attachment.document.id,
+                          );
+                          return (
+                            <button
+                              aria-pressed={isSelected}
+                              className={isSelected ? "selected" : ""}
+                              key={attachment.document.id}
+                              onClick={() => onToggleAttachment(attachment)}
+                              type="button"
+                            >
+                              {attachment.document.content_type.startsWith(
+                                "image/",
+                              ) ? (
+                                <FileImage aria-hidden size={16} />
+                              ) : (
+                                <FileText aria-hidden size={16} />
+                              )}
+                              <span>{attachment.document.original_filename}</span>
+                              <small>
+                                {formatAttachmentSize(
+                                  attachment.document.size_bytes,
+                                )}
+                              </small>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
                 <form className="assistant-composer" onSubmit={handleSubmit}>
+                  {selectedAttachments.length > 0 ? (
+                    <div
+                      className="assistant-selected-attachments"
+                      aria-label="Adjuntos seleccionados"
+                    >
+                      {selectedAttachments.map((attachment) => (
+                        <span key={attachment.document.id}>
+                          <Paperclip aria-hidden size={13} />
+                          <strong>{attachment.document.original_filename}</strong>
+                          <button
+                            aria-label={`Quitar ${attachment.document.original_filename}`}
+                            onClick={() =>
+                              onRemoveAttachment(attachment.document.id)
+                            }
+                            type="button"
+                          >
+                            <X aria-hidden size={13} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   <textarea
                     ref={messageTextareaRef}
                     value={draftMessage}
@@ -2070,7 +2361,28 @@ export function AssistantPanel({
                     disabled={composerDisabled}
                   />
                   <div className="assistant-composer-foot">
-                    <div className="assistant-composer-context" aria-hidden="true" />
+                    <div className="assistant-composer-context">
+                      <button
+                        aria-expanded={isAttachmentPickerOpen}
+                        aria-label="Adjuntar archivo"
+                        className={
+                          isAttachmentPickerOpen
+                            ? "assistant-attach-button active"
+                            : "assistant-attach-button"
+                        }
+                        disabled={composerDisabled}
+                        onClick={toggleAttachmentPicker}
+                        title="Adjuntar archivo"
+                        type="button"
+                      >
+                        <Paperclip aria-hidden size={17} />
+                      </button>
+                      <span>
+                        {selectedAttachments.length > 0
+                          ? `${selectedAttachments.length}/5 · solo este turno`
+                          : "Adjuntos: solo este turno"}
+                      </span>
+                    </div>
                     <div className="assistant-composer-actions">
                       {voiceDialogueAvailable ? (
                         <button
@@ -2157,6 +2469,12 @@ export function AssistantPanel({
                     </div>
                   </div>
                 </form>
+
+                {attachmentError ? (
+                  <p className="error-message assistant-attachment-error">
+                    {attachmentError}
+                  </p>
+                ) : null}
 
                 {voiceStatus ? (
                   <div className="voice-status" role="status">
