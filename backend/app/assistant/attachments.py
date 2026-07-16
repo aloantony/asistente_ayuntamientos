@@ -6,17 +6,20 @@ later turns keep the chip in history but do not silently reuse the document.
 Binary files are never sent to the model by this module.
 """
 
-import html
+import hashlib
+import json
 import logging
+import os
 import re
+import stat
+import subprocess
+import sys
 import unicodedata
-import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from fastapi import HTTPException, status
-from openpyxl import load_workbook
-from pypdf import PdfReader
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -38,14 +41,11 @@ DOCX_CONTENT_TYPES = frozenset(
 XLSX_CONTENT_TYPES = frozenset(
     {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
 )
-_DOCX_TEXT_RE = re.compile(rb"<w:t(?:\s[^>]*)?>(.*?)</w:t>", re.DOTALL)
 _WHITESPACE_RE = re.compile(r"[\t\x0b\x0c\r ]+")
 _EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
-MAX_PDF_PAGES = 20
-MAX_DOCX_TEXT_FRAGMENTS = 2_000
-MAX_XLSX_SHEETS = 10
-MAX_XLSX_ROWS_PER_SHEET = 200
-MAX_XLSX_CELLS_PER_ROW = 50
+MAX_ATTACHMENT_SNAPSHOT_BYTES = 25 * 1024 * 1024
+SNAPSHOT_CHUNK_BYTES = 1024 * 1024
+WORKER_OUTPUT_MAX_BYTES = 64 * 1024
 ATTACHMENT_STATUS_CONTEXT = {
     "empty": "NO SE ENCONTRÓ TEXTO EXTRAÍBLE",
     "unsupported": "FORMATO SIN LECTURA AUTOMÁTICA",
@@ -59,10 +59,33 @@ ATTACHMENT_STATUS_CONTEXT = {
 
 
 @dataclass(frozen=True)
+class AttachmentIdentity:
+    document_id: int
+    organization_id: int
+    project_id: int
+    status: str
+    checksum_sha256: str
+    storage_backend: str
+    storage_key: str
+    content_type: str
+    size_bytes: int
+    original_filename: str
+
+
+@dataclass(frozen=True)
+class AttachmentFileSnapshot:
+    available: bool
+    size_bytes: int | None
+    checksum_sha256: str | None
+
+
+@dataclass(frozen=True)
 class PreparedAttachment:
     document: Document
     context_status: str
     context_text: str | None
+    identity: AttachmentIdentity
+    file_snapshot: AttachmentFileSnapshot
 
     @property
     def context_char_count(self) -> int:
@@ -98,6 +121,11 @@ def prepare_attachments(
     remaining_chars = settings.assistant_attachment_total_context_chars
     for document_id in normalized_ids:
         document = by_id[document_id]
+        if document.project.organization_id != document.organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Assistant attachment project organization mismatch",
+            )
         try:
             require_document_action(db, current_user, document, "documents.view")
         except HTTPException as error:
@@ -125,6 +153,80 @@ def prepare_attachments(
         )
 
     return prepared
+
+
+def revalidate_prepared_attachments(
+    db: Session,
+    current_user: User,
+    prepared: list[PreparedAttachment],
+) -> list[PreparedAttachment]:
+    """Lock and revalidate every security-sensitive attachment attribute.
+
+    Parsing happens from an immutable private snapshot.  Immediately before
+    message persistence/provider use, this function reloads and locks the
+    document rows, checks current permissions, and verifies that both database
+    metadata and local file bytes still match the parsed snapshot.
+    """
+
+    if not prepared:
+        return []
+
+    document_ids = [item.identity.document_id for item in prepared]
+    documents = list(
+        db.scalars(
+            select(Document)
+            .options(selectinload(Document.project))
+            .where(Document.id.in_(document_ids))
+            .with_for_update(of=Document)
+            .execution_options(populate_existing=True)
+        )
+    )
+    by_id = {document.id: document for document in documents}
+    if len(by_id) != len(document_ids):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assistant attachment not found",
+        )
+
+    refreshed: list[PreparedAttachment] = []
+    for item in prepared:
+        document = by_id[item.identity.document_id]
+        if document.project.organization_id != document.organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Assistant attachment project organization mismatch",
+            )
+        if _attachment_identity(document) != item.identity:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Assistant attachment changed while being prepared",
+            )
+        if document.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Assistant attachment is not active",
+            )
+        try:
+            require_document_action(db, current_user, document, "documents.view")
+        except HTTPException as error:
+            if error.status_code in {
+                status.HTTP_403_FORBIDDEN,
+                status.HTTP_404_NOT_FOUND,
+            }:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Assistant attachment not found",
+                ) from None
+            raise
+
+        if _current_file_snapshot(document) != item.file_snapshot:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Assistant attachment changed while being prepared",
+            )
+        refreshed.append(replace(item, document=document))
+
+    return refreshed
 
 
 def persist_message_attachments(
@@ -236,52 +338,123 @@ def _extract_document_context(
     document: Document,
     remaining_chars: int,
 ) -> PreparedAttachment:
+    identity = _attachment_identity(document)
     content_type = document.content_type.lower()
-    if content_type in IMAGE_CONTENT_TYPES:
-        return PreparedAttachment(document, "vision_unavailable", None)
-    if remaining_chars <= 0:
-        return PreparedAttachment(document, "too_large", None)
-    if document.size_bytes > settings.assistant_attachment_max_extract_bytes:
-        return PreparedAttachment(document, "too_large", None)
-
-    max_chars = min(
-        settings.assistant_attachment_max_context_chars,
-        remaining_chars,
-    )
     storage = LocalStorageService()
     try:
         file_path = storage.resolve_storage_key(document.storage_key)
         if not file_path.is_file():
-            return PreparedAttachment(document, "unavailable", None)
+            return _prepared_attachment(
+                document,
+                identity,
+                AttachmentFileSnapshot(False, None, None),
+                "unavailable",
+            )
 
-        if content_type in TEXT_CONTENT_TYPES:
-            text = _extract_plain_text(file_path, max_chars)
-        elif content_type in PDF_CONTENT_TYPES:
-            text = _extract_pdf_text(file_path, max_chars)
-        elif content_type in DOCX_CONTENT_TYPES:
-            if not _zip_archive_within_limit(file_path):
-                return PreparedAttachment(document, "too_large", None)
-            text = _extract_docx_text(file_path, max_chars)
-        elif content_type in XLSX_CONTENT_TYPES:
-            if not _zip_archive_within_limit(file_path):
-                return PreparedAttachment(document, "too_large", None)
-            text = _extract_xlsx_text(file_path, max_chars)
-        else:
-            return PreparedAttachment(document, "unsupported", None)
+        with TemporaryDirectory(
+            prefix=".assistant-attachment-",
+        ) as temporary_directory:
+            os.chmod(temporary_directory, 0o700)
+            snapshot_path = Path(temporary_directory) / "snapshot.bin"
+            file_snapshot = _copy_verified_snapshot(
+                document,
+                file_path,
+                snapshot_path,
+            )
+
+            if content_type in IMAGE_CONTENT_TYPES:
+                return _prepared_attachment(
+                    document,
+                    identity,
+                    file_snapshot,
+                    "vision_unavailable",
+                )
+            if remaining_chars <= 0:
+                return _prepared_attachment(
+                    document,
+                    identity,
+                    file_snapshot,
+                    "too_large",
+                )
+            if document.size_bytes > settings.assistant_attachment_max_extract_bytes:
+                return _prepared_attachment(
+                    document,
+                    identity,
+                    file_snapshot,
+                    "too_large",
+                )
+
+            max_chars = min(
+                settings.assistant_attachment_max_context_chars,
+                remaining_chars,
+            )
+            if content_type in TEXT_CONTENT_TYPES:
+                # UTF-8 decoding is simple and bounded. Structured parsers stay
+                # outside the API process in the resource-limited worker.
+                text = _extract_plain_text(snapshot_path, max_chars)
+            elif content_type in (
+                PDF_CONTENT_TYPES | DOCX_CONTENT_TYPES | XLSX_CONTENT_TYPES
+            ):
+                parser_status, text = _run_structured_parser(
+                    snapshot_path,
+                    content_type,
+                    max_chars,
+                )
+                if parser_status != "ready":
+                    return _prepared_attachment(
+                        document,
+                        identity,
+                        file_snapshot,
+                        parser_status,
+                    )
+            else:
+                return _prepared_attachment(
+                    document,
+                    identity,
+                    file_snapshot,
+                    "unsupported",
+                )
     except InvalidStorageKeyError:
-        return PreparedAttachment(document, "unavailable", None)
+        return _prepared_attachment(
+            document,
+            identity,
+            AttachmentFileSnapshot(False, None, None),
+            "unavailable",
+        )
+    except _AttachmentChangedError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Assistant attachment changed while being prepared",
+        ) from None
     except Exception:
         logger.warning(
             "Assistant attachment extraction failed: document_id=%s content_type=%s",
             document.id,
             content_type,
         )
-        return PreparedAttachment(document, "failed", None)
+        file_snapshot = _current_file_snapshot(document)
+        return _prepared_attachment(
+            document,
+            identity,
+            file_snapshot,
+            "failed",
+        )
 
     normalized = _normalize_extracted_text(text)[:max_chars].strip()
     if not normalized:
-        return PreparedAttachment(document, "empty", None)
-    return PreparedAttachment(document, "ready", normalized)
+        return _prepared_attachment(
+            document,
+            identity,
+            file_snapshot,
+            "empty",
+        )
+    return _prepared_attachment(
+        document,
+        identity,
+        file_snapshot,
+        "ready",
+        normalized,
+    )
 
 
 def _extract_plain_text(file_path: Path, max_chars: int) -> str:
@@ -293,72 +466,193 @@ def _extract_plain_text(file_path: Path, max_chars: int) -> str:
         return source.read(max_bytes).decode("utf-8", errors="replace")
 
 
-def _extract_pdf_text(file_path: Path, max_chars: int) -> str:
-    reader = PdfReader(str(file_path))
-    parts: list[str] = []
-    chars = 0
-    for page_number, page in enumerate(reader.pages):
-        if page_number >= MAX_PDF_PAGES:
-            break
-        page_text = page.extract_text() or ""
-        if not page_text:
-            continue
-        remaining = max_chars - chars
-        if remaining <= 0:
-            break
-        parts.append(page_text[:remaining])
-        chars += len(parts[-1])
-    return "\n\n".join(parts)
+class _AttachmentChangedError(Exception):
+    pass
 
 
-def _extract_docx_text(file_path: Path, max_chars: int) -> str:
-    with zipfile.ZipFile(file_path) as archive:
-        info = archive.getinfo("word/document.xml")
-        if info.file_size > settings.assistant_attachment_max_extract_bytes:
-            return ""
-        raw_xml = archive.read(info)
-    fragments = [
-        html.unescape(match.decode("utf-8", errors="replace"))
-        for match in _DOCX_TEXT_RE.findall(raw_xml)[:MAX_DOCX_TEXT_FRAGMENTS]
-    ]
-    return "\n".join(fragments)[:max_chars]
+def _attachment_identity(document: Document) -> AttachmentIdentity:
+    return AttachmentIdentity(
+        document_id=document.id,
+        organization_id=document.organization_id,
+        project_id=document.project_id,
+        status=document.status,
+        checksum_sha256=document.checksum_sha256,
+        storage_backend=document.storage_backend,
+        storage_key=document.storage_key,
+        content_type=document.content_type,
+        size_bytes=document.size_bytes,
+        original_filename=document.original_filename,
+    )
 
 
-def _extract_xlsx_text(file_path: Path, max_chars: int) -> str:
-    workbook = load_workbook(file_path, read_only=True, data_only=True)
-    parts: list[str] = []
-    chars = 0
+def _prepared_attachment(
+    document: Document,
+    identity: AttachmentIdentity,
+    file_snapshot: AttachmentFileSnapshot,
+    context_status: str,
+    context_text: str | None = None,
+) -> PreparedAttachment:
+    return PreparedAttachment(
+        document=document,
+        context_status=context_status,
+        context_text=context_text,
+        identity=identity,
+        file_snapshot=file_snapshot,
+    )
+
+
+def _open_regular_file(path: Path):
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise OSError("O_NOFOLLOW is required for attachment snapshots")
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | no_follow)
+    source = os.fdopen(descriptor, "rb")
+    file_stat = os.fstat(source.fileno())
+    if not stat.S_ISREG(file_stat.st_mode):
+        source.close()
+        raise OSError("attachment storage object is not a regular file")
+    return source, file_stat
+
+
+def _copy_verified_snapshot(
+    document: Document,
+    source_path: Path,
+    snapshot_path: Path,
+) -> AttachmentFileSnapshot:
+    source, initial_stat = _open_regular_file(source_path)
+    digest = hashlib.sha256()
+    size_bytes = 0
     try:
-        for worksheet in workbook.worksheets[:MAX_XLSX_SHEETS]:
-            header = f"Hoja: {worksheet.title}"
-            parts.append(header)
-            chars += len(header) + 1
-            for row_number, row in enumerate(worksheet.iter_rows(values_only=True)):
-                if row_number >= MAX_XLSX_ROWS_PER_SHEET:
-                    break
-                line = " | ".join(
-                    str(value).strip()
-                    for value in row[:MAX_XLSX_CELLS_PER_ROW]
-                    if value is not None and str(value).strip()
-                )
-                if not line:
-                    continue
-                remaining = max_chars - chars
-                if remaining <= 0:
-                    return "\n".join(parts)
-                parts.append(line[:remaining])
-                chars += len(parts[-1]) + 1
-    finally:
-        workbook.close()
-    return "\n".join(parts)
+        with source, snapshot_path.open("xb") as snapshot:
+            os.chmod(snapshot_path, 0o600)
+            while chunk := source.read(SNAPSHOT_CHUNK_BYTES):
+                size_bytes += len(chunk)
+                if size_bytes > MAX_ATTACHMENT_SNAPSHOT_BYTES:
+                    raise _AttachmentChangedError
+                digest.update(chunk)
+                snapshot.write(chunk)
+            final_stat = os.fstat(source.fileno())
+    except Exception:
+        snapshot_path.unlink(missing_ok=True)
+        raise
+
+    stable_attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(
+        getattr(initial_stat, attribute) != getattr(final_stat, attribute)
+        for attribute in stable_attributes
+    ):
+        raise _AttachmentChangedError
+
+    checksum = digest.hexdigest()
+    if size_bytes != document.size_bytes or checksum != document.checksum_sha256:
+        raise _AttachmentChangedError
+    return AttachmentFileSnapshot(True, size_bytes, checksum)
 
 
-def _zip_archive_within_limit(file_path: Path) -> bool:
-    with zipfile.ZipFile(file_path) as archive:
-        return (
-            sum(info.file_size for info in archive.infolist())
-            <= settings.assistant_attachment_max_extract_bytes
-        )
+def _current_file_snapshot(document: Document) -> AttachmentFileSnapshot:
+    if document.storage_backend != "local":
+        return AttachmentFileSnapshot(False, None, None)
+    try:
+        path = LocalStorageService().resolve_storage_key(document.storage_key)
+        source, initial_stat = _open_regular_file(path)
+    except (InvalidStorageKeyError, FileNotFoundError, OSError):
+        return AttachmentFileSnapshot(False, None, None)
+
+    digest = hashlib.sha256()
+    size_bytes = 0
+    try:
+        with source:
+            while chunk := source.read(SNAPSHOT_CHUNK_BYTES):
+                size_bytes += len(chunk)
+                if size_bytes > MAX_ATTACHMENT_SNAPSHOT_BYTES:
+                    return AttachmentFileSnapshot(True, size_bytes, None)
+                digest.update(chunk)
+            final_stat = os.fstat(source.fileno())
+    except OSError:
+        return AttachmentFileSnapshot(False, None, None)
+
+    stable_attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(
+        getattr(initial_stat, attribute) != getattr(final_stat, attribute)
+        for attribute in stable_attributes
+    ):
+        return AttachmentFileSnapshot(True, size_bytes, None)
+    return AttachmentFileSnapshot(True, size_bytes, digest.hexdigest())
+
+
+def _run_structured_parser(
+    snapshot_path: Path,
+    content_type: str,
+    max_chars: int,
+) -> tuple[str, str]:
+    worker_path = Path(__file__).with_name("attachment_worker.py")
+    output_path = snapshot_path.with_name(f".{snapshot_path.name}.worker-output.json")
+    command = [
+        sys.executable,
+        "-I",
+        str(worker_path),
+        "--path",
+        str(snapshot_path),
+        "--content-type",
+        content_type,
+        "--max-chars",
+        str(max_chars),
+        "--max-total-bytes",
+        str(settings.assistant_attachment_max_extract_bytes),
+        "--max-member-bytes",
+        str(settings.assistant_attachment_max_archive_member_bytes),
+        "--max-members",
+        str(settings.assistant_attachment_max_archive_members),
+        "--max-compression-ratio",
+        str(settings.assistant_attachment_max_compression_ratio),
+        "--cpu-seconds",
+        str(settings.assistant_attachment_worker_cpu_seconds),
+        "--memory-bytes",
+        str(settings.assistant_attachment_worker_memory_bytes),
+        "--max-fds",
+        str(settings.assistant_attachment_worker_max_fds),
+    ]
+    safe_environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+    try:
+        with output_path.open("xb") as output:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                timeout=settings.assistant_attachment_extraction_timeout_seconds,
+                check=False,
+                close_fds=True,
+                start_new_session=True,
+                cwd=snapshot_path.parent,
+                env=safe_environment,
+            )
+    except subprocess.TimeoutExpired:
+        logger.warning("Assistant attachment parser timed out")
+        return "failed", ""
+    except OSError:
+        logger.warning("Assistant attachment parser could not start")
+        return "failed", ""
+
+    if completed.returncode != 0:
+        return "failed", ""
+    raw_output = output_path.read_bytes()
+    if not raw_output or len(raw_output) > WORKER_OUTPUT_MAX_BYTES:
+        return "failed", ""
+    try:
+        payload = json.loads(raw_output)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "failed", ""
+    if payload.get("ok") is True and isinstance(payload.get("text"), str):
+        return "ready", payload["text"][:max_chars]
+    worker_status = payload.get("status")
+    if worker_status == "too_large":
+        return "too_large", ""
+    return "failed", ""
 
 
 def _normalize_extracted_text(value: str) -> str:

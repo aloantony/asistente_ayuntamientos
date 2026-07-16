@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.assistant.attachments import prepare_attachments
+from app.assistant.attachments import attachment_payload, prepare_attachments
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
 from app.assistant.models import (
     AssistantAdminFeedback,
@@ -86,6 +86,7 @@ from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.documents.models import Document
 from app.organizations.access import get_accessible_organizations_query
+from app.projects.access import user_can_access_project
 from app.rbac.permissions import has_permission
 from app.users.models import User
 
@@ -667,7 +668,7 @@ def create_conversation(
     payload: AssistantConversationCreate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
 
     conversation = AssistantConversation(
@@ -676,7 +677,11 @@ def create_conversation(
     )
     db.add(conversation)
     db.commit()
-    return get_own_conversation(db, current_user, conversation.id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation.id),
+    )
 
 
 @router.get(
@@ -687,9 +692,13 @@ def get_conversation(
     conversation_id: int,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
-    return get_own_conversation(db, current_user, conversation_id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation_id),
+    )
 
 
 @router.patch(
@@ -701,7 +710,7 @@ def update_conversation(
     payload: AssistantConversationUpdate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
     conversation = get_own_conversation(db, current_user, conversation_id)
 
@@ -719,7 +728,11 @@ def update_conversation(
             conversation.folder_id = folder.id
 
     db.commit()
-    return get_own_conversation(db, current_user, conversation_id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation_id),
+    )
 
 
 @router.post(
@@ -732,7 +745,7 @@ def send_message(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
     conversation = get_own_conversation(db, current_user, conversation_id)
 
@@ -774,7 +787,11 @@ def send_message(
             detail="Assistant request failed",
         ) from None
 
-    return get_own_conversation(db, current_user, conversation_id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation_id),
+    )
 
 
 @router.post("/conversations/{conversation_id}/messages/stream")
@@ -1112,6 +1129,72 @@ def recover_unexpected_stream_error(
             type(rollback_error).__name__,
         )
     return TurnEvent("error", {"detail": "Assistant request failed"})
+
+
+def serialize_conversation_detail(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+) -> AssistantConversationDetail:
+    """Serialize current attachment visibility without changing history rows."""
+
+    project_visibility: dict[tuple[int, int], bool] = {}
+    messages: list[dict] = []
+    for message in conversation.messages:
+        visible_attachments: list[dict] = []
+        for attachment in message.attachments:
+            document = attachment.document
+            project = document.project
+            if project.organization_id != document.organization_id:
+                continue
+            cache_key = (project.id, project.organization_id)
+            if cache_key not in project_visibility:
+                visible = True
+                if not current_user.is_superuser:
+                    can_manage = has_permission(
+                        current_user,
+                        "documents.manage",
+                        db,
+                        organization_id=project.organization_id,
+                    )
+                    can_view = can_manage or has_permission(
+                        current_user,
+                        "documents.view",
+                        db,
+                        organization_id=project.organization_id,
+                    )
+                    visible = can_view and (
+                        can_manage
+                        or user_can_access_project(db, current_user, project)
+                    )
+                project_visibility[cache_key] = visible
+            if project_visibility[cache_key]:
+                visible_attachments.append(attachment_payload(attachment))
+
+        messages.append(
+            {
+                "id": message.id,
+                "role": message.role,
+                "content": message.content,
+                "actions": message.actions,
+                "attachments": visible_attachments,
+                "agent_key": message.agent_key,
+                "routing": message.routing,
+                "created_at": message.created_at,
+            }
+        )
+
+    return AssistantConversationDetail.model_validate(
+        {
+            "id": conversation.id,
+            "title": conversation.title,
+            "status": conversation.status,
+            "folder_id": conversation.folder_id,
+            "created_at": conversation.created_at,
+            "updated_at": conversation.updated_at,
+            "messages": messages,
+        }
+    )
 
 
 def get_own_conversation(

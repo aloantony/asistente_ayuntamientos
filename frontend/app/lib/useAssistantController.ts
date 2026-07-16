@@ -61,6 +61,17 @@ type SendMessageOptions = {
 };
 
 const MAX_ASSISTANT_ATTACHMENTS = 5;
+const ATTACHMENT_VOICE_BLOCKED_STATES = new Set<AssistantVoiceState>([
+  "connecting",
+  "listening",
+  "user_speaking",
+  "transcribing",
+  "thinking",
+  "tool_running",
+  "responding",
+]);
+const ATTACHMENT_VOICE_MESSAGE =
+  "Los adjuntos solo están disponibles en modo texto. Desactiva la voz para seleccionarlos o enviarlos.";
 
 type RealtimeTurnDraft = {
   clientTurnId: string;
@@ -657,6 +668,9 @@ export function useAssistantController({
     setVoiceModeEnabledState(enabled);
     if (enabled) {
       setRealtimeVoiceFallback(false);
+      if (selectedAttachments.length > 0) {
+        setAttachmentError(ATTACHMENT_VOICE_MESSAGE);
+      }
     }
     if (!enabled) {
       stopRealtimeVoice({ interrupted: true });
@@ -756,6 +770,14 @@ export function useAssistantController({
   }
 
   function toggleAttachment(candidate: AssistantAttachmentCandidate) {
+    if (
+      voiceModeEnabled ||
+      realtimeVoiceActive ||
+      ATTACHMENT_VOICE_BLOCKED_STATES.has(voiceState)
+    ) {
+      setAttachmentError(ATTACHMENT_VOICE_MESSAGE);
+      return;
+    }
     setAttachmentError("");
     setSelectedAttachments((current) => {
       if (
@@ -789,6 +811,14 @@ export function useAssistantController({
   }
 
   async function uploadAttachment(projectId: number, file: File) {
+    if (
+      voiceModeEnabled ||
+      realtimeVoiceActive ||
+      ATTACHMENT_VOICE_BLOCKED_STATES.has(voiceState)
+    ) {
+      setAttachmentError(ATTACHMENT_VOICE_MESSAGE);
+      return;
+    }
     if (selectedAttachments.length >= MAX_ASSISTANT_ATTACHMENTS) {
       setAttachmentError(
         `Puedes adjuntar hasta ${MAX_ASSISTANT_ATTACHMENTS} archivos por mensaje.`,
@@ -990,7 +1020,19 @@ export function useAssistantController({
     const content = (options.contentOverride ?? draftMessage).trim();
     const inputMode = options.inputMode ?? "text";
     const usesDraft = options.contentOverride === undefined;
-    const attachmentsForTurn = usesDraft ? selectedAttachments : [];
+    const attachmentsBlockedByVoice =
+      voiceModeEnabled ||
+      realtimeVoiceActive ||
+      ATTACHMENT_VOICE_BLOCKED_STATES.has(voiceState);
+    if (
+      selectedAttachments.length > 0 &&
+      (inputMode !== "text" || attachmentsBlockedByVoice)
+    ) {
+      setAttachmentError(ATTACHMENT_VOICE_MESSAGE);
+      return;
+    }
+    const attachmentsForTurn =
+      usesDraft && inputMode === "text" ? selectedAttachments : [];
     const attachmentIds = attachmentsForTurn.map(
       (attachment) => attachment.document.id,
     );
