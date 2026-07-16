@@ -1,18 +1,23 @@
 import hashlib
 import json
+import logging
 import math
 import multiprocessing
 import os
 import selectors
 import signal
 import socket
+import threading
 from dataclasses import dataclass
-from time import monotonic
+from datetime import datetime, timezone
+from time import time
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingsUnavailableError(Exception):
@@ -38,6 +43,11 @@ MAX_EMBEDDING_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_EMBEDDING_IPC_BYTES = 4 * 1024 * 1024
 EMBEDDING_IPC_CHUNK_BYTES = 64 * 1024
 MAX_EMBEDDING_VECTOR_DIMENSIONS = 16_384
+EMBEDDING_ADMISSION_WAIT_SECONDS = 0.05
+
+_EMBEDDING_ADMISSION = threading.BoundedSemaphore(
+    settings.embeddings_max_concurrent_workers
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +56,33 @@ class _ExternalEmbeddingConfig:
     api_key: str
     model: str
     timeout_seconds: float
+
+
+class _AdmissionLease:
+    """Release one global worker slot exactly once across racing owners."""
+
+    def __init__(self, semaphore) -> None:
+        self._semaphore = semaphore
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._semaphore.release()
+
+
+class _LaunchState:
+    """Transfer a late Process.start and its admission slot to the launcher."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.complete = False
+        self.started = False
+        self.error: BaseException | None = None
+        self.cancel_requested = False
 
 
 def _validated_embedding_timeout(value: object) -> float:
@@ -70,8 +107,8 @@ def supervised_embedding_claim_lease_seconds(
     """Return a lease that cannot expire during a supervised provider call.
 
     The child has a hard deadline and the parent always terminates and reaps it
-    before returning.  The additional full deadline and safety allowance cover
-    claim persistence/process scheduling without relying on socket inactivity
+    before returning.  Cleanup and safety allowances keep claim takeover after
+    the persisted provider deadline without relying on socket inactivity
     timeouts.
     """
 
@@ -80,9 +117,12 @@ def supervised_embedding_claim_lease_seconds(
         if timeout_seconds is None
         else timeout_seconds
     )
+    return timeout + supervised_embedding_cleanup_margin_seconds()
+
+
+def supervised_embedding_cleanup_margin_seconds() -> float:
     return (
-        timeout * 2
-        + EMBEDDING_WORKER_MAX_CLEANUP_SECONDS
+        EMBEDDING_WORKER_MAX_CLEANUP_SECONDS
         + EMBEDDING_CLAIM_SAFETY_SECONDS
     )
 
@@ -110,7 +150,11 @@ def embed_text(text: str) -> tuple[str | None, str, str]:
     )
 
 
-def embed_text_supervised(text: str) -> tuple[str | None, str, str]:
+def embed_text_supervised(
+    text: str,
+    *,
+    provider_deadline_at: datetime | None = None,
+) -> tuple[str | None, str, str]:
     """Embed text with a hard total deadline for external HTTP runtimes.
 
     Local/disabled runtimes remain in-process.  The OpenAI-compatible request
@@ -119,6 +163,13 @@ def embed_text_supervised(text: str) -> tuple[str | None, str, str]:
     """
 
     clean_text = text.strip()
+    provider_deadline_epoch = None
+    if provider_deadline_at is not None:
+        provider_deadline_epoch = _resolve_provider_deadline_epoch(
+            settings.embeddings_timeout_seconds,
+            provider_deadline_at=provider_deadline_at,
+        )
+        _require_embedding_deadline(provider_deadline_epoch)
     if settings.embeddings_runtime != "openai_compatible" or not clean_text:
         return embed_text(clean_text)
     if not settings.embeddings_base_url or not settings.embeddings_api_key:
@@ -131,22 +182,60 @@ def embed_text_supervised(text: str) -> tuple[str | None, str, str]:
             settings.embeddings_timeout_seconds
         ),
     )
-    vector = _run_supervised_external_embedding(clean_text, config)
+    if provider_deadline_epoch is None:
+        provider_deadline_epoch = _resolve_provider_deadline_epoch(
+            config.timeout_seconds,
+            provider_deadline_at=None,
+        )
+    vector = _run_supervised_external_embedding(
+        clean_text,
+        config,
+        provider_deadline_epoch=provider_deadline_epoch,
+    )
     return _format_vector(vector), config.model, "ready"
+
+
+def _resolve_provider_deadline_epoch(
+    timeout_seconds: object,
+    *,
+    provider_deadline_at: datetime | None,
+) -> float:
+    timeout = _validated_embedding_timeout(timeout_seconds)
+    if provider_deadline_at is None:
+        return time() + timeout
+    if provider_deadline_at.tzinfo is None:
+        raise EmbeddingsUnavailableError(
+            "Embeddings provider deadline must be timezone-aware"
+        )
+    deadline_epoch = provider_deadline_at.astimezone(timezone.utc).timestamp()
+    if not math.isfinite(deadline_epoch):
+        raise EmbeddingsUnavailableError("Embeddings provider deadline is invalid")
+    return deadline_epoch
 
 
 def _run_supervised_external_embedding(
     text: str,
     config: _ExternalEmbeddingConfig,
     *,
+    provider_deadline_epoch: float | None = None,
     worker_entry=None,
     worker_operation=None,
     process_start_method: str = "spawn",
+    process_context=None,
 ) -> list[float]:
     """Run one external embedding in a process under one absolute deadline."""
 
     timeout = _validated_embedding_timeout(config.timeout_seconds)
-    deadline = monotonic() + timeout
+    deadline_epoch = (
+        time() + timeout
+        if provider_deadline_epoch is None
+        else float(provider_deadline_epoch)
+    )
+    if not math.isfinite(deadline_epoch):
+        raise EmbeddingsUnavailableError("Embeddings provider deadline is invalid")
+    _require_embedding_deadline(deadline_epoch)
+    admission = _acquire_embedding_admission(deadline_epoch)
+    admission_owned_by_main = True
     receive_socket = None
     send_socket = None
     process = None
@@ -156,64 +245,176 @@ def _run_supervised_external_embedding(
     operation = worker_operation or _request_external_embedding
     try:
         try:
-            process_context = multiprocessing.get_context(process_start_method)
+            context = process_context or multiprocessing.get_context(
+                process_start_method
+            )
+            _require_embedding_deadline(deadline_epoch)
             receive_socket, send_socket = socket.socketpair(
                 socket.AF_UNIX,
                 socket.SOCK_STREAM,
             )
-            process = process_context.Process(
+            _require_embedding_deadline(deadline_epoch)
+            process = context.Process(
                 target=entry,
-                args=(send_socket, text, config, deadline, operation),
+                args=(send_socket, text, config, deadline_epoch, operation),
                 daemon=True,
             )
-            process.start()
-            process_started = True
+            _require_embedding_deadline(deadline_epoch)
         except (OSError, RuntimeError, ValueError, AssertionError) as error:
-            if process is not None:
-                try:
-                    process_started = process.pid is not None
-                except (OSError, RuntimeError, ValueError, AssertionError):
-                    process_started = False
+            raise EmbeddingsUnavailableError(
+                "Embeddings worker resources could not be reserved"
+            ) from error
+
+        launch_state = _LaunchState()
+        launch_done = threading.Event()
+        launcher = threading.Thread(
+            target=_launch_embedding_process,
+            args=(
+                process,
+                send_socket,
+                launch_state,
+                launch_done,
+                admission,
+            ),
+            name="embedding-worker-launcher",
+            daemon=True,
+        )
+        try:
+            launcher.start()
+        except (OSError, RuntimeError) as error:
+            raise EmbeddingsUnavailableError(
+                "Embeddings worker launcher could not be started"
+            ) from error
+
+        remaining = deadline_epoch - time()
+        launched_in_time = remaining > 0 and launch_done.wait(remaining)
+        if not launched_in_time:
+            with launch_state.lock:
+                launch_state.cancel_requested = True
+                launch_completed_during_race = launch_state.complete
+                process_started = launch_state.started
+            if not launch_completed_during_race:
+                # The launcher retains the process, sending socket and global
+                # admission slot.  When start eventually returns, the child
+                # sees the expired durable deadline before any provider I/O;
+                # the launcher then kills/reaps it and releases capacity.
+                admission_owned_by_main = False
+                process = None
+                send_socket = None
+            raise EmbeddingWorkerCleanupError(
+                "Embeddings worker launch exceeded its durable deadline"
+            )
+
+        with launch_state.lock:
+            process_started = launch_state.started
+            launch_error = launch_state.error
+        if launch_error is not None or not process_started:
             raise EmbeddingsUnavailableError(
                 "Embeddings worker could not be started"
-            ) from error
-        finally:
-            if process_started:
-                _safe_socket_close(send_socket)
-                send_socket = None
+            ) from launch_error
 
-        # A late Process.start is charged to the same deadline.  The child
-        # checks that deadline and arms its hard alarm before provider I/O, so
-        # a child scheduled after expiry cannot start a stale HTTP request.
-        _require_embedding_deadline(deadline)
+        # The launcher closed the parent's sending endpoint after Process.start.
+        send_socket = None
+        _require_embedding_deadline(deadline_epoch)
         raw_message = _wait_for_embedding_worker_message(
             receive_socket,
-            deadline=deadline,
+            deadline_epoch=deadline_epoch,
         )
         received_message = True
         return _decode_embedding_worker_message(raw_message)
     finally:
         _safe_socket_close(receive_socket)
         _safe_socket_close(send_socket)
-        if process is not None:
-            if process_started:
-                _cleanup_embedding_process(
-                    process,
-                    allow_normal_exit=received_message,
-                )
-            else:
-                _close_unstarted_embedding_process(process)
+        if admission_owned_by_main:
+            cleanup_confirmed = process is None
+            try:
+                if process is not None:
+                    if process_started:
+                        _cleanup_embedding_process(
+                            process,
+                            allow_normal_exit=received_message,
+                        )
+                    else:
+                        _close_unstarted_embedding_process(process)
+                    cleanup_confirmed = True
+            finally:
+                # An unconfirmed child keeps its slot quarantined.  Releasing
+                # it would let repeated cleanup failures exceed the global
+                # process/provider admission bound.
+                if cleanup_confirmed:
+                    admission.release()
 
 
-def _require_embedding_deadline(deadline: float) -> None:
-    if monotonic() >= deadline:
+def _acquire_embedding_admission(deadline_epoch: float) -> _AdmissionLease:
+    remaining = deadline_epoch - time()
+    if remaining <= 0:
+        raise EmbeddingsUnavailableError(
+            "Embeddings request exceeded its deadline"
+        )
+    try:
+        acquired = _EMBEDDING_ADMISSION.acquire(
+            timeout=min(remaining, EMBEDDING_ADMISSION_WAIT_SECONDS)
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise EmbeddingsUnavailableError(
+            "Embeddings worker capacity could not be reserved"
+        ) from error
+    if not acquired:
+        raise EmbeddingsUnavailableError(
+            "Embeddings worker capacity is currently occupied"
+        )
+    return _AdmissionLease(_EMBEDDING_ADMISSION)
+
+
+def _launch_embedding_process(
+    process,
+    send_socket,
+    state: _LaunchState,
+    done: threading.Event,
+    admission: _AdmissionLease,
+) -> None:
+    started = False
+    error: BaseException | None = None
+    try:
+        process.start()
+        started = True
+    except BaseException as launch_error:
+        error = launch_error
+    finally:
+        _safe_socket_close(send_socket)
+
+    with state.lock:
+        state.started = started
+        state.error = error
+        state.complete = True
+        cleanup_late_launch = state.cancel_requested
+        done.set()
+
+    if not cleanup_late_launch:
+        return
+    cleanup_confirmed = False
+    try:
+        if started:
+            _cleanup_embedding_process(process, allow_normal_exit=False)
+        else:
+            _close_unstarted_embedding_process(process)
+        cleanup_confirmed = True
+    except EmbeddingWorkerCleanupError:
+        logger.exception("Late embeddings worker cleanup could not be confirmed")
+    finally:
+        if cleanup_confirmed:
+            admission.release()
+
+
+def _require_embedding_deadline(deadline_epoch: float) -> None:
+    if time() >= deadline_epoch:
         raise EmbeddingsUnavailableError("Embeddings request exceeded its deadline")
 
 
 def _wait_for_embedding_worker_message(
     receive_socket,
     *,
-    deadline: float,
+    deadline_epoch: float,
 ) -> bytes:
     chunks: list[bytes] = []
     total = 0
@@ -223,7 +424,7 @@ def _wait_for_embedding_worker_message(
         selector = selectors.DefaultSelector()
         selector.register(receive_socket, selectors.EVENT_READ)
         while True:
-            remaining = deadline - monotonic()
+            remaining = deadline_epoch - time()
             if remaining <= 0:
                 raise EmbeddingsUnavailableError(
                     "Embeddings request exceeded its deadline"
@@ -272,12 +473,12 @@ def _embedding_worker_entry(
     send_socket,
     text: str,
     config: _ExternalEmbeddingConfig,
-    deadline: float,
+    provider_deadline_epoch: float,
     operation,
 ) -> None:
     """Child entry: arm the hard deadline before any provider operation."""
 
-    remaining = deadline - monotonic()
+    remaining = provider_deadline_epoch - time()
     if remaining <= 0:
         _safe_socket_close(send_socket)
         return
@@ -292,7 +493,7 @@ def _embedding_worker_entry(
 
     try:
         try:
-            vector = operation(text, config, deadline)
+            vector = operation(text, config, provider_deadline_epoch)
             message: dict[str, object] = {"status": "ok", "vector": vector}
         except EmbeddingsUnavailableError:
             message = {
@@ -321,9 +522,9 @@ def _embedding_worker_alarm(signum, frame) -> None:
 def _request_external_embedding(
     text: str,
     config: _ExternalEmbeddingConfig,
-    deadline: float,
+    provider_deadline_epoch: float,
 ) -> list[float]:
-    remaining = deadline - monotonic()
+    remaining = provider_deadline_epoch - time()
     if remaining <= 0:
         raise EmbeddingsUnavailableError("Embeddings request exceeded its deadline")
     payload = {"model": config.model, "input": text}

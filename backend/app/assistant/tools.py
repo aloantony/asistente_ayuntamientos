@@ -1590,6 +1590,8 @@ def _semantic_search_ordinances(
 
 def prepare_ordinance_search_embedding(
     tool_input: dict,
+    *,
+    provider_deadline_at: datetime | None = None,
 ) -> PreparedOrdinanceSearchEmbedding:
     """Compute the only external part of an ordinance semantic search.
 
@@ -1610,7 +1612,8 @@ def prepare_ordinance_search_embedding(
             f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
         )
     query_vector, embedding_model, embedding_status = embed_text_supervised(
-        query_text
+        query_text,
+        provider_deadline_at=provider_deadline_at,
     )
     return PreparedOrdinanceSearchEmbedding(
         query=query_text,

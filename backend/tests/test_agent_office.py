@@ -6,6 +6,7 @@ import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
+from datetime import datetime, timezone
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from time import monotonic
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from conftest import headers_for
 
+from app.agent_office import service as agent_office_service
 from app.agent_office.models import AgentOfficeTask, AgentOfficeTaskEvent
 from app.agent_office.service import (
     approve_or_cancel_task,
@@ -36,8 +38,9 @@ from app.assistant.tools import (
     execute_tool,
     normalize_tool_input,
 )
-from app.core.config import Settings
+from app.core.config import Settings, settings
 from app.organizations.models import Organization
+from app.ordinances import embeddings as embeddings_module
 from app.ordinances.embeddings import (
     EMBEDDING_WORKER_MAX_CLEANUP_SECONDS,
     EmbeddingWorkerCleanupError,
@@ -957,9 +960,21 @@ def test_embeddings_timeout_accepts_bounded_endpoints(timeout):
     assert configured.embeddings_timeout_seconds == timeout
 
 
+@pytest.mark.parametrize("workers", [0, -1, 33, 1_000_000])
+def test_embeddings_worker_capacity_rejects_out_of_bounds(workers):
+    with pytest.raises(
+        ValidationError,
+        match="embeddings_max_concurrent_workers",
+    ):
+        Settings(
+            embeddings_max_concurrent_workers=workers,
+            _env_file=None,
+        )
+
+
 def test_supervised_embedding_enforces_total_deadline_and_reaps_child():
     before = {process.pid for process in multiprocessing.active_children()}
-    timeout = 0.15
+    timeout = 5.0
     started_at = monotonic()
 
     with pytest.raises(EmbeddingsUnavailableError):
@@ -967,7 +982,6 @@ def test_supervised_embedding_enforces_total_deadline_and_reaps_child():
             "consulta lenta",
             _embedding_test_config(timeout),
             worker_operation=_slow_embedding_operation,
-            process_start_method="fork",
         )
 
     elapsed = monotonic() - started_at
@@ -1029,16 +1043,6 @@ def test_supervised_embedding_stops_slow_trickle_http_before_socket_timeout():
         assert server_thread.is_alive() is False
 
 
-def test_supervised_embedding_accepts_complete_bounded_ipc():
-    vector = _run_supervised_external_embedding(
-        "consulta completa",
-        _embedding_test_config(1.0),
-        worker_operation=_successful_embedding_operation,
-        process_start_method="fork",
-    )
-    assert vector == [0.25, -0.5]
-
-
 def test_supervised_embedding_spawn_path_accepts_complete_bounded_ipc():
     vector = _run_supervised_external_embedding(
         "consulta completa con spawn",
@@ -1081,7 +1085,7 @@ def test_semantic_tool_without_prepared_embedding_uses_supervisor(
 
 def test_supervised_embedding_times_out_partial_slow_ipc_and_reaps_child():
     before = {process.pid for process in multiprocessing.active_children()}
-    timeout = 0.15
+    timeout = 5.0
     started_at = monotonic()
 
     with pytest.raises(EmbeddingsUnavailableError):
@@ -1090,7 +1094,6 @@ def test_supervised_embedding_times_out_partial_slow_ipc_and_reaps_child():
             _embedding_test_config(timeout),
             worker_entry=_partial_embedding_ipc_worker,
             worker_operation=_successful_embedding_operation,
-            process_start_method="fork",
         )
 
     elapsed = monotonic() - started_at
@@ -1112,7 +1115,7 @@ def test_embedding_child_scheduled_after_deadline_never_calls_provider():
             send_socket,
             "consulta vencida",
             _embedding_test_config(0.1),
-            monotonic() - 1.0,
+            time.time() - 1.0,
             partial(_record_late_embedding_operation, provider_called),
         ),
         daemon=True,
@@ -1135,10 +1138,373 @@ def test_embedding_child_scheduled_after_deadline_never_calls_provider():
         process.close()
 
 
+def test_blocked_process_start_is_bounded_and_retains_admission_slot(
+    monkeypatch,
+):
+    admission = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(
+        embeddings_module,
+        "_EMBEDDING_ADMISSION",
+        admission,
+    )
+    start_entered = threading.Event()
+    release_start = threading.Event()
+    cleanup_done = threading.Event()
+    provider_calls = 0
+
+    def provider_operation(text, config, provider_deadline_epoch):
+        nonlocal provider_calls
+        del text, config, provider_deadline_epoch
+        provider_calls += 1
+        return [1.0]
+
+    class BlockingStartProcess:
+        def __init__(self, *, target, args, daemon):
+            del daemon
+            self._target = target
+            self._args = args
+            self._alive = False
+
+        def start(self):
+            start_entered.set()
+            assert release_start.wait(timeout=5)
+            self._alive = True
+            self._target(*self._args)
+            self._alive = False
+
+        def is_alive(self):
+            return self._alive
+
+        def join(self, timeout=None):
+            del timeout
+
+        def terminate(self):
+            self._alive = False
+
+        def kill(self):
+            self._alive = False
+
+        def close(self):
+            cleanup_done.set()
+
+    class BlockingStartContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return BlockingStartProcess(
+                target=target,
+                args=args,
+                daemon=daemon,
+            )
+
+    started_at = monotonic()
+    try:
+        with pytest.raises(
+            EmbeddingWorkerCleanupError,
+            match="launch exceeded",
+        ):
+            _run_supervised_external_embedding(
+                "consulta con start bloqueado",
+                _embedding_test_config(0.1),
+                worker_operation=provider_operation,
+                process_context=BlockingStartContext(),
+            )
+        assert monotonic() - started_at < 1.0
+        assert start_entered.is_set()
+        assert provider_calls == 0
+        # Ownership moved to the still-blocked launcher; capacity cannot be
+        # reused to create an unbounded number of launch threads.
+        assert admission.acquire(blocking=False) is False
+    finally:
+        release_start.set()
+
+    assert cleanup_done.wait(timeout=2)
+    assert provider_calls == 0
+    assert admission.acquire(timeout=1)
+    admission.release()
+
+
+def test_late_worker_cleanup_failure_keeps_admission_slot_quarantined(
+    monkeypatch,
+):
+    release_called = threading.Event()
+
+    class RecordingAdmission:
+        def __init__(self):
+            self._semaphore = threading.BoundedSemaphore(1)
+
+        def acquire(self, *args, **kwargs):
+            return self._semaphore.acquire(*args, **kwargs)
+
+        def release(self):
+            release_called.set()
+            self._semaphore.release()
+
+    admission = RecordingAdmission()
+    monkeypatch.setattr(
+        embeddings_module,
+        "_EMBEDDING_ADMISSION",
+        admission,
+    )
+    start_entered = threading.Event()
+    release_start = threading.Event()
+    cleanup_attempted = threading.Event()
+
+    class UncleanableLateProcess:
+        def __init__(self, *, target, args, daemon):
+            del daemon
+            self._target = target
+            self._args = args
+
+        def start(self):
+            start_entered.set()
+            assert release_start.wait(timeout=5)
+            self._target(*self._args)
+
+        @staticmethod
+        def is_alive():
+            return False
+
+        @staticmethod
+        def join(timeout=None):
+            del timeout
+
+        @staticmethod
+        def close():
+            cleanup_attempted.set()
+            raise RuntimeError("process cleanup remains indeterminate")
+
+    class UncleanableLateContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return UncleanableLateProcess(
+                target=target,
+                args=args,
+                daemon=daemon,
+            )
+
+    try:
+        with pytest.raises(EmbeddingWorkerCleanupError, match="launch exceeded"):
+            _run_supervised_external_embedding(
+                "consulta con limpieza indeterminada",
+                _embedding_test_config(0.1),
+                worker_operation=_successful_embedding_operation,
+                process_context=UncleanableLateContext(),
+            )
+        assert start_entered.is_set()
+    finally:
+        release_start.set()
+
+    assert cleanup_attempted.wait(timeout=2)
+    assert release_called.wait(timeout=0.2) is False
+    assert admission.acquire(blocking=False) is False
+
+
 def test_embedding_claim_lease_outlives_deadline_and_cleanup():
     for timeout in (0.1, 60.0, 120.0):
         lease = supervised_embedding_claim_lease_seconds(timeout)
         assert lease > timeout + EMBEDDING_WORKER_MAX_CLEANUP_SECONDS
+
+
+def test_worker_resuming_after_stale_claim_never_gets_fresh_provider_deadline(
+    engine,
+    monkeypatch,
+):
+    ids = _seed_engine_ordinance_task(engine)
+    first_worker_paused = threading.Event()
+    release_first_worker = threading.Event()
+    prepare_lock = threading.Lock()
+    prepare_calls = 0
+    provider_calls = 0
+    original_prepare = agent_office_service.prepare_ordinance_search_embedding
+
+    monkeypatch.setattr(settings, "embeddings_timeout_seconds", 0.5)
+    monkeypatch.setattr(
+        agent_office_service,
+        "supervised_embedding_cleanup_margin_seconds",
+        lambda: 0.1,
+    )
+
+    def deadline_bound_embedding(text, *, provider_deadline_at=None):
+        nonlocal provider_calls
+        assert provider_deadline_at is not None
+        if datetime.now(timezone.utc) >= provider_deadline_at:
+            raise EmbeddingsUnavailableError("durable provider deadline expired")
+        provider_calls += 1
+        return None, "test-disabled", "disabled"
+
+    monkeypatch.setattr(
+        "app.assistant.tools.embed_text_supervised",
+        deadline_bound_embedding,
+    )
+
+    def pause_first_prepare(
+        tool_input,
+        *,
+        provider_deadline_at=None,
+    ):
+        nonlocal prepare_calls
+        with prepare_lock:
+            prepare_calls += 1
+            call_number = prepare_calls
+        if call_number == 1:
+            first_worker_paused.set()
+            assert release_first_worker.wait(timeout=5)
+        return original_prepare(
+            tool_input,
+            provider_deadline_at=provider_deadline_at,
+        )
+
+    monkeypatch.setattr(
+        agent_office_service,
+        "prepare_ordinance_search_embedding",
+        pause_first_prepare,
+    )
+
+    def run_worker() -> str:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            return run_agent_office_task(
+                int(ids["task_id"]),
+                db=worker_db,
+            ).status
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            stale_worker = executor.submit(run_worker)
+            assert first_worker_paused.wait(timeout=5)
+            time.sleep(0.75)
+            takeover_worker = executor.submit(run_worker)
+            takeover_status = takeover_worker.result(timeout=5)
+            if takeover_status != "completed":
+                with Session(engine) as failure_db:
+                    failed_task = failure_db.get(
+                        AgentOfficeTask,
+                        int(ids["task_id"]),
+                    )
+                    failure_detail = (
+                        failed_task.error_message if failed_task else None
+                    )
+                raise AssertionError(
+                    f"takeover status={takeover_status}: {failure_detail}"
+                )
+            release_first_worker.set()
+            assert stale_worker.result(timeout=5) == "completed"
+
+        assert provider_calls == 1
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, int(ids["task_id"]))
+            assert task is not None
+            claims = [
+                event
+                for event in task.events
+                if event.event_type == "external_read_claimed"
+            ]
+            assert len(claims) == 2
+            for claim in claims:
+                provider_deadline = datetime.fromisoformat(
+                    claim.payload["provider_deadline_at"]
+                )
+                lease_expiry = datetime.fromisoformat(
+                    claim.payload["lease_expires_at"]
+                )
+                assert provider_deadline < lease_expiry
+            assert [event.event_type for event in task.events].count(
+                "completed"
+            ) == 1
+    finally:
+        release_first_worker.set()
+        _cleanup_engine_ordinance_task(engine, ids)
+
+
+def test_stale_cleanup_failure_quarantines_newer_external_claim(
+    engine,
+    monkeypatch,
+):
+    ids = _seed_engine_ordinance_task(engine)
+    first_worker_paused = threading.Event()
+    second_worker_started = threading.Event()
+    release_first_worker = threading.Event()
+    release_second_worker = threading.Event()
+    prepare_lock = threading.Lock()
+    prepare_calls = 0
+
+    monkeypatch.setattr(settings, "embeddings_timeout_seconds", 0.1)
+    monkeypatch.setattr(
+        agent_office_service,
+        "supervised_embedding_cleanup_margin_seconds",
+        lambda: 0.1,
+    )
+
+    def controlled_prepare(tool_input, *, provider_deadline_at=None):
+        nonlocal prepare_calls
+        del tool_input, provider_deadline_at
+        with prepare_lock:
+            prepare_calls += 1
+            call_number = prepare_calls
+        if call_number == 1:
+            first_worker_paused.set()
+            assert release_first_worker.wait(timeout=5)
+            raise EmbeddingWorkerCleanupError(
+                "stale worker cleanup is indeterminate"
+            )
+        second_worker_started.set()
+        assert release_second_worker.wait(timeout=5)
+        return PreparedOrdinanceSearchEmbedding(
+            query=str(ids["query"]),
+            vector=None,
+            model="test-disabled",
+            status="disabled",
+        )
+
+    monkeypatch.setattr(
+        agent_office_service,
+        "prepare_ordinance_search_embedding",
+        controlled_prepare,
+    )
+
+    def run_worker() -> str:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            return run_agent_office_task(
+                int(ids["task_id"]),
+                db=worker_db,
+            ).status
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            stale_worker = executor.submit(run_worker)
+            assert first_worker_paused.wait(timeout=5)
+            time.sleep(0.25)
+            takeover_worker = executor.submit(run_worker)
+            assert second_worker_started.wait(timeout=5)
+            # Even if the takeover completes first, a late cleanup failure
+            # from the stale worker must invalidate that result durably.
+            release_second_worker.set()
+            assert takeover_worker.result(timeout=5) == "completed"
+            release_first_worker.set()
+            assert stale_worker.result(timeout=5) == "failed"
+
+        with Session(engine, expire_on_commit=False) as verification_db:
+            task = verification_db.get(AgentOfficeTask, int(ids["task_id"]))
+            user = verification_db.get(User, int(ids["user_id"]))
+            assert task is not None
+            assert user is not None
+            event_types = [event.event_type for event in task.events]
+            assert event_types.count("external_read_claimed") == 2
+            assert event_types.count("external_read_quarantined") == 1
+            assert event_types.count("failed") == 1
+            assert task.status == "failed"
+            assert event_types[-3:] == [
+                "completed",
+                "external_read_quarantined",
+                "failed",
+            ]
+            with pytest.raises(HTTPException) as rejected_retry:
+                mark_task_queued(verification_db, user, task)
+            assert rejected_retry.value.status_code == 409
+            verification_db.rollback()
+    finally:
+        release_first_worker.set()
+        release_second_worker.set()
+        _cleanup_engine_ordinance_task(engine, ids)
 
 
 def test_indeterminate_embedding_cleanup_quarantines_agent_task_retry(
@@ -1148,9 +1514,9 @@ def test_indeterminate_embedding_cleanup_quarantines_agent_task_retry(
     ids = _seed_engine_ordinance_task(engine)
     provider_calls = 0
 
-    def indeterminate_cleanup(tool_input):
+    def indeterminate_cleanup(tool_input, *, provider_deadline_at=None):
         nonlocal provider_calls
-        del tool_input
+        del tool_input, provider_deadline_at
         provider_calls += 1
         raise EmbeddingWorkerCleanupError("cleanup could not be confirmed")
 
@@ -1192,7 +1558,12 @@ def test_external_ordinance_provider_does_not_block_task_cancellation(
     provider_started = threading.Event()
     release_provider = threading.Event()
 
-    def blocked_embedding(tool_input: dict) -> PreparedOrdinanceSearchEmbedding:
+    def blocked_embedding(
+        tool_input: dict,
+        *,
+        provider_deadline_at=None,
+    ) -> PreparedOrdinanceSearchEmbedding:
+        del provider_deadline_at
         provider_started.set()
         assert release_provider.wait(timeout=15)
         return PreparedOrdinanceSearchEmbedding(
@@ -1290,7 +1661,12 @@ def test_two_workers_make_one_external_ordinance_provider_call(
     call_count = 0
     call_count_lock = threading.Lock()
 
-    def blocked_embedding(tool_input: dict) -> PreparedOrdinanceSearchEmbedding:
+    def blocked_embedding(
+        tool_input: dict,
+        *,
+        provider_deadline_at=None,
+    ) -> PreparedOrdinanceSearchEmbedding:
+        del provider_deadline_at
         nonlocal call_count
         with call_count_lock:
             call_count += 1
