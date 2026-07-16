@@ -39,6 +39,7 @@ from app.assistant.prompts import (
 )
 from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import (
+    MAX_ORDINANCE_TOOL_RESULT_CHARS,
     ToolContext,
     ToolResult,
     ToolSpec,
@@ -51,6 +52,17 @@ from app.users.models import User
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 4000
+
+
+def tool_result_for_activity(tool_name: str, content: str) -> str:
+    limit = (
+        MAX_ORDINANCE_TOOL_RESULT_CHARS
+        if tool_name == "semantic_search_ordinances"
+        else MAX_TOOL_RESULT_CHARS
+    )
+    return content[:limit]
+
+
 TOOL_CALL_BUDGET_RESULT = (
     "No se ejecutó la herramienta porque se agotó el presupuesto total de "
     "llamadas de este turno. Resume los resultados ya disponibles y explica "
@@ -383,7 +395,7 @@ def _run_agent_turn_events(
                     "tool": block.name,
                     "ok": result.ok,
                     "input": tool_input,
-                    "result": result.content[:MAX_TOOL_RESULT_CHARS],
+                    "result": tool_result_for_activity(block.name, result.content),
                 }
                 actions.append(action)
                 yield TurnEvent(

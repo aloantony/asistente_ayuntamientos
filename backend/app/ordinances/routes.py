@@ -25,7 +25,7 @@ from app.ordinances.bop_burgos import (
     build_burgos_coverage_report,
     retry_failed_burgos_embeddings,
 )
-from app.ordinances.embeddings import embed_text, vector_similarity
+from app.ordinances.embeddings import embed_text
 from app.ordinances.import_service import run_import_job
 from app.ordinances.models import (
     OfficialLegalSource,
@@ -57,6 +57,7 @@ from app.ordinances.schemas import (
     OrdinanceStatus,
     OrdinanceUpdate,
 )
+from app.ordinances.search import OrdinanceSearchOptions, search_ordinance_chunks
 from app.rbac.permissions import has_permission
 from app.users.models import User
 
@@ -465,59 +466,23 @@ def semantic_search_ordinances(
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> list[dict]:
     require_ordinance_permission(db, current_user, "ordinances.compare")
-    query_vector, _, status = embed_text(q)
+    query_vector, embedding_model, status = embed_text(q)
     if status != "ready" or query_vector is None:
         return []
-    query = (
-        select(OrdinanceLegalChunk)
-        .join(OrdinanceLegalChunk.ordinance)
-        .join(Ordinance.municipality)
-        .where(OrdinanceLegalChunk.embedding_status == "ready")
-        .options(
-            selectinload(OrdinanceLegalChunk.ordinance).selectinload(
-                Ordinance.municipality
-            )
-        )
+    page = search_ordinance_chunks(
+        db,
+        query_vector=query_vector,
+        embedding_model=embedding_model,
+        options=OrdinanceSearchOptions(
+            municipality_id=municipality_id,
+            municipality_name=(municipality_name or "").strip() or None,
+            topic=(topic or "").strip() or None,
+            strict_topic=bool(topic),
+            include_pending=include_pending,
+            limit=limit,
+        ),
     )
-    if municipality_id is not None:
-        query = query.where(Ordinance.municipality_id == municipality_id)
-    if municipality_name:
-        query = query.where(Municipality.name.ilike(municipality_name.strip()))
-    if topic:
-        topic_pattern = f"%{topic.strip()}%"
-        query = query.where(
-            (Ordinance.topic.ilike(topic_pattern))
-            | (Ordinance.subtopic.ilike(topic_pattern))
-            | (Ordinance.title.ilike(topic_pattern))
-        )
-    if include_pending:
-        query = query.where(Ordinance.curation_status != "rejected")
-    else:
-        query = query.where(
-            Ordinance.curation_status == "approved",
-            OrdinanceLegalChunk.review_status == "approved",
-        )
-
-    scored = []
-    for chunk in db.scalars(query.limit(500)):
-        score = vector_similarity(query_vector, chunk.embedding)
-        if score <= 0:
-            continue
-        scored.append((score, chunk))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [
-        {
-            "chunk_id": chunk.id,
-            "ordinance_id": chunk.ordinance_id,
-            "title": chunk.ordinance.title,
-            "municipality_name": chunk.ordinance.municipality.name,
-            "citation": chunk.citation,
-            "text": chunk.text,
-            "source_url": chunk.source_url,
-            "score": round(score, 4),
-        }
-        for score, chunk in scored[:limit]
-    ]
+    return page["results"]
 
 
 @router.get(

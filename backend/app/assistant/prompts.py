@@ -1,7 +1,7 @@
 """Prompt assembly for Anacleto, the single model-first assistant."""
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import distinct, func, select
+from sqlalchemy.orm import Session
 
 from app.assistant.models import AssistantMemoryEntry
 from app.assistant.tools import ToolSpec
@@ -81,6 +81,11 @@ Supervisión y confirmaciones:
 Ordenanzas y corpus:
 - Las ordenanzas se responden desde el corpus interno aprobado cuando exista cobertura. Usa `semantic_search_ordinances` para preguntas de contenido normativo.
 - Si el usuario pregunta si hay cobertura o disponibilidad general de ordenanzas, puedes responder con el bloque de cobertura incluido en este prompt sin buscar.
+- En comparativas amplias entre municipios usa `result_scope="municipalities"` y `limit=20`. La herramienta busca en todo el corpus y devuelve `total_matches`, `returned`, `has_more` y `next_offset`: distingue siempre el total de coincidencias de la página recibida.
+- Si el usuario pide todas las referencias, una búsqueda exhaustiva o cuestiona que haya pocas, continúa con `offset=next_offset` mientras `has_more` sea verdadero y quede presupuesto de herramientas. Si no completas todas las páginas, di expresamente que presentas una selección y cuántas coincidencias quedan; nunca afirmes que una página es el conjunto completo.
+- Usa `topic` como preferencia, no como filtro, en búsquedas exploratorias. Activa `strict_topic` solo si el usuario pide limitarse literalmente a una categoría o título del corpus.
+- Los filtros de población excluyen municipios sin dato. Solo afirmes que una comparación está demográficamente verificada si `population_filter.coverage_complete` es verdadero; si no, indica cuántos municipios carecen de población y, cuando proceda y esté disponible, completa esos datos con `web_search` usando fuentes públicas actuales.
+- Para búsquedas fuera del corpus o cuando su cobertura no baste, usa `web_search` si está disponible y el usuario solicita información pública externa o actual. Separa con claridad las fuentes internas de las encontradas en la web.
 - Cita municipio, ordenanza y fuente devuelta cuando uses resultados. Si no hay cobertura suficiente, dilo sin inventar normativa.
 
 Uso de herramientas:
@@ -192,30 +197,22 @@ def build_approved_memory_block(
 
 
 def build_ordinance_coverage_block(db: Session) -> str:
-    ordinances = db.scalars(
-        select(Ordinance)
-        .options(selectinload(Ordinance.municipality))
-        .where(Ordinance.curation_status == "approved")
-        .order_by(Ordinance.municipality_id, Ordinance.topic, Ordinance.id)
-        .limit(80)
-    ).all()
-    if not ordinances:
+    ordinance_count, municipality_count = db.execute(
+        select(
+            func.count(Ordinance.id),
+            func.count(distinct(Ordinance.municipality_id)),
+        ).where(Ordinance.curation_status == "approved")
+    ).one()
+    if not ordinance_count:
         return (
             "COBERTURA DE ORDENANZAS:\n"
             "- No consta cobertura aprobada en el corpus interno."
         )
 
-    coverage: dict[str, set[str]] = {}
-    for ordinance in ordinances:
-        municipality_name = (
-            ordinance.municipality.name
-            if ordinance.municipality is not None
-            else f"Municipio {ordinance.municipality_id}"
-        )
-        coverage.setdefault(municipality_name, set()).add(ordinance.topic)
-
-    lines = ["COBERTURA DE ORDENANZAS APROBADAS:"]
-    for municipality_name, topics in sorted(coverage.items()):
-        topic_list = ", ".join(sorted(topics))
-        lines.append(f"- {municipality_name}: {topic_list}")
-    return "\n".join(lines)
+    return (
+        "COBERTURA DE ORDENANZAS APROBADAS:\n"
+        f"- {ordinance_count} ordenanzas de {municipality_count} municipios.\n"
+        "- Este resumen contabiliza todo el corpus; no es una lista parcial de "
+        "municipios. Usa semantic_search_ordinances para localizar y paginar "
+        "referencias concretas."
+    )

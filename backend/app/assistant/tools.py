@@ -37,13 +37,12 @@ from app.geo.access import (
     has_map_view_permission,
 )
 from app.geo.models import EntityLocation, GeoLocation
-from app.municipalities.models import Municipality
 from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
 )
-from app.ordinances.embeddings import embed_text, vector_similarity
-from app.ordinances.models import Ordinance, OrdinanceLegalChunk
+from app.ordinances.embeddings import embed_text
+from app.ordinances.search import OrdinanceSearchOptions, search_ordinance_chunks
 from app.projects.access import select_visible_projects
 from app.projects.models import Project
 from app.rbac.permissions import has_permission
@@ -89,7 +88,10 @@ VALID_ADMIN_FEEDBACK_CATEGORIES = {
 MAX_WEB_RESULTS = 5
 MAX_WEB_TOOL_RESULT_CHARS = 4000
 MAX_ORDINANCE_QUERY_CHARS = 400
-MAX_ORDINANCE_RESULTS = 5
+DEFAULT_ORDINANCE_RESULTS = 10
+MAX_ORDINANCE_RESULTS = 20
+MAX_ORDINANCE_OFFSET = 2_147_483_647
+MAX_ORDINANCE_TOOL_RESULT_CHARS = 12_000
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
@@ -371,15 +373,53 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
                 "municipality_id": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "Filtrar por municipio si el usuario lo ha indicado",
                 },
                 "municipality_name": {
                     "type": "string",
                     "description": "Nombre del municipio cuando el usuario lo indique y no se conozca su ID",
                 },
+                "province": {
+                    "type": "string",
+                    "description": "Filtrar por provincia, sin distinguir mayúsculas",
+                },
                 "topic": {
                     "type": "string",
-                    "description": "Materia o tema regulado a filtrar, por ejemplo agua, residuos, terrazas o animales",
+                    "description": (
+                        "Preferencia temática que mejora el orden sin excluir otras "
+                        "coincidencias. En búsquedas exploratorias, usa la materia en "
+                        "query y no actives strict_topic."
+                    ),
+                },
+                "strict_topic": {
+                    "type": "boolean",
+                    "description": (
+                        "Aplicar topic como filtro literal estricto sobre tema, "
+                        "subtema o título; por defecto false"
+                    ),
+                },
+                "population_gte": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Población mínima inclusiva, solo cuando conste en la ficha municipal",
+                },
+                "population_lt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Población máxima exclusiva. Para 'menos de 5.000', usa 5000. "
+                        "La respuesta indica si faltan datos demográficos."
+                    ),
+                },
+                "result_scope": {
+                    "type": "string",
+                    "enum": ["fragments", "ordinances", "municipalities"],
+                    "description": (
+                        "Diversidad de resultados: fragments devuelve pasajes; "
+                        "ordinances, una referencia por ordenanza; municipalities, "
+                        "una por municipio. Usa municipalities para comparativas."
+                    ),
                 },
                 "include_pending": {
                     "type": "boolean",
@@ -387,7 +427,15 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Número de fragmentos, máximo 5",
+                    "minimum": 1,
+                    "maximum": MAX_ORDINANCE_RESULTS,
+                    "description": "Resultados por página, máximo 20",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_ORDINANCE_OFFSET,
+                    "description": "Desplazamiento para continuar cuando has_more sea true",
                 },
             },
             "required": ["query"],
@@ -725,6 +773,8 @@ def execute_tool(
 
     if name == "web_search":
         content = _serialize_web_search_payload(result)
+    elif name == "semantic_search_ordinances":
+        content = _serialize_ordinance_search_payload(result)
     else:
         content = json.dumps(result, ensure_ascii=False)
     return ToolResult(content=content, ok=True)
@@ -981,6 +1031,54 @@ def _serialize_web_search_payload(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _serialize_ordinance_search_payload(payload: dict) -> str:
+    """Keep result pages valid and resumable within the realtime/audit limit."""
+
+    results = list(payload.get("results") or [])
+    offset = int(payload.get("offset") or 0)
+    total_matches = int(payload.get("total_matches") or 0)
+    selected: list[dict] = []
+    for result in results:
+        candidate_results = [*selected, result]
+        candidate_next_offset = offset + len(candidate_results)
+        candidate = {
+            **payload,
+            "page_candidates": len(results),
+            "returned": len(candidate_results),
+            "payload_truncated": False,
+            "has_more": candidate_next_offset < total_matches,
+            "next_offset": (
+                candidate_next_offset
+                if candidate_next_offset < total_matches
+                else None
+            ),
+            "results": candidate_results,
+        }
+        serialized = json.dumps(
+            candidate,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(serialized) >= MAX_ORDINANCE_TOOL_RESULT_CHARS:
+            break
+        selected.append(result)
+
+    next_offset = offset + len(selected)
+    compact = {
+        **payload,
+        "page_candidates": len(results),
+        "returned": len(selected),
+        "payload_truncated": len(selected) < len(results),
+        "has_more": next_offset < total_matches,
+        "next_offset": next_offset if next_offset < total_matches else None,
+        "results": selected,
+    }
+    serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) >= MAX_ORDINANCE_TOOL_RESULT_CHARS:
+        raise ValueError("ordinance search metadata exceeds the action result limit")
+    return serialized
+
+
 def _compact_web_search_payload(
     *,
     query: str,
@@ -1040,82 +1138,79 @@ def _semantic_search_ordinances(
             f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
         )
 
-    limit = int(tool_input.get("limit") or MAX_ORDINANCE_RESULTS)
+    limit = int(tool_input.get("limit") or DEFAULT_ORDINANCE_RESULTS)
     if limit < 1:
         raise ValueError("limit debe ser mayor o igual que 1")
     limit = min(limit, MAX_ORDINANCE_RESULTS)
+    offset = int(tool_input.get("offset") or 0)
+    if offset < 0:
+        raise ValueError("offset debe ser mayor o igual que 0")
+    if offset > MAX_ORDINANCE_OFFSET:
+        raise ValueError(f"offset no puede superar {MAX_ORDINANCE_OFFSET}")
 
-    query_vector, _, embedding_status = embed_text(query_text)
+    population_gte = tool_input.get("population_gte")
+    if population_gte is not None:
+        population_gte = int(population_gte)
+    population_lt = tool_input.get("population_lt")
+    if population_lt is not None:
+        population_lt = int(population_lt)
+    result_scope = str(tool_input.get("result_scope") or "fragments").strip()
+
+    query_vector, embedding_model, embedding_status = embed_text(query_text)
     if embedding_status != "ready" or query_vector is None:
-        return {"query": query_text, "limit": limit, "results": []}
+        return {
+            "query": query_text,
+            "limit": limit,
+            "offset": offset,
+            "returned": 0,
+            "total_matches": 0,
+            "has_more": False,
+            "next_offset": None,
+            "corpus_scan_complete": False,
+            "search_error": "embedding_unavailable",
+            "results": [],
+        }
 
-    include_pending = bool(tool_input.get("include_pending") or False)
-    query = (
-        select(OrdinanceLegalChunk)
-        .join(OrdinanceLegalChunk.ordinance)
-        .join(Ordinance.municipality)
-        .where(OrdinanceLegalChunk.embedding_status == "ready")
-        .options(
-            selectinload(OrdinanceLegalChunk.ordinance).selectinload(
-                Ordinance.municipality
-            )
-        )
-    )
     municipality_id = tool_input.get("municipality_id")
-    if municipality_id is not None:
-        query = query.where(Ordinance.municipality_id == int(municipality_id))
     municipality_name = str(tool_input.get("municipality_name") or "").strip()
-    if municipality_name:
-        query = query.where(Municipality.name.ilike(municipality_name))
+    province = str(tool_input.get("province") or "").strip()
     topic = str(tool_input.get("topic") or "").strip()
-    if topic:
-        topic_pattern = f"%{topic}%"
-        query = query.where(
-            (Ordinance.topic.ilike(topic_pattern))
-            | (Ordinance.subtopic.ilike(topic_pattern))
-            | (Ordinance.title.ilike(topic_pattern))
-        )
-    if include_pending:
-        query = query.where(Ordinance.curation_status != "rejected")
-    else:
-        query = query.where(
-            Ordinance.curation_status == "approved",
-            OrdinanceLegalChunk.review_status == "approved",
-        )
-
-    scored: list[tuple[float, OrdinanceLegalChunk]] = []
-    structured_filter_applied = municipality_id is not None or bool(
-        municipality_name or topic
+    search_page = search_ordinance_chunks(
+        db,
+        query_vector=query_vector,
+        embedding_model=embedding_model,
+        options=OrdinanceSearchOptions(
+            include_pending=_optional_boolean(tool_input, "include_pending"),
+            municipality_id=(
+                int(municipality_id) if municipality_id is not None else None
+            ),
+            municipality_name=municipality_name or None,
+            province=province or None,
+            topic=topic or None,
+            strict_topic=_optional_boolean(tool_input, "strict_topic"),
+            population_gte=population_gte,
+            population_lt=population_lt,
+            result_scope=result_scope,
+            limit=limit,
+            offset=offset,
+        ),
     )
-    for chunk in db.scalars(query.limit(500)):
-        score = vector_similarity(query_vector, chunk.embedding)
-        if score <= 0 and not structured_filter_applied:
-            continue
-        scored.append((score, chunk))
-    scored.sort(key=lambda item: item[0], reverse=True)
-
     return {
         "query": query_text,
         "municipality_name": municipality_name or None,
+        "province": province or None,
         "topic": topic or None,
-        "limit": limit,
-        "results": [
-            {
-                "chunk_id": chunk.id,
-                "ordinance_id": chunk.ordinance_id,
-                "title": chunk.ordinance.title,
-                "municipality_id": chunk.ordinance.municipality_id,
-                "municipality_name": chunk.ordinance.municipality.name,
-                "topic": chunk.ordinance.topic,
-                "curation_status": chunk.ordinance.curation_status,
-                "citation": chunk.citation,
-                "text": chunk.text,
-                "source_url": chunk.source_url or chunk.ordinance.source_url,
-                "score": round(score, 4),
-            }
-            for score, chunk in scored[:limit]
-        ],
+        **search_page,
     }
+
+
+def _optional_boolean(tool_input: dict, name: str) -> bool:
+    value = tool_input.get(name)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} debe ser booleano")
+    return value
 
 
 def _create_requirement(

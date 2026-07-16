@@ -385,9 +385,15 @@ class OrdinanceSemanticSearchResult(BaseModel):
     chunk_id: int
     ordinance_id: int
     title: str
+    municipality_id: int
     municipality_name: str
+    province: str
+    population: int | None
+    topic: str
+    curation_status: str
     citation: str | None
     text: str
+    text_truncated: bool
     source_url: str | None
     score: float
 

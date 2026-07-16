@@ -31,7 +31,7 @@ from app.assistant.schemas import (
 )
 from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import ToolContext, execute_tool, get_available_tool_specs
-from app.assistant.turn import MAX_TOOL_RESULT_CHARS, build_history
+from app.assistant.turn import build_history, tool_result_for_activity
 from app.core.config import settings
 from app.users.models import User
 
@@ -369,7 +369,7 @@ def execute_realtime_tool_call(
             "tool": payload.name,
             "ok": result.ok,
             "input": tool_input,
-            "result": result.content[:MAX_TOOL_RESULT_CHARS],
+            "result": tool_result_for_activity(payload.name, result.content),
         }
 
         confirmation_context = _confirmation_context_from_result(guarded_result)
@@ -401,7 +401,7 @@ def execute_realtime_tool_call(
             input_mode="voice",
             turn_user_message_id=user_message.id,
         )
-        output = result.content[:MAX_TOOL_RESULT_CHARS]
+        output = tool_result_for_activity(payload.name, result.content)
         if confirmation_prompt:
             output = json.dumps(
                 {"status": "confirmation_required"},
