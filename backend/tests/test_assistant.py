@@ -2932,6 +2932,117 @@ def test_openai_responses_web_search_executes_brave_and_replays_function_output(
     assert json.loads(action["result"]) == expected_tool_payload
 
 
+def test_agent_turn_searches_reads_visible_source_and_cites_it(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-test-secret")
+    monkeypatch.setattr(
+        settings,
+        "brave_search_storage_rights_confirmed",
+        True,
+    )
+    source_url = "https://portal.example/ordenanza"
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda *, query, limit: [
+            {
+                "title": "Ordenanza oficial",
+                "url": source_url,
+                "snippet": "Normas de conservación viaria.",
+                "published_at": "2026-07-15",
+            }
+        ],
+    )
+    reads = []
+    monkeypatch.setattr(
+        assistant_tools.web_reader,
+        "read_web_page",
+        lambda url: reads.append(url)
+        or assistant_tools.web_reader.WebPage(
+            source_url=url,
+            final_url=url,
+            title="Ordenanza oficial",
+            content_type="text/html",
+            text="El artículo 4 regula la conservación de las vías.",
+            text_truncated=False,
+            redirects=0,
+        ),
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "search-1",
+                            "web_search",
+                            {"query": "ordenanza de vías", "limit": 1},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "read-1",
+                            "read_web_page",
+                            {"url": source_url},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "El artículo 4 regula la conservación "
+                            f"([fuente oficial]({source_url}))."
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca y comprueba qué dice la ordenanza de vías"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert reads == [source_url]
+    assert len(gateway.calls) == 3
+    assert {tool["name"] for tool in gateway.calls[0]["tools"]}.issuperset(
+        {"web_search", "read_web_page"}
+    )
+    assistant_message = response.json()["messages"][-1]
+    assert source_url in assistant_message["content"]
+    assert [action["tool"] for action in assistant_message["actions"]] == [
+        "web_search",
+        "read_web_page",
+    ]
+    page_activity = json.loads(assistant_message["actions"][1]["result"])
+    assert page_activity["source_url"] == source_url
+    assert page_activity["text_chars"] == len(
+        "El artículo 4 regula la conservación de las vías."
+    )
+    assert "text" not in page_activity
+
+
 def test_tool_call_budget_skips_excess_calls_and_forces_tool_free_synthesis(
     client,
     assistant_user,

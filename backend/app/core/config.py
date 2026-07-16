@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     brave_search_language: str = "es"
     brave_search_ui_language: str = "es-ES"
     brave_search_storage_rights_confirmed: bool = False
+    web_page_timeout_seconds: float = 10.0
+    web_page_max_response_bytes: int = 2 * 1024 * 1024
+    web_page_max_redirects: int = 3
+    web_page_max_text_chars: int = 12000
     openai_api_key: str | None = None
     openai_responses_base_url: str = "https://api.openai.com/v1"
     openai_responses_model: str = "gpt-5.6"
@@ -361,12 +365,37 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("brave_search_timeout_seconds")
+    @field_validator("brave_search_timeout_seconds", "web_page_timeout_seconds")
     @classmethod
-    def validate_brave_search_timeout(cls, value: float) -> float:
+    def validate_web_timeouts(cls, value: float) -> float:
         if not isfinite(value) or value <= 0:
             raise ValueError(
-                "brave_search_timeout_seconds must be finite and greater than zero"
+                "web timeouts must be finite and greater than zero"
+            )
+        return value
+
+    @field_validator("web_page_max_response_bytes")
+    @classmethod
+    def validate_web_page_max_response_bytes(cls, value: int) -> int:
+        if not 1024 <= value <= 10 * 1024 * 1024:
+            raise ValueError(
+                "web_page_max_response_bytes must be between 1024 and 10485760"
+            )
+        return value
+
+    @field_validator("web_page_max_redirects")
+    @classmethod
+    def validate_web_page_max_redirects(cls, value: int) -> int:
+        if not 0 <= value <= 5:
+            raise ValueError("web_page_max_redirects must be between 0 and 5")
+        return value
+
+    @field_validator("web_page_max_text_chars")
+    @classmethod
+    def validate_web_page_max_text_chars(cls, value: int) -> int:
+        if not 1000 <= value <= 50000:
+            raise ValueError(
+                "web_page_max_text_chars must be between 1000 and 50000"
             )
         return value
 

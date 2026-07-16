@@ -325,7 +325,7 @@ function getActionIcon(tool: string): LucideIcon {
   if (tool === "get_map_items") {
     return MapPin;
   }
-  if (tool === "web_search") {
+  if (tool === "web_search" || tool === "read_web_page") {
     return Globe2;
   }
   if (tool === "propose_memory_entry") {
@@ -374,14 +374,37 @@ function getActionSummary(action: AssistantAction) {
 }
 
 function getWebResults(action: AssistantAction) {
-  if (action.tool !== "web_search" || !action.ok) {
+  if (
+    !["web_search", "read_web_page"].includes(action.tool) ||
+    !action.ok
+  ) {
     return [];
   }
 
   const parsed = parseActionResult(action.result);
+  if (!parsed.data || typeof parsed.data !== "object") {
+    return [];
+  }
+
+  if (action.tool === "read_web_page") {
+    const page = parsed.data as Record<string, unknown>;
+    if (!page.source_url) {
+      return [];
+    }
+    const textChars = Number(page.text_chars ?? 0);
+    return [
+      {
+        title: String(page.title ?? page.source_url),
+        url: String(page.source_url),
+        snippet: Number.isFinite(textChars)
+          ? `${textChars.toLocaleString("es-ES")} caracteres extraídos.`
+          : "Fuente leída.",
+        publishedAt: "",
+      },
+    ];
+  }
+
   if (
-    !parsed.data ||
-    typeof parsed.data !== "object" ||
     !("results" in parsed.data) ||
     !Array.isArray((parsed.data as { results?: unknown }).results)
   ) {
