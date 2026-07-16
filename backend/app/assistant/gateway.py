@@ -91,6 +91,7 @@ class AICompletion:
 class AIGateway:
     def __init__(self) -> None:
         self._anthropic_client: anthropic.Anthropic | None = None
+        self._codex_subscription_runtime = None
 
     @property
     def enabled(self) -> bool:
@@ -100,6 +101,10 @@ class AIGateway:
             return hermes_agent_enabled()
         if settings.assistant_runtime == "openai_responses":
             return bool(settings.openai_api_key)
+        if settings.assistant_runtime == "codex_subscription":
+            if settings.environment != "development":
+                return False
+            return self._get_codex_subscription_runtime().configured
         return False
 
     @property
@@ -108,15 +113,45 @@ class AIGateway:
             return settings.hermes_agent_model
         if settings.assistant_runtime == "openai_responses":
             return settings.openai_responses_model
+        if settings.assistant_runtime == "codex_subscription":
+            return settings.codex_subscription_model or "codex-subscription-default"
         return settings.assistant_model
 
     @property
     def runtime_healthy(self) -> bool | None:
-        if settings.assistant_runtime != "hermes_agent":
-            return None
-        if not self.enabled:
-            return False
-        return hermes_agent_healthy(timeout=settings.hermes_agent_health_timeout_seconds)
+        if settings.assistant_runtime == "hermes_agent":
+            if not self.enabled:
+                return False
+            return hermes_agent_healthy(
+                timeout=settings.hermes_agent_health_timeout_seconds
+            )
+        if settings.assistant_runtime == "codex_subscription":
+            if not self.enabled:
+                return False
+            return self._get_codex_subscription_runtime().healthy(
+                timeout=settings.codex_subscription_health_timeout_seconds
+            )
+        return None
+
+    def _get_codex_subscription_runtime(self):
+        if self._codex_subscription_runtime is None:
+            from app.assistant.codex_app_server import CodexSubscriptionRuntime
+
+            self._codex_subscription_runtime = CodexSubscriptionRuntime(
+                command=settings.codex_subscription_command,
+                codex_home=settings.codex_subscription_home,
+                model=settings.codex_subscription_model,
+                reasoning_effort=settings.codex_subscription_reasoning_effort,
+                session_ttl_seconds=(
+                    settings.codex_subscription_session_ttl_seconds
+                ),
+                max_sessions=settings.codex_subscription_max_sessions,
+            )
+        return self._codex_subscription_runtime
+
+    def discard_provider_state(self, messages: list[dict]) -> None:
+        if self._codex_subscription_runtime is not None:
+            self._codex_subscription_runtime.discard_provider_state(messages)
 
     def _get_anthropic_client(self) -> anthropic.Anthropic:
         if not self.enabled:
@@ -159,6 +194,14 @@ class AIGateway:
                 timeout_seconds=timeout_seconds,
                 safety_identifier=safety_identifier,
             )
+        if settings.assistant_runtime == "codex_subscription":
+            return self._complete_codex_subscription(
+                system=system,
+                messages=messages,
+                tools=tools,
+                timeout_seconds=timeout_seconds,
+                safety_identifier=safety_identifier,
+            )
         raise AssistantUnavailableError("Assistant runtime is not supported")
 
     def complete_stream(
@@ -188,6 +231,15 @@ class AIGateway:
             return completion
         if settings.assistant_runtime == "openai_responses":
             completion = yield from self._complete_stream_openai_responses(
+                system=system,
+                messages=messages,
+                tools=tools,
+                timeout_seconds=timeout_seconds,
+                safety_identifier=safety_identifier,
+            )
+            return completion
+        if settings.assistant_runtime == "codex_subscription":
+            completion = yield from self._complete_stream_codex_subscription(
                 system=system,
                 messages=messages,
                 tools=tools,
@@ -432,6 +484,70 @@ class AIGateway:
         _log_openai_responses_completion(completion)
         return completion
 
+    def _complete_codex_subscription(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        timeout_seconds: float | None,
+        safety_identifier: str | None,
+    ) -> AICompletion:
+        if not self.enabled:
+            raise AssistantUnavailableError(
+                "Codex subscription runtime is not configured"
+            )
+        request_timeout = _bounded_gateway_timeout(timeout_seconds)
+        try:
+            runtime_completion = self._get_codex_subscription_runtime().complete(
+                system=system,
+                messages=messages,
+                tools=tools,
+                timeout=request_timeout,
+                safety_identifier=safety_identifier,
+            )
+        except Exception as error:
+            _raise_codex_subscription_gateway_error(error)
+        completion = _from_codex_subscription_completion(runtime_completion)
+        _log_codex_subscription_completion(completion)
+        return completion
+
+    def _complete_stream_codex_subscription(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        timeout_seconds: float | None,
+        safety_identifier: str | None,
+    ) -> Generator[AITextDelta, None, AICompletion]:
+        if not self.enabled:
+            raise AssistantUnavailableError(
+                "Codex subscription runtime is not configured"
+            )
+        request_timeout = _bounded_gateway_timeout(timeout_seconds)
+        try:
+            stream = self._get_codex_subscription_runtime().complete_stream(
+                system=system,
+                messages=messages,
+                tools=tools,
+                timeout=request_timeout,
+                safety_identifier=safety_identifier,
+            )
+            while True:
+                try:
+                    delta = next(stream)
+                except StopIteration as stop:
+                    runtime_completion = stop.value
+                    break
+                if delta:
+                    yield AITextDelta(text=delta)
+        except Exception as error:
+            _raise_codex_subscription_gateway_error(error)
+        completion = _from_codex_subscription_completion(runtime_completion)
+        _log_codex_subscription_completion(completion)
+        return completion
+
 
 def _bounded_gateway_timeout(
     requested_timeout: float | None,
@@ -444,6 +560,67 @@ def _bounded_gateway_timeout(
     if timeout <= 0:
         raise AssistantTimeoutError("Assistant request timed out")
     return timeout
+
+
+def _raise_codex_subscription_gateway_error(error: Exception) -> None:
+    from app.assistant.codex_app_server import (
+        CodexSubscriptionError,
+        CodexTimeoutError,
+    )
+
+    if isinstance(error, CodexTimeoutError):
+        logger.error("Assistant API timeout: runtime=codex_subscription")
+        raise AssistantTimeoutError("Assistant request timed out") from error
+    if isinstance(error, CodexSubscriptionError):
+        logger.error(
+            "Assistant runtime failed: runtime=codex_subscription error_type=%s",
+            type(error).__name__,
+        )
+        raise AssistantUnavailableError("Assistant runtime failed") from error
+    raise error
+
+
+def _from_codex_subscription_completion(response) -> AICompletion:
+    content: list[AITextBlock | AIToolUseBlock] = []
+    if response.text:
+        content.append(AITextBlock(text=response.text))
+    content.extend(
+        AIToolUseBlock(
+            id=call.id,
+            name=call.name,
+            input=dict(call.arguments),
+        )
+        for call in response.tool_calls
+    )
+    provider_state: tuple[dict[str, Any], ...] = ()
+    if response.state_handle:
+        provider_state = (
+            {
+                "type": "codex_subscription_session",
+                "handle": response.state_handle,
+            },
+        )
+    return AICompletion(
+        model=response.model,
+        stop_reason=response.stop_reason,
+        content=content,
+        usage=AIUsage(
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        ),
+        provider_state=provider_state,
+    )
+
+
+def _log_codex_subscription_completion(completion: AICompletion) -> None:
+    logger.info(
+        "Assistant completion: runtime=codex_subscription model=%s "
+        "stop_reason=%s input_tokens=%s output_tokens=%s",
+        completion.model,
+        completion.stop_reason,
+        completion.usage.input_tokens,
+        completion.usage.output_tokens,
+    )
 
 
 def complete_openai_responses(

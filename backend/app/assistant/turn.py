@@ -172,19 +172,22 @@ def run_agent_turn_events(
         gateway,
         input_mode=input_mode,
     )
-    while True:
-        try:
-            event = next(events)
-        except StopIteration as stop:
-            return stop.value
-        if event.type == "text_delta":
-            streamed_text.append(str(event.data.get("text", "")))
-        elif event.type == "done" and streamed_text:
-            message = event.data.get("message") or {}
-            canonical_text = str(message.get("content", ""))
-            if "".join(streamed_text) != canonical_text:
-                yield TurnEvent("text_reset", {"text": canonical_text})
-        yield event
+    try:
+        while True:
+            try:
+                event = next(events)
+            except StopIteration as stop:
+                return stop.value
+            if event.type == "text_delta":
+                streamed_text.append(str(event.data.get("text", "")))
+            elif event.type == "done" and streamed_text:
+                message = event.data.get("message") or {}
+                canonical_text = str(message.get("content", ""))
+                if "".join(streamed_text) != canonical_text:
+                    yield TurnEvent("text_reset", {"text": canonical_text})
+            yield event
+    finally:
+        events.close()
 
 
 def _run_agent_turn_events(
@@ -450,6 +453,10 @@ def _run_agent_turn_events(
             conversation.id,
         )
         reply_text = ERROR_REPLY
+    finally:
+        discard_provider_state = getattr(gateway, "discard_provider_state", None)
+        if callable(discard_provider_state):
+            discard_provider_state(messages)
 
     if not reply_text:
         reply_text = FALLBACK_REPLY

@@ -1,8 +1,9 @@
 from functools import lru_cache
 from math import isfinite
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,6 +53,15 @@ class Settings(BaseSettings):
     openai_responses_model: str = "gpt-5.6"
     openai_responses_reasoning_effort: str = "medium"
     openai_responses_max_output_tokens: int = 25000
+    # Local development bridge backed by an interactive ChatGPT/Codex login.
+    # It is deliberately isolated from the developer's normal ~/.codex home.
+    codex_subscription_command: str = "codex"
+    codex_subscription_home: str = "~/.codex-asistente-ayuntamientos"
+    codex_subscription_model: str = ""
+    codex_subscription_reasoning_effort: str = "medium"
+    codex_subscription_session_ttl_seconds: float = 180.0
+    codex_subscription_max_sessions: int = 4
+    codex_subscription_health_timeout_seconds: float = 3.0
     assistant_realtime_enabled: bool = True
     assistant_realtime_model: str = "gpt-realtime-2.1"
     assistant_realtime_voice: str = "marin"
@@ -117,12 +127,91 @@ class Settings(BaseSettings):
     @classmethod
     def validate_assistant_runtime(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"anthropic", "hermes_agent", "openai_responses"}:
+        if normalized not in {
+            "anthropic",
+            "hermes_agent",
+            "openai_responses",
+            "codex_subscription",
+        }:
             raise ValueError(
                 "assistant_runtime must be 'anthropic', 'hermes_agent' or "
-                "'openai_responses'"
+                "'openai_responses' or 'codex_subscription'"
             )
         return normalized
+
+    @field_validator("codex_subscription_command")
+    @classmethod
+    def validate_codex_subscription_command(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("codex_subscription_command must not be empty")
+        return normalized
+
+    @field_validator("codex_subscription_home")
+    @classmethod
+    def validate_codex_subscription_home(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("codex_subscription_home must not be empty")
+        expanded = Path(normalized).expanduser().resolve(strict=False)
+        personal_home = Path("~/.codex").expanduser().resolve(strict=False)
+        if expanded == personal_home:
+            raise ValueError(
+                "codex_subscription_home must be dedicated and cannot be ~/.codex"
+            )
+        return str(expanded)
+
+    @field_validator("codex_subscription_model")
+    @classmethod
+    def validate_codex_subscription_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if "\x00" in normalized or len(normalized) > 128:
+            raise ValueError("codex_subscription_model is invalid")
+        return normalized
+
+    @field_validator("codex_subscription_reasoning_effort")
+    @classmethod
+    def validate_codex_subscription_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError(
+                "codex_subscription_reasoning_effort must be one of: none, "
+                "minimal, low, medium, high, xhigh"
+            )
+        return normalized
+
+    @field_validator(
+        "codex_subscription_session_ttl_seconds",
+        "codex_subscription_health_timeout_seconds",
+    )
+    @classmethod
+    def validate_codex_subscription_timeouts(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError(
+                "codex_subscription timeouts must be finite and greater than zero"
+            )
+        return value
+
+    @field_validator("codex_subscription_max_sessions")
+    @classmethod
+    def validate_codex_subscription_max_sessions(cls, value: int) -> int:
+        if not 1 <= value <= 32:
+            raise ValueError(
+                "codex_subscription_max_sessions must be between 1 and 32"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def reject_codex_subscription_outside_development(self):
+        if (
+            self.assistant_runtime == "codex_subscription"
+            and self.environment != "development"
+        ):
+            raise ValueError(
+                "codex_subscription is a local development runtime and is "
+                "forbidden outside environment=development"
+            )
+        return self
 
     @field_validator("openai_responses_base_url")
     @classmethod
