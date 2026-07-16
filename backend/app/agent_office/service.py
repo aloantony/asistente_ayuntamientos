@@ -31,10 +31,13 @@ from app.assistant.tools import (
     normalize_tool_input,
     prepare_ordinance_search_embedding,
 )
-from app.core.config import settings
 from app.db.session import SessionLocal
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization
+from app.ordinances.embeddings import (
+    EmbeddingWorkerCleanupError,
+    supervised_embedding_claim_lease_seconds,
+)
 from app.rbac.permissions import has_permission
 from app.requirements.models import Requirement
 from app.users.models import User
@@ -215,13 +218,7 @@ MUTATING_ACTIONS = {
 }
 EXTERNAL_READ_ACTIONS = frozenset({"semantic_search_ordinances"})
 EXTERNAL_READ_CLAIM_EVENT = "external_read_claimed"
-# Keep the durable lease substantially longer than the configured provider
-# timeout.  This prevents a healthy request from being duplicated while still
-# allowing a crashed read-only attempt to be recovered later.
-EXTERNAL_READ_CLAIM_LEASE_SECONDS = max(
-    300,
-    int(settings.embeddings_timeout_seconds * 3) + 60,
-)
+EXTERNAL_READ_QUARANTINE_EVENT = "external_read_quarantined"
 
 
 @dataclass(frozen=True)
@@ -556,6 +553,14 @@ def mark_task_queued(db: Session, current_user: User, task: AgentOfficeTask) -> 
         task.organization_id,
         "agent_office.execute",
     )
+    if task.status == "failed" and _latest_attempt_is_quarantined(db, task.id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Task cannot be retried because external worker cleanup "
+                "could not be confirmed"
+            ),
+        )
     if task.status not in {"approved", "failed"}:
         raise HTTPException(status_code=409, detail="Only approved or failed tasks can be queued")
     task.status = "queued"
@@ -831,6 +836,24 @@ def _running_attempt_is_incomplete(
     return terminal_event is None
 
 
+def _latest_attempt_is_quarantined(db: Session, task_id: int) -> bool:
+    attempt = _latest_task_execution_attempt(db, task_id)
+    if attempt is None:
+        return False
+    quarantine_event = db.scalar(
+        select(AgentOfficeTaskEvent.id)
+        .where(
+            AgentOfficeTaskEvent.task_id == task_id,
+            AgentOfficeTaskEvent.id > attempt.id,
+            AgentOfficeTaskEvent.event_type
+            == EXTERNAL_READ_QUARANTINE_EVENT,
+        )
+        .order_by(AgentOfficeTaskEvent.id.desc())
+        .limit(1)
+    )
+    return quarantine_event is not None
+
+
 def _task_is_terminal(task: AgentOfficeTask) -> bool:
     return task.status in {
         "waiting_approval",
@@ -950,7 +973,7 @@ def _claim_external_read_action(
 
     claim_id = uuid.uuid4().hex
     lease_expires_at = now + timedelta(
-        seconds=EXTERNAL_READ_CLAIM_LEASE_SECONDS
+        seconds=supervised_embedding_claim_lease_seconds()
     )
     add_task_event(
         db,
@@ -1130,6 +1153,16 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
             task.status = "failed"
             task.error_message = str(error)[:2000]
             task.completed_at = datetime.now(timezone.utc)
+            if isinstance(error, EmbeddingWorkerCleanupError):
+                add_task_event(
+                    session,
+                    task,
+                    EXTERNAL_READ_QUARANTINE_EVENT,
+                    (
+                        "External provider worker cleanup could not be "
+                        "confirmed; automatic retry is quarantined."
+                    ),
+                )
             add_task_event(session, task, "failed", task.error_message)
             session.commit()
             return task

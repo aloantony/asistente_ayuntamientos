@@ -1,11 +1,18 @@
 import json
+import multiprocessing
+import socket
 import threading
+import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
+from functools import partial
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from time import monotonic
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,9 +36,58 @@ from app.assistant.tools import (
     execute_tool,
     normalize_tool_input,
 )
+from app.core.config import Settings
 from app.organizations.models import Organization
+from app.ordinances.embeddings import (
+    EMBEDDING_WORKER_MAX_CLEANUP_SECONDS,
+    EmbeddingWorkerCleanupError,
+    EmbeddingsUnavailableError,
+    _ExternalEmbeddingConfig,
+    _embedding_worker_entry,
+    _run_supervised_external_embedding,
+    supervised_embedding_claim_lease_seconds,
+)
 from app.requirements.models import Requirement, RequirementMessage
 from app.users.models import User
+
+
+def _slow_embedding_operation(text, config, deadline):
+    del text, config, deadline
+    while True:
+        time.sleep(0.02)
+
+
+def _successful_embedding_operation(text, config, deadline):
+    del text, config, deadline
+    return [0.25, -0.5]
+
+
+def _partial_embedding_ipc_worker(
+    send_socket,
+    text,
+    config,
+    deadline,
+    operation,
+):
+    del text, config, deadline, operation
+    try:
+        for byte in b'{"status":"ok","vector":[0.25':
+            send_socket.send(bytes([byte]))
+            time.sleep(0.02)
+        time.sleep(5)
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        try:
+            send_socket.close()
+        except OSError:
+            pass
+
+
+def _record_late_embedding_operation(event, text, config, deadline):
+    del text, config, deadline
+    event.set()
+    return [1.0]
 
 
 def _make_authorizable_feedback_task(
@@ -207,6 +263,15 @@ def _cleanup_engine_ordinance_task(
         if organization is not None:
             cleanup_db.delete(organization)
         cleanup_db.commit()
+
+
+def _embedding_test_config(timeout_seconds: float) -> _ExternalEmbeddingConfig:
+    return _ExternalEmbeddingConfig(
+        base_url="https://embeddings.invalid/v1",
+        api_key="test-secret",
+        model="test-embedding",
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _run_cross_organization_requirement_task(
@@ -860,6 +925,263 @@ def test_two_agent_workers_serialize_one_task_effect(engine):
             assert event_types.count("completed") == 1
     finally:
         _cleanup_engine_feedback_task(engine, ids)
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        -1.0,
+        0.0,
+        0.099,
+        120.001,
+        1_000_000.0,
+    ],
+)
+def test_embeddings_timeout_rejects_nonfinite_and_out_of_bounds(timeout):
+    with pytest.raises(ValidationError, match="embeddings_timeout_seconds"):
+        Settings(
+            embeddings_timeout_seconds=timeout,
+            _env_file=None,
+        )
+
+
+@pytest.mark.parametrize("timeout", [0.1, 120.0])
+def test_embeddings_timeout_accepts_bounded_endpoints(timeout):
+    configured = Settings(
+        embeddings_timeout_seconds=timeout,
+        _env_file=None,
+    )
+    assert configured.embeddings_timeout_seconds == timeout
+
+
+def test_supervised_embedding_enforces_total_deadline_and_reaps_child():
+    before = {process.pid for process in multiprocessing.active_children()}
+    timeout = 0.15
+    started_at = monotonic()
+
+    with pytest.raises(EmbeddingsUnavailableError):
+        _run_supervised_external_embedding(
+            "consulta lenta",
+            _embedding_test_config(timeout),
+            worker_operation=_slow_embedding_operation,
+            process_start_method="fork",
+        )
+
+    elapsed = monotonic() - started_at
+    assert elapsed <= timeout + EMBEDDING_WORKER_MAX_CLEANUP_SECONDS + 1.0
+    after = {process.pid for process in multiprocessing.active_children()}
+    assert after <= before
+
+
+def test_supervised_embedding_stops_slow_trickle_http_before_socket_timeout():
+    request_started = threading.Event()
+
+    class SlowTrickleHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            content_length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(content_length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "10000")
+            self.end_headers()
+            request_started.set()
+            try:
+                while True:
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.02)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+
+        def log_message(self, format, *args):
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowTrickleHandler)
+    server_thread = threading.Thread(
+        target=server.serve_forever,
+        name="embedding-slow-trickle-test-server",
+    )
+    server_thread.start()
+    timeout = 5.0
+    config = _ExternalEmbeddingConfig(
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        api_key="test-secret",
+        model="test-embedding",
+        timeout_seconds=timeout,
+    )
+    started_at = monotonic()
+    try:
+        with pytest.raises(EmbeddingsUnavailableError):
+            _run_supervised_external_embedding(
+                "consulta HTTP lenta",
+                config,
+            )
+        assert request_started.wait(timeout=1)
+        elapsed = monotonic() - started_at
+        assert elapsed <= timeout + EMBEDDING_WORKER_MAX_CLEANUP_SECONDS + 1.0
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+        assert server_thread.is_alive() is False
+
+
+def test_supervised_embedding_accepts_complete_bounded_ipc():
+    vector = _run_supervised_external_embedding(
+        "consulta completa",
+        _embedding_test_config(1.0),
+        worker_operation=_successful_embedding_operation,
+        process_start_method="fork",
+    )
+    assert vector == [0.25, -0.5]
+
+
+def test_supervised_embedding_spawn_path_accepts_complete_bounded_ipc():
+    vector = _run_supervised_external_embedding(
+        "consulta completa con spawn",
+        _embedding_test_config(5.0),
+        worker_operation=_successful_embedding_operation,
+    )
+    assert vector == [0.25, -0.5]
+
+
+def test_semantic_tool_without_prepared_embedding_uses_supervisor(
+    db,
+    make_user,
+    monkeypatch,
+):
+    user = make_user(is_superuser=True)
+    calls: list[str] = []
+
+    def deadline_embedding(text: str):
+        calls.append(text)
+        raise EmbeddingsUnavailableError("supervised total deadline")
+
+    monkeypatch.setattr(
+        "app.assistant.tools.embed_text_supervised",
+        deadline_embedding,
+    )
+
+    with pytest.raises(
+        EmbeddingsUnavailableError,
+        match="supervised total deadline",
+    ):
+        execute_tool(
+            db,
+            user,
+            "semantic_search_ordinances",
+            {"query": "dominio público viario"},
+        )
+
+    assert calls == ["dominio público viario"]
+
+
+def test_supervised_embedding_times_out_partial_slow_ipc_and_reaps_child():
+    before = {process.pid for process in multiprocessing.active_children()}
+    timeout = 0.15
+    started_at = monotonic()
+
+    with pytest.raises(EmbeddingsUnavailableError):
+        _run_supervised_external_embedding(
+            "consulta con IPC parcial",
+            _embedding_test_config(timeout),
+            worker_entry=_partial_embedding_ipc_worker,
+            worker_operation=_successful_embedding_operation,
+            process_start_method="fork",
+        )
+
+    elapsed = monotonic() - started_at
+    assert elapsed <= timeout + EMBEDDING_WORKER_MAX_CLEANUP_SECONDS + 1.0
+    after = {process.pid for process in multiprocessing.active_children()}
+    assert after <= before
+
+
+def test_embedding_child_scheduled_after_deadline_never_calls_provider():
+    process_context = multiprocessing.get_context("fork")
+    provider_called = process_context.Event()
+    receive_socket, send_socket = socket.socketpair(
+        socket.AF_UNIX,
+        socket.SOCK_STREAM,
+    )
+    process = process_context.Process(
+        target=_embedding_worker_entry,
+        args=(
+            send_socket,
+            "consulta vencida",
+            _embedding_test_config(0.1),
+            monotonic() - 1.0,
+            partial(_record_late_embedding_operation, provider_called),
+        ),
+        daemon=True,
+    )
+    try:
+        process.start()
+        send_socket.close()
+        process.join(timeout=2)
+        assert not process.is_alive()
+        assert provider_called.is_set() is False
+    finally:
+        try:
+            send_socket.close()
+        except OSError:
+            pass
+        receive_socket.close()
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)
+        process.close()
+
+
+def test_embedding_claim_lease_outlives_deadline_and_cleanup():
+    for timeout in (0.1, 60.0, 120.0):
+        lease = supervised_embedding_claim_lease_seconds(timeout)
+        assert lease > timeout + EMBEDDING_WORKER_MAX_CLEANUP_SECONDS
+
+
+def test_indeterminate_embedding_cleanup_quarantines_agent_task_retry(
+    engine,
+    monkeypatch,
+):
+    ids = _seed_engine_ordinance_task(engine)
+    provider_calls = 0
+
+    def indeterminate_cleanup(tool_input):
+        nonlocal provider_calls
+        del tool_input
+        provider_calls += 1
+        raise EmbeddingWorkerCleanupError("cleanup could not be confirmed")
+
+    monkeypatch.setattr(
+        "app.agent_office.service.prepare_ordinance_search_embedding",
+        indeterminate_cleanup,
+    )
+
+    try:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            task = run_agent_office_task(int(ids["task_id"]), db=worker_db)
+            assert task.status == "failed"
+
+        with Session(engine, expire_on_commit=False) as retry_db:
+            task = retry_db.get(AgentOfficeTask, int(ids["task_id"]))
+            user = retry_db.get(User, int(ids["user_id"]))
+            assert task is not None
+            assert user is not None
+            event_types = [event.event_type for event in task.events]
+            assert event_types.count("started") == 1
+            assert event_types.count("external_read_claimed") == 1
+            assert event_types.count("external_read_quarantined") == 1
+            assert event_types.count("failed") == 1
+            with pytest.raises(HTTPException) as rejected_retry:
+                mark_task_queued(retry_db, user, task)
+            assert rejected_retry.value.status_code == 409
+            retry_db.rollback()
+
+        assert provider_calls == 1
+    finally:
+        _cleanup_engine_ordinance_task(engine, ids)
 
 
 def test_external_ordinance_provider_does_not_block_task_cancellation(

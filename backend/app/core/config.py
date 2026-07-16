@@ -336,6 +336,16 @@ class Settings(BaseSettings):
             )
         return normalized
 
+    @field_validator("embeddings_timeout_seconds")
+    @classmethod
+    def validate_embeddings_timeout(cls, value: float) -> float:
+        if not isfinite(value) or not 0.1 <= value <= 120.0:
+            raise ValueError(
+                "embeddings_timeout_seconds must be finite and between "
+                "0.1 and 120 seconds"
+            )
+        return value
+
     @field_validator("speech_transcription_runtime")
     @classmethod
     def validate_speech_transcription_runtime(cls, value: str) -> str:
