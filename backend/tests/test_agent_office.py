@@ -1,7 +1,8 @@
 import json
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import replace
 
 import pytest
 from fastapi import HTTPException
@@ -22,7 +23,12 @@ from app.assistant.tool_authorization import (
     issue_agent_office_tool_authorization,
     tool_input_digest,
 )
-from app.assistant.tools import execute_tool, normalize_tool_input
+from app.assistant.tools import (
+    TOOL_CATALOG,
+    PreparedOrdinanceSearchEmbedding,
+    execute_tool,
+    normalize_tool_input,
+)
 from app.organizations.models import Organization
 from app.requirements.models import Requirement, RequirementMessage
 from app.users.models import User
@@ -144,6 +150,60 @@ def _cleanup_engine_feedback_task(engine, ids: dict[str, int]) -> None:
             Organization,
             ids["organization_id"],
         )
+        if organization is not None:
+            cleanup_db.delete(organization)
+        cleanup_db.commit()
+
+
+def _seed_engine_ordinance_task(engine) -> dict[str, int | str]:
+    suffix = uuid.uuid4().hex
+    query = f"dominio público viario {suffix}"
+    with Session(engine, expire_on_commit=False) as seed_db:
+        user = User(
+            email=f"agent-ordinance-{suffix}@example.com",
+            hashed_password="not-used",
+            full_name="Agent Office Ordinance",
+            is_active=True,
+            is_superuser=True,
+        )
+        organization = Organization(name=f"Agent ordinance org {suffix}")
+        seed_db.add_all([user, organization])
+        seed_db.flush()
+        task = AgentOfficeTask(
+            organization_id=organization.id,
+            title=f"Buscar ordenanzas {suffix}",
+            description=query,
+            department="ordinances",
+            requested_action="semantic_search_ordinances",
+            status="queued",
+            approval_policy="never",
+            requires_human_approval=False,
+            input_json=json.dumps({"query": query, "limit": 3}),
+            requested_by_id=user.id,
+        )
+        seed_db.add(task)
+        seed_db.commit()
+        return {
+            "task_id": task.id,
+            "user_id": user.id,
+            "organization_id": organization.id,
+            "query": query,
+        }
+
+
+def _cleanup_engine_ordinance_task(
+    engine,
+    ids: dict[str, int | str],
+) -> None:
+    with Session(engine) as cleanup_db:
+        task = cleanup_db.get(AgentOfficeTask, ids["task_id"])
+        if task is not None:
+            cleanup_db.delete(task)
+        cleanup_db.commit()
+        user = cleanup_db.get(User, ids["user_id"])
+        if user is not None:
+            cleanup_db.delete(user)
+        organization = cleanup_db.get(Organization, ids["organization_id"])
         if organization is not None:
             cleanup_db.delete(organization)
         cleanup_db.commit()
@@ -798,6 +858,248 @@ def test_two_agent_workers_serialize_one_task_effect(engine):
             assert event_types.count("tool_authorization_claimed") == 1
             assert event_types.count("tool_execution_completed") == 1
             assert event_types.count("completed") == 1
+    finally:
+        _cleanup_engine_feedback_task(engine, ids)
+
+
+def test_external_ordinance_provider_does_not_block_task_cancellation(
+    engine,
+    monkeypatch,
+):
+    ids = _seed_engine_ordinance_task(engine)
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+
+    def blocked_embedding(tool_input: dict) -> PreparedOrdinanceSearchEmbedding:
+        provider_started.set()
+        assert release_provider.wait(timeout=15)
+        return PreparedOrdinanceSearchEmbedding(
+            query=str(tool_input["query"]),
+            vector=None,
+            model="test-disabled",
+            status="disabled",
+        )
+
+    monkeypatch.setattr(
+        "app.agent_office.service.prepare_ordinance_search_embedding",
+        blocked_embedding,
+    )
+
+    def run_worker() -> str:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            return run_agent_office_task(
+                int(ids["task_id"]),
+                db=worker_db,
+            ).status
+
+    def cancel_task() -> str:
+        with Session(engine, expire_on_commit=False) as cancellation_db:
+            user = cancellation_db.get(User, int(ids["user_id"]))
+            task = cancellation_db.get(
+                AgentOfficeTask,
+                int(ids["task_id"]),
+            )
+            assert user is not None
+            assert task is not None
+            return approve_or_cancel_task(
+                cancellation_db,
+                user,
+                task,
+                decision="cancel",
+                notes="Cancel while the embeddings provider is blocked.",
+            ).status
+
+    def attempt_approval() -> int:
+        with Session(engine, expire_on_commit=False) as approval_db:
+            user = approval_db.get(User, int(ids["user_id"]))
+            task = approval_db.get(AgentOfficeTask, int(ids["task_id"]))
+            assert user is not None
+            assert task is not None
+            try:
+                approve_or_cancel_task(
+                    approval_db,
+                    user,
+                    task,
+                    decision="approve",
+                    notes="Approval check while provider is blocked.",
+                )
+            except HTTPException as error:
+                approval_db.rollback()
+                return error.status_code
+            raise AssertionError("Running external read must not be approvable")
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            worker_future = executor.submit(run_worker)
+            assert provider_started.wait(timeout=15)
+            approval_future = executor.submit(attempt_approval)
+            # Approval is not valid from running, but it must acquire/release
+            # the row immediately instead of waiting for provider I/O.
+            assert approval_future.result(timeout=5) == 409
+            cancellation_future = executor.submit(cancel_task)
+            # This completes before the provider is released, proving that the
+            # HTTP phase retains no task row lock.
+            assert cancellation_future.result(timeout=5) == "cancelled"
+            release_provider.set()
+            assert worker_future.result(timeout=15) == "cancelled"
+
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, int(ids["task_id"]))
+            assert task is not None
+            event_types = [event.event_type for event in task.events]
+            assert task.status == "cancelled"
+            assert event_types.count("started") == 1
+            assert event_types.count("external_read_claimed") == 1
+            assert event_types.count("cancelled") == 1
+            assert "completed" not in event_types
+    finally:
+        release_provider.set()
+        _cleanup_engine_ordinance_task(engine, ids)
+
+
+def test_two_workers_make_one_external_ordinance_provider_call(
+    engine,
+    monkeypatch,
+):
+    ids = _seed_engine_ordinance_task(engine)
+    workers_ready = threading.Barrier(2)
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+    call_count = 0
+    call_count_lock = threading.Lock()
+
+    def blocked_embedding(tool_input: dict) -> PreparedOrdinanceSearchEmbedding:
+        nonlocal call_count
+        with call_count_lock:
+            call_count += 1
+        provider_started.set()
+        assert release_provider.wait(timeout=15)
+        return PreparedOrdinanceSearchEmbedding(
+            query=str(tool_input["query"]),
+            vector=None,
+            model="test-disabled",
+            status="disabled",
+        )
+
+    monkeypatch.setattr(
+        "app.agent_office.service.prepare_ordinance_search_embedding",
+        blocked_embedding,
+    )
+
+    def run_worker() -> str:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            workers_ready.wait(timeout=15)
+            return run_agent_office_task(
+                int(ids["task_id"]),
+                db=worker_db,
+            ).status
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(run_worker) for _ in range(2)]
+            assert provider_started.wait(timeout=15)
+            completed_while_provider_blocked, _ = wait(
+                futures,
+                timeout=5,
+                return_when=FIRST_COMPLETED,
+            )
+            assert len(completed_while_provider_blocked) == 1
+            assert next(iter(completed_while_provider_blocked)).result() == "running"
+            with call_count_lock:
+                assert call_count == 1
+
+            release_provider.set()
+            statuses = [future.result(timeout=15) for future in futures]
+
+        assert sorted(statuses) == ["completed", "running"]
+        with call_count_lock:
+            assert call_count == 1
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, int(ids["task_id"]))
+            assert task is not None
+            event_types = [event.event_type for event in task.events]
+            assert task.status == "completed"
+            assert event_types.count("started") == 1
+            assert event_types.count("external_read_claimed") == 1
+            assert event_types.count("completed") == 1
+    finally:
+        release_provider.set()
+        _cleanup_engine_ordinance_task(engine, ids)
+
+
+@pytest.mark.parametrize("initial_status", ["queued", "running"])
+def test_execute_tool_rollback_keeps_started_then_failed_history(
+    engine,
+    monkeypatch,
+    initial_status,
+):
+    ids = _seed_engine_feedback_task(engine, status=initial_status)
+    original_spec = TOOL_CATALOG["send_admin_feedback"]
+
+    def fail_after_effect_flush(db, user, tool_input, context):
+        original_spec.executor(db, user, tool_input, context)
+        raise ValueError("forced executor rollback")
+
+    monkeypatch.setitem(
+        TOOL_CATALOG,
+        "send_admin_feedback",
+        replace(original_spec, executor=fail_after_effect_flush),
+    )
+
+    try:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            result = run_agent_office_task(
+                ids["task_id"],
+                db=worker_db,
+            )
+            assert result.status == "failed"
+
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, ids["task_id"])
+            assert task is not None
+            event_types = [event.event_type for event in task.events]
+            assert event_types.count("started") == 1
+            assert event_types.count("failed") == 1
+            assert event_types.index("started") < event_types.index("failed")
+            assert "tool_authorization_issued" not in event_types
+            assert "tool_authorization_claimed" not in event_types
+            assert "tool_execution_completed" not in event_types
+            assert (
+                verification_db.query(AssistantAdminFeedback)
+                .filter_by(organization_id=ids["organization_id"])
+                .count()
+                == 0
+            )
+    finally:
+        _cleanup_engine_feedback_task(engine, ids)
+
+
+def test_early_execution_context_error_keeps_started_then_failed_history(engine):
+    ids = _seed_engine_feedback_task(engine, status="queued")
+    try:
+        with Session(engine) as setup_db:
+            user = setup_db.get(User, ids["user_id"])
+            assert user is not None
+            user.is_active = False
+            setup_db.commit()
+
+        with Session(engine, expire_on_commit=False) as worker_db:
+            result = run_agent_office_task(
+                ids["task_id"],
+                db=worker_db,
+            )
+            assert result.status == "failed"
+
+        with Session(engine) as verification_db:
+            task = verification_db.get(AgentOfficeTask, ids["task_id"])
+            assert task is not None
+            execution_events = [
+                event.event_type
+                for event in task.events
+                if event.event_type in {"started", "failed"}
+            ]
+            assert execution_events == ["started", "failed"]
+            assert task.error_message == "Task has no user context for RBAC execution"
     finally:
         _cleanup_engine_feedback_task(engine, ids)
 

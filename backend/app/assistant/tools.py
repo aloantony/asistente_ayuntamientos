@@ -797,11 +797,28 @@ class WebSearchProvenance:
     rank: int
 
 
+@dataclass(frozen=True)
+class PreparedOrdinanceSearchEmbedding:
+    """Embedding computed before opening the database result transaction.
+
+    Agent Office uses this value to keep the potentially remote embeddings
+    request outside every database transaction.  Binding the vector to the
+    normalized query prevents a prepared value from being reused for a
+    different search payload.
+    """
+
+    query: str
+    vector: str | None
+    model: str
+    status: str
+
+
 @dataclass
 class ToolContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
     lock_effects: bool = False
+    prepared_ordinance_embedding: PreparedOrdinanceSearchEmbedding | None = None
     attachment_content_seen: bool = False
     # Ephemeral provenance for one assistant turn. It is never persisted as an
     # authorization that a later turn can reuse.
@@ -1511,7 +1528,17 @@ def _semantic_search_ordinances(
         population_lt = int(population_lt)
     result_scope = str(tool_input.get("result_scope") or "fragments").strip()
 
-    query_vector, embedding_model, embedding_status = embed_text(query_text)
+    prepared_embedding = context.prepared_ordinance_embedding
+    if prepared_embedding is not None:
+        if prepared_embedding.query != query_text:
+            raise ValueError(
+                "La consulta no coincide con el embedding preparado"
+            )
+        query_vector = prepared_embedding.vector
+        embedding_model = prepared_embedding.model
+        embedding_status = prepared_embedding.status
+    else:
+        query_vector, embedding_model, embedding_status = embed_text(query_text)
     if embedding_status != "ready" or query_vector is None:
         return {
             "query": query_text,
@@ -1557,6 +1584,36 @@ def _semantic_search_ordinances(
         "topic": topic or None,
         **search_page,
     }
+
+
+def prepare_ordinance_search_embedding(
+    tool_input: dict,
+) -> PreparedOrdinanceSearchEmbedding:
+    """Compute the only external part of an ordinance semantic search.
+
+    This helper deliberately takes no ``Session``.  Callers can therefore
+    prove that the HTTP request made by an OpenAI-compatible embedding runtime
+    cannot retain a database row lock or transaction while it is in flight.
+    The executor repeats the query validation and checks this binding before
+    querying the local corpus.
+    """
+
+    if "query" not in tool_input:
+        raise ValueError("query es obligatorio")
+    query_text = str(tool_input["query"]).strip()
+    if not query_text:
+        raise ValueError("query no puede estar vacío")
+    if len(query_text) > MAX_ORDINANCE_QUERY_CHARS:
+        raise ValueError(
+            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
+        )
+    query_vector, embedding_model, embedding_status = embed_text(query_text)
+    return PreparedOrdinanceSearchEmbedding(
+        query=query_text,
+        vector=query_vector,
+        model=embedding_model,
+        status=embedding_status,
+    )
 
 
 def _optional_boolean(tool_input: dict, name: str) -> bool:
