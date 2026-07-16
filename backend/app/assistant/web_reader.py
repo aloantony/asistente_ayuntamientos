@@ -74,6 +74,8 @@ logger = logging.getLogger(__name__)
 _WEB_READER_ADMISSION = threading.BoundedSemaphore(
     settings.web_page_max_concurrent_readers
 )
+_WEB_READER_QUARANTINE_LOCK = threading.Lock()
+_WEB_READER_QUARANTINED_SLOTS = 0
 
 
 class UnsafeWebPageURLError(ValueError):
@@ -141,14 +143,22 @@ class _AdmissionLease:
     def __init__(self, semaphore) -> None:
         self._semaphore = semaphore
         self._lock = threading.Lock()
-        self._released = False
+        self._settled = False
 
     def release(self) -> None:
         with self._lock:
-            if self._released:
+            if self._settled:
                 return
-            self._released = True
+            self._settled = True
         self._semaphore.release()
+
+    def quarantine(self, reason: str) -> None:
+        """Permanently retain this slot when cleanup cannot be verified."""
+        with self._lock:
+            if self._settled:
+                return
+            self._settled = True
+        _record_reader_slot_quarantine(reason)
 
 
 class _LaunchState:
@@ -427,7 +437,8 @@ def _run_supervised_web_reader(
                 process_started = launch_state.started
             if not launch_completed_during_race:
                 # The launcher owns the still-blocked ``Process.start`` call.
-                # When it returns, it will kill/reap any child and free the slot.
+                # When it returns, it settles the lease after late cleanup,
+                # releasing it only when child mortality is verified.
                 lease_owned_by_main = False
                 process = None
                 send_socket = None
@@ -455,17 +466,26 @@ def _run_supervised_web_reader(
         _safe_socket_close(receive_socket)
         _safe_socket_close(send_socket)
         if lease_owned_by_main:
+            cleanup_verified = True
             try:
                 if process is not None:
                     if process_started:
-                        _cleanup_worker_process(
+                        cleanup_verified = _cleanup_worker_process(
                             process,
                             allow_normal_exit=received_message,
                         )
                     else:
-                        _close_unstarted_process(process)
-            finally:
+                        cleanup_verified = _close_unstarted_process(process)
+            except BaseException:
+                lease.quarantine("main_cleanup_raised")
+                raise
+            if cleanup_verified:
                 lease.release()
+            else:
+                lease.quarantine("main_cleanup_unverified")
+                raise WebPageUnavailableError(
+                    "No se pudo verificar la limpieza del proceso aislado"
+                )
 
 
 def _acquire_reader_admission(deadline: float) -> _AdmissionLease:
@@ -485,6 +505,19 @@ def _acquire_reader_admission(deadline: float) -> _AdmissionLease:
             "La capacidad de lectura web está ocupada; inténtalo de nuevo"
         )
     return _AdmissionLease(_WEB_READER_ADMISSION)
+
+
+def _record_reader_slot_quarantine(reason: str) -> None:
+    global _WEB_READER_QUARANTINED_SLOTS
+    with _WEB_READER_QUARANTINE_LOCK:
+        _WEB_READER_QUARANTINED_SLOTS += 1
+        quarantined_slots = _WEB_READER_QUARANTINED_SLOTS
+    logger.critical(
+        "Web-reader admission capacity permanently degraded: "
+        "metric=web_reader_quarantined_slots_total value=%s reason=%s",
+        quarantined_slots,
+        reason,
+    )
 
 
 def _require_reader_deadline(deadline: float) -> None:
@@ -520,13 +553,20 @@ def _launch_web_reader_process(
         return
     try:
         if started:
-            _cleanup_worker_process(process, allow_normal_exit=False)
+            cleanup_verified = _cleanup_worker_process(
+                process,
+                allow_normal_exit=False,
+            )
         else:
-            _close_unstarted_process(process)
-    except WebPageUnavailableError:
-        logger.exception("Late web-reader process cleanup failed")
-    finally:
+            cleanup_verified = _close_unstarted_process(process)
+    except BaseException:
+        logger.exception("Late web-reader process cleanup raised unexpectedly")
+        lease.quarantine("late_launcher_cleanup_raised")
+        return
+    if cleanup_verified:
         lease.release()
+    else:
+        lease.quarantine("late_launcher_cleanup_unverified")
 
 
 def _wait_for_worker_message(
@@ -594,38 +634,79 @@ def _wait_for_worker_message(
                 pass
 
 
-def _cleanup_worker_process(process, *, allow_normal_exit: bool) -> None:
-    """Reap a worker with bounded joins and never return a live child."""
-    try:
-        if allow_normal_exit:
-            process.join(timeout=WEB_READER_NORMAL_JOIN_SECONDS)
-        if process.is_alive():
+def _cleanup_worker_process(process, *, allow_normal_exit: bool) -> bool:
+    """Return true only after the child is confirmed dead, reaped and closed."""
+    cleanup_failed = False
+    cleanup_errors = (OSError, RuntimeError, ValueError, AssertionError)
+
+    def record_failure(operation: str, error: BaseException) -> None:
+        nonlocal cleanup_failed
+        cleanup_failed = True
+        logger.error(
+            "Web-reader process cleanup operation failed: operation=%s error=%s",
+            operation,
+            type(error).__name__,
+        )
+
+    def bounded_join(timeout: float, operation: str) -> None:
+        try:
+            process.join(timeout=timeout)
+        except cleanup_errors as error:
+            record_failure(operation, error)
+
+    def checked_is_alive(operation: str) -> bool | None:
+        try:
+            return bool(process.is_alive())
+        except cleanup_errors as error:
+            record_failure(operation, error)
+            return None
+
+    if allow_normal_exit:
+        bounded_join(WEB_READER_NORMAL_JOIN_SECONDS, "normal_join")
+
+    alive = checked_is_alive("is_alive_before_terminate")
+    if alive is not False:
+        try:
             process.terminate()
-            process.join(timeout=WEB_READER_TERMINATE_JOIN_SECONDS)
-        if process.is_alive():
+        except cleanup_errors as error:
+            record_failure("terminate", error)
+        bounded_join(WEB_READER_TERMINATE_JOIN_SECONDS, "terminate_join")
+        alive = checked_is_alive("is_alive_before_kill")
+
+    if alive is not False:
+        try:
             process.kill()
-            process.join(timeout=WEB_READER_KILL_JOIN_SECONDS)
-        if process.is_alive():
-            raise WebPageUnavailableError(
-                "No se pudo detener el proceso aislado de lectura web"
-            )
-        process.join(timeout=0)
+        except cleanup_errors as error:
+            record_failure("kill", error)
+        bounded_join(WEB_READER_KILL_JOIN_SECONDS, "kill_join")
+        alive = checked_is_alive("is_alive_final")
+
+    if alive is not False:
+        logger.critical(
+            "Web-reader child mortality could not be verified; process handle "
+            "will remain open and its admission slot must be quarantined"
+        )
+        return False
+
+    bounded_join(0, "final_reap_join")
+    try:
         process.close()
-    except WebPageUnavailableError:
-        raise
-    except (OSError, RuntimeError, ValueError, AssertionError) as error:
-        raise WebPageUnavailableError(
-            "No se pudo limpiar el proceso aislado de lectura web"
-        ) from error
+    except cleanup_errors as error:
+        record_failure("process_close", error)
+        return False
+    return not cleanup_failed
 
 
-def _close_unstarted_process(process) -> None:
+def _close_unstarted_process(process) -> bool:
     try:
         process.close()
     except (OSError, RuntimeError, ValueError, AssertionError) as error:
-        raise WebPageUnavailableError(
-            "No se pudo liberar el proceso aislado de lectura web"
-        ) from error
+        logger.error(
+            "Unstarted web-reader process handle could not be closed: error=%s",
+            type(error).__name__,
+        )
+        return False
+    return True
 
 
 def _safe_socket_close(value) -> None:

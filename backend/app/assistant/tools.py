@@ -803,13 +803,43 @@ def tool_is_blocked_after_untrusted_content(
     """Fail closed after web taint, including for unknown model tool names."""
     if not context.untrusted_external_content_seen:
         return False
-    if not allow_web_reader or name != "read_web_page":
-        return True
+    return canonical_untrusted_web_reader_input(
+        name,
+        tool_input,
+        context,
+        allow_web_reader=allow_web_reader,
+    ) is None
+
+
+def canonical_untrusted_web_reader_input(
+    name: str,
+    tool_input: dict,
+    context: ToolContext,
+    *,
+    allow_web_reader: bool,
+) -> dict[str, str] | None:
+    """Accept only the exact canonical provenance URL and no other fields."""
+    if (
+        not context.untrusted_external_content_seen
+        or not allow_web_reader
+        or name != "read_web_page"
+        or not isinstance(tool_input, dict)
+        or set(tool_input) != {"url"}
+    ):
+        return None
+    raw_url = tool_input.get("url")
+    if (
+        not isinstance(raw_url, str)
+        or raw_url not in context.web_search_provenance
+    ):
+        return None
     try:
-        normalized_url = web_reader.normalize_web_page_url(tool_input.get("url"))
+        normalized_url = web_reader.normalize_web_page_url(raw_url)
     except (TypeError, ValueError):
-        return True
-    return normalized_url not in context.web_search_provenance
+        return None
+    if normalized_url != raw_url:
+        return None
+    return {"url": normalized_url}
 
 
 def redacted_untrusted_tool_input() -> dict[str, bool]:
