@@ -22,6 +22,7 @@ from app.agent_office.service import (
     get_task_for_user,
     list_routines_for_user,
     list_tasks_for_user,
+    mark_task_queue_failed,
     mark_task_queued,
     run_agent_office_task,
     trigger_routine,
@@ -127,9 +128,7 @@ def enqueue_agent_office_task(
     try:
         queue_job = get_default_queue().enqueue(run_agent_office_task, task.id)
     except Exception as error:
-        task.status = "failed"
-        task.error_message = str(error)[:2000]
-        db.commit()
+        mark_task_queue_failed(db, current_user, task.id, error)
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Agent office queue is unavailable",

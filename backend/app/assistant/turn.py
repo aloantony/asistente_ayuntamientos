@@ -36,9 +36,12 @@ from app.assistant.guards import (
     ConfirmationToolResult,
     build_confirmation_prompt,
     check_tool_confirmation,
+    confirmation_safe_history_content,
     finalize_confirmation_turn,
     load_conversation_state,
     lock_conversation_for_confirmation,
+    message_has_confirmation_suffix_metadata,
+    message_is_confirmation_response,
     process_pending_confirmation_response,
 )
 from app.assistant.models import AssistantConversation, AssistantMessage
@@ -1020,19 +1023,21 @@ def build_history(
     attachment_context: str = "",
 ) -> list[dict]:
     state = load_conversation_state(conversation)
-    excluded_confirmation_message_ids: set[int] = set()
+    legacy_prompt_message_ids: set[int] = set()
+    confirmation_response_message_ids: set[int] = set()
     exchanges = state.get("finalized_confirmation_exchanges")
     if isinstance(exchanges, list):
         for exchange in exchanges:
             if not isinstance(exchange, dict):
                 continue
-            for field in (
-                "prompted_at_assistant_message_id",
-                "response_user_message_id",
-            ):
-                message_id = int(exchange.get(field) or 0)
-                if message_id:
-                    excluded_confirmation_message_ids.add(message_id)
+            prompt_message_id = int(
+                exchange.get("prompted_at_assistant_message_id") or 0
+            )
+            if prompt_message_id:
+                legacy_prompt_message_ids.add(prompt_message_id)
+            response_message_id = int(exchange.get("response_user_message_id") or 0)
+            if response_message_id:
+                confirmation_response_message_ids.add(response_message_id)
     # Backward compatibility for confirmations finalized before the bounded
     # exchange list existed.
     for key in ("last_consumed_confirmation", "last_cancelled_confirmation"):
@@ -1041,25 +1046,36 @@ def build_history(
             continue
         message_id = int(confirmation.get("prompted_at_assistant_message_id") or 0)
         if message_id:
-            excluded_confirmation_message_ids.add(message_id)
+            legacy_prompt_message_ids.add(message_id)
         response_message_id = int(
             confirmation.get("confirmed_at_user_message_id")
             or confirmation.get("cancelled_at_user_message_id")
             or 0
         )
         if response_message_id:
-            excluded_confirmation_message_ids.add(response_message_id)
+            confirmation_response_message_ids.add(response_message_id)
     messages: list[dict] = []
     for message in conversation.messages:
+        if not message.content:
+            continue
         if (
-            not message.content
-            or message.id in excluded_confirmation_message_ids
+            message.id in confirmation_response_message_ids
+            or message_is_confirmation_response(message)
         ):
             continue
-        content = message.content
-        if message.id == attachment_context_message_id and attachment_context:
-            content = f"{content}\n\n{attachment_context}"
-        messages.append({"role": message.role, "content": content})
+        content = confirmation_safe_history_content(message)
+        if (
+            message.id in legacy_prompt_message_ids
+            and not message_has_confirmation_suffix_metadata(message)
+        ):
+            continue
+        if content:
+            if (
+                message.id == attachment_context_message_id
+                and attachment_context
+            ):
+                content = f"{content}\n\n{attachment_context}"
+            messages.append({"role": message.role, "content": content})
     max_messages = max(2, settings.assistant_history_max_messages)
     if len(messages) <= max_messages:
         return messages
