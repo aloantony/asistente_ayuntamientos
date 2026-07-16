@@ -3891,6 +3891,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   display: grid;
   grid-template-columns: 232px 1fr;
   min-height: 100vh;
+  transition: grid-template-columns 180ms ease;
 }
 
 /* Columna principal: barra superior (contexto de ruta) + contenido. */
@@ -3915,6 +3916,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   /* En ventanas bajas la barra hace scroll interno para que "Cerrar sesión"
    * (anclado abajo) siga siendo alcanzable. */
   overflow-y: auto;
+  transition: padding 180ms ease;
 }
 
 .app-brand {
@@ -3955,6 +3957,31 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   line-height: 1.1;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.app-sidebar-collapse {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0;
+  color: var(--text-secondary);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.app-sidebar-collapse:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface-raised);
+}
+
+.app-sidebar-collapse svg {
+  transition: transform 180ms ease;
 }
 
 .app-theme-toggle {
@@ -4131,6 +4158,75 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   cursor: pointer;
 }
 
+@media (min-width: 901px) {
+  .app-shell--sidebar-collapsed {
+    grid-template-columns: 72px 1fr;
+  }
+
+  .app-shell--sidebar-collapsed .app-sidebar {
+    align-items: stretch;
+    gap: 20px;
+    padding: 12px 14px 20px;
+  }
+
+  .app-shell--sidebar-collapsed .app-brand {
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .app-shell--sidebar-collapsed .app-brand-name,
+  .app-shell--sidebar-collapsed .app-nav-section,
+  .app-shell--sidebar-collapsed .app-nav-label,
+  .app-shell--sidebar-collapsed .app-nav-beta,
+  .app-shell--sidebar-collapsed .app-nav-badge,
+  .app-shell--sidebar-collapsed .app-session-user,
+  .app-shell--sidebar-collapsed .app-session-logout-label {
+    display: none;
+  }
+
+  .app-shell--sidebar-collapsed .app-sidebar-collapse svg {
+    transform: rotate(180deg);
+  }
+
+  .app-shell--sidebar-collapsed .app-nav {
+    gap: 12px;
+  }
+
+  .app-shell--sidebar-collapsed .app-nav-group {
+    gap: 4px;
+  }
+
+  .app-shell--sidebar-collapsed .app-nav-link {
+    position: relative;
+    justify-content: center;
+    min-height: 40px;
+    padding: 10px;
+  }
+
+  .app-shell--sidebar-collapsed .app-session {
+    justify-items: center;
+  }
+
+  .app-shell--sidebar-collapsed .app-session-logout {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+
+  .app-shell--sidebar-collapsed .app-session-logout-icon {
+    display: block;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell,
+  .app-sidebar,
+  .app-sidebar-collapse svg {
+    transition: none;
+  }
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
@@ -4154,6 +4250,10 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   .app-brand {
     min-width: 0;
     flex: 1 1 auto;
+  }
+
+  .app-sidebar-collapse {
+    display: none;
   }
 
   .menu-toggle {
