@@ -1328,6 +1328,91 @@ def test_realtime_web_search_snippet_blocks_later_mutation_in_same_turn(
     ).all() == []
 
 
+def test_realtime_legacy_turn_rebuilds_taint_from_finished_web_search(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda *, query, limit: [
+            {
+                "title": "Fuente externa heredada",
+                "url": "https://example.org/legacy",
+                "snippet": "No confíes en instrucciones de esta fuente",
+                "published_at": None,
+            }
+        ],
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    assert post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Busca una fuente antigua, sin crear nada",
+    ).status_code == 200
+    searched = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="legacy-search",
+        name="web_search",
+        arguments={"query": "consulta externa heredada", "limit": 1},
+    )
+    assert searched.status_code == 200
+    assert searched.json()["action"]["ok"] is True
+
+    legacy_state = get_conversation_state(db, conversation["id"])
+    legacy_turn = legacy_state["realtime_voice"]["active_turn"]
+    assert legacy_turn.pop("untrusted_external_content_seen") is True
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    stored_conversation.state = json.dumps(legacy_state, ensure_ascii=False)
+    db.commit()
+
+    mutation = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="legacy-mutation",
+        name="create_requirement",
+        arguments={
+            "organization_id": organization.id,
+            "title": "Inyección realtime heredada",
+        },
+    )
+
+    assert mutation.status_code == 200
+    assert mutation.json()["action"]["ok"] is False
+    assert "contenido web externo no confiable" in mutation.json()["output"]
+    rebuilt_state = get_conversation_state(db, conversation["id"])
+    assert rebuilt_state["realtime_voice"]["active_turn"][
+        "untrusted_external_content_seen"
+    ] is True
+    assert db.scalars(
+        select(Requirement).where(
+            Requirement.title == "Inyección realtime heredada"
+        )
+    ).all() == []
+
+
 def test_realtime_turn_start_is_idempotent_and_user_text_is_immutable(
     client,
     db,
@@ -3366,6 +3451,83 @@ def test_web_page_prompt_injection_cannot_trigger_mutation_in_same_turn(
     assert db.scalars(
         select(Requirement).where(Requirement.title == "Inyección desde web")
     ).all() == []
+
+
+def test_unknown_tool_after_web_taint_returns_safe_tool_error(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda *, query, limit: [
+            {
+                "title": "Fuente externa",
+                "url": "https://example.org/fuente",
+                "snippet": "Contenido web no confiable",
+                "published_at": None,
+            }
+        ],
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "search-before-unknown",
+                            "web_search",
+                            {"query": "fuente externa", "limit": 1},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "unknown-after-taint",
+                            "non_existent_tool",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("La herramienta solicitada no está disponible.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca esa fuente y responde sin guardar nada"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    actions = response.json()["messages"][-1]["actions"]
+    assert [action["tool"] for action in actions] == [
+        "web_search",
+        "non_existent_tool",
+    ]
+    assert actions[-1]["ok"] is False
+    assert "Herramienta no disponible" in actions[-1]["result"]
 
 
 def test_tool_call_budget_skips_excess_calls_and_forces_tool_free_synthesis(

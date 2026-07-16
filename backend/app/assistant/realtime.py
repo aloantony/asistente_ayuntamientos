@@ -44,6 +44,7 @@ from app.users.models import User
 logger = logging.getLogger(__name__)
 
 REALTIME_STATE_KEY = "realtime_voice"
+REALTIME_UNTRUSTED_CONTENT_KEY = "untrusted_external_content_seen"
 MAX_RECENT_REALTIME_TURNS = 4
 MAX_REALTIME_TOOL_CALLS = 16
 MAX_REALTIME_RESPONSES = 4
@@ -293,6 +294,12 @@ def execute_realtime_tool_call(
     request_digest = _tool_call_digest(payload.name, payload.arguments)
     tool_input = dict(payload.arguments or {})
     calls = _turn_calls(turn)
+    if not isinstance(turn.get(REALTIME_UNTRUSTED_CONTENT_KEY), bool):
+        # Older open turns predate the explicit taint bit. Reconstruct it from
+        # durable successful web-search actions before accepting another call.
+        turn[REALTIME_UNTRUSTED_CONTENT_KEY] = (
+            _realtime_turn_has_untrusted_external_content(turn, calls)
+        )
     recovered_expired_call = _recover_expired_realtime_tool_calls(turn)
     existing = calls.get(payload.call_id)
     if isinstance(existing, dict):
@@ -365,7 +372,7 @@ def execute_realtime_tool_call(
             conversation_id=conversation.id,
             user_message_id=user_message.id,
             untrusted_external_content_seen=(
-                turn.get("untrusted_external_content_seen") is True
+                _realtime_turn_has_untrusted_external_content(turn)
             ),
         )
         selected_tool = tools_by_name.get(payload.name)
@@ -426,7 +433,7 @@ def execute_realtime_tool_call(
             )
 
         if untrusted_external_content_seen:
-            turn["untrusted_external_content_seen"] = True
+            turn[REALTIME_UNTRUSTED_CONTENT_KEY] = True
 
         if confirmation_context is not None:
             turn["confirmation"] = _serialize_confirmation_reference(
@@ -911,6 +918,38 @@ def _turn_calls(turn: dict) -> dict:
         calls = {}
         turn["calls"] = calls
     return calls
+
+
+def _realtime_turn_has_untrusted_external_content(
+    turn: dict,
+    calls: dict | None = None,
+) -> bool:
+    stored = turn.get(REALTIME_UNTRUSTED_CONTENT_KEY)
+    if isinstance(stored, bool):
+        return stored
+
+    for call in (calls if calls is not None else _turn_calls(turn)).values():
+        if not isinstance(call, dict):
+            continue
+        action = call.get("action")
+        action_tool = action.get("tool") if isinstance(action, dict) else None
+        tool_name = call.get("name") or action_tool
+        if tool_name != "web_search":
+            continue
+        status = call.get("status")
+        if status == "indeterminate":
+            # The search may have returned snippets before persistence failed.
+            return True
+        if status != "finished":
+            continue
+        if not isinstance(action, dict):
+            # A finalized legacy search without an auditable outcome is tainted
+            # rather than treated as safe.
+            return True
+        if action.get("ok") is not False:
+            # Exact success and malformed/missing legacy flags both fail closed.
+            return True
+    return False
 
 
 def _turn_responses(turn: dict) -> dict:

@@ -1,7 +1,9 @@
 import hashlib
 import json
+import multiprocessing
 import socket
 import ssl
+import time
 
 import pytest
 
@@ -13,6 +15,16 @@ from app.core.config import settings
 
 
 PUBLIC_IP = "93.184.216.34"
+
+
+def read_in_worker(url: str) -> web_reader.WebPage:
+    """Exercise fetch/extraction directly; process supervision has separate tests."""
+    config = web_reader._web_reader_config()
+    return web_reader._read_web_page_in_worker(
+        url,
+        config=config,
+        deadline=web_reader.monotonic() + config.timeout_seconds,
+    )
 
 
 class FakeResponse:
@@ -94,9 +106,12 @@ def test_normalize_web_page_url_rejects_unsafe_targets(url):
 
 def test_dns_resolution_rejects_any_private_answer(monkeypatch):
     monkeypatch.setattr(
-        web_reader,
-        "_resolve_hostname_in_subprocess",
-        lambda hostname, port, *, timeout: (PUBLIC_IP, "10.10.0.5"),
+        web_reader.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.10.0.5", 443)),
+        ],
     )
     monkeypatch.setattr(
         web_reader,
@@ -108,77 +123,91 @@ def test_dns_resolution_rejects_any_private_answer(monkeypatch):
         web_reader.UnsafeWebPageURLError,
         match="privadas, locales o reservadas",
     ):
-        web_reader.read_web_page("https://example.org/documento")
+        read_in_worker("https://example.org/documento")
 
 
-def test_dns_timeout_terminates_and_joins_child_process(monkeypatch):
+def test_total_deadline_stops_slow_headers_without_orphan_process(monkeypatch):
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("requires fork to install a deterministic child fake")
+
+    class SlowHeaderConnection:
+        sock = None
+
+        def request(self, method, target, *, headers):
+            pass
+
+        def getresponse(self):
+            time.sleep(5)
+
+        def close(self):
+            pass
+
+    real_get_context = multiprocessing.get_context
+    fork_context = real_get_context("fork")
+    monkeypatch.setattr(
+        web_reader.multiprocessing,
+        "get_context",
+        lambda method: fork_context if method == "spawn" else real_get_context(method),
+    )
+    monkeypatch.setattr(settings, "web_page_timeout_seconds", 0.15)
+    monkeypatch.setattr(
+        web_reader,
+        "_resolve_public_addresses",
+        lambda parsed, *, timeout: (PUBLIC_IP,),
+    )
+    monkeypatch.setattr(
+        web_reader,
+        "_open_pinned_connection",
+        lambda *args, **kwargs: SlowHeaderConnection(),
+    )
+    existing_children = {child.pid for child in multiprocessing.active_children()}
+
+    started_at = time.monotonic()
+    with pytest.raises(web_reader.WebPageUnavailableError, match="agotó el tiempo"):
+        web_reader.read_web_page("https://example.org/slow-headers")
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed <= (
+        settings.web_page_timeout_seconds
+        + web_reader.WEB_READER_MAX_CLEANUP_OVERHEAD_SECONDS
+        + 0.5
+    )
+    assert {
+        child.pid for child in multiprocessing.active_children()
+    } <= existing_children
+
+
+def test_cleanup_uses_only_bounded_terminate_and_kill_joins():
     events = []
 
-    class FakeReceiveConnection:
-        def poll(self, timeout):
-            events.append(("poll", timeout))
-            return False
-
-        def close(self):
-            events.append("receive_close")
-
-    class FakeSendConnection:
-        def close(self):
-            events.append("send_close")
-
     class FakeProcess:
-        alive = True
-
-        def start(self):
-            events.append("start")
+        alive_checks = iter([True, True, False])
 
         def join(self, timeout=None):
             events.append(("join", timeout))
 
         def is_alive(self):
-            return self.alive
+            return next(self.alive_checks)
 
         def terminate(self):
             events.append("terminate")
-            self.alive = False
 
         def kill(self):
             events.append("kill")
-            self.alive = False
 
         def close(self):
-            events.append("process_close")
+            events.append("close")
 
-    fake_process = FakeProcess()
+    web_reader._cleanup_worker_process(FakeProcess(), allow_normal_exit=False)
 
-    class FakeContext:
-        def Pipe(self, *, duplex):
-            assert duplex is False
-            return FakeReceiveConnection(), FakeSendConnection()
-
-        def Process(self, *, target, args, daemon):
-            assert target is web_reader._dns_lookup_worker
-            assert args[1:] == ("example.org", 443)
-            assert daemon is True
-            return fake_process
-
-    monkeypatch.setattr(
-        web_reader.multiprocessing,
-        "get_context",
-        lambda method: FakeContext() if method == "spawn" else pytest.fail(method),
-    )
-
-    with pytest.raises(TimeoutError, match="DNS deadline"):
-        web_reader._resolve_hostname_in_subprocess(
-            "example.org",
-            443,
-            timeout=0.25,
-        )
-
-    assert ("poll", 0.25) in events
-    assert "terminate" in events
-    assert "kill" not in events
-    assert events[-1] == "process_close"
+    assert events == [
+        "terminate",
+        ("join", web_reader.WEB_READER_TERMINATE_JOIN_SECONDS),
+        "kill",
+        ("join", web_reader.WEB_READER_KILL_JOIN_SECONDS),
+        ("join", 0),
+        "close",
+    ]
 
 
 def test_normalize_web_page_url_encodes_unicode_path_and_query():
@@ -278,7 +307,7 @@ def test_cross_origin_redirect_requires_a_new_search_before_resolution(monkeypat
     )
 
     with pytest.raises(web_reader.UnsafeWebPageURLError, match="nueva búsqueda"):
-        web_reader.read_web_page("https://public.example/start")
+        read_in_worker("https://public.example/start")
 
     assert opened == ["public.example"]
     assert first.closed is True
@@ -308,7 +337,7 @@ def test_redirect_must_keep_exact_scheme_host_and_effective_port(
         web_reader.UnsafeWebPageURLError,
         match="otro origen",
     ):
-        web_reader.read_web_page("https://example.org/segura")
+        read_in_worker("https://example.org/segura")
 
     assert len(opened) == 1
     assert connections[0].closed is True
@@ -329,7 +358,7 @@ def test_same_origin_redirect_chain_is_returned_and_final_url_is_downloaded(
         ),
     )
 
-    page = web_reader.read_web_page("https://example.org/inicio")
+    page = read_in_worker("https://example.org/inicio")
 
     assert page.final_url == "https://example.org/final?version=2"
     assert page.redirect_chain == (
@@ -342,16 +371,19 @@ def test_same_origin_redirect_chain_is_returned_and_final_url_is_downloaded(
 
 
 def test_redirects_share_one_total_fetch_deadline(monkeypatch):
-    monkeypatch.setattr(settings, "web_page_timeout_seconds", 10.0)
-    ticks = iter([100.0, 101.0, 102.0, 111.5])
+    ticks = iter([101.0, 102.0, 111.5])
     monkeypatch.setattr(web_reader, "monotonic", lambda: next(ticks))
     opened, connections = install_fake_connection(
         monkeypatch,
         FakeResponse(status=302, headers={"Location": "/second"}),
     )
 
-    with pytest.raises(web_reader.WebPageUnavailableError, match="agotó el tiempo"):
-        web_reader.read_web_page("https://example.org/first")
+    with pytest.raises(TimeoutError, match="total deadline"):
+        web_reader._download(
+            "https://example.org/first",
+            config=web_reader._web_reader_config(),
+            deadline=110.0,
+        )
 
     assert len(opened) == 1
     assert opened[0][2] == pytest.approx(8.0)
@@ -367,7 +399,7 @@ def test_redirect_limit_is_enforced(monkeypatch):
     )
 
     with pytest.raises(web_reader.WebPageUnavailableError, match="redirecciones"):
-        web_reader.read_web_page("https://example.org/first")
+        read_in_worker("https://example.org/first")
 
     assert len(opened) == 2
     assert all(connection.closed for connection in connections)
@@ -385,7 +417,7 @@ def test_declared_and_streamed_oversize_responses_are_rejected(monkeypatch):
         ),
     )
     with pytest.raises(web_reader.WebPageUnavailableError, match="máximo de bytes"):
-        web_reader.read_web_page("https://example.org/declared")
+        read_in_worker("https://example.org/declared")
     assert declared_connections[0].closed is True
 
     _, streamed_connections = install_fake_connection(
@@ -396,7 +428,7 @@ def test_declared_and_streamed_oversize_responses_are_rejected(monkeypatch):
         ),
     )
     with pytest.raises(web_reader.WebPageUnavailableError, match="máximo de bytes"):
-        web_reader.read_web_page("https://example.org/streamed")
+        read_in_worker("https://example.org/streamed")
     assert streamed_connections[0].closed is True
 
 
@@ -421,10 +453,10 @@ def test_content_type_and_encoding_are_restricted(monkeypatch, headers, message)
     )
 
     with pytest.raises(web_reader.WebPageUnavailableError, match=message):
-        web_reader.read_web_page("https://example.org/data")
+        read_in_worker("https://example.org/data")
 
 
-def test_timeout_is_mapped_to_safe_error(monkeypatch):
+def test_worker_timeout_is_raised_for_supervisor_to_map(monkeypatch):
     monkeypatch.setattr(
         web_reader,
         "_resolve_public_addresses",
@@ -436,8 +468,8 @@ def test_timeout_is_mapped_to_safe_error(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError()),
     )
 
-    with pytest.raises(web_reader.WebPageUnavailableError, match="agotó el tiempo"):
-        web_reader.read_web_page("https://example.org/lenta")
+    with pytest.raises(TimeoutError):
+        read_in_worker("https://example.org/lenta")
 
 
 def test_html_happy_path_is_anonymous_bounded_and_ignores_active_content(
@@ -458,7 +490,7 @@ def test_html_happy_path_is_anonymous_bounded_and_ignores_active_content(
         ),
     )
 
-    page = web_reader.read_web_page(
+    page = read_in_worker(
         "https://Example.ORG/documento?version=1#seccion"
     )
 
@@ -497,7 +529,7 @@ def test_page_title_is_bounded(monkeypatch):
         ),
     )
 
-    page = web_reader.read_web_page("https://example.org/titulo")
+    page = read_in_worker("https://example.org/titulo")
 
     assert len(page.title) == web_reader.MAX_WEB_PAGE_TITLE_CHARS
 
@@ -511,7 +543,7 @@ def test_remote_pdf_is_rejected_until_extraction_is_isolated(monkeypatch):
         ),
     )
     with pytest.raises(web_reader.WebPageUnavailableError, match="no está permitido"):
-        web_reader.read_web_page("https://example.org/ordenanza.pdf")
+        read_in_worker("https://example.org/ordenanza.pdf")
 
 
 def test_tool_requires_same_turn_search_provenance(
