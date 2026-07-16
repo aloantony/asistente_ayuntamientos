@@ -3828,6 +3828,172 @@ def test_text_post_taint_search_is_not_called_or_persisted_or_emitted(
     assert secret not in (stored_conversation.state or "")
 
 
+def test_post_taint_reader_only_persists_exact_canonical_input(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "assistant_web_reader_enabled", True)
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    source_url = "https://example.org/fuente-canonica"
+    secret = "SECRET_READER_EXTRA_183fc2"
+    page_text = "Contenido público contrastado."
+    reader_calls = []
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda *, query, limit: [
+            {
+                "title": "Fuente canónica",
+                "url": source_url,
+                "snippet": "Documento público",
+                "published_at": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_tools.web_reader,
+        "read_web_page",
+        lambda url: reader_calls.append(url)
+        or assistant_tools.web_reader.WebPage(
+            source_url=url,
+            final_url=url,
+            title="Fuente canónica",
+            content_type="text/html",
+            text=page_text,
+            content_length_bytes=len(page_text.encode()),
+            text_char_count=len(page_text),
+            text_sha256=hashlib.sha256(page_text.encode()).hexdigest(),
+            text_truncated=False,
+            redirects=0,
+            redirect_chain=(url,),
+        ),
+    )
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "search-canonical-reader",
+                            "web_search",
+                            {"query": "fuente canónica", "limit": 1},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "reader-extra",
+                            "read_web_page",
+                            {"url": source_url, "note": secret},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "reader-fragment",
+                            "read_web_page",
+                            {"url": f"{source_url}#{secret}"},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "reader-canonical",
+                            "read_web_page",
+                            {"url": source_url},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He leído únicamente la fuente autorizada.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Busca y lee solo la fuente exacta"},
+        headers=headers_for(user),
+    ) as response:
+        raw_events = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert secret not in raw_events
+    assert reader_calls == [source_url]
+    events = parse_sse(raw_events)
+    tool_events = [
+        event["data"]
+        for event in events
+        if event["event"] == "tool_activity"
+    ]
+    blocked_events = [
+        event
+        for event in tool_events
+        if event["tool"] == assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME
+    ]
+    assert len(blocked_events) == 4
+    assert all(event["input"] == {"redacted": True} for event in blocked_events)
+    canonical_events = [
+        event for event in tool_events if event["tool"] == "read_web_page"
+    ]
+    assert len(canonical_events) == 2
+    assert all(event["input"] == {"url": source_url} for event in canonical_events)
+
+    done_message = events[-1]["data"]["message"]
+    assert [action["tool"] for action in done_message["actions"]] == [
+        "web_search",
+        assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME,
+        assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME,
+        "read_web_page",
+    ]
+    assert all(
+        action["input"] == {"redacted": True}
+        for action in done_message["actions"][1:3]
+    )
+    assert done_message["actions"][-1]["input"] == {"url": source_url}
+    assert secret not in json.dumps(done_message, ensure_ascii=False)
+
+    stored_assistant = db.scalar(
+        select(AssistantMessage)
+        .where(
+            AssistantMessage.conversation_id == conversation["id"],
+            AssistantMessage.role == "assistant",
+        )
+        .order_by(AssistantMessage.id.desc())
+    )
+    assert stored_assistant is not None
+    stored_actions = json.loads(stored_assistant.actions or "[]")
+    assert stored_actions[-1]["input"] == {"url": source_url}
+    assert secret not in json.dumps(stored_actions, ensure_ascii=False)
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    assert secret not in (stored_conversation.state or "")
+
+
 def test_unknown_tool_after_web_taint_is_blocked_and_redacted(
     client,
     assistant_user,

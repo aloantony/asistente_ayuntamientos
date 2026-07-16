@@ -441,8 +441,12 @@ def test_cleanup_uses_only_bounded_terminate_and_kill_joins():
         def close(self):
             events.append("close")
 
-    web_reader._cleanup_worker_process(FakeProcess(), allow_normal_exit=False)
+    cleanup_verified = web_reader._cleanup_worker_process(
+        FakeProcess(),
+        allow_normal_exit=False,
+    )
 
+    assert cleanup_verified is True
     assert events == [
         "terminate",
         ("join", web_reader.WEB_READER_TERMINATE_JOIN_SECONDS),
@@ -451,6 +455,142 @@ def test_cleanup_uses_only_bounded_terminate_and_kill_joins():
         ("join", 0),
         "close",
     ]
+
+
+def test_main_cleanup_failure_quarantines_admission_slot(monkeypatch):
+    admission = threading.BoundedSemaphore(1)
+    kill_attempted = threading.Event()
+    process_closed = threading.Event()
+
+    class FakeProcess:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            kill_attempted.set()
+            raise OSError("kill failed")
+
+        def close(self):
+            process_closed.set()
+
+    class FakeContext:
+        Process = FakeProcess
+
+    monkeypatch.setattr(web_reader, "_WEB_READER_ADMISSION", admission)
+    monkeypatch.setattr(web_reader, "_WEB_READER_QUARANTINED_SLOTS", 0)
+    monkeypatch.setattr(
+        web_reader.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    config = web_reader._WebReaderConfig(
+        app_version="test",
+        timeout_seconds=0.2,
+        dns_timeout_seconds=0.05,
+        max_response_bytes=1024,
+        max_redirects=1,
+        max_text_chars=100,
+    )
+
+    with pytest.raises(
+        web_reader.WebPageUnavailableError,
+        match="verificar la limpieza",
+    ):
+        web_reader._run_supervised_web_reader(
+            "https://example.org/cleanup-no-verificado",
+            config,
+        )
+
+    assert kill_attempted.is_set()
+    assert process_closed.is_set() is False
+    assert web_reader._WEB_READER_QUARANTINED_SLOTS == 1
+    assert admission.acquire(blocking=False) is False
+
+
+def test_late_launcher_cleanup_failure_quarantines_admission_slot(monkeypatch):
+    admission = threading.BoundedSemaphore(1)
+    start_release = threading.Event()
+    kill_attempted = threading.Event()
+    process_closed = threading.Event()
+    quarantine_recorded = threading.Event()
+    original_record_quarantine = web_reader._record_reader_slot_quarantine
+
+    class FakeProcess:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            start_release.wait(5)
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            kill_attempted.set()
+            raise OSError("late kill failed")
+
+        def close(self):
+            process_closed.set()
+
+    class FakeContext:
+        Process = FakeProcess
+
+    def record_quarantine(reason):
+        original_record_quarantine(reason)
+        quarantine_recorded.set()
+
+    monkeypatch.setattr(web_reader, "_WEB_READER_ADMISSION", admission)
+    monkeypatch.setattr(web_reader, "_WEB_READER_QUARANTINED_SLOTS", 0)
+    monkeypatch.setattr(
+        web_reader,
+        "_record_reader_slot_quarantine",
+        record_quarantine,
+    )
+    monkeypatch.setattr(
+        web_reader.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    config = web_reader._WebReaderConfig(
+        app_version="test",
+        timeout_seconds=0.1,
+        dns_timeout_seconds=0.05,
+        max_response_bytes=1024,
+        max_redirects=1,
+        max_text_chars=100,
+    )
+
+    with pytest.raises(web_reader.WebPageUnavailableError, match="agotó el tiempo"):
+        web_reader._run_supervised_web_reader(
+            "https://example.org/late-cleanup-no-verificado",
+            config,
+        )
+
+    assert admission.acquire(blocking=False) is False
+    start_release.set()
+    assert kill_attempted.wait(1)
+    assert quarantine_recorded.wait(1)
+    assert process_closed.is_set() is False
+    assert web_reader._WEB_READER_QUARANTINED_SLOTS == 1
+    assert admission.acquire(blocking=False) is False
 
 
 def test_normalize_web_page_url_encodes_unicode_path_and_query():
@@ -801,7 +941,7 @@ def test_tool_requires_same_turn_search_provenance(
     grant_permissions(user, organization, ["assistant.web.search"])
     monkeypatch.setattr(settings, "assistant_web_reader_enabled", True)
     context = assistant_tools.ToolContext(conversation_id=7, user_message_id=11)
-    source_url = "https://Example.org/ordenanza#articulo-1"
+    source_url = "https://example.org/ordenanza"
     monkeypatch.setattr(
         assistant_tools.web_search_client,
         "search",
@@ -863,6 +1003,25 @@ def test_tool_requires_same_turn_search_provenance(
     )
     assert json.loads(read_result.content)["query"] == "ordenanza municipal"
     assert context.untrusted_external_content_seen is True
+
+    secret = "SECRET_READER_ARGUMENT_5d29"
+    for unsafe_input in (
+        {"url": f"{source_url}#{secret}"},
+        {"url": source_url, "note": secret},
+        {"url": "https://EXAMPLE.org/ordenanza"},
+        {"url": f"https://{secret}@example.org/ordenanza"},
+    ):
+        rejected = assistant_tools.execute_tool(
+            db,
+            user,
+            "read_web_page",
+            unsafe_input,
+            context=context,
+            allowed=frozenset({"read_web_page"}),
+        )
+        assert rejected.ok is False
+        assert "contenido web externo no confiable" in rejected.content
+    assert read_calls == [source_url]
 
     unrelated_context = assistant_tools.ToolContext(
         conversation_id=7,

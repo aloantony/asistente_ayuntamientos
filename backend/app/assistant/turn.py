@@ -46,6 +46,7 @@ from app.assistant.tools import (
     ToolSpec,
     REDACTED_UNTRUSTED_TOOL_NAME,
     UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
+    canonical_untrusted_web_reader_input,
     execute_tool,
     get_available_tool_specs,
     redacted_untrusted_tool_input,
@@ -432,10 +433,16 @@ def _run_agent_turn_events(
                     tool_context,
                     allow_web_reader=True,
                 )
+                canonical_reader_input = canonical_untrusted_web_reader_input(
+                    block.name,
+                    tool_input,
+                    tool_context,
+                    allow_web_reader=True,
+                )
                 persisted_tool_input = (
                     redacted_untrusted_tool_input()
                     if post_taint_blocked
-                    else tool_input
+                    else canonical_reader_input or tool_input
                 )
                 persisted_tool_name = (
                     REDACTED_UNTRUSTED_TOOL_NAME
