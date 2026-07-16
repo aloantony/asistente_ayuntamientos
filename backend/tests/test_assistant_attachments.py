@@ -1,5 +1,8 @@
 import io
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
@@ -7,11 +10,12 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, text
+from sqlalchemy.orm import Session
 
 from app.assistant import attachments as assistant_attachments
-from app.assistant import routes as assistant_routes
 from app.assistant import tools as assistant_tools
+from app.assistant import turn as assistant_turn
 from app.assistant.models import (
     AssistantConversation,
     AssistantMemoryEntry,
@@ -23,7 +27,13 @@ from app.core.config import settings
 from app.documents.models import Document
 from app.documents.storage import LocalStorageService
 from app.main import app
+from app.organizations.models import Organization
+from app.projects import routes as project_routes
 from app.projects.models import Project, project_users
+from app.rbac.locking import (
+    lock_authorization_graph,
+    require_authorization_graph_lock,
+)
 from app.rbac.models import (
     Group,
     Permission,
@@ -31,6 +41,7 @@ from app.rbac.models import (
     role_permissions,
     user_groups,
 )
+from app.users.models import User
 from conftest import headers_for, unique_suffix
 
 
@@ -45,21 +56,27 @@ def text_response(text: str):
     )
 
 
-def tool_response(name: str, tool_input: dict):
+def tool_response(
+    name: str,
+    tool_input: dict,
+    *,
+    call_id: str = "injected-call",
+    provider_state: tuple[dict, ...] = (),
+):
     return SimpleNamespace(
         model="fake-model",
         stop_reason="tool_use",
         content=[
             SimpleNamespace(
                 type="tool_use",
-                id="injected-call",
+                id=call_id,
                 name=name,
                 input=tool_input,
             )
         ],
         usage=SimpleNamespace(input_tokens=1, output_tokens=1),
         deltas=[],
-        provider_state=(),
+        provider_state=provider_state,
     )
 
 
@@ -94,6 +111,11 @@ def attachment_gateway(client):
 
     yield use
     app.dependency_overrides.pop(get_gateway, None)
+
+
+@pytest.fixture(autouse=True)
+def attachment_runtime_without_internal_agent_tools(monkeypatch):
+    monkeypatch.setattr(settings, "assistant_runtime", "anthropic")
 
 
 @pytest.fixture()
@@ -311,6 +333,60 @@ def test_attachment_context_is_ephemeral_non_persistent_and_disables_egress(
     assert "CONTEXTO DE ADJUNTOS" not in second_provider_payload
 
 
+@pytest.mark.parametrize(
+    "endpoint_suffix",
+    ["messages", "messages/stream"],
+)
+def test_hermes_runtime_rejects_attachments_before_file_or_gateway_io(
+    client,
+    db,
+    attachment_user,
+    attachment_gateway,
+    superuser,
+    monkeypatch,
+    endpoint_suffix,
+):
+    user, organization = attachment_user
+    project = create_project(db, organization, user)
+    document = upload_document(
+        client,
+        superuser,
+        project,
+        content=b"material que Hermes no debe recibir",
+        filename="no-hermes.txt",
+        content_type="text/plain",
+    )
+    gateway = attachment_gateway([text_response("No debe ejecutarse")])
+    conversation = create_conversation(client, user)
+    open_calls: list[int] = []
+
+    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
+    monkeypatch.setattr(
+        assistant_attachments,
+        "_secure_open_document",
+        lambda candidate: open_calls.append(candidate.id),
+    )
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/{endpoint_suffix}",
+        headers=headers_for(user),
+        json={
+            "content": "Resume el adjunto",
+            "attachment_ids": [document["id"]],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        assistant_attachments.HERMES_ATTACHMENT_UNAVAILABLE_DETAIL
+    )
+    assert open_calls == []
+    assert gateway.calls == []
+    stored = db.get(AssistantConversation, conversation["id"])
+    assert stored is not None
+    assert stored.messages == []
+
+
 def test_cross_tenant_attachment_is_hidden_before_message_persistence(
     client,
     db,
@@ -419,12 +495,87 @@ def test_attachment_prompt_injection_cannot_execute_semantic_search_or_persist_i
     assert stored is not None
     assert stored.state in {None, "{}"}
     attempted_action = response.json()["messages"][-1]["actions"][0]
-    assert attempted_action["tool"] == "semantic_search_ordinances"
+    assert attempted_action["tool"] == assistant_turn.ATTACHMENT_TOOL_NAME_REDACTION
     assert attempted_action["ok"] is False
     assert attempted_action["input"] == {"redacted": True}
     assert secret not in repr(attempted_action)
     assert secret not in repr(
         [(message.content, message.actions) for message in stored.messages]
+    )
+
+
+def test_attachment_tool_name_id_input_and_provider_state_are_redacted_before_sse(
+    client,
+    db,
+    attachment_user,
+    attachment_gateway,
+    superuser,
+):
+    user, organization = attachment_user
+    project = create_project(db, organization, user)
+    document = upload_document(
+        client,
+        superuser,
+        project,
+        content=b"contenido inocuo",
+        filename="inocuo.txt",
+        content_type="text/plain",
+    )
+    secret = "SECRET-MODEL-TOOL-FIELDS-5ec2"
+    gateway = attachment_gateway(
+        [
+            tool_response(
+                f"semantic_search_ordinances_{secret}",
+                {"query": secret},
+                call_id=f"call-{secret}",
+                provider_state=({"opaque": secret},),
+            ),
+            text_response("He ignorado la llamada no autorizada."),
+        ]
+    )
+    conversation = create_conversation(client, user)
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        headers=headers_for(user),
+        json={
+            "content": "Resume el adjunto sin usar herramientas",
+            "attachment_ids": [document["id"]],
+        },
+    )
+
+    assert response.status_code == 200
+    assert secret not in response.text
+    events = parse_sse_events(response.text)
+    activities = [payload for kind, payload in events if kind == "tool_activity"]
+    assert [activity["tool"] for activity in activities] == [
+        assistant_turn.ATTACHMENT_TOOL_NAME_REDACTION,
+        assistant_turn.ATTACHMENT_TOOL_NAME_REDACTION,
+    ]
+    assert all(
+        activity["input"] == assistant_turn.ATTACHMENT_TOOL_INPUT_REDACTION
+        for activity in activities
+    )
+    done = next(payload for kind, payload in events if kind == "done")
+    assert done["message"]["actions"] == [
+        {
+            "tool": assistant_turn.ATTACHMENT_TOOL_NAME_REDACTION,
+            "ok": False,
+            "input": assistant_turn.ATTACHMENT_TOOL_INPUT_REDACTION,
+            "result": assistant_tools.ATTACHMENT_CONTENT_TOOL_RESULT,
+        }
+    ]
+    assert len(gateway.calls) == 2
+    assert secret not in repr(gateway.calls[1]["messages"])
+    assert assistant_turn.ATTACHMENT_TOOL_CALL_ID_PREFIX in repr(
+        gateway.calls[1]["messages"]
+    )
+
+    db.expire_all()
+    stored = db.get(AssistantConversation, conversation["id"])
+    assert stored is not None
+    assert secret not in repr(
+        [(message.content, message.actions, message.routing) for message in stored.messages]
     )
 
 
@@ -484,20 +635,21 @@ def test_attachment_is_revalidated_after_extraction_before_message_persistence(
     )
     stored_document = db.get(Document, document["id"])
     assert stored_document is not None
-    storage_path = LocalStorageService().resolve_storage_key(
-        stored_document.storage_key
-    )
-    original_prepare = assistant_routes.prepare_attachments
+    original_extract = assistant_turn.extract_attachment_contexts
 
-    def prepare_then_mutate(db_session, current_user, document_ids):
-        prepared = original_prepare(db_session, current_user, document_ids)
-        storage_path.write_bytes(b"contenido modificado tras extraer")
-        return prepared
+    def extract_then_mutate(prepared, *, turn_deadline):
+        extracted = original_extract(
+            prepared,
+            turn_deadline=turn_deadline,
+        )
+        stored_document.checksum_sha256 = "0" * 64
+        db.commit()
+        return extracted
 
     monkeypatch.setattr(
-        assistant_routes,
-        "prepare_attachments",
-        prepare_then_mutate,
+        assistant_turn,
+        "extract_attachment_contexts",
+        extract_then_mutate,
     )
     gateway = attachment_gateway([text_response("No debe ejecutarse")])
     conversation = create_conversation(client, user)
@@ -516,6 +668,70 @@ def test_attachment_is_revalidated_after_extraction_before_message_persistence(
     stored_conversation = db.get(AssistantConversation, conversation["id"])
     assert stored_conversation is not None
     assert stored_conversation.messages == []
+
+
+def test_attachment_file_is_read_before_conversation_or_rbac_locks(
+    client,
+    db,
+    attachment_user,
+    attachment_gateway,
+    superuser,
+    monkeypatch,
+):
+    user, organization = attachment_user
+    project = create_project(db, organization, user)
+    document = upload_document(
+        client,
+        superuser,
+        project,
+        content=b"snapshot previo a locks",
+        filename="orden-locks.txt",
+        content_type="text/plain",
+    )
+    gateway = attachment_gateway([text_response("Leído")])
+    conversation = create_conversation(client, user)
+    order: list[str] = []
+    original_open = assistant_attachments._secure_open_document
+    original_conversation_lock = assistant_turn.lock_conversation_for_confirmation
+    original_graph_lock = assistant_turn.lock_authorization_graph
+
+    def recording_open(candidate):
+        order.append("file")
+        return original_open(candidate)
+
+    def recording_conversation_lock(db_session, conversation_id):
+        order.append("conversation")
+        return original_conversation_lock(db_session, conversation_id)
+
+    def recording_graph_lock(db_session):
+        order.append("rbac")
+        return original_graph_lock(db_session)
+
+    monkeypatch.setattr(
+        assistant_attachments,
+        "_secure_open_document",
+        recording_open,
+    )
+    monkeypatch.setattr(
+        assistant_turn,
+        "lock_conversation_for_confirmation",
+        recording_conversation_lock,
+    )
+    monkeypatch.setattr(
+        assistant_turn,
+        "lock_authorization_graph",
+        recording_graph_lock,
+    )
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        headers=headers_for(user),
+        json={"content": "Lee", "attachment_ids": [document["id"]]},
+    )
+
+    assert response.status_code == 200
+    assert order[:3] == ["file", "rbac", "conversation"]
+    assert gateway.calls
 
 
 def test_conversation_hides_attachment_after_project_membership_revocation(
@@ -637,23 +853,26 @@ def test_attachment_permission_is_rechecked_after_extraction(
         filename="race.txt",
         content_type="text/plain",
     )
-    original_prepare = assistant_routes.prepare_attachments
+    original_extract = assistant_turn.extract_attachment_contexts
 
-    def prepare_then_revoke(db_session, current_user, document_ids):
-        prepared = original_prepare(db_session, current_user, document_ids)
-        db_session.execute(
+    def extract_then_revoke(prepared, *, turn_deadline):
+        extracted = original_extract(
+            prepared,
+            turn_deadline=turn_deadline,
+        )
+        db.execute(
             delete(project_users).where(
                 project_users.c.project_id == project.id,
                 project_users.c.user_id == user.id,
             )
         )
-        db_session.commit()
-        return prepared
+        db.commit()
+        return extracted
 
     monkeypatch.setattr(
-        assistant_routes,
-        "prepare_attachments",
-        prepare_then_revoke,
+        assistant_turn,
+        "extract_attachment_contexts",
+        extract_then_revoke,
     )
     gateway = attachment_gateway([text_response("No debe ejecutarse")])
     conversation = create_conversation(client, user)
@@ -1013,3 +1232,129 @@ def test_attachment_identifiers_reject_duplicates_and_configured_maximum(
 
     assert error.value.status_code == 422
     assert "at most 2 attachments" in error.value.detail
+
+
+def _wait_for_pending_advisory_lock(engine, backend_pid: int) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with engine.connect() as connection:
+            waiting = connection.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_locks "
+                    "WHERE pid = :pid AND locktype = 'advisory' "
+                    "AND NOT granted)"
+                ),
+                {"pid": backend_pid},
+            ).scalar_one()
+        if waiting:
+            return
+        time.sleep(0.02)
+    pytest.fail("RBAC mutator did not wait for the canonical advisory lock")
+
+
+def test_project_membership_revocation_uses_canonical_lock_before_association(
+    engine,
+):
+    suffix = unique_suffix()
+    with Session(engine, expire_on_commit=False) as seed_db:
+        admin = User(
+            email=f"attachment-lock-admin-{suffix}@example.test",
+            hashed_password="not-used",
+            full_name="Attachment lock admin",
+            is_superuser=True,
+        )
+        member = User(
+            email=f"attachment-lock-member-{suffix}@example.test",
+            hashed_password="not-used",
+            full_name="Attachment lock member",
+        )
+        organization = Organization(name=f"Attachment lock org {suffix}")
+        project = Project(
+            name=f"Attachment lock project {suffix}",
+            organization=organization,
+        )
+        seed_db.add_all([admin, member, project])
+        seed_db.flush()
+        seed_db.execute(
+            insert(project_users).values(
+                project_id=project.id,
+                user_id=member.id,
+            )
+        )
+        seed_db.commit()
+        admin_id = admin.id
+        member_id = member.id
+        project_id = project.id
+        organization_id = organization.id
+
+    started = threading.Event()
+    worker_pid: list[int] = []
+
+    def revoke_membership() -> None:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            worker_admin = worker_db.get(User, admin_id)
+            assert worker_admin is not None
+            worker_pid.append(
+                worker_db.execute(text("SELECT pg_backend_pid()"))
+                .scalar_one()
+            )
+            started.set()
+            project_routes.remove_user_from_project(
+                project_id,
+                member_id,
+                worker_db,
+                worker_admin,
+            )
+
+    try:
+        with Session(engine, expire_on_commit=False) as boundary_db:
+            lock_authorization_graph(boundary_db)
+            boundary_db.scalar(
+                select(Project)
+                .where(Project.id == project_id)
+                .with_for_update(of=Project)
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(revoke_membership)
+                assert started.wait(timeout=10)
+                _wait_for_pending_advisory_lock(engine, worker_pid[0])
+
+                with engine.connect() as observer:
+                    assert observer.execute(
+                        select(project_users.c.project_id).where(
+                            project_users.c.project_id == project_id,
+                            project_users.c.user_id == member_id,
+                        )
+                    ).scalar_one() == project_id
+
+                boundary_db.commit()
+                future.result(timeout=10)
+
+        with engine.connect() as verification:
+            assert verification.execute(
+                select(project_users.c.project_id).where(
+                    project_users.c.project_id == project_id,
+                    project_users.c.user_id == member_id,
+                )
+            ).scalar_one_or_none() is None
+    finally:
+        with engine.begin() as cleanup:
+            cleanup.execute(
+                delete(Project).where(Project.id == project_id)
+            )
+            cleanup.execute(
+                delete(Organization).where(Organization.id == organization_id)
+            )
+            cleanup.execute(
+                delete(User).where(User.id.in_([admin_id, member_id]))
+            )
+
+
+def test_authorization_graph_token_fails_closed_after_transaction_end(engine):
+    with Session(engine) as db_session:
+        authorization_lock = lock_authorization_graph(db_session)
+        db_session.commit()
+
+        with pytest.raises(RuntimeError, match="is not active"):
+            require_authorization_graph_lock(db_session, authorization_lock)

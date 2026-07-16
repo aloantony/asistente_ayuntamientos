@@ -17,6 +17,7 @@ from app.db.session import get_db
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization, organization_users
 from app.projects.models import Project, project_groups
+from app.rbac.locking import lock_authorization_graph
 from app.rbac.models import Group, group_roles, user_groups
 from app.rbac.permissions import has_permission
 from app.users.models import User
@@ -96,6 +97,7 @@ def update_group(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Group:
+    lock_authorization_graph(db)
     group = get_existing_group(db, group_id)
     require_groups_manage(db, current_user, group.organization_id)
 
@@ -135,6 +137,7 @@ def delete_group(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AdminGroupDeleteResponse:
+    lock_authorization_graph(db)
     group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
     if group is None:
         raise HTTPException(
@@ -162,6 +165,7 @@ def add_user_to_group(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> GroupMembershipResponse:
+    lock_authorization_graph(db)
     group, user = ensure_group_and_user_exist(
         db,
         group_id=group_id,
@@ -202,6 +206,7 @@ def remove_user_from_group(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> GroupMembershipResponse:
+    lock_authorization_graph(db)
     group, _ = ensure_group_and_user_exist(
         db,
         group_id=group_id,

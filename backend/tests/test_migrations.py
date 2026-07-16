@@ -1322,6 +1322,143 @@ def test_attachment_audit_upgrade_preserves_legacy_rows_and_blocks_downgrade(
         engine.dispose()
 
 
+def test_attachment_audit_downgrade_waits_for_concurrent_insert(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0027")
+    engine = create_engine(migration_database_url)
+    writer = engine.connect()
+    transaction = writer.begin()
+    migration_process: subprocess.Popen[str] | None = None
+
+    try:
+        suffix = uuid.uuid4().hex
+        checksum = "b" * 64
+        user_id = writer.execute(
+            text(
+                "INSERT INTO users (email, hashed_password, full_name) "
+                "VALUES (:email, 'hash', 'Concurrent attachment audit') "
+                "RETURNING id"
+            ),
+            {"email": f"attachment-concurrent-{suffix}@example.test"},
+        ).scalar_one()
+        organization_id = writer.execute(
+            text(
+                "INSERT INTO organizations (name) "
+                "VALUES (:name) RETURNING id"
+            ),
+            {"name": f"Concurrent attachment organization {suffix}"},
+        ).scalar_one()
+        project_id = writer.execute(
+            text(
+                "INSERT INTO projects (name, organization_id) "
+                "VALUES (:name, :organization_id) RETURNING id"
+            ),
+            {
+                "name": f"Concurrent attachment project {suffix}",
+                "organization_id": organization_id,
+            },
+        ).scalar_one()
+        document_id = writer.execute(
+            text(
+                "INSERT INTO documents ("
+                "organization_id, project_id, original_filename, "
+                "stored_filename, storage_key, content_type, size_bytes, "
+                "checksum_sha256, uploaded_by_id"
+                ") VALUES ("
+                ":organization_id, :project_id, 'concurrent.txt', "
+                "'concurrent.txt', :storage_key, 'text/plain', 6, "
+                ":checksum, :user_id"
+                ") RETURNING id"
+            ),
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "storage_key": (
+                    f"organizations/{organization_id}/projects/"
+                    f"{project_id}/concurrent.txt"
+                ),
+                "checksum": checksum,
+                "user_id": user_id,
+            },
+        ).scalar_one()
+        conversation_id = writer.execute(
+            text(
+                "INSERT INTO assistant_conversations (title, created_by_id) "
+                "VALUES ('Concurrent attachment audit', :user_id) "
+                "RETURNING id"
+            ),
+            {"user_id": user_id},
+        ).scalar_one()
+        message_id = writer.execute(
+            text(
+                "INSERT INTO assistant_messages (conversation_id, role, content) "
+                "VALUES (:conversation_id, 'user', 'audit') RETURNING id"
+            ),
+            {"conversation_id": conversation_id},
+        ).scalar_one()
+        relation_id = writer.execute(
+            text(
+                "INSERT INTO assistant_message_attachments ("
+                "message_id, document_id, position, context_status, "
+                "context_char_count, authorization_checked_at, "
+                "authorized_by_id, authorized_organization_id, "
+                "authorized_project_id, authorized_document_checksum_sha256, "
+                "authorization_scope"
+                ") VALUES ("
+                ":message_id, :document_id, 0, 'ready', 6, now(), "
+                ":user_id, :organization_id, :project_id, :checksum, "
+                "'superuser'"
+                ") RETURNING id"
+            ),
+            {
+                "message_id": message_id,
+                "document_id": document_id,
+                "user_id": user_id,
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "checksum": checksum,
+            },
+        ).scalar_one()
+
+        migration_process = start_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260716_0026",
+        )
+        wait_for_exclusive_lock(
+            engine,
+            "assistant_message_attachments",
+            migration_process,
+        )
+        assert migration_process.poll() is None
+
+        transaction.commit()
+        stdout, stderr = migration_process.communicate(timeout=15)
+        assert migration_process.returncode != 0, stdout
+        assert "contains 1 attachment audit row(s)" in stderr
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260716_0027"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM assistant_message_attachments "
+                    "WHERE id = :id"
+                ),
+                {"id": relation_id},
+            ).scalar_one() == 1
+    finally:
+        if migration_process is not None and migration_process.poll() is None:
+            migration_process.kill()
+            migration_process.communicate()
+        if transaction.is_active:
+            transaction.rollback()
+        writer.close()
+        engine.dispose()
+
+
 def test_population_provenance_migration_is_additive_and_reversible(
     migration_database_url: str,
 ) -> None:

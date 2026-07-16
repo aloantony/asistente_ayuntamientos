@@ -18,7 +18,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.assistant.attachments import attachment_payload, prepare_attachments
+from app.assistant.attachments import (
+    attachment_payload,
+    ensure_attachment_runtime_supported,
+    prepare_attachments,
+)
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
 from app.assistant.models import (
     AssistantAdminFeedback,
@@ -760,6 +764,7 @@ def send_message(
             detail="Assistant is not configured",
         )
 
+    ensure_attachment_runtime_supported(bool(payload.attachment_ids))
     prepared_attachments = prepare_attachments(
         db,
         current_user,
@@ -816,6 +821,7 @@ def send_message_stream(
             detail="Assistant is not configured",
         )
 
+    ensure_attachment_runtime_supported(bool(payload.attachment_ids))
     prepared_attachments = prepare_attachments(
         db,
         current_user,
