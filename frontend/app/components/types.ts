@@ -390,6 +390,11 @@ export type GeoMapItem = {
   entity_type: GeoEntityType;
   entity_id: number;
   role: GeoLocationRole;
+  layer_key: string;
+  layer_label: string;
+  layer_color: string;
+  item_type: string | null;
+  condition_status: AssetConditionStatus | null;
   title: string;
   subtitle: string | null;
   status: string;
