@@ -57,7 +57,7 @@ from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
 )
-from app.ordinances.embeddings import embed_text
+from app.ordinances.embeddings import embed_text_supervised
 from app.ordinances.search import OrdinanceSearchOptions, search_ordinance_chunks
 from app.projects.access import select_visible_projects
 from app.projects.models import Project
@@ -1538,7 +1538,9 @@ def _semantic_search_ordinances(
         embedding_model = prepared_embedding.model
         embedding_status = prepared_embedding.status
     else:
-        query_vector, embedding_model, embedding_status = embed_text(query_text)
+        query_vector, embedding_model, embedding_status = embed_text_supervised(
+            query_text
+        )
     if embedding_status != "ready" or query_vector is None:
         return {
             "query": query_text,
@@ -1607,7 +1609,9 @@ def prepare_ordinance_search_embedding(
         raise ValueError(
             f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
         )
-    query_vector, embedding_model, embedding_status = embed_text(query_text)
+    query_vector, embedding_model, embedding_status = embed_text_supervised(
+        query_text
+    )
     return PreparedOrdinanceSearchEmbedding(
         query=query_text,
         vector=query_vector,
