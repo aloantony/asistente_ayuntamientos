@@ -2,16 +2,27 @@ import type {
   MaintenanceOrder,
   MaintenanceOrderCreate,
   MaintenanceOrderDetail,
+  MaintenanceOrderPriority,
+  MaintenanceOrderStatus,
   MaintenanceOrderTransition,
   MaintenanceOrderUpdate,
+  MaintenanceType,
 } from "../components/types";
 import { adminRequest, adminRequestWithTotal } from "./api";
 
-type MaintenanceOrderListFilters = {
+export type MaintenanceOrderListFilters = {
   organizationId: number;
-  assetId: number;
+  assetId?: number;
+  status?: MaintenanceOrderStatus;
+  priority?: MaintenanceOrderPriority;
+  maintenanceType?: MaintenanceType;
+  assignedToId?: number;
+  scheduledFrom?: string;
+  scheduledTo?: string;
+  query?: string;
   includeClosed?: boolean;
   limit?: number;
+  offset?: number;
 };
 
 export function fetchMaintenanceOrders(
@@ -20,10 +31,35 @@ export function fetchMaintenanceOrders(
 ) {
   const params = new URLSearchParams({
     organization_id: String(filters.organizationId),
-    asset_id: String(filters.assetId),
     include_closed: String(filters.includeClosed ?? true),
     limit: String(filters.limit ?? 100),
+    offset: String(filters.offset ?? 0),
   });
+
+  if (filters.assetId !== undefined) {
+    params.set("asset_id", String(filters.assetId));
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (filters.priority) {
+    params.set("priority", filters.priority);
+  }
+  if (filters.maintenanceType) {
+    params.set("maintenance_type", filters.maintenanceType);
+  }
+  if (filters.assignedToId !== undefined) {
+    params.set("assigned_to_id", String(filters.assignedToId));
+  }
+  if (filters.scheduledFrom) {
+    params.set("scheduled_from", filters.scheduledFrom);
+  }
+  if (filters.scheduledTo) {
+    params.set("scheduled_to", filters.scheduledTo);
+  }
+  if (filters.query?.trim()) {
+    params.set("q", filters.query.trim());
+  }
 
   return adminRequestWithTotal<MaintenanceOrder[]>(
     `/maintenance/orders?${params.toString()}`,
