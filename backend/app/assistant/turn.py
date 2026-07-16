@@ -44,9 +44,12 @@ from app.assistant.tools import (
     ToolContext,
     ToolResult,
     ToolSpec,
-    UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+    REDACTED_UNTRUSTED_TOOL_NAME,
+    UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
     execute_tool,
     get_available_tool_specs,
+    redacted_untrusted_tool_input,
+    tool_is_blocked_after_untrusted_content,
 )
 from app.core.config import settings
 from app.users.models import User
@@ -423,12 +426,28 @@ def _run_agent_turn_events(
                     continue
                 tool_input = dict(block.input)
                 tool = tools_by_name.get(block.name)
+                post_taint_blocked = tool_is_blocked_after_untrusted_content(
+                    block.name,
+                    tool_input,
+                    tool_context,
+                    allow_web_reader=True,
+                )
+                persisted_tool_input = (
+                    redacted_untrusted_tool_input()
+                    if post_taint_blocked
+                    else tool_input
+                )
+                persisted_tool_name = (
+                    REDACTED_UNTRUSTED_TOOL_NAME
+                    if post_taint_blocked
+                    else block.name
+                )
                 yield TurnEvent(
                     "tool_activity",
                     {
-                        "tool": block.name,
+                        "tool": persisted_tool_name,
                         "status": "started",
-                        "input": tool_input,
+                        "input": persisted_tool_input,
                     },
                 )
                 signature = tool_call_signature(block.name, tool_input)
@@ -452,13 +471,9 @@ def _run_agent_turn_events(
                 elif tool_calls_used >= tool_call_budget:
                     result = ToolResult(content=TOOL_CALL_BUDGET_RESULT, ok=False)
                     force_synthesis_reason = "tool_call_budget"
-                elif (
-                    tool_context.untrusted_external_content_seen
-                    and tool is not None
-                    and not tool.read_only
-                ):
+                elif post_taint_blocked:
                     result = ToolResult(
-                        content=UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
+                        content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
                         ok=False,
                     )
                 else:
@@ -496,18 +511,21 @@ def _run_agent_turn_events(
                         # again later in this same turn.
                         seen_read_calls.clear()
                 action = {
-                    "tool": block.name,
+                    "tool": persisted_tool_name,
                     "ok": result.ok,
-                    "input": tool_input,
-                    "result": tool_result_for_activity(block.name, result.content),
+                    "input": persisted_tool_input,
+                    "result": tool_result_for_activity(
+                        persisted_tool_name,
+                        result.content,
+                    ),
                 }
                 actions.append(action)
                 yield TurnEvent(
                     "tool_activity",
                     {
-                        "tool": block.name,
+                        "tool": persisted_tool_name,
                         "status": "finished",
-                        "input": tool_input,
+                        "input": persisted_tool_input,
                         "ok": result.ok,
                         "result": action["result"],
                     },

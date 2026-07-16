@@ -405,6 +405,55 @@ def test_status_exposes_text_reader_opt_in_but_never_realtime_reader(
     assert "read_web_page" in {tool["name"] for tool in body["tools"]}
 
 
+def test_hermes_catalog_and_execution_boundary_omit_web_tools(
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    monkeypatch.setattr(settings, "assistant_web_reader_enabled", True)
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda **kwargs: pytest.fail("Hermes must not execute backend web search"),
+    )
+    monkeypatch.setattr(
+        assistant_tools.web_reader,
+        "read_web_page",
+        lambda url: pytest.fail("Hermes must not execute backend page reader"),
+    )
+
+    specs = assistant_tools.get_available_tool_specs(db, user)
+    tool_names = {spec.name for spec in specs}
+    search_result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "consulta pública"},
+        context=assistant_tools.ToolContext(),
+    )
+    reader_result = assistant_tools.execute_tool(
+        db,
+        user,
+        "read_web_page",
+        {"url": "https://example.org/fuente"},
+        context=assistant_tools.ToolContext(),
+    )
+
+    assert "web_search" not in tool_names
+    assert "read_web_page" not in tool_names
+    assert search_result.ok is False
+    assert reader_result.ok is False
+    assert "runtime Hermes" in search_result.content
+    assert "runtime Hermes" in reader_result.content
+
+
 def test_web_search_compacts_complete_sources_below_action_limit(
     db,
     assistant_user,
@@ -1317,6 +1366,7 @@ def test_realtime_web_search_snippet_blocks_later_mutation_in_same_turn(
 
     assert mutation.status_code == 200
     assert mutation.json()["action"]["ok"] is False
+    assert mutation.json()["action"]["input"] == {"redacted": True}
     assert "contenido web externo no confiable" in mutation.json()["output"]
     assert mutation.json()["confirmation_prompt"] is None
     state = get_conversation_state(db, conversation["id"])
@@ -1326,6 +1376,116 @@ def test_realtime_web_search_snippet_blocks_later_mutation_in_same_turn(
     assert db.scalars(
         select(Requirement).where(Requirement.title == "Inyección realtime")
     ).all() == []
+
+
+def test_realtime_post_taint_search_redacts_input_before_state_commit(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    secret = "SECRET_POST_TAINT_REALTIME_0c813b"
+    provider_queries = []
+
+    def fake_search(*, query, limit):
+        provider_queries.append(query)
+        return [
+            {
+                "title": "Fuente externa",
+                "url": "https://example.org/fuente",
+                "snippet": "Contenido externo no confiable",
+                "published_at": None,
+            }
+        ]
+
+    monkeypatch.setattr(assistant_tools.web_search_client, "search", fake_search)
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    assert post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Busca una fuente pública",
+    ).status_code == 200
+    first_search = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="search-initial",
+        name="web_search",
+        arguments={"query": "consulta pública", "limit": 1},
+    )
+    assert first_search.status_code == 200
+    assert first_search.json()["action"]["ok"] is True
+
+    blocked_search = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id=f"search-call-{secret}",
+        name="web_search",
+        arguments={"query": secret, "limit": 1},
+    )
+    blocked_unknown = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id=f"unknown-call-{secret}",
+        name=f"unknown-tool-{secret}",
+        arguments={"query": secret},
+    )
+
+    assert blocked_search.status_code == 200
+    assert blocked_unknown.status_code == 200
+    assert provider_queries == ["consulta pública"]
+    assert secret not in blocked_search.text
+    assert secret not in blocked_unknown.text
+    for response in (blocked_search, blocked_unknown):
+        body = response.json()
+        assert body["action"]["ok"] is False
+        assert body["action"]["tool"] == (
+            assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME
+        )
+        assert body["action"]["call_id"].startswith("redacted-")
+        assert body["action"]["input"] == {"redacted": True}
+        assert "contenido web externo no confiable" in body["output"]
+
+    state = get_conversation_state(db, conversation["id"])
+    assert secret not in json.dumps(state, ensure_ascii=False)
+    calls = state["realtime_voice"]["active_turn"]["calls"]
+    for raw_call_id in (
+        f"search-call-{secret}",
+        f"unknown-call-{secret}",
+    ):
+        call_id = assistant_tools.redacted_untrusted_call_id(raw_call_id)
+        stored_call = calls[call_id]
+        assert stored_call["name"] == (
+            assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME
+        )
+        assert stored_call["input"] == {"redacted": True}
+        assert stored_call["action"]["call_id"] == call_id
+        assert stored_call["action"]["tool"] == (
+            assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME
+        )
+        assert stored_call["action"]["input"] == {"redacted": True}
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    assert secret not in (stored_conversation.state or "")
 
 
 def test_realtime_legacy_turn_rebuilds_taint_from_finished_web_search(
@@ -3330,6 +3490,84 @@ def test_agent_turn_searches_reads_visible_source_and_cites_it(
     assert "text" not in page_activity
 
 
+def test_hermes_turn_rejects_model_requested_web_tools_before_external_content(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    monkeypatch.setattr(settings, "assistant_web_reader_enabled", True)
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda **kwargs: pytest.fail("Hermes turn must not call web provider"),
+    )
+    monkeypatch.setattr(
+        assistant_tools.web_reader,
+        "read_web_page",
+        lambda url: pytest.fail("Hermes turn must not call page reader"),
+    )
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "hermes-search",
+                            "web_search",
+                            {"query": "contenido externo", "limit": 1},
+                        ),
+                        tool_use_block(
+                            "hermes-reader",
+                            "read_web_page",
+                            {"url": "https://example.org/fuente"},
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No puedo usar web con este runtime.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca y lee una fuente web"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert len(gateway.calls) == 2
+    assert all(
+        {tool["name"] for tool in call["tools"]}.isdisjoint(
+            {"web_search", "read_web_page"}
+        )
+        for call in gateway.calls
+    )
+    actions = response.json()["messages"][-1]["actions"]
+    assert [action["tool"] for action in actions] == [
+        "web_search",
+        "read_web_page",
+    ]
+    assert all(action["ok"] is False for action in actions)
+    assert all("runtime Hermes" in action["result"] for action in actions)
+
+
 def test_web_page_prompt_injection_cannot_trigger_mutation_in_same_turn(
     client,
     db,
@@ -3444,16 +3682,153 @@ def test_web_page_prompt_injection_cannot_trigger_mutation_in_same_turn(
     assert [action["tool"] for action in actions] == [
         "web_search",
         "read_web_page",
-        "create_requirement",
+        assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME,
     ]
     assert actions[-1]["ok"] is False
+    assert actions[-1]["input"] == {"redacted": True}
     assert "contenido web externo no confiable" in actions[-1]["result"]
     assert db.scalars(
         select(Requirement).where(Requirement.title == "Inyección desde web")
     ).all() == []
 
 
-def test_unknown_tool_after_web_taint_returns_safe_tool_error(
+def test_text_post_taint_search_is_not_called_or_persisted_or_emitted(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    secret = "SECRET_POST_TAINT_TEXT_9f06a8"
+    provider_queries = []
+
+    def fake_search(*, query, limit):
+        provider_queries.append(query)
+        return [
+            {
+                "title": "Fuente pública",
+                "url": "https://example.org/fuente",
+                "snippet": "Contenido público no confiable",
+                "published_at": None,
+            }
+        ]
+
+    monkeypatch.setattr(assistant_tools.web_search_client, "search", fake_search)
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "search-safe",
+                            "web_search",
+                            {"query": "consulta pública", "limit": 1},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "search-secret",
+                            "web_search",
+                            {"query": secret, "limit": 1},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            f"call-id-{secret}",
+                            f"unknown-tool-{secret}",
+                            {"query": secret},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He detenido la segunda búsqueda.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Haz una búsqueda pública y detente"},
+        headers=headers_for(user),
+    ) as response:
+        raw_events = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert provider_queries == ["consulta pública"]
+    assert secret not in raw_events
+    events = parse_sse(raw_events)
+    tool_events = [
+        event["data"]
+        for event in events
+        if event["event"] == "tool_activity"
+    ]
+    blocked_call_events = [
+        event
+        for event in tool_events
+        if event["tool"] == assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME
+    ]
+    assert [event["status"] for event in blocked_call_events] == [
+        "started",
+        "finished",
+        "started",
+        "finished",
+    ]
+    assert all(
+        event["input"] == {"redacted": True}
+        for event in blocked_call_events
+    )
+
+    done_message = events[-1]["data"]["message"]
+    assert all(
+        action["tool"] == assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME
+        and action["input"] == {"redacted": True}
+        for action in done_message["actions"][-2:]
+    )
+    assert secret not in json.dumps(done_message, ensure_ascii=False)
+    stored_assistant = db.scalar(
+        select(AssistantMessage)
+        .where(
+            AssistantMessage.conversation_id == conversation["id"],
+            AssistantMessage.role == "assistant",
+        )
+        .order_by(AssistantMessage.id.desc())
+    )
+    assert stored_assistant is not None
+    stored_actions = json.loads(stored_assistant.actions or "[]")
+    assert all(
+        action["tool"] == assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME
+        and action["input"] == {"redacted": True}
+        for action in stored_actions[-2:]
+    )
+    assert secret not in json.dumps(stored_actions, ensure_ascii=False)
+    stored_conversation = db.get(AssistantConversation, conversation["id"])
+    assert stored_conversation is not None
+    assert secret not in (stored_conversation.state or "")
+
+
+def test_unknown_tool_after_web_taint_is_blocked_and_redacted(
     client,
     assistant_user,
     grant_permissions,
@@ -3524,10 +3899,11 @@ def test_unknown_tool_after_web_taint_returns_safe_tool_error(
     actions = response.json()["messages"][-1]["actions"]
     assert [action["tool"] for action in actions] == [
         "web_search",
-        "non_existent_tool",
+        assistant_tools.REDACTED_UNTRUSTED_TOOL_NAME,
     ]
     assert actions[-1]["ok"] is False
-    assert "Herramienta no disponible" in actions[-1]["result"]
+    assert actions[-1]["input"] == {"redacted": True}
+    assert "contenido web externo no confiable" in actions[-1]["result"]
 
 
 def test_tool_call_budget_skips_excess_calls_and_forces_tool_free_synthesis(
@@ -5930,11 +6306,35 @@ def test_hermes_agent_url_normalizes_v1(monkeypatch):
     assert _hermes_agent_url("health") == "http://127.0.0.1:8642/health"
 
 
+def test_hermes_runtime_requires_native_toolset_attestation(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "hermes_agent_api_key", "test-key")
+    monkeypatch.setattr(
+        settings,
+        "hermes_agent_native_tools_disabled_confirmed",
+        False,
+    )
+
+    assert assistant_gateway.hermes_agent_enabled() is False
+
+    monkeypatch.setattr(
+        settings,
+        "hermes_agent_native_tools_disabled_confirmed",
+        True,
+    )
+    assert assistant_gateway.hermes_agent_enabled() is True
+
+
 def test_hermes_gateway_uses_smaller_turn_timeout(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
     monkeypatch.setattr(settings, "environment", "development")
     monkeypatch.setattr(settings, "hermes_agent_api_key", "test-key")
+    monkeypatch.setattr(
+        settings,
+        "hermes_agent_native_tools_disabled_confirmed",
+        True,
+    )
     monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 5.0)
     monkeypatch.setattr(settings, "hermes_agent_timeout_seconds", 120.0)
 

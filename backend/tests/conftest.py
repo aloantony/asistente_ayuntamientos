@@ -11,6 +11,9 @@ _TEST_DOCUMENT_STORAGE_ROOT = tempfile.mkdtemp(
     prefix="asistente-ayuntamientos-test-documents-"
 )
 os.environ["DOCUMENT_STORAGE_ROOT"] = _TEST_DOCUMENT_STORAGE_ROOT
+# Product behavior must not depend on the developer's selected local runtime.
+# Runtime-specific tests override this setting explicitly after app import.
+os.environ["ASSISTANT_RUNTIME"] = "anthropic"
 
 import pytest
 from fastapi.testclient import TestClient

@@ -6,6 +6,8 @@ user could do through the API. Human-supervision principle: the agent creates
 requirements as drafts (or moves them to 'submitted'); review states stay
 human-only.
 """
+import hashlib
+import hmac
 import json
 import uuid
 from collections.abc import Callable
@@ -771,16 +773,58 @@ class ToolContext:
     web_search_provenance: dict[str, WebSearchProvenance] = field(
         default_factory=dict
     )
-    # Once a search snippet or page body has entered the model context, no
-    # mutating tool may run for the remainder of this turn.
+    # Once a search snippet or page body has entered the model context, only
+    # reads of URLs authorized by that initial search may continue.
     untrusted_external_content_seen: bool = False
 
 
-UNTRUSTED_EXTERNAL_MUTATION_BLOCKED = (
-    "No se ejecutó la herramienta de escritura porque este turno ya ha recibido "
-    "contenido web externo no confiable. Inicia un nuevo mensaje para realizar "
-    "la acción después de revisar la información."
+UNTRUSTED_EXTERNAL_TOOL_BLOCKED = (
+    "No se ejecutó la herramienta porque este turno ya ha recibido contenido "
+    "web externo no confiable. Solo se permite leer las fuentes localizadas por "
+    "la búsqueda inicial; inicia un nuevo mensaje para realizar otra operación."
 )
+# Backwards-compatible import for integrations that used the narrower name.
+UNTRUSTED_EXTERNAL_MUTATION_BLOCKED = UNTRUSTED_EXTERNAL_TOOL_BLOCKED
+REDACTED_UNTRUSTED_TOOL_NAME = "redacted_post_taint_tool"
+HERMES_WEB_TOOLS_BLOCKED = (
+    "La búsqueda y lectura web están desactivadas para el runtime Hermes "
+    "porque su toolset nativo no forma parte de la frontera auditada."
+)
+
+
+def tool_is_blocked_after_untrusted_content(
+    name: str,
+    tool_input: dict,
+    context: ToolContext,
+    *,
+    allow_web_reader: bool,
+) -> bool:
+    """Fail closed after web taint, including for unknown model tool names."""
+    if not context.untrusted_external_content_seen:
+        return False
+    if not allow_web_reader or name != "read_web_page":
+        return True
+    try:
+        normalized_url = web_reader.normalize_web_page_url(tool_input.get("url"))
+    except (TypeError, ValueError):
+        return True
+    return normalized_url not in context.web_search_provenance
+
+
+def redacted_untrusted_tool_input() -> dict[str, bool]:
+    """Return the only payload safe to persist for a post-taint denial."""
+    return {"redacted": True}
+
+
+def redacted_untrusted_call_id(value: object) -> str:
+    """Return a deterministic correlation ID without retaining model text."""
+    digest = hmac.new(
+        settings.secret_key.encode("utf-8"),
+        b"assistant-realtime-post-taint-call-id\0"
+        + str(value).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"redacted-{digest}"
 
 
 def execute_tool(
@@ -790,7 +834,27 @@ def execute_tool(
     tool_input: dict,
     context: ToolContext | None = None,
     allowed: frozenset[str] | None = None,
+    *,
+    allow_web_reader_after_taint: bool = True,
 ) -> ToolResult:
+    context_obj = context or ToolContext()
+    if tool_is_blocked_after_untrusted_content(
+        name,
+        tool_input,
+        context_obj,
+        allow_web_reader=allow_web_reader_after_taint,
+    ):
+        return ToolResult(
+            content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
+            ok=False,
+        )
+
+    if (
+        settings.assistant_runtime == "hermes_agent"
+        and name in {"web_search", "read_web_page"}
+    ):
+        return ToolResult(content=HERMES_WEB_TOOLS_BLOCKED, ok=False)
+
     if allowed is not None and name not in allowed:
         return ToolResult(
             content=f"Herramienta no disponible para este agente: {name}",
@@ -800,13 +864,6 @@ def execute_tool(
     spec = TOOL_CATALOG.get(name)
     if spec is None:
         return ToolResult(content=f"Herramienta desconocida: {name}", ok=False)
-
-    context_obj = context or ToolContext()
-    if context_obj.untrusted_external_content_seen and not spec.read_only:
-        return ToolResult(
-            content=UNTRUSTED_EXTERNAL_MUTATION_BLOCKED,
-            ok=False,
-        )
 
     try:
         result = spec.executor(db, current_user, tool_input, context_obj)
@@ -2031,6 +2088,10 @@ def get_available_tool_specs(
         spec
         for name, spec in TOOL_CATALOG.items()
         if name in requested_tool_names
+        and (
+            settings.assistant_runtime != "hermes_agent"
+            or name not in {"web_search", "read_web_page"}
+        )
         and (
             name not in {"web_search", "read_web_page"}
             or web_search_client.enabled

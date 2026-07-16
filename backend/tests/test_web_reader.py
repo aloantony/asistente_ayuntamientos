@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import socket
 import ssl
+import threading
 import time
 
 import pytest
@@ -175,6 +176,248 @@ def test_total_deadline_stops_slow_headers_without_orphan_process(monkeypatch):
     assert {
         child.pid for child in multiprocessing.active_children()
     } <= existing_children
+
+
+def test_partial_ipc_message_times_out_and_reaps_worker(monkeypatch):
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("requires fork to install a deterministic child fake")
+
+    def partial_worker(send_socket, source_url, config, deadline):
+        send_socket.sendall(b'{"status":"ok"')
+        time.sleep(5)
+
+    real_get_context = multiprocessing.get_context
+    fork_context = real_get_context("fork")
+    monkeypatch.setattr(
+        web_reader.multiprocessing,
+        "get_context",
+        lambda method: fork_context if method == "spawn" else real_get_context(method),
+    )
+    monkeypatch.setattr(web_reader, "_web_reader_worker", partial_worker)
+    monkeypatch.setattr(settings, "web_page_timeout_seconds", 0.15)
+    existing_children = {child.pid for child in multiprocessing.active_children()}
+
+    started_at = time.monotonic()
+    with pytest.raises(web_reader.WebPageUnavailableError, match="agotó el tiempo"):
+        web_reader.read_web_page("https://example.org/partial-ipc")
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed <= (
+        settings.web_page_timeout_seconds
+        + web_reader.WEB_READER_MAX_CLEANUP_OVERHEAD_SECONDS
+        + 0.5
+    )
+    assert {
+        child.pid for child in multiprocessing.active_children()
+    } <= existing_children
+
+
+def test_blocked_process_start_returns_at_deadline_then_reaps_late_child(
+    monkeypatch,
+):
+    start_release = threading.Event()
+    process_closed = threading.Event()
+    admission = threading.BoundedSemaphore(1)
+    processes = []
+
+    class FakeProcess:
+        def __init__(self, **kwargs):
+            self.alive = False
+            self.terminated = False
+            processes.append(self)
+
+        def start(self):
+            start_release.wait(5)
+            self.alive = True
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def kill(self):
+            self.alive = False
+
+        def close(self):
+            process_closed.set()
+
+    class FakeContext:
+        Process = FakeProcess
+
+    monkeypatch.setattr(web_reader, "_WEB_READER_ADMISSION", admission)
+    monkeypatch.setattr(
+        web_reader.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    config = web_reader._WebReaderConfig(
+        app_version="test",
+        timeout_seconds=0.1,
+        dns_timeout_seconds=0.05,
+        max_response_bytes=1024,
+        max_redirects=1,
+        max_text_chars=100,
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(web_reader.WebPageUnavailableError, match="agotó el tiempo"):
+        web_reader._run_supervised_web_reader(
+            "https://example.org/start-bloqueado",
+            config,
+        )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed <= 0.35
+    assert admission.acquire(blocking=False) is False
+
+    start_release.set()
+    assert process_closed.wait(1)
+    assert processes[0].terminated is True
+    assert processes[0].alive is False
+    assert admission.acquire(blocking=False) is True
+    admission.release()
+
+
+def test_reader_admission_is_fail_fast_before_process_resources(monkeypatch):
+    admission = threading.BoundedSemaphore(1)
+    assert admission.acquire(blocking=False) is True
+    monkeypatch.setattr(web_reader, "_WEB_READER_ADMISSION", admission)
+    monkeypatch.setattr(
+        web_reader.multiprocessing,
+        "get_context",
+        lambda method: pytest.fail("admission must precede process resources"),
+    )
+    config = web_reader._WebReaderConfig(
+        app_version="test",
+        timeout_seconds=1,
+        dns_timeout_seconds=0.1,
+        max_response_bytes=1024,
+        max_redirects=1,
+        max_text_chars=100,
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(web_reader.WebPageUnavailableError, match="capacidad"):
+        web_reader._run_supervised_web_reader(
+            "https://example.org/saturado",
+            config,
+        )
+
+    assert time.monotonic() - started_at <= 0.25
+    admission.release()
+
+
+def test_reader_resource_oserror_is_normalized_and_releases_admission(monkeypatch):
+    admission = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(web_reader, "_WEB_READER_ADMISSION", admission)
+    monkeypatch.setattr(
+        web_reader.socket,
+        "socketpair",
+        lambda *args: (_ for _ in ()).throw(OSError("fd exhaustion")),
+    )
+    config = web_reader._WebReaderConfig(
+        app_version="test",
+        timeout_seconds=1,
+        dns_timeout_seconds=0.1,
+        max_response_bytes=1024,
+        max_redirects=1,
+        max_text_chars=100,
+    )
+
+    with pytest.raises(
+        web_reader.WebPageUnavailableError,
+        match="reservar recursos",
+    ):
+        web_reader._run_supervised_web_reader(
+            "https://example.org/sin-descriptores",
+            config,
+        )
+
+    assert admission.acquire(blocking=False) is True
+    admission.release()
+
+
+def test_process_start_runtime_error_is_normalized_and_resources_are_closed(
+    monkeypatch,
+):
+    admission = threading.BoundedSemaphore(1)
+    process_closed = threading.Event()
+
+    class FakeProcess:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("spawn unavailable")
+
+        def close(self):
+            process_closed.set()
+
+    class FakeContext:
+        Process = FakeProcess
+
+    monkeypatch.setattr(web_reader, "_WEB_READER_ADMISSION", admission)
+    monkeypatch.setattr(
+        web_reader.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    config = web_reader._WebReaderConfig(
+        app_version="test",
+        timeout_seconds=1,
+        dns_timeout_seconds=0.1,
+        max_response_bytes=1024,
+        max_redirects=1,
+        max_text_chars=100,
+    )
+
+    with pytest.raises(
+        web_reader.WebPageUnavailableError,
+        match="iniciar el proceso aislado",
+    ):
+        web_reader._run_supervised_web_reader(
+            "https://example.org/spawn-error",
+            config,
+        )
+
+    assert process_closed.is_set()
+    assert admission.acquire(blocking=False) is True
+    admission.release()
+
+
+def test_ipc_reader_rejects_more_than_maximum_before_eof():
+    receive_socket, send_socket = socket.socketpair(
+        socket.AF_UNIX,
+        socket.SOCK_STREAM,
+    )
+
+    def send_oversize_payload():
+        try:
+            send_socket.sendall(b"x" * (web_reader.MAX_WEB_PAGE_IPC_BYTES + 1))
+            send_socket.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        finally:
+            send_socket.close()
+
+    sender = threading.Thread(target=send_oversize_payload, daemon=True)
+    sender.start()
+    try:
+        with pytest.raises(web_reader.WebPageUnavailableError, match="límite de IPC"):
+            web_reader._wait_for_worker_message(
+                receive_socket,
+                deadline=time.monotonic() + 2,
+            )
+    finally:
+        receive_socket.close()
+        sender.join(timeout=1)
+
+    assert sender.is_alive() is False
 
 
 def test_cleanup_uses_only_bounded_terminate_and_kill_joins():
@@ -737,6 +980,189 @@ def test_web_search_snippet_blocks_mutating_tool_for_rest_of_turn(
     assert context.untrusted_external_content_seen is True
     assert mutation_result.ok is False
     assert "contenido web externo no confiable" in mutation_result.content
+
+
+def test_post_search_policy_only_allows_initial_provenance_page_reads(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "assistant_web_reader_enabled", True)
+    urls = (
+        "https://example.org/fuente-uno",
+        "https://example.org/fuente-dos",
+    )
+    search_calls = []
+
+    def fake_search(*, query, limit):
+        search_calls.append(query)
+        return [
+            {
+                "title": f"Fuente {rank}",
+                "url": url,
+                "snippet": "Contenido público",
+                "published_at": None,
+            }
+            for rank, url in enumerate(urls, start=1)
+        ]
+
+    monkeypatch.setattr(assistant_tools.web_search_client, "search", fake_search)
+    monkeypatch.setattr(
+        assistant_tools.web_reader,
+        "read_web_page",
+        lambda url: web_reader.WebPage(
+            source_url=url,
+            final_url=url,
+            title="Fuente",
+            content_type="text/html",
+            text="Contenido contrastado",
+            content_length_bytes=21,
+            text_char_count=21,
+            text_sha256=hashlib.sha256(b"Contenido contrastado").hexdigest(),
+            text_truncated=False,
+            redirects=0,
+            redirect_chain=(url,),
+        ),
+    )
+    context = assistant_tools.ToolContext()
+    allowed = frozenset(
+        {
+            "web_search",
+            "read_web_page",
+            "semantic_search_ordinances",
+            "list_organizations",
+            "create_requirement",
+        }
+    )
+
+    first_search = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "dominio público viario", "limit": 2},
+        context=context,
+        allowed=allowed,
+    )
+    page_reads = [
+        assistant_tools.execute_tool(
+            db,
+            user,
+            "read_web_page",
+            {"url": url},
+            context=context,
+            allowed=allowed,
+        )
+        for url in urls
+    ]
+    blocked_search = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "SECRETO-NO-DEBE-SALIR"},
+        context=context,
+        allowed=allowed,
+    )
+    blocked_local = assistant_tools.execute_tool(
+        db,
+        user,
+        "semantic_search_ordinances",
+        {"query": "vías"},
+        context=context,
+        allowed=allowed,
+    )
+    blocked_list = assistant_tools.execute_tool(
+        db,
+        user,
+        "list_organizations",
+        {},
+        context=context,
+        allowed=allowed,
+    )
+    blocked_mutation = assistant_tools.execute_tool(
+        db,
+        user,
+        "create_requirement",
+        {"organization_id": organization.id, "title": "No ejecutar"},
+        context=context,
+        allowed=allowed,
+    )
+    blocked_unknown = assistant_tools.execute_tool(
+        db,
+        user,
+        "legacy_unknown_tool",
+        {"value": "se conserva el error legacy"},
+        context=context,
+    )
+
+    assert first_search.ok is True
+    assert all(result.ok for result in page_reads)
+    assert search_calls == ["dominio público viario"]
+    assert all(
+        "contenido web externo no confiable" in result.content
+        for result in (
+            blocked_search,
+            blocked_local,
+            blocked_list,
+            blocked_mutation,
+        )
+    )
+    assert "contenido web externo no confiable" in blocked_unknown.content
+
+    outside_taint = assistant_tools.execute_tool(
+        db,
+        user,
+        "legacy_unknown_tool",
+        {"value": "se conserva el error legacy fuera del taint"},
+        context=assistant_tools.ToolContext(),
+    )
+    assert outside_taint.content == "Herramienta desconocida: legacy_unknown_tool"
+
+
+def test_realtime_execution_boundary_blocks_even_provenance_reader_after_taint(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["assistant.web.search"])
+    source_url = "https://example.org/fuente"
+    context = assistant_tools.ToolContext(
+        web_search_provenance={
+            source_url: assistant_tools.WebSearchProvenance(
+                source_url=source_url,
+                query="consulta",
+                provider="brave",
+                rank=1,
+            )
+        },
+        untrusted_external_content_seen=True,
+    )
+    monkeypatch.setattr(
+        assistant_tools.web_reader,
+        "read_web_page",
+        lambda url: pytest.fail("Realtime must not invoke the reader"),
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "read_web_page",
+        {"url": source_url},
+        context=context,
+        allowed=frozenset({"read_web_page"}),
+        allow_web_reader_after_taint=False,
+    )
+
+    assert result.ok is False
+    assert "contenido web externo no confiable" in result.content
 
 
 def test_reader_feature_flag_denies_direct_execution_by_default(

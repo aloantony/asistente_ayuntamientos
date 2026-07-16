@@ -950,6 +950,8 @@ def _log_openai_responses_completion(completion: AICompletion) -> None:
 def hermes_agent_enabled() -> bool:
     if not settings.hermes_agent_base_url or not settings.hermes_agent_api_key:
         return False
+    if not settings.hermes_agent_native_tools_disabled_confirmed:
+        return False
     return (
         settings.environment != "production"
         or settings.hermes_agent_real_data_allowed
