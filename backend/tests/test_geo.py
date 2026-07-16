@@ -688,6 +688,17 @@ def test_asset_map_filters_archives_and_global_limit(
         params={"entity_type": "asset", "include_archived": True, "limit": 1},
         headers=auth,
     )
+    second_page = client.get(
+        "/geo/map-items",
+        params={
+            "entity_type": "asset",
+            "include_archived": True,
+            "limit": 1,
+            "offset": 1,
+        },
+        headers=auth,
+    )
+    invalid_offset = client.get("/geo/map-items?offset=-1", headers=auth)
     wrong_organization = client.get(
         "/geo/map-items",
         params={"entity_type": "asset", "organization_id": 999999},
@@ -708,6 +719,9 @@ def test_asset_map_filters_archives_and_global_limit(
         item["entity_id"] for item in with_archived.json()
     }
     assert len(limited.json()) == 1
+    assert len(second_page.json()) == 1
+    assert second_page.json()[0]["entity_id"] != limited.json()[0]["entity_id"]
+    assert invalid_offset.status_code == 422
     assert wrong_organization.status_code == 200
     assert wrong_organization.json() == []
     assert missing_type.status_code == 422

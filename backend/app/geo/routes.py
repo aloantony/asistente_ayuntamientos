@@ -57,6 +57,7 @@ def list_map_items(
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     include_archived: bool = False,
     limit: Annotated[int, Query(ge=1, le=500)] = 500,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[GeoMapItem]:
     if entity_id is not None and entity_type is None:
         raise HTTPException(
@@ -90,6 +91,7 @@ def list_map_items(
         status_filter=status_filter,
         include_archived=include_archived,
         limit=limit,
+        offset=offset,
         map_organization_ids=map_organization_ids,
         asset_organization_ids=asset_organization_ids,
     )
@@ -289,6 +291,7 @@ def list_visible_map_items(
     status_filter: str | None,
     include_archived: bool,
     limit: int,
+    offset: int,
     map_organization_ids: list[int] | None,
     asset_organization_ids: list[int] | None,
 ) -> list[GeoMapItem]:
@@ -350,6 +353,7 @@ def list_visible_map_items(
             candidates.c.entity_id.desc(),
             candidates.c.role.asc(),
         )
+        .offset(offset)
         .limit(limit)
     ).all()
     return hydrate_map_candidates(db, rows)

@@ -14,7 +14,7 @@ import {
 import { adminRequest, ApiRequestError } from "../lib/api";
 import {
   createEntityLocation,
-  fetchGeoMapItems,
+  fetchAllGeoMapItems,
   fetchMunicipalAssets,
 } from "../lib/geo";
 import { useSession } from "../lib/session";
@@ -354,7 +354,10 @@ function itemIsInsideBounds(item: GeoMapItem, bounds: MapBounds) {
 
 function csvCell(value: string | number | null | undefined) {
   const serialized = value == null ? "" : String(value);
-  return `"${serialized.replace(/"/g, '""')}"`;
+  const safeValue = /^[=+\-@]/.test(serialized)
+    ? `'${serialized}`
+    : serialized;
+  return `"${safeValue.replace(/"/g, '""')}"`;
 }
 
 function downloadTextFile(contents: string, filename: string, type: string) {
@@ -369,9 +372,16 @@ function downloadTextFile(contents: string, filename: string, type: string) {
 }
 
 export function MapPanel({ user }: MapPanelProps) {
+  const canViewMap =
+    userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
+  const canViewMunicipalities =
+    userHasPermission(user, "municipalities.view") ||
+    userHasPermission(user, "municipalities.manage");
   const searchParams = useSearchParams();
   const { getStoredToken, handleRequestError } = useSession();
-  const [activeView, setActiveView] = useState<MapView>("territory");
+  const [activeView, setActiveView] = useState<MapView>(
+    canViewMap ? "territory" : "municipalities",
+  );
   const [includeArchived, setIncludeArchived] = useState(false);
   const [items, setItems] = useState<GeoMapItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<GeoMapItem | null>(null);
@@ -424,8 +434,6 @@ export function MapPanel({ user }: MapPanelProps) {
   const layerDragKeyRef = useRef<string | null>(null);
   const handleRequestErrorRef = useRef(handleRequestError);
 
-  const canViewMap =
-    userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
   const canEditMap =
     userHasPermission(user, "map.edit") || userHasPermission(user, "map.manage");
   const canCreateRequirements =
@@ -497,7 +505,6 @@ export function MapPanel({ user }: MapPanelProps) {
     if (includeArchived) {
       params.set("include_archived", "true");
     }
-    params.set("limit", "500");
     return params;
   }, [
     focusedEntityId,
@@ -526,7 +533,7 @@ export function MapPanel({ user }: MapPanelProps) {
     setIsLoading(true);
     setMessage("");
 
-    fetchGeoMapItems(queryParams, controller.signal)
+    fetchAllGeoMapItems(queryParams, controller.signal)
       .then((mapItems) => {
         if (
           controller.signal.aborted ||
@@ -713,6 +720,19 @@ export function MapPanel({ user }: MapPanelProps) {
   );
 
   useEffect(() => {
+    if (
+      selectedItem &&
+      !displayedItems.some(
+        (item) => getItemKey(item) === getItemKey(selectedItem),
+      )
+    ) {
+      setSelectedItem(null);
+      setManualFocusLocation(null);
+      setManualFocusZoom(null);
+    }
+  }, [displayedItems, selectedItem]);
+
+  useEffect(() => {
     try {
       const serialized = window.localStorage.getItem(MAP_PREFERENCES_KEY);
       if (serialized) {
@@ -772,17 +792,21 @@ export function MapPanel({ user }: MapPanelProps) {
     if (!preferencesReady) {
       return;
     }
-    window.localStorage.setItem(
-      MAP_PREFERENCES_KEY,
-      JSON.stringify({
-        visibleLayerKeys,
-        layerOrder,
-        layerPanelOpen,
-        stateLayerEnabled,
-        visibleStatuses,
-        baseLayer,
-      }),
-    );
+    try {
+      window.localStorage.setItem(
+        MAP_PREFERENCES_KEY,
+        JSON.stringify({
+          visibleLayerKeys,
+          layerOrder,
+          layerPanelOpen,
+          stateLayerEnabled,
+          visibleStatuses,
+          baseLayer,
+        }),
+      );
+    } catch {
+      // Preferences are optional when browser storage is unavailable.
+    }
   }, [
     baseLayer,
     layerOrder,
@@ -953,6 +977,12 @@ export function MapPanel({ user }: MapPanelProps) {
     }));
   }
 
+  function clearSelectedItem() {
+    setSelectedItem(null);
+    setManualFocusLocation(null);
+    setManualFocusZoom(null);
+  }
+
   function handleLayerDragStart(
     event: DragEvent<HTMLButtonElement>,
     layerKey: string,
@@ -985,7 +1015,39 @@ export function MapPanel({ user }: MapPanelProps) {
     });
   }
 
+  function swapLayerPositions(
+    sourceLayerKey: string,
+    targetLayerKey: string | undefined,
+  ) {
+    if (!targetLayerKey) {
+      return;
+    }
+    setLayerOrder((currentOrder) => {
+      const sourceIndex = currentOrder.indexOf(sourceLayerKey);
+      const targetIndex = currentOrder.indexOf(targetLayerKey);
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return currentOrder;
+      }
+      const nextOrder = [...currentOrder];
+      [nextOrder[sourceIndex], nextOrder[targetIndex]] = [
+        nextOrder[targetIndex],
+        nextOrder[sourceIndex],
+      ];
+      return nextOrder;
+    });
+  }
+
   function toggleAreaSelection() {
+    if (
+      !areaSelectionEnabled &&
+      typeof window !== "undefined" &&
+      !window.matchMedia("(any-pointer: fine)").matches
+    ) {
+      setMessage(
+        "La selección rectangular requiere un ratón o puntero de precisión.",
+      );
+      return;
+    }
     setAreaSelectionEnabled((current) => {
       if (current) {
         setAreaBounds(null);
@@ -1401,7 +1463,7 @@ export function MapPanel({ user }: MapPanelProps) {
       })()
     : null;
 
-  if (!canViewMap) {
+  if (!canViewMap && !canViewMunicipalities) {
     return (
       <section className="panel map-panel">
         <p className="eyebrow">Territorio</p>
@@ -1432,24 +1494,28 @@ export function MapPanel({ user }: MapPanelProps) {
       </div>
 
       <div className="map-view-tabs" role="tablist" aria-label="Vistas del mapa">
-        <button
-          aria-selected={activeView === "territory"}
-          className={activeView === "territory" ? "is-active" : ""}
-          onClick={() => setActiveView("territory")}
-          role="tab"
-          type="button"
-        >
-          Territorio municipal
-        </button>
-        <button
-          aria-selected={activeView === "municipalities"}
-          className={activeView === "municipalities" ? "is-active" : ""}
-          onClick={() => setActiveView("municipalities")}
-          role="tab"
-          type="button"
-        >
-          Municipios y normativa
-        </button>
+        {canViewMap ? (
+          <button
+            aria-selected={activeView === "territory"}
+            className={activeView === "territory" ? "is-active" : ""}
+            onClick={() => setActiveView("territory")}
+            role="tab"
+            type="button"
+          >
+            Territorio municipal
+          </button>
+        ) : null}
+        {canViewMunicipalities ? (
+          <button
+            aria-selected={activeView === "municipalities"}
+            className={activeView === "municipalities" ? "is-active" : ""}
+            onClick={() => setActiveView("municipalities")}
+            role="tab"
+            type="button"
+          >
+            Municipios y normativa
+          </button>
+        ) : null}
       </div>
 
       {activeView === "municipalities" ? (
@@ -1593,7 +1659,7 @@ export function MapPanel({ user }: MapPanelProps) {
                         : "Patrimonio e instalaciones"}
                     </h2>
                     <div>
-                      {groupLayers.map((layer) => {
+                      {groupLayers.map((layer, layerIndex) => {
                         const isVisible = visibleLayerKeys[layer.key] !== false;
                         return (
                           <div
@@ -1619,6 +1685,34 @@ export function MapPanel({ user }: MapPanelProps) {
                             >
                               ⠿
                             </button>
+                            <div className="map-layer-order-buttons">
+                              <button
+                                aria-label={`Subir ${layer.label}`}
+                                disabled={layerIndex === 0}
+                                onClick={() =>
+                                  swapLayerPositions(
+                                    layer.key,
+                                    groupLayers[layerIndex - 1]?.key,
+                                  )
+                                }
+                                type="button"
+                              >
+                                ↑
+                              </button>
+                              <button
+                                aria-label={`Bajar ${layer.label}`}
+                                disabled={layerIndex === groupLayers.length - 1}
+                                onClick={() =>
+                                  swapLayerPositions(
+                                    layer.key,
+                                    groupLayers[layerIndex + 1]?.key,
+                                  )
+                                }
+                                type="button"
+                              >
+                                ↓
+                              </button>
+                            </div>
                             <label>
                               <input
                                 checked={isVisible}
@@ -1811,7 +1905,7 @@ export function MapPanel({ user }: MapPanelProps) {
                 </span>
                 <button
                   aria-label="Cerrar detalle"
-                  onClick={() => setSelectedItem(null)}
+                  onClick={clearSelectedItem}
                   type="button"
                 >
                   ×
@@ -1905,7 +1999,7 @@ export function MapPanel({ user }: MapPanelProps) {
       {mapContextMenu ? (
         <div
           className="map-context-menu"
-          role="menu"
+          role="group"
           aria-label="Herramientas del mapa"
           style={{ left: mapContextMenu.x, top: mapContextMenu.y }}
         >
@@ -1921,7 +2015,6 @@ export function MapPanel({ user }: MapPanelProps) {
           {canCreateRequirements ? (
             <button
               type="button"
-              role="menuitem"
               onClick={() => openRegistrationDraft("requirement")}
             >
               Registrar necesidad aquí
@@ -1931,7 +2024,6 @@ export function MapPanel({ user }: MapPanelProps) {
           {canCreateProjects ? (
             <button
               type="button"
-              role="menuitem"
               onClick={() => openRegistrationDraft("project")}
             >
               Registrar proyecto aquí
@@ -1941,7 +2033,6 @@ export function MapPanel({ user }: MapPanelProps) {
           {canLocateAssets ? (
             <button
               type="button"
-              role="menuitem"
               onClick={openAssetLocationDraft}
             >
               Ubicar activo existente aquí
@@ -1955,13 +2046,12 @@ export function MapPanel({ user }: MapPanelProps) {
           ) : null}
           <button
             type="button"
-            role="menuitem"
             onClick={focusContextPoint}
           >
             Solo centrar el mapa aquí
           </button>
           {mapContextMenu.nearestItem && mapContextMenu.nearestDistanceMeters !== null ? (
-            <button type="button" role="menuitem" onClick={selectNearestItem}>
+            <button type="button" onClick={selectNearestItem}>
               Ver elemento cercano
               <span>
                 {mapContextMenu.nearestItem.title} ·{" "}
@@ -1971,7 +2061,6 @@ export function MapPanel({ user }: MapPanelProps) {
           ) : null}
           <button
             type="button"
-            role="menuitem"
             className="map-context-menu-close"
             onClick={() => setMapContextMenu(null)}
           >

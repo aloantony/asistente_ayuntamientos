@@ -1271,6 +1271,37 @@ button:disabled {
   color: var(--text);
 }
 
+.map-layer-order-buttons {
+  flex: none;
+  display: grid;
+  gap: 1px;
+}
+
+.map-layer-order-buttons button {
+  width: 20px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  color: var(--text-faint);
+  background: transparent;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.map-layer-order-buttons button:hover:not(:disabled),
+.map-layer-order-buttons button:focus-visible:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+.map-layer-order-buttons button:disabled {
+  cursor: not-allowed;
+  opacity: 0.28;
+}
+
 .map-layer-row label {
   min-width: 0;
   flex: 1;
@@ -1401,7 +1432,7 @@ button:disabled {
 
 .map-overlay-tools {
   position: absolute;
-  left: 18px;
+  left: 68px;
   bottom: 18px;
   z-index: 650;
   display: flex;
@@ -1447,7 +1478,7 @@ button:disabled {
 
 .map-area-export {
   position: absolute;
-  left: 18px;
+  left: 68px;
   right: 72px;
   bottom: 62px;
   z-index: 660;
@@ -2345,14 +2376,14 @@ html.dark .municipal-map-canvas .leaflet-tile-pane {
   .map-overlay-tools {
     right: 56px;
     bottom: 12px;
-    left: 12px;
+    left: 64px;
     max-width: none;
   }
 
   .map-area-export {
     right: 12px;
     bottom: 94px;
-    left: 12px;
+    left: 64px;
     max-width: none;
   }
 
