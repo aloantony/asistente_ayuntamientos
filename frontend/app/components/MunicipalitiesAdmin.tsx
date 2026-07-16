@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import {
   formatMunicipalityStatus,
   formatMunicipalityType,
@@ -386,6 +386,9 @@ export function MunicipalitiesAdmin({
                         />
                         <EditableTextCell
                           canEdit={canEdit}
+                          hint={
+                            <PopulationSourceHint municipality={municipality} />
+                          }
                           inputMode="numeric"
                           label={`Población de ${municipality.name}`}
                           type="number"
@@ -655,6 +658,7 @@ export function MunicipalitiesAdmin({
 
 function EditableTextCell({
   canEdit,
+  hint,
   inputMode,
   label,
   step,
@@ -663,6 +667,7 @@ function EditableTextCell({
   onChange,
 }: {
   canEdit: boolean;
+  hint?: ReactNode;
   inputMode?: "decimal" | "numeric";
   label: string;
   step?: string;
@@ -686,8 +691,36 @@ function EditableTextCell({
       ) : (
         value || <span className="small-muted">Sin dato</span>
       )}
+      {hint ? <div className="small-muted">{hint}</div> : null}
     </td>
   );
+}
+
+function PopulationSourceHint({
+  municipality,
+}: {
+  municipality: Municipality;
+}) {
+  if (municipality.population === null) {
+    return null;
+  }
+  if (
+    municipality.population_reference_year !== null &&
+    municipality.population_source_url &&
+    municipality.population_source_sha256
+  ) {
+    return (
+      <a
+        href={municipality.population_source_url}
+        rel="noreferrer"
+        target="_blank"
+        title={`SHA-256: ${municipality.population_source_sha256}`}
+      >
+        INE · padrón {municipality.population_reference_year}
+      </a>
+    );
+  }
+  return <span>Dato manual o sin fuente</span>;
 }
 
 function EditableTextareaCell({

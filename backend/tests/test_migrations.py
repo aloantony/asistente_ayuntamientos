@@ -15,10 +15,22 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260715_0023"
+HEAD_REVISION = "20260716_0024"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
+}
+POPULATION_PROVENANCE_COLUMNS = {
+    "population_reference_year",
+    "population_source_url",
+    "population_source_sha256",
+}
+POPULATION_PROVENANCE_CHECKS = {
+    "ck_municipalities_population_reference_year",
+    "ck_municipalities_population_provenance_complete",
+    "ck_municipalities_population_provenance_has_population",
+    "ck_municipalities_population_source_url",
+    "ck_municipalities_population_source_sha256",
 }
 
 ASSET_INVENTORY_SCHEMA = {
@@ -821,6 +833,117 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+    finally:
+        engine.dispose()
+
+
+def test_population_provenance_migration_is_additive_and_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260715_0023")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community, ine_code,
+                        population
+                    ) VALUES (
+                        'Population migration town', 'Burgos',
+                        'Castilla y León', '09137', 123
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        inspector = inspect(engine)
+        columns = {
+            column["name"] for column in inspector.get_columns("municipalities")
+        }
+        checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("municipalities")
+        }
+        assert POPULATION_PROVENANCE_COLUMNS <= columns
+        assert POPULATION_PROVENANCE_CHECKS <= checks
+
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT population, population_reference_year,
+                           population_source_url, population_source_sha256
+                    FROM municipalities
+                    WHERE id = :municipality_id
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).one()
+            assert row == (123, None, None, None)
+
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE municipalities
+                        SET population_reference_year = 2025
+                        WHERE id = :municipality_id
+                        """
+                    ),
+                    {"municipality_id": municipality_id},
+                )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE municipalities
+                    SET population_reference_year = 2025,
+                        population_source_url =
+                            'https://www.ine.es/pob_xls/pobmun.zip',
+                        population_source_sha256 = :source_sha256
+                    WHERE id = :municipality_id
+                    """
+                ),
+                {
+                    "municipality_id": municipality_id,
+                    "source_sha256": "a" * 64,
+                },
+            )
+
+        run_alembic(migration_database_url, "downgrade", "20260715_0023")
+        downgraded_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("municipalities")
+        }
+        assert POPULATION_PROVENANCE_COLUMNS.isdisjoint(downgraded_columns)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT population FROM municipalities WHERE id = :municipality_id"
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one() == 123
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    """
+                    SELECT population_reference_year
+                    FROM municipalities
+                    WHERE id = :municipality_id
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one_or_none() is None
     finally:
         engine.dispose()
 

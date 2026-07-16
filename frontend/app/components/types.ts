@@ -94,6 +94,9 @@ export type Municipality = MunicipalitySummary & {
   country: string;
   ine_code: string | null;
   population: number | null;
+  population_reference_year: number | null;
+  population_source_url: string | null;
+  population_source_sha256: string | null;
   surface_km2: number | null;
   density: number | null;
   postal_codes: string | null;

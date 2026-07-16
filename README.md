@@ -136,6 +136,26 @@ Apply database migrations:
 docker compose exec backend alembic upgrade head
 ```
 
+Synchronize the reviewed INE 2025 municipal population snapshot only after the
+migration is applied. The first command is a mandatory dry-run and never writes
+to the database. Review its conflicts and unmatched codes before applying:
+
+```bash
+docker compose exec -T backend \
+  python -m app.municipalities.ine_population --year 2025
+
+docker compose exec -T backend \
+  python -m app.municipalities.ine_population \
+  --year 2025 --apply --overwrite-existing
+```
+
+`--overwrite-existing` only permits replacement of figures without recorded
+provenance. It never overwrites a newer official year, a different source, or a
+different revision of the same annual source. For a controlled/offline run,
+pass the previously downloaded official ZIP with `--archive /path/pobmun.zip`;
+the inner XLSX checksum is still verified. The synchronization is intentionally
+not part of application startup.
+
 Local services:
 
 - Frontend: http://localhost:3000
