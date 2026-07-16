@@ -1116,6 +1116,8 @@ export type AssistantStatus = {
   realtime_voice_enabled: boolean;
   realtime_voice_provider: "openai" | null;
   realtime_voice_model: string | null;
+  web_page_reader_enabled: boolean;
+  realtime_web_page_reader_enabled: boolean;
   tools: AssistantTool[];
 };
 

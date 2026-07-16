@@ -69,6 +69,8 @@ class AssistantStatusRead(BaseModel):
     realtime_voice_enabled: bool = False
     realtime_voice_provider: Literal["openai"] | None = None
     realtime_voice_model: str | None = None
+    web_page_reader_enabled: bool = False
+    realtime_web_page_reader_enabled: bool = False
     tools: list["AssistantToolRead"] = []
 
 

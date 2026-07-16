@@ -1,36 +1,33 @@
 """Read public web pages without exposing an unrestricted server-side fetcher.
 
 The reader is intentionally narrower than a browser: it performs anonymous
-GET requests, never executes JavaScript, and only accepts bounded textual
-HTML, plain text, or PDF responses. DNS answers are validated before the
-connection and the socket is pinned to the validated address so a DNS
-rebinding cannot redirect the request into a private network.
+GET requests, never executes JavaScript, and only accepts bounded HTML or
+plain-text responses. DNS answers are resolved in a cancellable child process
+and validated before the connection. The socket is pinned to the validated
+address so a DNS rebinding cannot redirect the request into a private network.
 """
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import ipaddress
+import multiprocessing
 import re
 import socket
 import ssl
 import unicodedata
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from io import BytesIO
 from time import monotonic
 from urllib.parse import SplitResult, quote, urljoin, urlsplit, urlunsplit
-
-from pypdf import PdfReader
 
 from app.core.config import settings
 
 MAX_WEB_PAGE_URL_CHARS = 2000
 MAX_WEB_PAGE_TITLE_CHARS = 300
-MAX_PDF_PAGES = 40
 ALLOWED_CONTENT_TYPES = frozenset(
     {
-        "application/pdf",
         "application/xhtml+xml",
         "text/html",
         "text/plain",
@@ -65,8 +62,12 @@ class WebPage:
     title: str
     content_type: str
     text: str
+    content_length_bytes: int
+    text_char_count: int
+    text_sha256: str
     text_truncated: bool
     redirects: int
+    redirect_chain: tuple[str, ...]
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -75,8 +76,12 @@ class WebPage:
             "title": self.title,
             "content_type": self.content_type,
             "text": self.text,
+            "content_length_bytes": self.content_length_bytes,
+            "text_char_count": self.text_char_count,
+            "text_sha256": self.text_sha256,
             "text_truncated": self.text_truncated,
             "redirects": self.redirects,
+            "redirect_chain": list(self.redirect_chain),
             "untrusted_content": True,
         }
 
@@ -88,6 +93,7 @@ class _DownloadedPage:
     charset: str | None
     body: bytes
     redirects: int
+    redirect_chain: tuple[str, ...]
 
 
 class _TextHTMLParser(HTMLParser):
@@ -253,8 +259,8 @@ def normalize_web_page_url(value: object) -> str:
 
     default_port = 443 if scheme == "https" else 80
     effective_port = port or default_port
-    if not 1 <= effective_port <= 65535:
-        raise UnsafeWebPageURLError("url contiene un puerto no válido")
+    if effective_port not in {80, 443}:
+        raise UnsafeWebPageURLError("url solo puede usar los puertos 80 o 443")
     rendered_host = f"[{hostname}]" if ":" in hostname else hostname
     netloc = rendered_host
     if port is not None and port != default_port:
@@ -290,23 +296,36 @@ def read_web_page(value: object) -> WebPage:
     text, truncated = _limit_text(extracted, settings.web_page_max_text_chars)
     if not text:
         raise WebPageUnavailableError("La página no contiene texto extraíble")
+    text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return WebPage(
         source_url=source_url,
         final_url=downloaded.final_url,
         title=(title or downloaded.final_url)[:MAX_WEB_PAGE_TITLE_CHARS],
         content_type=downloaded.content_type,
         text=text,
+        content_length_bytes=len(downloaded.body),
+        text_char_count=len(text),
+        text_sha256=text_sha256,
         text_truncated=truncated,
         redirects=downloaded.redirects,
+        redirect_chain=downloaded.redirect_chain,
     )
 
 
 def _download(source_url: str) -> _DownloadedPage:
     current_url = source_url
+    source_origin = _url_origin(source_url)
+    redirect_chain = [source_url]
     deadline = monotonic() + settings.web_page_timeout_seconds
     for redirect_count in range(settings.web_page_max_redirects + 1):
         parsed = urlsplit(current_url)
-        addresses = _resolve_public_addresses(parsed)
+        remaining_timeout = deadline - monotonic()
+        if remaining_timeout <= 0:
+            raise TimeoutError("web page total deadline exceeded")
+        addresses = _resolve_public_addresses(
+            parsed,
+            timeout=min(settings.web_page_dns_timeout_seconds, remaining_timeout),
+        )
         remaining_timeout = deadline - monotonic()
         if remaining_timeout <= 0:
             raise TimeoutError("web page total deadline exceeded")
@@ -321,7 +340,7 @@ def _download(source_url: str) -> _DownloadedPage:
                 "GET",
                 target,
                 headers={
-                    "Accept": "text/html,application/xhtml+xml,text/plain,application/pdf;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,text/plain",
                     "Accept-Encoding": "identity",
                     "User-Agent": f"AsistenteAyuntamientos/{settings.app_version}",
                 },
@@ -341,13 +360,12 @@ def _download(source_url: str) -> _DownloadedPage:
                 redirected_url = normalize_web_page_url(
                     urljoin(current_url, location)
                 )
-                if (
-                    parsed.scheme == "https"
-                    and urlsplit(redirected_url).scheme != "https"
-                ):
+                if _url_origin(redirected_url) != source_origin:
                     raise UnsafeWebPageURLError(
-                        "No se permiten redirecciones de https a http"
+                        "La página redirige a otro origen; realiza una nueva "
+                        "búsqueda para autorizar esa URL"
                     )
+                redirect_chain.append(redirected_url)
                 current_url = redirected_url
                 continue
             if status != 200:
@@ -389,11 +407,24 @@ def _download(source_url: str) -> _DownloadedPage:
                 charset=charset,
                 body=body,
                 redirects=redirect_count,
+                redirect_chain=tuple(redirect_chain),
             )
         finally:
             connection.close()
 
     raise WebPageUnavailableError("La página supera el límite de redirecciones")
+
+
+def _url_origin(value: str) -> tuple[str, str, int]:
+    parsed = urlsplit(value)
+    hostname = parsed.hostname
+    if not hostname:
+        raise UnsafeWebPageURLError("url debe incluir un host")
+    return (
+        parsed.scheme.casefold(),
+        hostname.rstrip(".").casefold(),
+        parsed.port or (443 if parsed.scheme.casefold() == "https" else 80),
+    )
 
 
 def _read_bounded_body(response, connection, *, deadline: float, max_bytes: int) -> bytes:
@@ -419,7 +450,11 @@ def _read_bounded_body(response, connection, *, deadline: float, max_bytes: int)
     return b"".join(chunks)
 
 
-def _resolve_public_addresses(parsed: SplitResult) -> tuple[str, ...]:
+def _resolve_public_addresses(
+    parsed: SplitResult,
+    *,
+    timeout: float,
+) -> tuple[str, ...]:
     hostname = parsed.hostname
     if not hostname:
         raise UnsafeWebPageURLError("url debe incluir un host")
@@ -431,19 +466,14 @@ def _resolve_public_addresses(parsed: SplitResult) -> tuple[str, ...]:
         _require_public_ip(literal)
         return (str(literal),)
 
-    try:
-        records = socket.getaddrinfo(
-            hostname,
-            port,
-            family=socket.AF_UNSPEC,
-            type=socket.SOCK_STREAM,
-        )
-    except socket.gaierror as error:
-        raise WebPageUnavailableError("No se pudo resolver el host de la página") from error
+    raw_addresses = _resolve_hostname_in_subprocess(
+        hostname,
+        port,
+        timeout=timeout,
+    )
 
     addresses: list[str] = []
-    for record in records:
-        raw_address = record[4][0]
+    for raw_address in raw_addresses:
         try:
             address = ipaddress.ip_address(raw_address)
         except ValueError as error:
@@ -457,6 +487,79 @@ def _resolve_public_addresses(parsed: SplitResult) -> tuple[str, ...]:
     if not addresses:
         raise WebPageUnavailableError("El host de la página no tiene direcciones")
     return tuple(addresses)
+
+
+def _resolve_hostname_in_subprocess(
+    hostname: str,
+    port: int,
+    *,
+    timeout: float,
+) -> tuple[str, ...]:
+    """Resolve DNS in a process that can be terminated at the deadline."""
+    if timeout <= 0:
+        raise TimeoutError("web page DNS deadline exceeded")
+
+    process_context = multiprocessing.get_context("spawn")
+    receive_connection, send_connection = process_context.Pipe(duplex=False)
+    process = process_context.Process(
+        target=_dns_lookup_worker,
+        args=(send_connection, hostname, port),
+        daemon=True,
+    )
+    try:
+        process.start()
+    except Exception as error:
+        receive_connection.close()
+        send_connection.close()
+        raise WebPageUnavailableError(
+            "No se pudo iniciar la resolución DNS de la página"
+        ) from error
+    send_connection.close()
+
+    try:
+        if not receive_connection.poll(timeout):
+            raise TimeoutError("web page DNS deadline exceeded")
+        try:
+            status, payload = receive_connection.recv()
+        except EOFError as error:
+            raise WebPageUnavailableError(
+                "No se pudo resolver el host de la página"
+            ) from error
+        if status != "ok" or not isinstance(payload, list):
+            raise WebPageUnavailableError(
+                "No se pudo resolver el host de la página"
+            )
+        return tuple(str(value) for value in payload[:64])
+    finally:
+        receive_connection.close()
+        process.join(timeout=0.1)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=0.5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        process.close()
+
+
+def _dns_lookup_worker(send_connection, hostname: str, port: int) -> None:
+    """Child-process entry point; never expose resolver errors to the caller."""
+    try:
+        records = socket.getaddrinfo(
+            hostname,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+        addresses = [str(record[4][0]) for record in records[:64]]
+        send_connection.send(("ok", addresses))
+    except BaseException:
+        try:
+            send_connection.send(("error", None))
+        except BaseException:
+            pass
+    finally:
+        send_connection.close()
 
 
 def _reject_blocked_hostname(hostname: str) -> None:
@@ -547,9 +650,6 @@ def _extract_text(
     content_type: str,
     charset: str | None,
 ) -> tuple[str, str]:
-    if content_type == "application/pdf":
-        return _extract_pdf_text(body)
-
     decoded = _decode_text(body, charset)
     if content_type in {"text/html", "application/xhtml+xml"}:
         parser = _TextHTMLParser()
@@ -560,32 +660,6 @@ def _extract_text(
             raise WebPageUnavailableError("No se pudo extraer el HTML") from error
         return parser.title, parser.text
     return "", _normalize_extracted_text(decoded)
-
-
-def _extract_pdf_text(body: bytes) -> tuple[str, str]:
-    try:
-        reader = PdfReader(BytesIO(body), strict=False)
-        if reader.is_encrypted:
-            raise WebPageUnavailableError("No se admiten documentos PDF cifrados")
-        if len(reader.pages) > MAX_PDF_PAGES:
-            raise WebPageUnavailableError(
-                f"El PDF supera el límite de {MAX_PDF_PAGES} páginas"
-            )
-        text_parts: list[str] = []
-        remaining = settings.web_page_max_text_chars + 1
-        for page in reader.pages:
-            page_text = page.extract_text() or ""
-            text_parts.append(page_text[:remaining])
-            remaining -= len(text_parts[-1])
-            if remaining <= 0:
-                break
-        text = "\n\n".join(text_parts)
-        metadata_title = reader.metadata.title if reader.metadata else None
-    except WebPageUnavailableError:
-        raise
-    except Exception as error:
-        raise WebPageUnavailableError("No se pudo extraer el PDF") from error
-    return _normalize_inline_text(metadata_title or ""), _normalize_extracted_text(text)
 
 
 def _decode_text(body: bytes, charset: str | None) -> str:

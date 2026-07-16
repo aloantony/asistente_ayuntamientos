@@ -48,7 +48,9 @@ class Settings(BaseSettings):
     brave_search_language: str = "es"
     brave_search_ui_language: str = "es-ES"
     brave_search_storage_rights_confirmed: bool = False
+    assistant_web_reader_enabled: bool = False
     web_page_timeout_seconds: float = 10.0
+    web_page_dns_timeout_seconds: float = 3.0
     web_page_max_response_bytes: int = 2 * 1024 * 1024
     web_page_max_redirects: int = 3
     web_page_max_text_chars: int = 12000
@@ -321,7 +323,11 @@ class Settings(BaseSettings):
             raise ValueError("assistant timeouts must be finite and greater than zero")
         return value
 
-    @field_validator("brave_search_timeout_seconds", "web_page_timeout_seconds")
+    @field_validator(
+        "brave_search_timeout_seconds",
+        "web_page_timeout_seconds",
+        "web_page_dns_timeout_seconds",
+    )
     @classmethod
     def validate_web_timeouts(cls, value: float) -> float:
         if not isfinite(value) or value <= 0:
