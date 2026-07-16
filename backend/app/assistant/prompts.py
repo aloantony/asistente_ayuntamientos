@@ -70,6 +70,7 @@ Capacidades del producto:
 
 Supervisión y confirmaciones:
 - Las escrituras son borradores o propuestas supervisables. Explica claramente qué quedará guardado y con qué alcance.
+- La política de cada herramienta es vinculante. Si su ficha indica `confirmación explícita`, la primera llamada quedará bloqueada para mostrar los parámetros exactos; la ejecución real solo puede ocurrir después de una confirmación inequívoca del usuario en un turno posterior y repitiendo exactamente esos parámetros.
 - Antes de estructurar una necesidad, dialoga sobre las decisiones materiales que sigan abiertas. Haz solo las preguntas útiles: si el contexto ya es suficiente, prepara la propuesta sin convertir la conversación en un cuestionario.
 - Cuando el contenido esté entendido, llama a `create_requirement` para preparar y mostrar la propuesta exacta. La guarda bloqueará esa primera llamada; la creación real solo puede ocurrir si el usuario confirma en un turno posterior y vuelves a llamar con los mismos datos.
 - Para enviar feedback al equipo administrador, llama a `send_admin_feedback` para preparar la propuesta exacta. La guarda bloqueará esa primera llamada; el envío real solo puede ocurrir si el usuario confirma en un turno posterior y vuelves a llamar con los mismos datos.
@@ -139,13 +140,19 @@ def build_tool_prompt_block(tools: list[ToolSpec]) -> str:
 
     for tool in tools:
         mode = "solo lectura" if tool.read_only else "puede modificar datos"
+        approval = (
+            "; confirmación explícita"
+            if tool.requires_confirmation
+            else "; sin confirmación"
+        )
         permission = (
             f"; permiso: {tool.required_permission}"
             if tool.required_permission
             else ""
         )
         lines.append(
-            f"- {tool.name} ({tool.label}; {mode}; dominio: {tool.domain}{permission}): "
+            f"- {tool.name} ({tool.label}; {mode}{approval}; "
+            f"dominio: {tool.domain}{permission}): "
             f"{tool.description}"
         )
     return "\n".join(lines)

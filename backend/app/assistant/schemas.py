@@ -87,6 +87,8 @@ class AssistantToolRead(BaseModel):
     label: str
     read_only: bool
     domain: str
+    side_effect: Literal["none", "database_write"]
+    approval_policy: Literal["never", "explicit"]
     required_permission: str | None = None
 
 

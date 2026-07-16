@@ -346,12 +346,14 @@ def execute_realtime_tool_call(
     try:
         tools = get_available_tool_specs(db, current_user)
         allowed_tool_names = frozenset(tool.name for tool in tools)
+        tools_by_name = {tool.name: tool for tool in tools}
         guarded_result = check_tool_confirmation(
             db,
             conversation,
             user_message,
             payload.name,
             tool_input,
+            tool_spec=tools_by_name.get(payload.name),
         )
         result = guarded_result or execute_tool(
             db,

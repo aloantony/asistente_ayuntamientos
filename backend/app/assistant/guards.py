@@ -21,16 +21,16 @@ from app.assistant.prompts import (
     CONFIRMATION_STALE_TURN_TOOL_RESULT,
 )
 from app.assistant.tools import (
+    TOOL_CATALOG,
     ToolResult,
+    ToolSpec,
     normalize_admin_feedback_input,
     normalize_create_requirement_input,
 )
 
 logger = logging.getLogger(__name__)
+_TOOL_SPEC_UNSET = object()
 
-CONFIRMATION_REQUIRED_TOOLS = frozenset(
-    {"create_requirement", "send_admin_feedback"}
-)
 GENERIC_EXPLICIT_CONFIRMATIONS = frozenset(
     {
         "adelante",
@@ -125,9 +125,21 @@ def check_tool_confirmation(
     user_message: AssistantMessage,
     tool_name: str,
     tool_input: dict,
+    *,
+    tool_spec: ToolSpec | None | object = _TOOL_SPEC_UNSET,
 ) -> ConfirmationToolResult | None:
-    if tool_name not in CONFIRMATION_REQUIRED_TOOLS:
+    if tool_spec is _TOOL_SPEC_UNSET:
+        spec = TOOL_CATALOG.get(tool_name)
+    elif isinstance(tool_spec, ToolSpec):
+        spec = tool_spec
+    else:
+        spec = None
+    if spec is None or not spec.requires_confirmation:
         return None
+    if spec.name != tool_name:
+        raise ValueError(
+            f"Tool policy mismatch: expected {tool_name}, received {spec.name}"
+        )
 
     locked_conversation = lock_conversation_for_confirmation(db, conversation.id)
     state = load_conversation_state(locked_conversation)
@@ -505,7 +517,10 @@ def _render_confirmation_prompt(
             input_mode=input_mode,
         )
     if reference.tool != "create_requirement":
-        raise ValueError(f"Unsupported confirmation tool: {reference.tool}")
+        return _render_generic_confirmation_prompt(
+            reference,
+            input_mode=input_mode,
+        )
 
     display_payload = {
         label: reference.tool_input[field]
@@ -574,6 +589,38 @@ def _render_admin_feedback_confirmation_prompt(
         "Se enviará al equipo administrador con estos datos exactos.\n\n"
         "Responde **Sí, envíalo**, **Confirmo** o **Adelante** solo si los "
         "datos son correctos."
+    )
+
+
+def _render_generic_confirmation_prompt(
+    reference: ConfirmationReference,
+    *,
+    input_mode: str,
+) -> str:
+    spec = TOOL_CATALOG.get(reference.tool)
+    label = spec.label if spec is not None else reference.tool
+    if input_mode == "voice":
+        details = "; ".join(
+            f"{field.replace('_', ' ')}: {_plain_confirmation_value(value)}"
+            for field, value in reference.tool_input.items()
+        )
+        return (
+            f"Acción pendiente de confirmación: {label}. "
+            f"Datos exactos: {details or 'sin parámetros'}. "
+            "Para ejecutarla, responde: Confirmo; Adelante; o Hazlo."
+        )
+
+    serialized = json.dumps(reference.tool_input, ensure_ascii=False, indent=2)
+    indented_payload = "\n".join(
+        f"    {line}" for line in serialized.splitlines()
+    )
+    return (
+        "### Acción pendiente de confirmación\n\n"
+        f"Acción: **{label}** (`{reference.tool}`)\n\n"
+        f"Referencia: `{reference.confirmation_id}`\n\n"
+        f"{indented_payload}\n\n"
+        "Esta acción modificará datos con los parámetros exactos mostrados.\n\n"
+        "Responde **Confirmo**, **Adelante** o **Hazlo** solo si son correctos."
     )
 
 

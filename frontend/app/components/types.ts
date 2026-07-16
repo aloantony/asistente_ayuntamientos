@@ -1124,6 +1124,8 @@ export type AssistantTool = {
   label: string;
   read_only: boolean;
   domain: string;
+  side_effect: "none" | "database_write";
+  approval_policy: "never" | "explicit";
   required_permission: string | null;
 };
 
