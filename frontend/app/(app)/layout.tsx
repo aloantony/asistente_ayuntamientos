@@ -54,6 +54,8 @@ type NavIconName =
   | "home"
   | "townhall"
   | "needs"
+  | "inventory"
+  | "maintenance"
   | "map"
   | "projects"
   | "anacleto"
@@ -109,6 +111,21 @@ function NavIcon({ name }: { name: NavIconName }) {
           <path d="M9 18 3.5 21V6L9 3l6 3 5.5-3v15L15 21l-6-3Z" />
           <path d="M9 3v15" />
           <path d="M15 6v15" />
+        </svg>
+      );
+    case "inventory":
+      return (
+        <svg {...common}>
+          <path d="M4 8.5 12 4l8 4.5v9L12 22l-8-4.5v-9Z" />
+          <path d="m4 8.5 8 4.5 8-4.5M12 13v9" />
+          <path d="m8 6.25 8 4.5" />
+        </svg>
+      );
+    case "maintenance":
+      return (
+        <svg {...common}>
+          <path d="M14.5 6.5a4 4 0 0 0-5-5l2.1 2.1-3 3-2.1-2.1a4 4 0 0 0 5 5L19 17a2.1 2.1 0 0 1-3 3l-7.5-7.5" />
+          <path d="m5.5 14.5-3 3a2.1 2.1 0 0 0 3 3l3-3" />
         </svg>
       );
     case "anacleto":
@@ -343,6 +360,13 @@ export default function AppLayout({
   const canViewProjects = shouldShowProjectsPanel(user);
   const canViewMap =
     userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
+  const canViewInventory =
+    userHasPermission(user, "assets.view") ||
+    userHasPermission(user, "assets.manage");
+  const canViewMaintenance =
+    canViewInventory &&
+    (userHasPermission(user, "maintenance.view") ||
+      userHasPermission(user, "maintenance.manage"));
   const brandName = getMunicipalBrandName(user);
   const userInitials = getUserInitials(user.full_name);
 
@@ -401,14 +425,41 @@ export default function AppLayout({
               },
             ]
           : []),
-        ...(canViewMap
-          ? [{ href: "/mapa", label: "Mapa", icon: "map" as const }]
-          : []),
         ...(canViewProjects
           ? [{ href: "/proyectos", label: "Proyectos", icon: "projects" as const }]
           : []),
       ],
     },
+    ...(canViewInventory || canViewMaintenance || canViewMap
+      ? [
+          {
+            label: "Territorio",
+            items: [
+              ...(canViewInventory
+                ? [
+                    {
+                      href: "/inventario",
+                      label: "Inventario",
+                      icon: "inventory" as const,
+                    },
+                  ]
+                : []),
+              ...(canViewMaintenance
+                ? [
+                    {
+                      href: "/mantenimiento",
+                      label: "Mantenimiento",
+                      icon: "maintenance" as const,
+                    },
+                  ]
+                : []),
+              ...(canViewMap
+                ? [{ href: "/mapa", label: "Mapa", icon: "map" as const }]
+                : []),
+            ],
+          },
+        ]
+      : []),
     ...(canUseAssistant
       ? [
           {

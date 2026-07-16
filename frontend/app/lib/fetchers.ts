@@ -99,3 +99,27 @@ export function fetchOrdinancesTotal() {
     "No se pudo contar la lista de ordenanzas.",
   );
 }
+
+export function fetchMunicipalAssetsTotal(organizationId: number) {
+  const params = new URLSearchParams({
+    organization_id: String(organizationId),
+    include_archived: "false",
+    limit: "1",
+  });
+  return fetchTotal(
+    `/assets?${params.toString()}`,
+    "No se pudo contar el inventario municipal.",
+  );
+}
+
+export function fetchOpenMaintenanceTotal(organizationId: number) {
+  const params = new URLSearchParams({
+    organization_id: String(organizationId),
+    include_closed: "false",
+    limit: "1",
+  });
+  return fetchTotal(
+    `/maintenance/orders?${params.toString()}`,
+    "No se pudieron contar las órdenes de mantenimiento.",
+  );
+}

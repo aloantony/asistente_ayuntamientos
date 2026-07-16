@@ -6,7 +6,9 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { Project } from "../components/types";
 import { formatProjectStatus, userHasPermission } from "../components/types";
 import {
+  fetchMunicipalAssetsTotal,
   fetchMunicipalitiesTotal,
+  fetchOpenMaintenanceTotal,
   fetchOrdinancesTotal,
   fetchProjects,
   fetchRequirementsTotal,
@@ -83,7 +85,13 @@ function ArrowIcon() {
   );
 }
 
-type StatIconName = "projects" | "needs" | "municipalities" | "ordinances";
+type StatIconName =
+  | "projects"
+  | "needs"
+  | "municipalities"
+  | "ordinances"
+  | "assets"
+  | "maintenance";
 
 function StatIcon({ name }: { name: StatIconName }) {
   const common = {
@@ -126,6 +134,20 @@ function StatIcon({ name }: { name: StatIconName }) {
           <path d="m4 7 8-3 8 3" />
           <path d="M6 9 3 15a3 3 0 0 0 6 0L6 9Z" />
           <path d="M18 9l-3 6a3 3 0 0 0 6 0l-3-6Z" />
+        </svg>
+      );
+    case "assets":
+      return (
+        <svg {...common}>
+          <path d="M4 8.5 12 4l8 4.5v9L12 22l-8-4.5v-9Z" />
+          <path d="m4 8.5 8 4.5 8-4.5M12 13v9" />
+        </svg>
+      );
+    case "maintenance":
+      return (
+        <svg {...common}>
+          <path d="M14.5 6.5a4 4 0 0 0-5-5l2.1 2.1-3 3-2.1-2.1a4 4 0 0 0 5 5L19 17a2.1 2.1 0 0 1-3 3l-7.5-7.5" />
+          <path d="m5.5 14.5-3 3a2.1 2.1 0 0 0 3 3l3-3" />
         </svg>
       );
   }
@@ -175,6 +197,10 @@ export default function HomePage() {
     null,
   );
   const [ordinancesTotal, setOrdinancesTotal] = useState<number | null>(null);
+  const [assetsTotal, setAssetsTotal] = useState<number | null>(null);
+  const [openMaintenanceTotal, setOpenMaintenanceTotal] = useState<number | null>(
+    null,
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -183,10 +209,28 @@ export default function HomePage() {
   const canSeeProjects = Boolean(user && shouldShowProjectsPanel(user));
   const canSeeRequirements = Boolean(user && shouldShowRequirementsPanel(user));
   const canSeeMunicipalities = Boolean(
-    user && canSeeAdmin && hasAnyPermission(user, MUNICIPALITY_PERMISSIONS),
+    user && hasAnyPermission(user, MUNICIPALITY_PERMISSIONS),
   );
   const canSeeOrdinances = Boolean(
-    user && canSeeAdmin && hasAnyPermission(user, ORDINANCE_PERMISSIONS),
+    user && hasAnyPermission(user, ORDINANCE_PERMISSIONS),
+  );
+  const municipalOrganization =
+    user?.organizations?.find(
+      (organization) =>
+        organization.status === "active" && Boolean(organization.municipality),
+    ) ?? user?.organizations?.find((organization) => Boolean(organization.municipality));
+  const canSeeAssets = Boolean(
+    user &&
+      municipalOrganization &&
+      (userHasPermission(user, "assets.view") ||
+        userHasPermission(user, "assets.manage")),
+  );
+  const canSeeMaintenance = Boolean(
+    user &&
+      municipalOrganization &&
+      canSeeAssets &&
+      (userHasPermission(user, "maintenance.view") ||
+        userHasPermission(user, "maintenance.manage")),
   );
 
   useEffect(() => {
@@ -245,6 +289,24 @@ export default function HomePage() {
           .then((total) => isActive && setOrdinancesTotal(total))
           .catch(() => isActive && setOrdinancesTotal(null)),
       );
+    }
+    if (canSeeAssets && municipalOrganization) {
+      tasks.push(
+        fetchMunicipalAssetsTotal(municipalOrganization.id)
+          .then((total) => isActive && setAssetsTotal(total))
+          .catch(() => isActive && setAssetsTotal(null)),
+      );
+    } else {
+      setAssetsTotal(null);
+    }
+    if (canSeeMaintenance && municipalOrganization) {
+      tasks.push(
+        fetchOpenMaintenanceTotal(municipalOrganization.id)
+          .then((total) => isActive && setOpenMaintenanceTotal(total))
+          .catch(() => isActive && setOpenMaintenanceTotal(null)),
+      );
+    } else {
+      setOpenMaintenanceTotal(null);
     }
 
     void Promise.allSettled(tasks).then(() => {
@@ -308,7 +370,7 @@ export default function HomePage() {
       cards.push({
         key: "municipalities",
         label: "Municipios",
-        href: "/admin/municipios",
+        href: canSeeAdmin ? "/admin/municipios" : "/ayuntamiento",
         icon: "municipalities",
         value: municipalitiesTotal,
       });
@@ -317,9 +379,29 @@ export default function HomePage() {
       cards.push({
         key: "ordinances",
         label: "Ordenanzas",
-        href: "/admin/ordenanzas",
+        href: canSeeAdmin ? "/admin/ordenanzas" : "/ayuntamiento",
         icon: "ordinances",
         value: ordinancesTotal,
+      });
+    }
+    if (canSeeAssets) {
+      cards.push({
+        key: "assets",
+        label: "Inventario",
+        href: "/inventario",
+        icon: "assets",
+        value: assetsTotal,
+        hint: "activos municipales",
+      });
+    }
+    if (canSeeMaintenance) {
+      cards.push({
+        key: "maintenance",
+        label: "Mantenimiento",
+        href: "/mantenimiento",
+        icon: "maintenance",
+        value: openMaintenanceTotal,
+        hint: "órdenes abiertas",
       });
     }
     return cards;
@@ -328,10 +410,15 @@ export default function HomePage() {
     canSeeProjects,
     canSeeRequirements,
     requirementsTotal,
+    canSeeAdmin,
     canSeeMunicipalities,
     municipalitiesTotal,
     canSeeOrdinances,
     ordinancesTotal,
+    canSeeAssets,
+    assetsTotal,
+    canSeeMaintenance,
+    openMaintenanceTotal,
   ]);
 
   if (!user) {
