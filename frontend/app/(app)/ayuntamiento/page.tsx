@@ -1,5 +1,5 @@
-import { MunicipalHub } from "../../components/MunicipalHub";
+import { MunicipalWorkspace } from "../../components/MunicipalWorkspace";
 
 export default function AyuntamientoPage() {
-  return <MunicipalHub />;
+  return <MunicipalWorkspace />;
 }
