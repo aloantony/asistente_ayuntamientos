@@ -11,6 +11,7 @@ reason) — never message content.
 import json
 import logging
 import re
+import threading
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -92,6 +93,7 @@ class AIGateway:
     def __init__(self) -> None:
         self._anthropic_client: anthropic.Anthropic | None = None
         self._codex_subscription_runtime = None
+        self._codex_subscription_runtime_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -102,7 +104,11 @@ class AIGateway:
         if settings.assistant_runtime == "openai_responses":
             return bool(settings.openai_api_key)
         if settings.assistant_runtime == "codex_subscription":
-            if settings.environment != "development":
+            if (
+                settings.environment != "development"
+                or not settings.codex_subscription_enabled
+                or not settings.codex_subscription_real_data_allowed
+            ):
                 return False
             return self._get_codex_subscription_runtime().configured
         return False
@@ -135,18 +141,24 @@ class AIGateway:
 
     def _get_codex_subscription_runtime(self):
         if self._codex_subscription_runtime is None:
-            from app.assistant.codex_app_server import CodexSubscriptionRuntime
+            with self._codex_subscription_runtime_lock:
+                if self._codex_subscription_runtime is None:
+                    from app.assistant.codex_app_server import (
+                        CodexSubscriptionRuntime,
+                    )
 
-            self._codex_subscription_runtime = CodexSubscriptionRuntime(
-                command=settings.codex_subscription_command,
-                codex_home=settings.codex_subscription_home,
-                model=settings.codex_subscription_model,
-                reasoning_effort=settings.codex_subscription_reasoning_effort,
-                session_ttl_seconds=(
-                    settings.codex_subscription_session_ttl_seconds
-                ),
-                max_sessions=settings.codex_subscription_max_sessions,
-            )
+                    self._codex_subscription_runtime = CodexSubscriptionRuntime(
+                        command=settings.codex_subscription_command,
+                        codex_home=settings.codex_subscription_home,
+                        model=settings.codex_subscription_model,
+                        reasoning_effort=(
+                            settings.codex_subscription_reasoning_effort
+                        ),
+                        session_ttl_seconds=(
+                            settings.codex_subscription_session_ttl_seconds
+                        ),
+                        max_sessions=settings.codex_subscription_max_sessions,
+                    )
         return self._codex_subscription_runtime
 
     def discard_provider_state(self, messages: list[dict]) -> None:
@@ -526,6 +538,8 @@ class AIGateway:
                 "Codex subscription runtime is not configured"
             )
         request_timeout = _bounded_gateway_timeout(timeout_seconds)
+        stream = None
+        stream_completed = False
         try:
             stream = self._get_codex_subscription_runtime().complete_stream(
                 system=system,
@@ -539,11 +553,15 @@ class AIGateway:
                     delta = next(stream)
                 except StopIteration as stop:
                     runtime_completion = stop.value
+                    stream_completed = True
                     break
                 if delta:
                     yield AITextDelta(text=delta)
         except Exception as error:
             _raise_codex_subscription_gateway_error(error)
+        finally:
+            if stream is not None and not stream_completed:
+                stream.close()
         completion = _from_codex_subscription_completion(runtime_completion)
         _log_codex_subscription_completion(completion)
         return completion

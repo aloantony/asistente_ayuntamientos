@@ -31,7 +31,7 @@ The runtime backend image intentionally excludes `pytest`; install
 `TEST_DATABASE_URL` is set manually, it must point to an `app_test`-prefixed
 database.
 
-Fresh database: create the first superuser via `POST /auth/bootstrap-admin` (header `X-Bootstrap-Admin-Token`; only works while no users exist). Without a complete assistant runtime configuration (`ANTHROPIC_API_KEY` for `ASSISTANT_RUNTIME=anthropic`, `OPENAI_API_KEY` for `ASSISTANT_RUNTIME=openai_responses`, or `HERMES_AGENT_*` for `ASSISTANT_RUNTIME=hermes_agent`) the assistant endpoints return 503 by design — not a bug. A ChatGPT subscription is not an OpenAI API credential.
+Fresh database: create the first superuser via `POST /auth/bootstrap-admin` (header `X-Bootstrap-Admin-Token`; only works while no users exist). Without a complete assistant runtime configuration (`ANTHROPIC_API_KEY` for `ASSISTANT_RUNTIME=anthropic`, `OPENAI_API_KEY` for `ASSISTANT_RUNTIME=openai_responses`, `HERMES_AGENT_*` for `ASSISTANT_RUNTIME=hermes_agent`, or a dedicated authenticated Codex home plus both `CODEX_SUBSCRIPTION_*` opt-ins for development-only `ASSISTANT_RUNTIME=codex_subscription`) the assistant endpoints return 503 by design — not a bug. A ChatGPT subscription is not an OpenAI API credential; the Codex bridge is a separate local evaluation path, validated against CLI 0.144.4, and is forbidden in production (ADR-024).
 
 Pre-handoff validation (README §9 "Useful validation commands"), packaged as the `/validar` skill. The backend test suite above is part of it; the remaining commands are:
 

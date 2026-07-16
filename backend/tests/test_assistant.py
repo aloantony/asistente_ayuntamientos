@@ -307,6 +307,24 @@ def test_status_reports_openai_responses_model(
     assert response.json()["model"] == "gpt-5.6"
 
 
+def test_status_reports_codex_subscription_model(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "assistant_runtime", "codex_subscription")
+    monkeypatch.setattr(settings, "codex_subscription_model", "")
+    use_gateway(FakeGateway([], runtime_healthy=True))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    assert response.json()["runtime"] == "codex_subscription"
+    assert response.json()["model"] == "codex-subscription-default"
+
+
 def test_web_search_is_hidden_when_permission_exists_but_runtime_is_incomplete(
     client,
     db,
@@ -2620,6 +2638,69 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     safety_identifier = gateway.calls[0]["safety_identifier"]
     assert safety_identifier == gateway.calls[1]["safety_identifier"]
     assert len(safety_identifier) == 64
+
+
+def test_cancel_during_tool_activity_discards_paused_provider_state(
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+
+    class CleanupGateway(FakeGateway):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.discarded_messages = []
+
+        def discard_provider_state(self, messages):
+            self.discarded_messages.append(list(messages))
+
+    provider_state = (
+        {
+            "type": "codex_subscription_session",
+            "handle": "a" * 32,
+        },
+    )
+    gateway = CleanupGateway(
+        [
+            fake_response(
+                "tool_use",
+                [
+                    tool_use_block(
+                        "call_1",
+                        "list_requirements",
+                        {"organization_id": organization.id},
+                    )
+                ],
+                provider_state=provider_state,
+            )
+        ]
+    )
+    conversation = AssistantConversation(
+        title="Conversación",
+        created_by_id=user.id,
+    )
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+
+    events = assistant_turn._run_agent_turn_events(
+        db,
+        user,
+        conversation,
+        "Lista necesidades",
+        gateway,
+    )
+    assert next(events).type == "message_start"
+    activity = next(events)
+    assert activity.type == "tool_activity"
+    assert activity.data["status"] == "started"
+    events.close()
+
+    assert gateway.discarded_messages
+    assert any(
+        message.get("provider_state") == provider_state
+        for message in gateway.discarded_messages[-1]
+    )
 
 
 def test_openai_responses_web_search_executes_brave_and_replays_function_output(

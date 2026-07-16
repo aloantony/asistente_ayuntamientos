@@ -17,6 +17,7 @@ import json
 import os
 import queue
 import re
+import select
 import shutil
 import signal
 import stat
@@ -31,24 +32,21 @@ from time import monotonic
 from typing import Any
 
 
-MAX_JSONL_LINE_BYTES = 1024 * 1024
-MAX_EVENT_QUEUE_ITEMS = 2048
+MAX_INBOUND_JSONL_LINE_BYTES = 1024 * 1024
+MAX_OUTBOUND_JSONL_LINE_BYTES = 4 * 1024 * 1024
+MAX_EVENT_QUEUE_ITEMS = 32
 MAX_STDERR_LINES = 100
 MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024
 MAX_TOOL_ARGUMENT_BYTES = 256 * 1024
 MAX_TOOL_RESULT_BYTES = 256 * 1024
-TOOL_COLLECTION_GRACE_SECONDS = 0.03
+MAX_ASSISTANT_OUTPUT_BYTES = 2 * 1024 * 1024
+TOOL_COLLECTION_GRACE_SECONDS = 0.1
+DEFAULT_SEND_TIMEOUT_SECONDS = 1.0
 PROCESS_STOP_TIMEOUT_SECONDS = 0.5
 
 SESSION_STATE_TYPE = "codex_subscription_session"
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_SAFE_PROXY_ENV = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
+_SAFE_NETWORK_ENV = (
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
 )
@@ -170,7 +168,8 @@ class CodexAppServerClient:
         self._stderr_lines: list[str] = []
         self._stderr_lock = threading.Lock()
         self._closed = False
-        self._reader_failed = False
+        self._reader_failed = threading.Event()
+        self._transport_closed = threading.Event()
         self._stdout_reader = threading.Thread(
             target=self._read_stdout,
             name="codex-app-server-stdout",
@@ -204,24 +203,39 @@ class CodexAppServerClient:
             shell=False,
             start_new_session=True,
         )
+        stdin = process.stdin
+        if stdin is None:
+            _stop_process_group(process, signal.SIGKILL)
+            raise CodexProtocolError("Codex app-server input is unavailable")
+        try:
+            os.set_blocking(stdin.fileno(), False)
+        except (OSError, ValueError) as error:
+            _stop_process_group(process, signal.SIGKILL)
+            raise CodexProtocolError(
+                "Codex app-server input could not be bounded"
+            ) from error
         return cls(process)
 
     def request(self, method: str, params: dict, *, timeout: float) -> dict:
         if timeout <= 0:
             raise CodexTimeoutError("Codex app-server request timed out")
+        deadline = monotonic() + timeout
         request_id = self._take_id()
         response_queue: queue.Queue = queue.Queue(maxsize=1)
         with self._pending_lock:
             self._pending[request_id] = response_queue
         try:
-            self._send({"id": request_id, "method": method, "params": params})
+            self._send(
+                {"id": request_id, "method": method, "params": params},
+                timeout=_remaining(deadline),
+            )
         except Exception:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
             raise
         try:
-            response = response_queue.get(timeout=timeout)
-        except queue.Empty as error:
+            response = response_queue.get(timeout=_remaining(deadline))
+        except (queue.Empty, CodexTimeoutError) as error:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
             raise CodexTimeoutError("Codex app-server request timed out") from error
@@ -236,13 +250,30 @@ class CodexAppServerClient:
             raise CodexProtocolError("Codex app-server returned an invalid result")
         return result
 
-    def notify(self, method: str, params: dict | None = None) -> None:
-        self._send({"method": method, "params": params or {}})
+    def notify(
+        self,
+        method: str,
+        params: dict | None = None,
+        *,
+        timeout: float = DEFAULT_SEND_TIMEOUT_SECONDS,
+    ) -> None:
+        self._send({"method": method, "params": params or {}}, timeout=timeout)
 
-    def respond(self, request_id: object, result: dict) -> None:
-        self._send({"id": request_id, "result": result})
+    def respond(
+        self,
+        request_id: object,
+        result: dict,
+        *,
+        timeout: float = DEFAULT_SEND_TIMEOUT_SECONDS,
+    ) -> None:
+        self._send({"id": request_id, "result": result}, timeout=timeout)
 
-    def respond_error(self, request_id: object) -> None:
+    def respond_error(
+        self,
+        request_id: object,
+        *,
+        timeout: float = DEFAULT_SEND_TIMEOUT_SECONDS,
+    ) -> None:
         self._send(
             {
                 "id": request_id,
@@ -250,16 +281,23 @@ class CodexAppServerClient:
                     "code": -32601,
                     "message": "Unsupported server request",
                 },
-            }
+            },
+            timeout=timeout,
         )
 
     def take_event(self, *, timeout: float) -> dict | None:
+        if self._reader_failed.is_set():
+            raise CodexProtocolError("Codex app-server emitted invalid output")
         try:
             if timeout <= 0:
                 event = self._events.get_nowait()
             else:
                 event = self._events.get(timeout=timeout)
         except queue.Empty:
+            if self._reader_failed.is_set():
+                raise CodexProtocolError("Codex app-server emitted invalid output")
+            if self._transport_closed.is_set():
+                raise CodexProtocolError("Codex app-server stopped unexpectedly")
             return None
         if event is _TRANSPORT_CLOSED:
             raise CodexProtocolError("Codex app-server stopped unexpectedly")
@@ -295,9 +333,11 @@ class CodexAppServerClient:
             self._next_id += 1
             return request_id
 
-    def _send(self, message: dict) -> None:
+    def _send(self, message: dict, *, timeout: float) -> None:
         if self._closed:
             raise CodexProtocolError("Codex app-server is closed")
+        if timeout <= 0:
+            raise CodexTimeoutError("Codex app-server write timed out")
         stdin = self._process.stdin
         if stdin is None:
             raise CodexProtocolError("Codex app-server input is unavailable")
@@ -306,41 +346,69 @@ class CodexAppServerClient:
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        if len(encoded) > MAX_JSONL_LINE_BYTES:
+        if len(encoded) > MAX_OUTBOUND_JSONL_LINE_BYTES:
             raise CodexProtocolError("Codex app-server message is too large")
+        deadline = monotonic() + timeout
+        acquired = self._send_lock.acquire(timeout=_remaining(deadline))
+        if not acquired:
+            raise CodexTimeoutError("Codex app-server write timed out")
         try:
-            with self._send_lock:
-                stdin.write(encoded + b"\n")
-                stdin.flush()
+            file_descriptor = stdin.fileno()
+            remaining = memoryview(encoded + b"\n")
+            while remaining:
+                try:
+                    written = os.write(file_descriptor, remaining)
+                except BlockingIOError:
+                    wait_seconds = _remaining(deadline)
+                    _, writable, _ = select.select(
+                        [],
+                        [file_descriptor],
+                        [],
+                        wait_seconds,
+                    )
+                    if not writable:
+                        raise CodexTimeoutError(
+                            "Codex app-server write timed out"
+                        )
+                    continue
+                if written <= 0:
+                    raise CodexProtocolError("Codex app-server input closed")
+                remaining = remaining[written:]
+        except CodexTimeoutError:
+            raise
         except (BrokenPipeError, OSError, ValueError) as error:
             raise CodexProtocolError("Codex app-server input closed") from error
+        finally:
+            self._send_lock.release()
 
     def _read_stdout(self) -> None:
         stdout = self._process.stdout
         if stdout is None:
-            self._reader_failed = True
+            self._reader_failed.set()
             self._notify_transport_closed()
             return
         try:
             while True:
-                raw_line = stdout.readline(MAX_JSONL_LINE_BYTES + 1)
+                raw_line = stdout.readline(MAX_INBOUND_JSONL_LINE_BYTES + 1)
                 if not raw_line:
                     break
-                if len(raw_line) > MAX_JSONL_LINE_BYTES:
-                    self._reader_failed = True
+                if len(raw_line) > MAX_INBOUND_JSONL_LINE_BYTES:
+                    self._reader_failed.set()
                     break
                 try:
                     message = json.loads(raw_line.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._reader_failed = True
+                    self._reader_failed.set()
                     break
                 if not isinstance(message, dict):
-                    self._reader_failed = True
+                    self._reader_failed.set()
                     break
                 self._dispatch(message)
         except (OSError, ValueError):
-            self._reader_failed = True
+            if not self._closed:
+                self._reader_failed.set()
         finally:
+            self._transport_closed.set()
             self._notify_transport_closed()
 
     def _dispatch(self, message: dict) -> None:
@@ -351,17 +419,18 @@ class CodexAppServerClient:
                 try:
                     pending.put_nowait(message)
                 except queue.Full:
-                    self._reader_failed = True
+                    self._reader_failed.set()
             return
         if "method" not in message:
-            self._reader_failed = True
+            self._reader_failed.set()
             self._notify_transport_closed()
             return
-        try:
-            self._events.put_nowait(message)
-        except queue.Full:
-            self._reader_failed = True
-            self._notify_transport_closed()
+        while not self._closed:
+            try:
+                self._events.put(message, timeout=0.1)
+                return
+            except queue.Full:
+                continue
 
     def _read_stderr(self) -> None:
         stderr = self._process.stderr
@@ -380,6 +449,7 @@ class CodexAppServerClient:
             return
 
     def _notify_transport_closed(self) -> None:
+        self._transport_closed.set()
         with self._pending_lock:
             pending_queues = list(self._pending.values())
             self._pending.clear()
@@ -416,8 +486,10 @@ class _CodexSession:
     agent_item_phases: dict[str, str | None] = field(default_factory=dict)
     input_tokens: int | None = None
     output_tokens: int | None = None
+    output_bytes_seen: int = 0
     in_use: bool = True
     timer: threading.Timer | None = None
+    expiry_generation: int = 0
 
 
 class CodexSubscriptionRuntime:
@@ -497,7 +569,7 @@ class CodexSubscriptionRuntime:
         try:
             if handle:
                 session = self._acquire_session(handle, safety_identifier)
-                self._respond_to_pending_tools(session, messages)
+                self._respond_to_pending_tools(session, messages, deadline)
             else:
                 session = self._start_session(
                     system=system,
@@ -556,7 +628,19 @@ class CodexSubscriptionRuntime:
             self._assert_ready()
         except CodexSubscriptionError:
             return False
-        return True
+        if not self._uses_default_client:
+            return True
+        auth_file = Path(self.codex_home) / "auth.json"
+        try:
+            auth_stat = auth_file.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(auth_stat.st_mode)
+            and not auth_file.is_symlink()
+            and stat.S_IMODE(auth_stat.st_mode) & 0o077 == 0
+            and _owned_by_current_user(auth_stat)
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -572,9 +656,22 @@ class CodexSubscriptionRuntime:
         if self._closed:
             raise CodexProtocolError("Codex subscription runtime is closed")
         home = Path(self.codex_home)
-        if not home.is_dir():
+        try:
+            home_stat = home.lstat()
+        except OSError as error:
+            raise CodexProtocolError(
+                "Dedicated Codex home is not configured"
+            ) from error
+        if (
+            not stat.S_ISDIR(home_stat.st_mode)
+            or home.is_symlink()
+            or not _owned_by_current_user(home_stat)
+        ):
             raise CodexProtocolError("Dedicated Codex home is not configured")
-        mode = stat.S_IMODE(home.stat().st_mode)
+        personal_home = Path("~/.codex").expanduser().resolve(strict=False)
+        if home.resolve(strict=False) == personal_home:
+            raise CodexProtocolError("The personal Codex home cannot be reused")
+        mode = stat.S_IMODE(home_stat.st_mode)
         if mode & 0o077:
             raise CodexProtocolError(
                 "Dedicated Codex home must use private permissions 0700"
@@ -606,10 +703,11 @@ class CodexSubscriptionRuntime:
         safety_identifier: str | None,
     ) -> _CodexSession:
         self._reserve_start_slot()
-        workspace = tempfile.TemporaryDirectory(prefix="asistente-codex-")
-        Path(workspace.name).chmod(0o700)
+        workspace: tempfile.TemporaryDirectory | None = None
         client = None
         try:
+            workspace = tempfile.TemporaryDirectory(prefix="asistente-codex-")
+            Path(workspace.name).chmod(0o700)
             client = self._client_factory(
                 command=self.command,
                 codex_home=self.codex_home,
@@ -627,7 +725,11 @@ class CodexSubscriptionRuntime:
                 },
                 timeout=_remaining(deadline),
             )
-            client.notify("initialized", {})
+            client.notify(
+                "initialized",
+                {},
+                timeout=_remaining(deadline),
+            )
             account = client.request(
                 "account/read",
                 {"refreshToken": False},
@@ -700,24 +802,18 @@ class CodexSubscriptionRuntime:
                 safety_identifier=safety_identifier,
                 wire_to_tool=wire_to_tool,
             )
-            timer = threading.Timer(
-                self.session_ttl_seconds,
-                self._expire_session,
-                args=(handle,),
-            )
-            timer.daemon = True
-            session.timer = timer
             with self._lock:
                 if self._closed:
                     raise CodexProtocolError("Codex subscription runtime is closed")
                 self._sessions[handle] = session
-            timer.start()
             client = None
+            workspace = None
             return session
         finally:
             self._release_start_slot()
             if client is not None:
                 client.close()
+            if workspace is not None:
                 workspace.cleanup()
 
     def _acquire_session(
@@ -733,19 +829,42 @@ class CodexSubscriptionRuntime:
                 raise CodexProtocolError("Codex subscription session owner mismatch")
             if session.in_use:
                 raise CodexProtocolError("Codex subscription session is already in use")
+            session.expiry_generation += 1
+            if session.timer is not None:
+                session.timer.cancel()
+                session.timer = None
             session.in_use = True
             return session
 
     def _release_session(self, session: _CodexSession) -> None:
+        timer: threading.Timer | None = None
         with self._lock:
             active = self._sessions.get(session.handle)
             if active is session:
                 session.in_use = False
+                session.expiry_generation += 1
+                generation = session.expiry_generation
+                timer = threading.Timer(
+                    self.session_ttl_seconds,
+                    self._expire_session,
+                    args=(session.handle, generation),
+                )
+                timer.daemon = True
+                session.timer = timer
+        if timer is not None:
+            try:
+                timer.start()
+            except RuntimeError as error:
+                self._discard_session(session.handle)
+                raise CodexProtocolError(
+                    "Codex subscription session expiry could not start"
+                ) from error
 
     def _respond_to_pending_tools(
         self,
         session: _CodexSession,
         messages: list[dict],
+        deadline: float,
     ) -> None:
         tool_results = _latest_tool_results(messages)
         if set(tool_results) != set(session.pending_tools):
@@ -761,6 +880,7 @@ class CodexSubscriptionRuntime:
                     "contentItems": [{"type": "inputText", "text": content}],
                     "success": not bool(result.get("is_error")),
                 },
+                timeout=_remaining(deadline),
             )
         session.pending_tools.clear()
 
@@ -804,7 +924,10 @@ class CodexSubscriptionRuntime:
                 if method != "item/tool/call":
                     responder = getattr(session.client, "respond_error", None)
                     if callable(responder):
-                        responder(event.get("id"))
+                        responder(
+                            event.get("id"),
+                            timeout=_remaining(deadline),
+                        )
                     raise CodexProtocolError("Codex requested an unsupported capability")
                 self._record_dynamic_tool_call(session, event)
                 tool_collection_deadline = monotonic() + TOOL_COLLECTION_GRACE_SECONDS
@@ -833,8 +956,13 @@ class CodexSubscriptionRuntime:
                         if not isinstance(text, str):
                             raise CodexProtocolError("Codex emitted invalid assistant text")
                         if text:
-                            canonical_messages.append(text)
                             already_emitted = emitted_by_item.get(item_id, "")
+                            _consume_output_budget(
+                                session,
+                                text,
+                                already_emitted=already_emitted,
+                            )
+                            canonical_messages.append(text)
                             if not already_emitted:
                                 emitted_by_item[item_id] = text
                                 yield text
@@ -846,8 +974,13 @@ class CodexSubscriptionRuntime:
                 delta = params.get("delta")
                 if not isinstance(item_id, str) or not isinstance(delta, str):
                     raise CodexProtocolError("Codex emitted an invalid text delta")
+                if item_id not in session.agent_item_phases:
+                    raise CodexProtocolError(
+                        "Codex emitted text before starting its message"
+                    )
                 phase = session.agent_item_phases.get(item_id)
-                if phase != "commentary" and delta:
+                if phase == "final_answer" and delta:
+                    _consume_output_budget(session, delta)
                     emitted_by_item[item_id] = emitted_by_item.get(item_id, "") + delta
                     yield delta
                 continue
@@ -934,8 +1067,18 @@ class CodexSubscriptionRuntime:
             arguments=arguments,
         )
 
-    def _expire_session(self, handle: str) -> None:
-        self._discard_session(handle)
+    def _expire_session(self, handle: str, generation: int) -> None:
+        session: _CodexSession | None = None
+        with self._lock:
+            active = self._sessions.get(handle)
+            if (
+                active is not None
+                and not active.in_use
+                and active.expiry_generation == generation
+            ):
+                session = self._sessions.pop(handle)
+        if session is not None:
+            _close_session_resources(session)
 
     def _discard_session(self, handle: str) -> None:
         with self._lock:
@@ -969,10 +1112,25 @@ def _tool_completion(
 def _close_session_resources(session: _CodexSession) -> None:
     if session.timer is not None:
         session.timer.cancel()
+        session.timer = None
     try:
         session.client.close()
     finally:
         session.workspace.cleanup()
+
+
+def _consume_output_budget(
+    session: _CodexSession,
+    text: str,
+    *,
+    already_emitted: str = "",
+) -> None:
+    encoded_size = len(text.encode("utf-8"))
+    prior_size = len(already_emitted.encode("utf-8"))
+    additional_size = max(0, encoded_size - prior_size)
+    if session.output_bytes_seen + additional_size > MAX_ASSISTANT_OUTPUT_BYTES:
+        raise CodexProtocolError("Codex assistant output exceeded its size limit")
+    session.output_bytes_seen += additional_size
 
 
 def _remaining(deadline: float) -> float:
@@ -1002,6 +1160,11 @@ def _optional_nonnegative_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise CodexProtocolError("Codex emitted invalid token usage")
     return value
+
+
+def _owned_by_current_user(file_stat: os.stat_result) -> bool:
+    getuid = getattr(os, "getuid", None)
+    return not callable(getuid) or file_stat.st_uid == getuid()
 
 
 def _to_dynamic_tools(
@@ -1170,7 +1333,7 @@ def _codex_process_environment(codex_home: str) -> dict[str, str]:
         "PATH": os.environ.get("PATH", os.defpath),
         "RUST_LOG": "warn",
     }
-    for name in _SAFE_PROXY_ENV:
+    for name in _SAFE_NETWORK_ENV:
         value = os.environ.get(name)
         if value:
             environment[name] = value

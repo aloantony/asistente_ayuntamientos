@@ -606,12 +606,14 @@ export function AssistantPanel({
 }: AssistantPanelProps) {
   const assistantDisabled = assistantStatus !== null && !assistantStatus.enabled;
   const runtimeHealthFailed =
-    assistantStatus?.runtime === "hermes_agent" &&
-    assistantStatus.runtime_healthy === false &&
+    assistantStatus?.runtime_healthy === false &&
     assistantStatus.enabled;
   const selectedIsArchived = selectedConversation?.status === "archived";
   const composerDisabled =
-    isSendingMessage || assistantDisabled || Boolean(selectedIsArchived);
+    isSendingMessage ||
+    assistantDisabled ||
+    runtimeHealthFailed ||
+    Boolean(selectedIsArchived);
   const emptyThreadMessage = useMemo(
     () =>
       EMPTY_THREAD_MESSAGES[

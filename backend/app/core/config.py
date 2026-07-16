@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     openai_responses_max_output_tokens: int = 25000
     # Local development bridge backed by an interactive ChatGPT/Codex login.
     # It is deliberately isolated from the developer's normal ~/.codex home.
+    codex_subscription_enabled: bool = False
+    codex_subscription_real_data_allowed: bool = False
     codex_subscription_command: str = "codex"
     codex_subscription_home: str = "~/.codex-asistente-ayuntamientos"
     codex_subscription_model: str = ""
@@ -203,13 +205,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_codex_subscription_outside_development(self):
-        if (
-            self.assistant_runtime == "codex_subscription"
-            and self.environment != "development"
-        ):
+        if self.assistant_runtime != "codex_subscription":
+            return self
+        if self.environment != "development":
             raise ValueError(
                 "codex_subscription is a local development runtime and is "
                 "forbidden outside environment=development"
+            )
+        if not self.codex_subscription_enabled:
+            raise ValueError(
+                "codex_subscription requires the explicit local-development "
+                "opt-in CODEX_SUBSCRIPTION_ENABLED=true"
+            )
+        if not self.codex_subscription_real_data_allowed:
+            raise ValueError(
+                "codex_subscription requires explicit approval before application "
+                "data is sent to the shared ChatGPT account"
             )
         return self
 
