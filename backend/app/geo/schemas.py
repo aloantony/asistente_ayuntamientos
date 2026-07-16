@@ -71,6 +71,11 @@ class GeoMapItem(BaseModel):
     entity_type: GeoEntityType
     entity_id: int
     role: GeoLocationRole
+    layer_key: str
+    layer_label: str
+    layer_color: str
+    item_type: str | None = None
+    condition_status: str | None = None
     title: str
     subtitle: str | None = None
     status: str
