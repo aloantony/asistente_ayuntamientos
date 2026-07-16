@@ -1,7 +1,7 @@
 """create assistant message attachments
 
-Revision ID: 20260716_0026
-Revises: 20260716_0025
+Revision ID: 20260716_0027
+Revises: 20260716_0026
 Create Date: 2026-07-16
 """
 
@@ -10,8 +10,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260716_0026"
-down_revision: str | None = "20260716_0025"
+revision: str = "20260716_0027"
+down_revision: str | None = "20260716_0026"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -27,7 +27,7 @@ def _documents_project_foreign_key_name() -> str:
     if len(matches) != 1 or not matches[0].get("name"):
         raise RuntimeError(
             "Expected exactly one named documents(project_id) foreign key "
-            "before upgrading 20260716_0026"
+            "before upgrading 20260716_0027"
         )
     return str(matches[0]["name"])
 

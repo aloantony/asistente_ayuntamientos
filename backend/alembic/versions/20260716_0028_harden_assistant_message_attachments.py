@@ -1,12 +1,11 @@
 """harden assistant message attachment authorization audit
 
-Revision ID: 20260716_0027
-Revises: 20260716_0026
+Revision ID: 20260716_0028
+Revises: 20260716_0027
 Create Date: 2026-07-16
 
-Revision 0026 may already be present in persistent databases, so it remains
-immutable. Existing attachment rows are retained with an explicit
-``legacy_unverified`` scope instead of fabricating authorization evidence.
+Existing attachment rows are retained with an explicit ``legacy_unverified``
+scope instead of fabricating authorization evidence.
 """
 
 from collections.abc import Sequence
@@ -14,8 +13,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260716_0027"
-down_revision: str | None = "20260716_0026"
+revision: str = "20260716_0028"
+down_revision: str | None = "20260716_0027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -158,7 +157,7 @@ def downgrade() -> None:
     ).scalar_one()
     if attachment_count:
         raise RuntimeError(
-            "Refusing to downgrade 20260716_0027: "
+            "Refusing to downgrade 20260716_0028: "
             "assistant_message_attachments contains "
             f"{attachment_count} attachment audit row(s). Preserve or migrate "
             "those records before retrying."

@@ -15,7 +15,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260716_0027"
+HEAD_REVISION = "20260716_0028"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -1075,15 +1075,15 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         engine.dispose()
 
 
-def test_document_project_scope_upgrade_from_0025_and_downgrade(
+def test_document_project_scope_upgrade_from_0026_and_downgrade(
     migration_database_url: str,
 ) -> None:
-    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    run_alembic(migration_database_url, "upgrade", "20260716_0026")
     engine = create_engine(migration_database_url)
 
     try:
         assert_document_project_scope_is_simple(inspect(engine))
-        run_alembic(migration_database_url, "upgrade", "20260716_0026")
+        run_alembic(migration_database_url, "upgrade", "20260716_0027")
         assert_document_project_scope_is_composite(inspect(engine))
 
         with pytest.raises(DBAPIError), engine.begin() as connection:
@@ -1122,7 +1122,7 @@ def test_document_project_scope_upgrade_from_0025_and_downgrade(
                 },
             )
 
-        run_alembic(migration_database_url, "downgrade", "20260716_0025")
+        run_alembic(migration_database_url, "downgrade", "20260716_0026")
         assert_document_project_scope_is_simple(inspect(engine))
     finally:
         engine.dispose()
@@ -1131,7 +1131,7 @@ def test_document_project_scope_upgrade_from_0025_and_downgrade(
 def test_document_project_scope_preflight_rejects_inconsistent_existing_row(
     migration_database_url: str,
 ) -> None:
-    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    run_alembic(migration_database_url, "upgrade", "20260716_0026")
     engine = create_engine(migration_database_url)
 
     try:
@@ -1173,7 +1173,7 @@ def test_document_project_scope_preflight_rejects_inconsistent_existing_row(
         result = run_alembic(
             migration_database_url,
             "upgrade",
-            "20260716_0026",
+            "20260716_0027",
             check=False,
         )
 
@@ -1185,7 +1185,7 @@ def test_document_project_scope_preflight_rejects_inconsistent_existing_row(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260716_0025"
+            ).scalar_one() == "20260716_0026"
         assert_document_project_scope_is_simple(inspect(engine))
     finally:
         engine.dispose()
@@ -1194,7 +1194,7 @@ def test_document_project_scope_preflight_rejects_inconsistent_existing_row(
 def test_attachment_audit_upgrade_preserves_legacy_rows_and_blocks_downgrade(
     migration_database_url: str,
 ) -> None:
-    run_alembic(migration_database_url, "upgrade", "20260716_0026")
+    run_alembic(migration_database_url, "upgrade", "20260716_0027")
     engine = create_engine(migration_database_url)
 
     try:
@@ -1277,7 +1277,7 @@ def test_attachment_audit_upgrade_preserves_legacy_rows_and_blocks_downgrade(
                 {"message_id": message_id, "document_id": document_id},
             ).scalar_one()
 
-        run_alembic(migration_database_url, "upgrade", "20260716_0027")
+        run_alembic(migration_database_url, "upgrade", "20260716_0028")
         with engine.connect() as connection:
             audit = connection.execute(
                 text(
@@ -1301,7 +1301,7 @@ def test_attachment_audit_upgrade_preserves_legacy_rows_and_blocks_downgrade(
         result = run_alembic(
             migration_database_url,
             "downgrade",
-            "20260716_0026",
+            "20260716_0027",
             check=False,
         )
 
@@ -1310,7 +1310,7 @@ def test_attachment_audit_upgrade_preserves_legacy_rows_and_blocks_downgrade(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260716_0027"
+            ).scalar_one() == "20260716_0028"
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM assistant_message_attachments "
@@ -1325,7 +1325,7 @@ def test_attachment_audit_upgrade_preserves_legacy_rows_and_blocks_downgrade(
 def test_attachment_audit_downgrade_waits_for_concurrent_insert(
     migration_database_url: str,
 ) -> None:
-    run_alembic(migration_database_url, "upgrade", "20260716_0027")
+    run_alembic(migration_database_url, "upgrade", "20260716_0028")
     engine = create_engine(migration_database_url)
     writer = engine.connect()
     transaction = writer.begin()
@@ -1424,7 +1424,7 @@ def test_attachment_audit_downgrade_waits_for_concurrent_insert(
         migration_process = start_alembic(
             migration_database_url,
             "downgrade",
-            "20260716_0026",
+            "20260716_0027",
         )
         wait_for_exclusive_lock(
             engine,
@@ -1441,7 +1441,7 @@ def test_attachment_audit_downgrade_waits_for_concurrent_insert(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260716_0027"
+            ).scalar_one() == "20260716_0028"
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM assistant_message_attachments "
