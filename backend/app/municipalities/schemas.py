@@ -34,6 +34,9 @@ class MunicipalityRead(BaseModel):
     country: str
     ine_code: str | None
     population: int | None
+    population_reference_year: int | None
+    population_source_url: str | None
+    population_source_sha256: str | None
     surface_km2: float | None
     density: float | None
     postal_codes: str | None

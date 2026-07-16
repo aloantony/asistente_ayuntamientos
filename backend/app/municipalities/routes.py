@@ -124,6 +124,16 @@ def update_municipality(
     elif "status" in updates:
         require_municipality_permission(db, current_user, "municipalities.edit")
 
+    population_changed = (
+        "population" in updates and updates["population"] != municipality.population
+    )
+    if population_changed:
+        updates.update(
+            population_reference_year=None,
+            population_source_url=None,
+            population_source_sha256=None,
+        )
+
     apply_density(updates, municipality)
     for field, value in updates.items():
         setattr(municipality, field, value)

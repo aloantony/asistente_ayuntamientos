@@ -6,6 +6,7 @@ import io
 from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
+from app.municipalities.models import Municipality
 from app.ordinances import import_service
 from app.ordinances.bop_burgos import parse_bop_burgos_search_results
 from app.ordinances.models import OfficialLegalSource, OrdinanceLegalChunk
@@ -168,6 +169,41 @@ def test_create_municipality_computes_density_overriding_client_value(
     )
 
     assert body["density"] == 10000 / 40.0
+
+
+def test_manual_population_update_clears_official_provenance(
+    client,
+    db,
+    superuser,
+):
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+        ine_code="09137",
+        population=290,
+        population_reference_year=2025,
+        population_source_url="https://www.ine.es/pob_xls/pobmun.zip",
+        population_source_sha256="a" * 64,
+        surface_km2=10.0,
+        density=29.0,
+    )
+    db.add(municipality)
+    db.commit()
+
+    response = client.patch(
+        f"/municipalities/{municipality.id}",
+        headers=headers_for(superuser),
+        json={"population": 300},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["population"] == 300
+    assert body["population_reference_year"] is None
+    assert body["population_source_url"] is None
+    assert body["population_source_sha256"] is None
+    assert body["density"] == 30.0
 
 
 # ---------------------------------------------------------------------------
