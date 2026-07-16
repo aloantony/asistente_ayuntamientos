@@ -425,6 +425,13 @@ _TOOL_DEFINITIONS: list[dict] = [
                     "type": "boolean",
                     "description": "Incluir ordenanzas pendientes de revisión; por defecto false",
                 },
+                "include_inactive": {
+                    "type": "boolean",
+                    "description": (
+                        "Incluir ordenanzas derogadas, sustituidas o archivadas; "
+                        "por defecto false"
+                    ),
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -1124,10 +1131,21 @@ def _semantic_search_ordinances(
     tool_input: dict,
     context: ToolContext,
 ) -> dict:
-    if not has_permission(current_user, "ordinances.compare", db):
+    if not _has_ordinance_tool_permission(db, current_user, "ordinances.compare"):
         raise HTTPException(
             status_code=403,
             detail="Permission required: ordinances.compare",
+        )
+    include_pending = _optional_boolean(tool_input, "include_pending")
+    include_inactive = _optional_boolean(tool_input, "include_inactive")
+    if include_pending and not _has_ordinance_tool_permission(
+        db,
+        current_user,
+        "ordinances.review",
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.review",
         )
 
     query_text = str(tool_input["query"]).strip()
@@ -1180,7 +1198,8 @@ def _semantic_search_ordinances(
         query_vector=query_vector,
         embedding_model=embedding_model,
         options=OrdinanceSearchOptions(
-            include_pending=_optional_boolean(tool_input, "include_pending"),
+            include_pending=include_pending,
+            include_inactive=include_inactive,
             municipality_id=(
                 int(municipality_id) if municipality_id is not None else None
             ),
@@ -1202,6 +1221,18 @@ def _semantic_search_ordinances(
         "topic": topic or None,
         **search_page,
     }
+
+
+def _has_ordinance_tool_permission(
+    db: Session,
+    current_user: User,
+    permission_code: str,
+) -> bool:
+    return has_permission(
+        current_user,
+        permission_code,
+        db,
+    ) or has_permission(current_user, "ordinances.manage", db)
 
 
 def _optional_boolean(tool_input: dict, name: str) -> bool:
@@ -1912,11 +1943,24 @@ def get_available_tool_specs(
         for name, spec in TOOL_CATALOG.items()
         if name in requested_tool_names
         and (name != "web_search" or web_search_client.enabled)
-        and (
-            spec.required_permission is None
-            or has_permission(current_user, spec.required_permission, db)
-        )
+        and _has_required_tool_permission(db, current_user, spec)
     ]
+
+
+def _has_required_tool_permission(
+    db: Session,
+    current_user: User,
+    spec: ToolSpec,
+) -> bool:
+    if spec.required_permission is None:
+        return True
+    if has_permission(current_user, spec.required_permission, db):
+        return True
+    return spec.domain == "ordinances" and has_permission(
+        current_user,
+        "ordinances.manage",
+        db,
+    )
 
 
 def get_tool_metadata() -> list[dict]:

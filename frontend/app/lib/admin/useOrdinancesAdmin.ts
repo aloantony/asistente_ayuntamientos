@@ -84,7 +84,7 @@ const EMPTY_ORDINANCE_FORM: OrdinanceEditState = {
   publication_date: "",
   effective_date: "",
   status: "unknown",
-  curation_status: "approved",
+  curation_status: "pending_review",
   text_content: "",
   notes: "",
   legal_review_notes: "",
@@ -169,6 +169,23 @@ function buildOrdinancePayload(edit: OrdinanceEditState) {
   };
 }
 
+function buildOrdinancePatch(
+  edit: OrdinanceEditState,
+  original: Ordinance,
+) {
+  const nextPayload = buildOrdinancePayload(edit);
+  const originalPayload = buildOrdinancePayload(
+    buildOrdinanceEditEntry(original),
+  );
+
+  return Object.fromEntries(
+    Object.entries(nextPayload).filter(
+      ([field, value]) =>
+        value !== originalPayload[field as keyof typeof originalPayload],
+    ),
+  );
+}
+
 export function useOrdinancesAdmin({
   getStoredToken,
   handleRequestError,
@@ -190,6 +207,9 @@ export function useOrdinancesAdmin({
   const [isCreatingOrdinance, setIsCreatingOrdinance] = useState(false);
   const [ordinanceEdits, setOrdinanceEdits] = useState<
     Record<number, OrdinanceEditState>
+  >({});
+  const [ordinanceEditOriginals, setOrdinanceEditOriginals] = useState<
+    Record<number, Ordinance>
   >({});
   const [ordinanceEditError, setOrdinanceEditError] = useState("");
   const [ordinanceEditMessage, setOrdinanceEditMessage] = useState("");
@@ -223,6 +243,7 @@ export function useOrdinancesAdmin({
       setOrdinances(items);
       setOrdinanceTotal(total);
       setOrdinanceEdits(buildOrdinanceEditState(items));
+      setOrdinanceEditOriginals({});
       setOrdinanceDetailLoaded({});
     } catch (loadError) {
       handleRequestError(
@@ -243,7 +264,7 @@ export function useOrdinancesAdmin({
     try {
       const token = getStoredToken();
       const detail = await adminRequest<Ordinance>(
-        `/ordinances/${ordinanceId}`,
+        `/ordinances/${ordinanceId}?include_unreviewed=true&include_inactive=true`,
         token,
         "No se pudo cargar el detalle de la ordenanza.",
       );
@@ -251,6 +272,10 @@ export function useOrdinancesAdmin({
       setOrdinanceEdits((currentEdits) => ({
         ...currentEdits,
         [ordinanceId]: buildOrdinanceEditEntry(detail),
+      }));
+      setOrdinanceEditOriginals((current) => ({
+        ...current,
+        [ordinanceId]: detail,
       }));
       setOrdinanceDetailLoaded((current) => ({
         ...current,
@@ -328,8 +353,16 @@ export function useOrdinancesAdmin({
 
   async function handleUpdateOrdinance(ordinanceId: number) {
     const edit = ordinanceEdits[ordinanceId];
-    if (!edit) {
+    const original = ordinanceEditOriginals[ordinanceId];
+    if (!edit || !original) {
       setOrdinanceEditError("No se pudo encontrar la ordenanza para editar.");
+      return;
+    }
+
+    const patch = buildOrdinancePatch(edit, original);
+    if (Object.keys(patch).length === 0) {
+      setOrdinanceEditError("");
+      setOrdinanceEditMessage("No hay cambios pendientes.");
       return;
     }
 
@@ -339,19 +372,28 @@ export function useOrdinancesAdmin({
 
     try {
       const token = getStoredToken();
-      await adminRequest<Ordinance>(
+      const updated = await adminRequest<Ordinance>(
         `/ordinances/${ordinanceId}`,
         token,
         "No se pudo actualizar la ordenanza.",
         {
           method: "PATCH",
-          body: JSON.stringify(buildOrdinancePayload(edit)),
+          body: JSON.stringify(patch),
         },
       );
 
       setOrdinanceEditMessage("Ordenanza actualizada.");
       if (canList) {
         await loadOrdinances();
+      } else {
+        setOrdinanceEditOriginals((current) => ({
+          ...current,
+          [ordinanceId]: updated,
+        }));
+        setOrdinanceEdits((current) => ({
+          ...current,
+          [ordinanceId]: buildOrdinanceEditEntry(updated),
+        }));
       }
     } catch (updateError) {
       handleRequestError(

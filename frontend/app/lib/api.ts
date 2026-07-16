@@ -203,10 +203,30 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se puede usar un municipio archivado.";
     case "Ordinance not found":
       return "No se encontró la ordenanza indicada.";
+    case "Ordinance semantic search is unavailable":
+      return "La búsqueda semántica de ordenanzas no está disponible ahora mismo. Inténtalo de nuevo más tarde.";
+    case "Ordinance search query is too short":
+      return "Escribe al menos dos caracteres para buscar ordenanzas.";
+    case "population_gte must be lower than population_lt":
+      return "La población mínima debe ser menor que el límite superior.";
+    case "Comparison needs between 1 and 20 municipalities":
+      return "Selecciona entre uno y veinte municipios para comparar.";
+    case "Changed ordinance content requires a separate review":
+      return "El contenido jurídico ha cambiado. Guárdalo primero y apruébalo después en una revisión separada.";
+    case "Imported ordinance review must use the import item endpoint":
+      return "Las ordenanzas importadas deben revisarse desde su elemento de importación.";
+    case "Import item is not pending review":
+      return "Este elemento de importación ya no está pendiente de revisión.";
+    case "Import item does not own this ordinance review":
+      return "El elemento de importación no puede revisar esa ordenanza.";
+    case "El texto de la ordenanza supera el máximo de fragmentos buscables.":
+      return "El texto es demasiado extenso para indexarlo de forma segura. Divídelo o revisa el límite configurado.";
     case "Required ordinance fields cannot be null":
       return "Los campos obligatorios de la ordenanza no pueden estar vacíos.";
     case "Official legal source not found":
       return "No se encontró la fuente oficial.";
+    case "Invalid official legal source definition":
+      return "La fuente oficial no tiene una URL y un dominio seguros y coherentes.";
     case "Import job needs seed URLs or search query with municipalities":
       return "La importación necesita URLs semilla o una búsqueda con municipios.";
     case "Import job needs active official sources":

@@ -688,11 +688,18 @@ export type OrdinanceComparisonEntry = {
   subtopic: string | null;
   status: OrdinanceStatus;
   curation_status: OrdinanceCurationStatus;
+  approval_date: string | null;
   publication_date: string | null;
   effective_date: string | null;
   source_url: string | null;
   summary: string | null;
   confidence_score: number | null;
+};
+
+export type OrdinanceComparisonMunicipality = {
+  id: number;
+  name: string;
+  province: string;
 };
 
 export type OrdinanceComparisonRow = {
@@ -703,8 +710,90 @@ export type OrdinanceComparisonRow = {
 
 export type OrdinanceComparison = {
   municipality_ids: number[];
+  municipalities: OrdinanceComparisonMunicipality[];
   include_pending: boolean;
+  include_inactive: boolean;
   rows: OrdinanceComparisonRow[];
+};
+
+export type OrdinanceResultScope =
+  | "fragments"
+  | "ordinances"
+  | "municipalities";
+
+export type OrdinanceSemanticSearchResult = {
+  chunk_id: number;
+  ordinance_id: number;
+  title: string;
+  municipality_id: number;
+  municipality_name: string;
+  province: string;
+  population: number | null;
+  topic: string;
+  status: OrdinanceStatus;
+  curation_status: OrdinanceCurationStatus;
+  approval_date: string | null;
+  publication_date: string | null;
+  effective_date: string | null;
+  chunk_index: number;
+  heading: string | null;
+  citation: string | null;
+  source_locator: string | null;
+  text: string;
+  text_truncated: boolean;
+  source_url: string | null;
+  score: number;
+};
+
+export type OrdinancePopulationFilter = {
+  applied: boolean;
+  gte: number | null;
+  lt: number | null;
+  eligible_municipalities: number;
+  municipalities_with_population: number;
+  municipalities_without_population: number;
+  coverage_complete: boolean;
+};
+
+export type OrdinanceLegalStatusFilter = {
+  include_inactive: boolean;
+  excluded_statuses: OrdinanceStatus[];
+};
+
+export type OrdinanceSearchPage = {
+  query: string;
+  result_scope: OrdinanceResultScope;
+  limit: number;
+  offset: number;
+  returned: number;
+  total_matches: number;
+  has_more: boolean;
+  next_offset: number | null;
+  corpus_scan_complete: boolean;
+  search_backend: "pgvector" | "python";
+  topic_filter_mode: "none" | "preference" | "strict";
+  legal_status_filter: OrdinanceLegalStatusFilter;
+  population_filter: OrdinancePopulationFilter;
+  eligible_chunks: number;
+  results: OrdinanceSemanticSearchResult[];
+};
+
+export type OrdinanceLegalChunk = {
+  id: number;
+  ordinance_id: number;
+  import_item_id: number | null;
+  chunk_index: number;
+  heading: string | null;
+  citation: string | null;
+  text: string;
+  source_url: string | null;
+  source_locator: string | null;
+  review_status: "pending_review" | "approved" | "rejected";
+  embedding_model: string | null;
+  embedding_status: "pending" | "ready" | "failed" | "disabled";
+  embedded_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type TelegramLinkStatus = {
@@ -953,7 +1042,7 @@ const ORDINANCE_STATUS_LABELS: Record<OrdinanceStatus, string> = {
   repealed: "Derogada",
   partially_repealed: "Parcialmente derogada",
   superseded: "Sustituida",
-  unknown: "Desconocida",
+  unknown: "Vigencia desconocida",
   archived: "Archivada",
 };
 

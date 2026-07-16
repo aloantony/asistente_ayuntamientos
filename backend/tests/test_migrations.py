@@ -15,7 +15,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260716_0025"
+HEAD_REVISION = "20260716_0026"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -812,6 +812,108 @@ def test_reconciles_deployed_revision_and_reversible_schema(
                     """
                 )
             ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_ordinance_review_default_changes_without_reclassifying_existing_rows(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name,
+                        province,
+                        autonomous_community
+                    ) VALUES (
+                        'Municipio migración de ordenanzas',
+                        'Burgos',
+                        'Castilla y León'
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+            previous_status = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id,
+                        title,
+                        topic,
+                        ordinance_type
+                    ) VALUES (
+                        :municipality_id,
+                        'Ordenanza anterior a revisión segura',
+                        'migración',
+                        'ordinance'
+                    ) RETURNING curation_status
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            assert previous_status == "approved"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        with engine.begin() as connection:
+            assert connection.execute(
+                text(
+                    """
+                    SELECT curation_status
+                    FROM ordinances
+                    WHERE title = 'Ordenanza anterior a revisión segura'
+                    """
+                )
+            ).scalar_one() == "approved"
+            new_status = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id,
+                        title,
+                        topic,
+                        ordinance_type
+                    ) VALUES (
+                        :municipality_id,
+                        'Ordenanza posterior pendiente',
+                        'migración',
+                        'ordinance'
+                    ) RETURNING curation_status
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            assert new_status == "pending_review"
+
+        run_alembic(migration_database_url, "downgrade", "20260716_0025")
+        with engine.begin() as connection:
+            downgraded_status = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id,
+                        title,
+                        topic,
+                        ordinance_type
+                    ) VALUES (
+                        :municipality_id,
+                        'Ordenanza tras downgrade',
+                        'migración',
+                        'ordinance'
+                    ) RETURNING curation_status
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            assert downgraded_status == "approved"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
     finally:
         engine.dispose()
 

@@ -5,8 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.assistant.models import AssistantMemoryEntry
 from app.assistant.tools import ToolSpec
+from app.core.config import settings
 from app.organizations.access import get_accessible_organizations_query
-from app.ordinances.models import Ordinance
+from app.ordinances.models import Ordinance, OrdinanceLegalChunk
+from app.ordinances.search import DEFINITIVELY_INACTIVE_STATUSES
 from app.rbac.permissions import has_permission
 from app.users.models import User
 
@@ -199,9 +201,18 @@ def build_approved_memory_block(
 def build_ordinance_coverage_block(db: Session) -> str:
     ordinance_count, municipality_count = db.execute(
         select(
-            func.count(Ordinance.id),
+            func.count(distinct(Ordinance.id)),
             func.count(distinct(Ordinance.municipality_id)),
-        ).where(Ordinance.curation_status == "approved")
+        )
+        .join(OrdinanceLegalChunk)
+        .where(
+            Ordinance.curation_status == "approved",
+            Ordinance.status.not_in(DEFINITIVELY_INACTIVE_STATUSES),
+            OrdinanceLegalChunk.review_status == "approved",
+            OrdinanceLegalChunk.embedding_status == "ready",
+            OrdinanceLegalChunk.embedding.is_not(None),
+            OrdinanceLegalChunk.embedding_model == settings.embeddings_model,
+        )
     ).one()
     if not ordinance_count:
         return (
@@ -210,8 +221,11 @@ def build_ordinance_coverage_block(db: Session) -> str:
         )
 
     return (
-        "COBERTURA DE ORDENANZAS APROBADAS:\n"
+        "COBERTURA DE ORDENANZAS RECUPERABLES Y APROBADAS:\n"
         f"- {ordinance_count} ordenanzas de {municipality_count} municipios.\n"
+        "- Se excluyen por defecto las derogadas, sustituidas y archivadas. "
+        "Los estados de vigencia desconocida o derogación parcial deben "
+        "advertirse expresamente en la respuesta.\n"
         "- Este resumen contabiliza todo el corpus; no es una lista parcial de "
         "municipios. Usa semantic_search_ordinances para localizar y paginar "
         "referencias concretas."

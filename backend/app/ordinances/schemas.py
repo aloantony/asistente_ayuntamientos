@@ -141,7 +141,7 @@ class OrdinanceCreate(BaseModel):
     publication_date: date | None = None
     effective_date: date | None = None
     status: OrdinanceStatus = "unknown"
-    curation_status: OrdinanceCurationStatus = "approved"
+    curation_status: OrdinanceCurationStatus = "pending_review"
     text_content: str | None = None
     notes: str | None = None
     legal_review_notes: str | None = None
@@ -362,6 +362,7 @@ class OrdinanceComparisonEntry(BaseModel):
     subtopic: str | None
     status: OrdinanceStatus
     curation_status: OrdinanceCurationStatus
+    approval_date: date | None
     publication_date: date | None
     effective_date: date | None
     source_url: str | None
@@ -375,9 +376,17 @@ class OrdinanceComparisonRow(BaseModel):
     entries: list[OrdinanceComparisonEntry]
 
 
+class OrdinanceComparisonMunicipality(BaseModel):
+    id: int
+    name: str
+    province: str
+
+
 class OrdinanceComparisonRead(BaseModel):
     municipality_ids: list[int]
+    municipalities: list[OrdinanceComparisonMunicipality]
     include_pending: bool
+    include_inactive: bool
     rows: list[OrdinanceComparisonRow]
 
 
@@ -390,12 +399,52 @@ class OrdinanceSemanticSearchResult(BaseModel):
     province: str
     population: int | None
     topic: str
-    curation_status: str
+    status: OrdinanceStatus
+    curation_status: OrdinanceCurationStatus
+    approval_date: date | None
+    publication_date: date | None
+    effective_date: date | None
+    chunk_index: int
+    heading: str | None
     citation: str | None
+    source_locator: str | None
     text: str
     text_truncated: bool
     source_url: str | None
     score: float
+
+
+class OrdinancePopulationFilterRead(BaseModel):
+    applied: bool
+    gte: int | None
+    lt: int | None
+    eligible_municipalities: int
+    municipalities_with_population: int
+    municipalities_without_population: int
+    coverage_complete: bool
+
+
+class OrdinanceLegalStatusFilterRead(BaseModel):
+    include_inactive: bool
+    excluded_statuses: list[OrdinanceStatus]
+
+
+class OrdinanceSearchRead(BaseModel):
+    query: str
+    result_scope: Literal["fragments", "ordinances", "municipalities"]
+    limit: int
+    offset: int
+    returned: int
+    total_matches: int
+    has_more: bool
+    next_offset: int | None
+    corpus_scan_complete: bool
+    search_backend: Literal["pgvector", "python"]
+    topic_filter_mode: Literal["none", "preference", "strict"]
+    legal_status_filter: OrdinanceLegalStatusFilterRead
+    population_filter: OrdinancePopulationFilterRead
+    eligible_chunks: int
+    results: list[OrdinanceSemanticSearchResult]
 
 
 class OrdinanceCoverageMunicipalityRead(BaseModel):
@@ -447,6 +496,18 @@ class OrdinanceFailedEmbeddingRead(BaseModel):
 class OrdinanceEmbeddingRetryRead(BaseModel):
     province: str
     retried: int
+    queued: int = 0
     restored: int
     failed: int
     still_failed: list[OrdinanceFailedEmbeddingRead]
+
+
+class OrdinanceEmbeddingDispatchRead(BaseModel):
+    ordinance_id: int
+    requested: int
+    queued: int
+    queue_failed: int
+    ready: int
+    pending: int
+    failed: int
+    disabled: int

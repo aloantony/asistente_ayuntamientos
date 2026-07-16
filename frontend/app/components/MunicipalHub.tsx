@@ -3,7 +3,10 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { fetchMunicipality } from "../lib/fetchers";
-import { canViewMunicipalHub } from "../lib/permissions";
+import {
+  canViewMunicipalHub,
+  canViewOrdinanceLibrary,
+} from "../lib/permissions";
 import {
   shouldShowProjectsPanel,
   shouldShowRequirementsPanel,
@@ -149,6 +152,15 @@ function getModuleLinks(user: User, municipality: Municipality) {
     });
   }
 
+  if (canViewOrdinanceLibrary(user)) {
+    links.push({
+      href: `/ordenanzas?municipality_id=${municipality.id}`,
+      label: "Consultar ordenanzas",
+      description:
+        "Busca y abre el corpus normativo revisado de este municipio.",
+    });
+  }
+
   if (
     [
       "ordinances.create",
@@ -161,8 +173,8 @@ function getModuleLinks(user: User, municipality: Municipality) {
   ) {
     links.push({
       href: "/admin/ordenanzas",
-      label: "Ordenanzas",
-      description: "Gestiona el repositorio normativo disponible.",
+      label: "Administrar ordenanzas",
+      description: "Cura, revisa e importa el repositorio normativo.",
     });
   }
 
