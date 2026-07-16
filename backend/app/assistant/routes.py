@@ -118,6 +118,16 @@ def require_assistant_use(db: Session, current_user: User) -> None:
     )
 
 
+def configured_assistant_model() -> str:
+    if settings.assistant_runtime == "hermes_agent":
+        return settings.hermes_agent_model
+    if settings.assistant_runtime == "openai_responses":
+        return settings.openai_responses_model
+    if settings.assistant_runtime == "codex_subscription":
+        return settings.codex_subscription_model or "codex-subscription-default"
+    return settings.assistant_model
+
+
 @router.get("/status", response_model=AssistantStatusRead)
 def get_assistant_status(
     db: Annotated[Session, Depends(get_db)],
@@ -128,15 +138,7 @@ def get_assistant_status(
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
         runtime=settings.assistant_runtime,
-        model=(
-            settings.hermes_agent_model
-            if settings.assistant_runtime == "hermes_agent"
-            else (
-                settings.openai_responses_model
-                if settings.assistant_runtime == "openai_responses"
-                else settings.assistant_model
-            )
-        ),
+        model=getattr(agent_gateway, "model", configured_assistant_model()),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
         speech_transcription_enabled=settings.speech_transcription_runtime
         != "disabled",

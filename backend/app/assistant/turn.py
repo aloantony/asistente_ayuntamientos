@@ -172,19 +172,22 @@ def run_agent_turn_events(
         gateway,
         input_mode=input_mode,
     )
-    while True:
-        try:
-            event = next(events)
-        except StopIteration as stop:
-            return stop.value
-        if event.type == "text_delta":
-            streamed_text.append(str(event.data.get("text", "")))
-        elif event.type == "done" and streamed_text:
-            message = event.data.get("message") or {}
-            canonical_text = str(message.get("content", ""))
-            if "".join(streamed_text) != canonical_text:
-                yield TurnEvent("text_reset", {"text": canonical_text})
-        yield event
+    try:
+        while True:
+            try:
+                event = next(events)
+            except StopIteration as stop:
+                return stop.value
+            if event.type == "text_delta":
+                streamed_text.append(str(event.data.get("text", "")))
+            elif event.type == "done" and streamed_text:
+                message = event.data.get("message") or {}
+                canonical_text = str(message.get("content", ""))
+                if "".join(streamed_text) != canonical_text:
+                    yield TurnEvent("text_reset", {"text": canonical_text})
+            yield event
+    finally:
+        events.close()
 
 
 def _run_agent_turn_events(
@@ -293,6 +296,10 @@ def _run_agent_turn_events(
                 reply_text = sanitize_model_reply(extract_text(response.content))
                 break
 
+            # Retain opaque provider state before yielding tool activity. If an
+            # SSE client disconnects at either activity event, the outer
+            # ``finally`` can still discard the paused provider session.
+            messages.append(_assistant_response_message(response))
             force_synthesis_reason: str | None = None
             execute_round = iterations_remaining > 0
             if execute_round:
@@ -398,7 +405,6 @@ def _run_agent_turn_events(
                     }
                 )
 
-            messages.append(_assistant_response_message(response))
             messages.append({"role": "user", "content": tool_results})
             if _turn_timed_out(turn_deadline):
                 force_synthesis_reason = "turn_timeout"
@@ -450,6 +456,16 @@ def _run_agent_turn_events(
             conversation.id,
         )
         reply_text = ERROR_REPLY
+    finally:
+        discard_provider_state = getattr(gateway, "discard_provider_state", None)
+        if callable(discard_provider_state):
+            try:
+                discard_provider_state(messages)
+            except Exception:
+                logger.warning(
+                    "Assistant gateway state cleanup failed (conversation=%s)",
+                    conversation.id,
+                )
 
     if not reply_text:
         reply_text = FALLBACK_REPLY
