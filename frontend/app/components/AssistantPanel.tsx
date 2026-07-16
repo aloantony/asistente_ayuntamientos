@@ -840,6 +840,14 @@ export function AssistantPanel({
       speechSupported);
   const voiceCaptureAvailable = realtimeVoiceAvailable || speechTranscriptionEnabled;
   const useRealtimeVoice = voiceModeEnabled && realtimeVoiceAvailable;
+  const attachmentsBlockedByVoice =
+    voiceModeEnabled ||
+    realtimeVoiceActive ||
+    isListening ||
+    isTranscribingVoice ||
+    !["idle", "done", "interrupted", "error"].includes(voiceState);
+  const attachmentSendBlocked =
+    attachmentsBlockedByVoice && selectedAttachments.length > 0;
   const voiceStatus = (() => {
     if (voiceState === "connecting") {
       return "Conectando voz…";
@@ -901,6 +909,12 @@ export function AssistantPanel({
   useEffect(() => {
     setIsAttachmentPickerOpen(false);
   }, [selectedConversation?.id]);
+
+  useEffect(() => {
+    if (attachmentsBlockedByVoice) {
+      setIsAttachmentPickerOpen(false);
+    }
+  }, [attachmentsBlockedByVoice]);
 
   const conversationGroups = useMemo(() => {
     if (conversationListMode === "folders") {
@@ -1341,7 +1355,11 @@ export function AssistantPanel({
     }
 
     event.preventDefault();
-    if (composerDisabled || draftMessage.trim().length === 0) {
+    if (
+      composerDisabled ||
+      attachmentSendBlocked ||
+      draftMessage.trim().length === 0
+    ) {
       return;
     }
 
@@ -1352,12 +1370,18 @@ export function AssistantPanel({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (attachmentSendBlocked) {
+      return;
+    }
     stopListening({ discardAudio: true });
     onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
   }
 
   function toggleAttachmentPicker() {
+    if (attachmentsBlockedByVoice) {
+      return;
+    }
     const opening = !isAttachmentPickerOpen;
     setIsAttachmentPickerOpen(opening);
     if (opening && attachmentProjects.length === 0 && !isLoadingAttachments) {
@@ -2236,13 +2260,15 @@ export function AssistantPanel({
                   </div>
                 ) : null}
 
-                {isAttachmentPickerOpen ? (
+                {isAttachmentPickerOpen && !attachmentsBlockedByVoice ? (
                   <div className="assistant-attachment-picker">
                     <div className="assistant-attachment-picker-head">
                       <label>
                         <span>Proyecto</span>
                         <select
-                          disabled={isLoadingAttachments}
+                          disabled={
+                            isLoadingAttachments || attachmentsBlockedByVoice
+                          }
                           onChange={(event) =>
                             setAttachmentProjectId(Number(event.target.value))
                           }
@@ -2258,6 +2284,7 @@ export function AssistantPanel({
                       <input
                         accept=".pdf,.txt,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
                         className="assistant-attachment-input"
+                        disabled={attachmentsBlockedByVoice}
                         onChange={(event) =>
                           handleAttachmentUpload(event.target.files?.[0])
                         }
@@ -2269,7 +2296,8 @@ export function AssistantPanel({
                         disabled={
                           attachmentProjectId === null ||
                           isUploadingAttachment ||
-                          selectedAttachments.length >= 5
+                          selectedAttachments.length >= 5 ||
+                          attachmentsBlockedByVoice
                         }
                         onClick={() => attachmentInputRef.current?.click()}
                         type="button"
@@ -2303,6 +2331,7 @@ export function AssistantPanel({
                             <button
                               aria-pressed={isSelected}
                               className={isSelected ? "selected" : ""}
+                              disabled={attachmentsBlockedByVoice}
                               key={attachment.document.id}
                               onClick={() => onToggleAttachment(attachment)}
                               type="button"
@@ -2370,15 +2399,21 @@ export function AssistantPanel({
                             ? "assistant-attach-button active"
                             : "assistant-attach-button"
                         }
-                        disabled={composerDisabled}
+                        disabled={composerDisabled || attachmentsBlockedByVoice}
                         onClick={toggleAttachmentPicker}
-                        title="Adjuntar archivo"
+                        title={
+                          attachmentsBlockedByVoice
+                            ? "Los adjuntos solo están disponibles en modo texto"
+                            : "Adjuntar archivo"
+                        }
                         type="button"
                       >
                         <Paperclip aria-hidden size={17} />
                       </button>
                       <span>
-                        {selectedAttachments.length > 0
+                        {attachmentsBlockedByVoice
+                          ? "Adjuntos no disponibles durante la voz"
+                          : selectedAttachments.length > 0
                           ? `${selectedAttachments.length}/5 · solo este turno`
                           : "Adjuntos: solo este turno"}
                       </span>
@@ -2459,7 +2494,9 @@ export function AssistantPanel({
                         <button
                           type="submit"
                           disabled={
-                            composerDisabled || draftMessage.trim().length === 0
+                            composerDisabled ||
+                            attachmentSendBlocked ||
+                            draftMessage.trim().length === 0
                           }
                         >
                           <AssistantSymbolIcon name="send" size={17} />
@@ -2469,6 +2506,13 @@ export function AssistantPanel({
                     </div>
                   </div>
                 </form>
+
+                {attachmentsBlockedByVoice ? (
+                  <p className="muted assistant-attachment-error" role="status">
+                    Los adjuntos solo se pueden seleccionar y enviar en modo
+                    texto. Desactiva la voz para usarlos.
+                  </p>
+                ) : null}
 
                 {attachmentError ? (
                   <p className="error-message assistant-attachment-error">

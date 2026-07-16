@@ -16,6 +16,7 @@ from app.assistant.attachments import (
     attachment_payload,
     build_turn_attachment_context,
     persist_message_attachments,
+    revalidate_prepared_attachments,
 )
 from app.assistant.gateway import (
     AICompletion,
@@ -222,6 +223,15 @@ def _run_agent_turn_events(
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
     turn_deadline = monotonic() + settings.assistant_turn_timeout_seconds
+    current_attachments = prepared_attachments or []
+    if current_attachments and input_mode != "text":
+        raise ValueError("Assistant attachments are supported only for text input")
+    current_attachments = revalidate_prepared_attachments(
+        db,
+        current_user,
+        current_attachments,
+    )
+
     # Lock before inserting the message: concurrent FK inserts followed by a
     # row-lock upgrade can deadlock. The first commit releases this short lock.
     conversation = lock_conversation_for_confirmation(db, conversation.id)
@@ -236,7 +246,6 @@ def _run_agent_turn_events(
         content=user_text,
     )
     db.add(user_message)
-    current_attachments = prepared_attachments or []
     persist_message_attachments(db, user_message, current_attachments)
     if conversation.title == "Conversación":
         conversation.title = user_text[:255]
@@ -264,13 +273,18 @@ def _run_agent_turn_events(
     if current_attachments:
         # Attachment text is authorized for this turn only and must never be
         # captured as automatic long-term memory or sent to an egress tool.
-        attachment_disabled_tools = {
+        attachment_disabled_read_tools = {
             "propose_memory_entry",
             "web_search",
             "read_web_page",
         }
+        attachment_disabled_domains = {"web", "memory"}
         tools = [
-            tool for tool in tools if tool.name not in attachment_disabled_tools
+            tool
+            for tool in tools
+            if tool.read_only
+            and tool.domain not in attachment_disabled_domains
+            and tool.name not in attachment_disabled_read_tools
         ]
     tools_by_name = {tool.name: tool for tool in tools}
     tool_definitions = [tool.definition for tool in tools]
@@ -383,14 +397,18 @@ def _run_agent_turn_events(
                     force_synthesis_reason = "tool_call_budget"
                 else:
                     tool_calls_used += 1
-                    guarded_result = check_tool_confirmation(
-                        db,
-                        conversation,
-                        user_message,
-                        block.name,
-                        tool_input,
-                    )
-                    if block.name in CONFIRMATION_REQUIRED_TOOLS:
+                    guarded_result = None
+                    # A provider must not be able to arm confirmation state for
+                    # a tool omitted from this turn's code-level allowlist.
+                    if tool is not None:
+                        guarded_result = check_tool_confirmation(
+                            db,
+                            conversation,
+                            user_message,
+                            block.name,
+                            tool_input,
+                        )
+                    if tool is not None and block.name in CONFIRMATION_REQUIRED_TOOLS:
                         required_confirmation = _confirmation_context_from_result(
                             guarded_result
                         )

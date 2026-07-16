@@ -1,6 +1,12 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, String
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -18,6 +24,12 @@ class Document(TimestampMixin, Base):
             "status in ('active', 'archived')",
             name="ck_documents_status",
         ),
+        ForeignKeyConstraint(
+            ["project_id", "organization_id"],
+            ["projects.id", "projects.organization_id"],
+            name="fk_documents_project_organization",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -26,11 +38,7 @@ class Document(TimestampMixin, Base):
         index=True,
         nullable=False,
     )
-    project_id: Mapped[int] = mapped_column(
-        ForeignKey("projects.id", ondelete="RESTRICT"),
-        index=True,
-        nullable=False,
-    )
+    project_id: Mapped[int] = mapped_column(index=True, nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_backend: Mapped[str] = mapped_column(
@@ -60,6 +68,14 @@ class Document(TimestampMixin, Base):
         nullable=True,
     )
 
-    organization: Mapped["Organization"] = relationship("Organization")
-    project: Mapped["Project"] = relationship("Project")
+    organization: Mapped["Organization"] = relationship(
+        "Organization",
+        foreign_keys=[organization_id],
+        overlaps="project",
+    )
+    project: Mapped["Project"] = relationship(
+        "Project",
+        foreign_keys=[project_id, organization_id],
+        overlaps="organization",
+    )
     uploaded_by: Mapped["User | None"] = relationship("User")

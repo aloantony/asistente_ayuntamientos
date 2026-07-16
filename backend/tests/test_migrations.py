@@ -193,6 +193,48 @@ def assert_assistant_attachment_schema(inspector: Inspector) -> None:
     } == ASSISTANT_ATTACHMENT_SCHEMA["unique_constraints"]
 
 
+def assert_document_project_scope_is_composite(inspector: Inspector) -> None:
+    project_foreign_keys = [
+        foreign_key
+        for foreign_key in inspector.get_foreign_keys("documents")
+        if foreign_key["referred_table"] == "projects"
+    ]
+    assert [
+        (
+            foreign_key["name"],
+            tuple(foreign_key["constrained_columns"]),
+            tuple(foreign_key["referred_columns"]),
+        )
+        for foreign_key in project_foreign_keys
+    ] == [
+        (
+            "fk_documents_project_organization",
+            ("project_id", "organization_id"),
+            ("id", "organization_id"),
+        )
+    ]
+    assert "uq_projects_id_organization_id" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("projects")
+    }
+
+
+def assert_document_project_scope_is_simple(inspector: Inspector) -> None:
+    project_foreign_keys = [
+        foreign_key
+        for foreign_key in inspector.get_foreign_keys("documents")
+        if foreign_key["referred_table"] == "projects"
+    ]
+    assert [
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in project_foreign_keys
+    ] == [("project_id",)]
+    assert "uq_projects_id_organization_id" not in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("projects")
+    }
+
+
 ASSET_INVENTORY_SCHEMA = {
     "municipal_asset_categories": {
         "columns": {
@@ -913,6 +955,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(upgraded_inspector)
         assert_assistant_attachment_schema(upgraded_inspector)
+        assert_document_project_scope_is_composite(upgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -941,6 +984,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
         )
+        assert_document_project_scope_is_simple(downgraded_inspector)
 
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
@@ -954,6 +998,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(reupgraded_inspector)
         assert_assistant_attachment_schema(reupgraded_inspector)
+        assert_document_project_scope_is_composite(reupgraded_inspector)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -985,6 +1030,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
+        assert_document_project_scope_is_composite(inspect(engine))
 
         run_alembic(migration_database_url, "downgrade", "20260713_0021")
         downgraded_inspector = inspect(engine)
@@ -998,6 +1044,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
         )
+        assert_document_project_scope_is_simple(downgraded_inspector)
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
@@ -1011,6 +1058,123 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
+        assert_document_project_scope_is_composite(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_document_project_scope_upgrade_from_0025_and_downgrade(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        assert_document_project_scope_is_simple(inspect(engine))
+        run_alembic(migration_database_url, "upgrade", "20260716_0026")
+        assert_document_project_scope_is_composite(inspect(engine))
+
+        with pytest.raises(DBAPIError), engine.begin() as connection:
+            first_organization_id = connection.execute(
+                text("SELECT id FROM organizations ORDER BY id LIMIT 1")
+            ).scalar_one()
+            second_organization_id = connection.execute(
+                text(
+                    "INSERT INTO organizations (name) "
+                    "VALUES ('document-scope-second-org') RETURNING id"
+                )
+            ).scalar_one()
+            project_id = connection.execute(
+                text(
+                    "INSERT INTO projects (name, organization_id) "
+                    "VALUES ('document-scope-project', :organization_id) "
+                    "RETURNING id"
+                ),
+                {"organization_id": first_organization_id},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO documents ("
+                    "organization_id, project_id, original_filename, "
+                    "stored_filename, storage_key, content_type, size_bytes, "
+                    "checksum_sha256"
+                    ") VALUES ("
+                    ":organization_id, :project_id, 'bad.txt', 'bad.txt', "
+                    "'bad-scope-key', 'text/plain', 1, :checksum"
+                    ")"
+                ),
+                {
+                    "organization_id": second_organization_id,
+                    "project_id": project_id,
+                    "checksum": "0" * 64,
+                },
+            )
+
+        run_alembic(migration_database_url, "downgrade", "20260716_0025")
+        assert_document_project_scope_is_simple(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_document_project_scope_preflight_rejects_inconsistent_existing_row(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            first_organization_id = connection.execute(
+                text("SELECT id FROM organizations ORDER BY id LIMIT 1")
+            ).scalar_one()
+            second_organization_id = connection.execute(
+                text(
+                    "INSERT INTO organizations (name) "
+                    "VALUES ('preflight-second-org') RETURNING id"
+                )
+            ).scalar_one()
+            project_id = connection.execute(
+                text(
+                    "INSERT INTO projects (name, organization_id) "
+                    "VALUES ('preflight-project', :organization_id) RETURNING id"
+                ),
+                {"organization_id": first_organization_id},
+            ).scalar_one()
+            document_id = connection.execute(
+                text(
+                    "INSERT INTO documents ("
+                    "organization_id, project_id, original_filename, "
+                    "stored_filename, storage_key, content_type, size_bytes, "
+                    "checksum_sha256"
+                    ") VALUES ("
+                    ":organization_id, :project_id, 'bad.txt', 'bad.txt', "
+                    "'preflight-bad-scope-key', 'text/plain', 1, :checksum"
+                    ") RETURNING id"
+                ),
+                {
+                    "organization_id": second_organization_id,
+                    "project_id": project_id,
+                    "checksum": "0" * 64,
+                },
+            ).scalar_one()
+
+        result = run_alembic(
+            migration_database_url,
+            "upgrade",
+            "20260716_0026",
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert (
+            "Cannot enforce document/project tenant integrity: document "
+            f"{document_id}"
+        ) in result.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260716_0025"
+        assert_document_project_scope_is_simple(inspect(engine))
     finally:
         engine.dispose()
 

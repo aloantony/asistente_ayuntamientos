@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.organizations.schemas import OrganizationSummary
 
@@ -277,6 +277,12 @@ class AssistantUserMessageCreate(BaseModel):
         if any(document_id < 1 for document_id in value):
             raise ValueError("attachment_ids must contain positive integers")
         return value
+
+    @model_validator(mode="after")
+    def validate_attachments_are_text_only(self):
+        if self.attachment_ids and self.input_mode != "text":
+            raise ValueError("attachments are supported only for text input")
+        return self
 
 
 class AssistantMemoryUserSummary(BaseModel):
