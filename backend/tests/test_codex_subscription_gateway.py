@@ -693,6 +693,49 @@ def test_default_runtime_is_not_configured_without_private_auth_file(
     assert runtime.configured is False
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected"),
+    [
+        (0, "Logged in using ChatGPT\n", "", True),
+        (
+            0,
+            "",
+            "WARNING: could not create PATH aliases\nLogged in using ChatGPT\n",
+            True,
+        ),
+        (0, "", "Logged in using an API key\n", False),
+        (
+            0,
+            "Logged in using an API key\n",
+            "WARNING: ChatGPT login is also supported\n",
+            False,
+        ),
+        (1, "", "Not logged in\n", False),
+    ],
+)
+def test_runtime_health_accepts_chatgpt_status_from_either_stream(
+    monkeypatch,
+    tmp_path,
+    returncode,
+    stdout,
+    stderr,
+    expected,
+):
+    client = ScriptedCodexClient([])
+    runtime = runtime_with_client(tmp_path, client)
+    monkeypatch.setattr(
+        codex_app_server.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        ),
+    )
+
+    assert runtime.healthy(timeout=1) is expected
+
+
 def test_runtime_generator_close_cleans_pending_process(tmp_path):
     client = ScriptedCodexClient(
         [

@@ -619,8 +619,13 @@ class CodexSubscriptionRuntime:
             )
         except (OSError, subprocess.TimeoutExpired, CodexSubscriptionError):
             return False
-        output = completed.stdout.casefold()
-        return completed.returncode == 0 and "chatgpt" in output
+        # Codex CLI 0.144.4 writes the human-readable status to stderr when it
+        # also emits startup warnings. Inspect both captured streams in memory;
+        # neither is logged or returned to callers.
+        status_lines = f"{completed.stdout}\n{completed.stderr}".casefold().splitlines()
+        return completed.returncode == 0 and any(
+            line.strip() == "logged in using chatgpt" for line in status_lines
+        )
 
     @property
     def configured(self) -> bool:
