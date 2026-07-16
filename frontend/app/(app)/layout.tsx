@@ -563,7 +563,7 @@ export default function AppLayout({
           </span>
           <button
             aria-label={sidebarToggleLabel}
-            aria-pressed={isSidebarCollapsed}
+            aria-expanded={!isSidebarCollapsed}
             className="app-sidebar-collapse"
             onClick={toggleSidebar}
             title={sidebarToggleLabel}
