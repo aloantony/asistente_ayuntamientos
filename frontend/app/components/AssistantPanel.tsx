@@ -1551,6 +1551,16 @@ export function AssistantPanel({
       .catch(() => undefined);
   }
 
+  // The empty optimistic assistant message reserves the streaming slot. The
+  // dedicated typing row below already represents it until output arrives.
+  const displayedMessages =
+    selectedConversation?.messages.filter(
+      (message) =>
+        message.id !== -2 ||
+        message.content.trim().length > 0 ||
+        message.actions.length > 0,
+    ) ?? [];
+
   return (
     <section className="panel assistant-agent-panel">
       {assistantError ? (
@@ -1933,7 +1943,7 @@ export function AssistantPanel({
                     <p>{emptyThreadMessage.body}</p>
                   </div>
                 ) : null}
-                {selectedConversation.messages.map((message) => {
+                {displayedMessages.map((message) => {
                   const isAssistant = message.role === "assistant";
                   return (
                     <article
