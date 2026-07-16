@@ -17,6 +17,7 @@ from app.admin.schemas import (
 )
 from app.auth.dependencies import get_current_user, require_superuser
 from app.db.session import get_db
+from app.rbac.locking import lock_authorization_graph
 from app.rbac.models import Group, Permission, Role, group_roles, role_permissions
 from app.rbac.permissions import (
     ensure_initial_permissions,
@@ -144,6 +145,7 @@ def delete_role(
     role_id: int,
     db: Annotated[Session, Depends(get_db)],
 ) -> RoleDeleteResponse:
+    lock_authorization_graph(db)
     role = db.get(Role, role_id)
     if role is None:
         raise HTTPException(
@@ -170,6 +172,7 @@ def assign_permission_to_role(
     permission_id: int,
     db: Annotated[Session, Depends(get_db)],
 ) -> RolePermissionResponse:
+    lock_authorization_graph(db)
     ensure_role_and_permission_exist(
         db,
         role_id=role_id,
@@ -208,6 +211,7 @@ def remove_permission_from_role(
     permission_id: int,
     db: Annotated[Session, Depends(get_db)],
 ) -> RolePermissionResponse:
+    lock_authorization_graph(db)
     ensure_role_and_permission_exist(
         db,
         role_id=role_id,
@@ -240,6 +244,7 @@ def assign_role_to_group(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> GroupRoleResponse:
+    lock_authorization_graph(db)
     group = ensure_group_and_role_exist(db, group_id=group_id, role_id=role_id)
     require_roles_manage_for_group(db, current_user, group)
 
@@ -270,6 +275,7 @@ def remove_role_from_group(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> GroupRoleResponse:
+    lock_authorization_graph(db)
     group = ensure_group_and_role_exist(db, group_id=group_id, role_id=role_id)
     require_roles_manage_for_group(db, current_user, group)
 

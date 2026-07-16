@@ -5,9 +5,11 @@ parsing is intentionally unsupported until it can run in a dedicated non-root,
 networkless, read-only service with cgroup limits.
 
 The commit that stores the user message and attachment relations is the linear
-authorization boundary. Document/project rows and the RBAC evidence authorizing
-the request stay locked from the final check through that commit, then are
-released before any provider I/O. A later revocation is therefore ordered after
+authorization boundary. TXT bytes are read and verified before any database
+authorization or row lock is acquired. The authorization graph, user, document
+and project are then revalidated under canonical transaction locks through that
+commit; no lock is held during file or provider I/O. A later revocation is
+therefore ordered after
 an already committed turn, while current conversation serialization still hides
 the revoked metadata.
 """
@@ -37,6 +39,10 @@ from app.documents.models import Document
 from app.organizations.models import organization_users
 from app.projects.access import user_can_access_project
 from app.projects.models import Project, project_groups, project_users
+from app.rbac.locking import (
+    AuthorizationGraphLock,
+    require_authorization_graph_lock,
+)
 from app.rbac.models import (
     Group,
     Permission,
@@ -70,6 +76,9 @@ ATTACHMENT_STATUS_CONTEXT = {
     "unavailable": "ARCHIVO NO DISPONIBLE PARA LECTURA",
     "failed": "EL ARCHIVO NO ES TEXTO UTF-8 VÁLIDO",
 }
+HERMES_ATTACHMENT_UNAVAILABLE_DETAIL = (
+    "Assistant attachments are unavailable with Hermes Agent runtime"
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +116,16 @@ class _AttachmentChangedError(Exception):
 
 class _AttachmentSecurityError(Exception):
     pass
+
+
+def ensure_attachment_runtime_supported(has_attachments: bool) -> None:
+    """Reject runtimes whose internal tools cannot be disabled by this backend."""
+
+    if has_attachments and settings.assistant_runtime == "hermes_agent":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=HERMES_ATTACHMENT_UNAVAILABLE_DETAIL,
+        )
 
 
 def prepare_attachments(
@@ -150,22 +169,68 @@ def prepare_attachments(
     return prepared
 
 
-def authorize_and_prepare_attachments_for_commit(
+def extract_attachment_contexts(
+    prepared: list[PreparedAttachment],
+    *,
+    turn_deadline: float,
+) -> list[PreparedAttachment]:
+    """Read bounded TXT snapshots before the turn acquires database locks."""
+
+    if not prepared:
+        return []
+    _ensure_attachment_deadline(turn_deadline)
+
+    remaining_chars = settings.assistant_attachment_total_context_chars
+    extracted: list[PreparedAttachment] = []
+    for item in prepared:
+        context_status, context_text = _prepare_attachment_context_at_boundary(
+            item.document,
+            remaining_chars=remaining_chars,
+            turn_deadline=turn_deadline,
+        )
+        remaining_chars = max(0, remaining_chars - len(context_text or ""))
+        extracted.append(
+            replace(
+                item,
+                context_status=context_status,
+                context_text=context_text,
+            )
+        )
+
+    _ensure_attachment_deadline(turn_deadline)
+    return extracted
+
+
+def authorize_attachments_for_commit(
     db: Session,
     current_user: User,
     prepared: list[PreparedAttachment],
     *,
     turn_deadline: float,
+    authorization_lock: AuthorizationGraphLock,
 ) -> list[PreparedAttachment]:
-    """Lock authorization evidence and prepare TXT immediately before commit.
+    """Lock and revalidate an already-read TXT snapshot before commit.
 
     The caller must persist the returned relations and commit without performing
-    unrelated I/O. All locks acquired here are transaction-scoped.
+    unrelated I/O. All locks acquired here are transaction-scoped; this
+    function never performs filesystem or provider I/O.
     """
 
     if not prepared:
         return []
     _ensure_attachment_deadline(turn_deadline)
+
+    for item in prepared:
+        if item.context_status is None:
+            raise ValueError("Attachment context snapshot was not prepared")
+
+    _ensure_attachment_deadline(turn_deadline)
+
+    # The turn acquires this before its conversation lock. Every application
+    # mutator of organization/project/group/role/permission edges uses the same
+    # serialization point, so evidence cannot disappear between this check and
+    # the message commit without a joined FOR UPDATE.
+    require_authorization_graph_lock(db, authorization_lock)
 
     locked_user = db.scalar(
         select(User)
@@ -181,6 +246,7 @@ def authorize_and_prepare_attachments_for_commit(
         db.scalars(
             select(Document)
             .where(Document.id.in_(document_ids))
+            .order_by(Document.id)
             .with_for_update(of=Document)
             .execution_options(populate_existing=True)
         )
@@ -194,6 +260,7 @@ def authorize_and_prepare_attachments_for_commit(
         db.scalars(
             select(Project)
             .where(Project.id.in_(project_ids))
+            .order_by(Project.id)
             .with_for_update(of=Project)
             .execution_options(populate_existing=True)
         )
@@ -202,7 +269,6 @@ def authorize_and_prepare_attachments_for_commit(
     if len(projects_by_id) != len(project_ids):
         _raise_attachment_not_found()
 
-    remaining_chars = settings.assistant_attachment_total_context_chars
     authorization_scopes: dict[tuple[int, int], str] = {}
     finalized: list[PreparedAttachment] = []
     for item in prepared:
@@ -223,25 +289,17 @@ def authorize_and_prepare_attachments_for_commit(
         scope_key = (project.id, project.organization_id)
         authorization_scope = authorization_scopes.get(scope_key)
         if authorization_scope is None:
-            authorization_scope = _lock_attachment_authorization_scope(
+            authorization_scope = _attachment_authorization_scope(
                 db,
                 locked_user,
                 project,
             )
             authorization_scopes[scope_key] = authorization_scope
 
-        context_status, context_text = _prepare_attachment_context_at_boundary(
-            document,
-            remaining_chars=remaining_chars,
-            turn_deadline=turn_deadline,
-        )
-        remaining_chars = max(0, remaining_chars - len(context_text or ""))
         finalized.append(
             replace(
                 item,
                 document=document,
-                context_status=context_status,
-                context_text=context_text,
                 authorization_scope=authorization_scope,
             )
         )
@@ -396,7 +454,7 @@ def _require_initial_attachment_access(
         _raise_attachment_not_found()
 
 
-def _lock_attachment_authorization_scope(
+def _attachment_authorization_scope(
     db: Session,
     locked_user: User,
     project: Project,
@@ -404,14 +462,14 @@ def _lock_attachment_authorization_scope(
     if locked_user.is_superuser:
         return "superuser"
     organization_id = project.organization_id
-    if _lock_permission_evidence(
+    if _permission_evidence_exists(
         db,
         user_id=locked_user.id,
         organization_id=organization_id,
         permission_code="documents.manage",
     ):
         return "documents.manage"
-    if not _lock_permission_evidence(
+    if not _permission_evidence_exists(
         db,
         user_id=locked_user.id,
         organization_id=organization_id,
@@ -419,7 +477,7 @@ def _lock_attachment_authorization_scope(
     ):
         _raise_attachment_not_found()
 
-    has_project_access = _lock_permission_evidence(
+    has_project_access = _permission_evidence_exists(
         db,
         user_id=locked_user.id,
         organization_id=organization_id,
@@ -433,7 +491,6 @@ def _lock_attachment_authorization_scope(
                     project_users.c.project_id == project.id,
                     project_users.c.user_id == locked_user.id,
                 )
-                .with_for_update()
                 .limit(1)
             )
             is not None
@@ -449,7 +506,6 @@ def _lock_attachment_authorization_scope(
                     Group.organization_id == organization_id,
                     user_groups.c.user_id == locked_user.id,
                 )
-                .with_for_update()
                 .limit(1)
             )
             is not None
@@ -459,7 +515,7 @@ def _lock_attachment_authorization_scope(
     return "documents.view"
 
 
-def _lock_permission_evidence(
+def _permission_evidence_exists(
     db: Session,
     *,
     user_id: int,
@@ -488,7 +544,6 @@ def _lock_permission_evidence(
             Group.organization_id == organization_id,
             user_groups.c.user_id == user_id,
         )
-        .with_for_update()
         .limit(1)
     )
     return evidence is not None

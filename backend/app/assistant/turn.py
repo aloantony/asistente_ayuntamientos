@@ -13,10 +13,12 @@ from sqlalchemy.orm import Session
 
 from app.assistant.attachments import (
     PreparedAttachment,
-    authorize_and_prepare_attachments_for_commit,
+    authorize_attachments_for_commit,
     attachment_payload,
     build_turn_attachment_context,
     ensure_attachment_preparation_within_deadline,
+    ensure_attachment_runtime_supported,
+    extract_attachment_contexts,
     persist_message_attachments,
 )
 from app.assistant.gateway import (
@@ -56,12 +58,15 @@ from app.assistant.tools import (
     get_available_tool_specs,
 )
 from app.core.config import settings
+from app.rbac.locking import lock_authorization_graph
 from app.users.models import User
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 4000
 ATTACHMENT_TOOL_INPUT_REDACTION = {"redacted": True}
+ATTACHMENT_TOOL_NAME_REDACTION = "attachment_tool_redacted"
+ATTACHMENT_TOOL_CALL_ID_PREFIX = "attachment-tool-call-redacted"
 
 
 def tool_result_for_activity(tool_name: str, content: str) -> str:
@@ -227,8 +232,28 @@ def _run_agent_turn_events(
     """Persist the user message, run the tool loop and stream turn events."""
     turn_deadline = monotonic() + settings.assistant_turn_timeout_seconds
     current_attachments = prepared_attachments or []
+    ensure_attachment_runtime_supported(bool(current_attachments))
     if current_attachments and input_mode != "text":
         raise ValueError("Assistant attachments are supported only for text input")
+    authorization_graph_lock = None
+    if current_attachments:
+        if db.new or db.dirty or db.deleted:
+            raise ValueError(
+                "Attachment preflight must not include pending database changes"
+            )
+        # Release the read-only preflight transaction (and its table-level
+        # read locks) before touching storage. Prepared ORM objects remain
+        # usable because application sessions set expire_on_commit=False.
+        db.commit()
+    current_attachments = extract_attachment_contexts(
+        current_attachments,
+        turn_deadline=turn_deadline,
+    )
+    if current_attachments:
+        # Canonical order is RBAC graph -> conversation -> user -> document ->
+        # project. In particular, user deletion also takes the graph lock
+        # first and can cascade to conversations without creating an inversion.
+        authorization_graph_lock = lock_authorization_graph(db)
 
     # Lock before inserting the message: concurrent FK inserts followed by a
     # row-lock upgrade can deadlock. The first commit releases this short lock.
@@ -257,12 +282,16 @@ def _run_agent_turn_events(
         # This is the linear authorization boundary for attachment turns.
         # Authorization evidence and document identity remain locked until the
         # message+relation commit below, then no lock crosses provider I/O.
-        current_attachments = authorize_and_prepare_attachments_for_commit(
-            db,
-            current_user,
-            current_attachments,
-            turn_deadline=turn_deadline,
-        )
+        if current_attachments:
+            if authorization_graph_lock is None:
+                raise RuntimeError("Attachment authorization lock is missing")
+            current_attachments = authorize_attachments_for_commit(
+                db,
+                current_user,
+                current_attachments,
+                turn_deadline=turn_deadline,
+                authorization_lock=authorization_graph_lock,
+            )
         persist_message_attachments(
             db,
             user_message,
@@ -319,6 +348,8 @@ def _run_agent_turn_events(
         )
 
         while True:
+            if attachment_tainted:
+                response = _redact_attachment_tool_completion(gateway, response)
             response = recover_textual_read_tool_call(response, tools, messages)
 
             if response.stop_reason == "refusal":
@@ -618,6 +649,44 @@ def tool_call_signature(tool_name: str, tool_input: dict) -> str:
     """Return a stable signature for superficially equivalent tool inputs."""
     normalized = _normalize_tool_call_value(tool_input)
     return f"{tool_name}:{json.dumps(normalized, sort_keys=True, separators=(',', ':'))}"
+
+
+def _redact_attachment_tool_completion(
+    gateway: AIGateway,
+    response: AICompletion,
+) -> AICompletion:
+    """Remove model-controlled tool/provider fields before local reuse or audit."""
+
+    provider_state = getattr(response, "provider_state", ())
+    discard_provider_state = getattr(gateway, "discard_provider_state", None)
+    if provider_state and callable(discard_provider_state):
+        try:
+            discard_provider_state([{"provider_state": provider_state}])
+        except Exception:
+            logger.warning("Attachment provider state cleanup failed")
+
+    redacted_content = []
+    tool_index = 0
+    for block in response.content:
+        if block.type != "tool_use":
+            redacted_content.append(block)
+            continue
+        tool_index += 1
+        redacted_content.append(
+            AIToolUseBlock(
+                id=f"{ATTACHMENT_TOOL_CALL_ID_PREFIX}-{tool_index}",
+                name=ATTACHMENT_TOOL_NAME_REDACTION,
+                input=dict(ATTACHMENT_TOOL_INPUT_REDACTION),
+            )
+        )
+
+    return AICompletion(
+        model=response.model,
+        stop_reason=response.stop_reason,
+        content=redacted_content,
+        usage=response.usage,
+        provider_state=(),
+    )
 
 
 def _remaining_gateway_timeout(turn_deadline: float) -> float:

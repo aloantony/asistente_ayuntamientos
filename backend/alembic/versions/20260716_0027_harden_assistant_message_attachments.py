@@ -144,6 +144,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Serialize the emptiness check with every concurrent INSERT/UPDATE/DELETE.
+    # Without this table lock, a writer could insert after count(*) and before
+    # the audit columns are dropped, silently destroying its evidence.
+    op.execute(
+        sa.text(
+            "LOCK TABLE assistant_message_attachments "
+            "IN ACCESS EXCLUSIVE MODE"
+        )
+    )
     attachment_count = op.get_bind().execute(
         sa.text("SELECT count(*) FROM assistant_message_attachments")
     ).scalar_one()
