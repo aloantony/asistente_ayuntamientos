@@ -98,8 +98,8 @@ class AttachmentIdentity:
 
 @dataclass(frozen=True)
 class PreparedAttachment:
-    document: Document
     identity: AttachmentIdentity
+    document: Document | None = None
     context_status: str | None = None
     context_text: str | None = None
     authorization_scope: str | None = None
@@ -162,7 +162,6 @@ def prepare_attachments(
             )
         prepared.append(
             PreparedAttachment(
-                document=document,
                 identity=_attachment_identity(document),
             )
         )
@@ -184,7 +183,7 @@ def extract_attachment_contexts(
     extracted: list[PreparedAttachment] = []
     for item in prepared:
         context_status, context_text = _prepare_attachment_context_at_boundary(
-            item.document,
+            item.identity,
             remaining_chars=remaining_chars,
             turn_deadline=turn_deadline,
         )
@@ -203,7 +202,7 @@ def extract_attachment_contexts(
 
 def authorize_attachments_for_commit(
     db: Session,
-    current_user: User,
+    current_user_id: int,
     prepared: list[PreparedAttachment],
     *,
     turn_deadline: float,
@@ -234,7 +233,7 @@ def authorize_attachments_for_commit(
 
     locked_user = db.scalar(
         select(User)
-        .where(User.id == current_user.id)
+        .where(User.id == current_user_id)
         .with_for_update(of=User)
         .execution_options(populate_existing=True)
     )
@@ -328,6 +327,7 @@ def persist_message_attachments(
             item.context_status is None
             or item.authorization_scope is None
             or item.authorization_checked_at is None
+            or item.document is None
         ):
             raise ValueError("Attachment authorization boundary was not completed")
         attachment = AssistantMessageAttachment(
@@ -351,7 +351,7 @@ def build_turn_attachment_context(prepared: list[PreparedAttachment]) -> str:
 
     blocks: list[str] = []
     for index, attachment in enumerate(prepared, start=1):
-        content_type = _safe_attachment_metadata(attachment.document.content_type)
+        content_type = _safe_attachment_metadata(attachment.identity.content_type)
         if attachment.context_status != "ready" or not attachment.context_text:
             status_context = ATTACHMENT_STATUS_CONTEXT.get(
                 attachment.context_status or "failed",
@@ -366,7 +366,7 @@ def build_turn_attachment_context(prepared: list[PreparedAttachment]) -> str:
         blocks.append(
             f"ADJUNTO {index}\n"
             "ARCHIVO: "
-            f"{_safe_attachment_metadata(attachment.document.original_filename)}\n"
+            f"{_safe_attachment_metadata(attachment.identity.original_filename)}\n"
             f"TIPO: {content_type}\n"
             "CONTENIDO EXTRAÍDO (NO FIABLE):\n"
             f"{attachment.context_text}"
@@ -550,19 +550,19 @@ def _permission_evidence_exists(
 
 
 def _prepare_attachment_context_at_boundary(
-    document: Document,
+    identity: AttachmentIdentity,
     *,
     remaining_chars: int,
     turn_deadline: float,
 ) -> tuple[str, str | None]:
-    content_type = document.content_type.lower()
+    content_type = identity.content_type.lower()
     if content_type in IMAGE_CONTENT_TYPES:
         return "vision_unavailable", None
     if content_type not in TEXT_CONTENT_TYPES:
         return "unsupported", None
     if (
         remaining_chars <= 0
-        or document.size_bytes > settings.assistant_attachment_max_extract_bytes
+        or identity.size_bytes > settings.assistant_attachment_max_extract_bytes
     ):
         return "too_large", None
 
@@ -572,7 +572,7 @@ def _prepare_attachment_context_at_boundary(
     )
     try:
         raw_text = _read_and_verify_plain_text_once(
-            document,
+            identity,
             turn_deadline=turn_deadline,
         )
     except FileNotFoundError:
@@ -592,7 +592,7 @@ def _prepare_attachment_context_at_boundary(
 
 
 def _read_and_verify_plain_text_once(
-    document: Document,
+    identity: AttachmentIdentity,
     *,
     turn_deadline: float,
 ) -> str:
@@ -604,7 +604,7 @@ def _read_and_verify_plain_text_once(
 
     try:
         try:
-            source, initial_stat = _secure_open_document(document)
+            source, initial_stat = _secure_open_document(identity)
         except OSError as error:
             if error.errno == errno.ENOENT:
                 raise FileNotFoundError from error
@@ -616,7 +616,7 @@ def _read_and_verify_plain_text_once(
         try:
             with source:
                 if (
-                    initial_stat.st_size != document.size_bytes
+                    initial_stat.st_size != identity.size_bytes
                     or initial_stat.st_size
                     > settings.assistant_attachment_max_extract_bytes
                 ):
@@ -648,8 +648,8 @@ def _read_and_verify_plain_text_once(
         ):
             raise _AttachmentChangedError
         if (
-            size_bytes != document.size_bytes
-            or digest.hexdigest() != document.checksum_sha256
+            size_bytes != identity.size_bytes
+            or digest.hexdigest() != identity.checksum_sha256
         ):
             raise _AttachmentChangedError
         _ensure_attachment_deadline(turn_deadline)
@@ -658,10 +658,10 @@ def _read_and_verify_plain_text_once(
         _TEXT_READ_SEMAPHORE.release()
 
 
-def _secure_open_document(document: Document):
-    if document.storage_backend != "local":
+def _secure_open_document(identity: AttachmentIdentity):
+    if identity.storage_backend != "local":
         raise _AttachmentSecurityError
-    parts = _validated_storage_key_parts(document)
+    parts = _validated_storage_key_parts(identity)
     root = Path(settings.document_storage_root).expanduser()
     if not root.is_absolute():
         raise _AttachmentSecurityError
@@ -699,8 +699,10 @@ def _secure_open_document(document: Document):
     return source, file_stat
 
 
-def _validated_storage_key_parts(document: Document) -> tuple[str, ...]:
-    raw_key = document.storage_key
+def _validated_storage_key_parts(
+    identity: AttachmentIdentity,
+) -> tuple[str, ...]:
+    raw_key = identity.storage_key
     if (
         not raw_key
         or raw_key.startswith("/")
@@ -713,10 +715,10 @@ def _validated_storage_key_parts(document: Document) -> tuple[str, ...]:
         raise _AttachmentSecurityError
     expected = (
         "organizations",
-        str(document.organization_id),
+        str(identity.organization_id),
         "projects",
-        str(document.project_id),
-        document.stored_filename,
+        str(identity.project_id),
+        identity.stored_filename,
     )
     if parts != expected:
         raise _AttachmentSecurityError

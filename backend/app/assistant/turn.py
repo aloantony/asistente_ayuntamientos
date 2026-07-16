@@ -231,20 +231,19 @@ def _run_agent_turn_events(
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
     turn_deadline = monotonic() + settings.assistant_turn_timeout_seconds
+    conversation_id = conversation.id
+    current_user_id = current_user.id
     current_attachments = prepared_attachments or []
     ensure_attachment_runtime_supported(bool(current_attachments))
     if current_attachments and input_mode != "text":
         raise ValueError("Assistant attachments are supported only for text input")
     authorization_graph_lock = None
     if current_attachments:
-        if db.new or db.dirty or db.deleted:
-            raise ValueError(
-                "Attachment preflight must not include pending database changes"
-            )
-        # Release the read-only preflight transaction (and its table-level
-        # read locks) before touching storage. Prepared ORM objects remain
-        # usable because application sessions set expire_on_commit=False.
-        db.commit()
+        # PreparedAttachment contains only an immutable identity snapshot. A
+        # rollback, rather than a commit, both releases preflight locks and
+        # discards ORM *and Core* DML accidentally left by a caller. No ORM
+        # attribute is touched again until rows are reloaded after extraction.
+        db.rollback()
     current_attachments = extract_attachment_contexts(
         current_attachments,
         turn_deadline=turn_deadline,
@@ -257,7 +256,7 @@ def _run_agent_turn_events(
 
     # Lock before inserting the message: concurrent FK inserts followed by a
     # row-lock upgrade can deadlock. The first commit releases this short lock.
-    conversation = lock_conversation_for_confirmation(db, conversation.id)
+    conversation = lock_conversation_for_confirmation(db, conversation_id)
     # Imported lazily because realtime orchestration reuses this module's
     # history and tool-loop helpers.
     from app.assistant.realtime import seal_active_realtime_turn
@@ -287,7 +286,7 @@ def _run_agent_turn_events(
                 raise RuntimeError("Attachment authorization lock is missing")
             current_attachments = authorize_attachments_for_commit(
                 db,
-                current_user,
+                current_user_id,
                 current_attachments,
                 turn_deadline=turn_deadline,
                 authorization_lock=authorization_graph_lock,
@@ -296,7 +295,7 @@ def _run_agent_turn_events(
             db,
             user_message,
             current_attachments,
-            authorized_by_id=current_user.id,
+            authorized_by_id=current_user_id,
         )
         db.flush()
         if current_attachments:

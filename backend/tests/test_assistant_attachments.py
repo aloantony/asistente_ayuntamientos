@@ -14,6 +14,7 @@ from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
 
 from app.assistant import attachments as assistant_attachments
+from app.assistant import routes as assistant_routes
 from app.assistant import tools as assistant_tools
 from app.assistant import turn as assistant_turn
 from app.assistant.models import (
@@ -250,7 +251,7 @@ def test_attachment_context_is_ephemeral_non_persistent_and_disables_egress(
     original_sha256 = assistant_attachments.hashlib.sha256
 
     def counted_secure_open(candidate):
-        secure_open_calls.append(candidate.id)
+        secure_open_calls.append(candidate.document_id)
         return original_secure_open(candidate)
 
     def counted_sha256(*args, **kwargs):
@@ -364,7 +365,7 @@ def test_hermes_runtime_rejects_attachments_before_file_or_gateway_io(
     monkeypatch.setattr(
         assistant_attachments,
         "_secure_open_document",
-        lambda candidate: open_calls.append(candidate.id),
+        lambda candidate: open_calls.append(candidate.document_id),
     )
 
     response = client.post(
@@ -691,12 +692,14 @@ def test_attachment_file_is_read_before_conversation_or_rbac_locks(
     gateway = attachment_gateway([text_response("Leído")])
     conversation = create_conversation(client, user)
     order: list[str] = []
+    read_transaction_states: list[bool] = []
     original_open = assistant_attachments._secure_open_document
     original_conversation_lock = assistant_turn.lock_conversation_for_confirmation
     original_graph_lock = assistant_turn.lock_authorization_graph
 
     def recording_open(candidate):
         order.append("file")
+        read_transaction_states.append(db.in_transaction())
         return original_open(candidate)
 
     def recording_conversation_lock(db_session, conversation_id):
@@ -731,7 +734,71 @@ def test_attachment_file_is_read_before_conversation_or_rbac_locks(
 
     assert response.status_code == 200
     assert order[:3] == ["file", "rbac", "conversation"]
+    assert read_transaction_states == [False]
     assert gateway.calls
+
+
+def test_attachment_preflight_rolls_back_core_dml_before_file_failure(
+    client,
+    db,
+    attachment_user,
+    attachment_gateway,
+    superuser,
+    monkeypatch,
+):
+    user, organization = attachment_user
+    project = create_project(db, organization, user)
+    document = upload_document(
+        client,
+        superuser,
+        project,
+        content=b"snapshot que fallara al abrir",
+        filename="rollback-core-dml.txt",
+        content_type="text/plain",
+    )
+    marker = f"Core DML must roll back {unique_suffix()}"
+    original_prepare = assistant_routes.prepare_attachments
+
+    def prepare_with_core_dml(db_session, current_user, document_ids):
+        prepared = original_prepare(db_session, current_user, document_ids)
+        db_session.execute(insert(Organization).values(name=marker))
+        return prepared
+
+    def fail_after_preflight(_identity):
+        assert db.in_transaction() is False
+        raise assistant_attachments._AttachmentChangedError
+
+    monkeypatch.setattr(
+        assistant_routes,
+        "prepare_attachments",
+        prepare_with_core_dml,
+    )
+    monkeypatch.setattr(
+        assistant_attachments,
+        "_secure_open_document",
+        fail_after_preflight,
+    )
+    gateway = attachment_gateway([text_response("No debe ejecutarse")])
+    conversation = create_conversation(client, user)
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        headers=headers_for(user),
+        json={"content": "Lee", "attachment_ids": [document["id"]]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Assistant attachment changed while being prepared"
+    )
+    assert (
+        db.scalar(select(Organization.id).where(Organization.name == marker))
+        is None
+    )
+    assert gateway.calls == []
+    stored = db.get(AssistantConversation, conversation["id"])
+    assert stored is not None
+    assert stored.messages == []
 
 
 def test_conversation_hides_attachment_after_project_membership_revocation(
