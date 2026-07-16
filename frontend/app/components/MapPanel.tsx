@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent,
   type FormEvent,
 } from "react";
 import { adminRequest, ApiRequestError } from "../lib/api";
@@ -18,7 +19,12 @@ import {
 } from "../lib/geo";
 import { useSession } from "../lib/session";
 import { AssetMaintenancePanel } from "./AssetMaintenancePanel";
-import { MunicipalMap } from "./MunicipalMap";
+import { MunicipalityMapDirectory } from "./MunicipalityMapDirectory";
+import {
+  MunicipalMap,
+  type MapBaseLayer,
+  type MapBounds,
+} from "./MunicipalMap";
 import type {
   AssetStatus,
   GeoEntityType,
@@ -34,8 +40,41 @@ type MapPanelProps = {
   user: User;
 };
 
-type EntityTypeFilter = "all" | GeoEntityType;
 type CreatableMapEntityType = "requirement" | "project";
+type MapView = "territory" | "municipalities";
+
+type MapLayer = {
+  key: string;
+  label: string;
+  entityType: GeoEntityType;
+  color: string;
+  group: "work" | "assets";
+  count: number;
+};
+
+type LayeredGeoMapItem = GeoMapItem & {
+  layer_key?: string;
+  layer_label?: string;
+  layer_color?: string | null;
+  item_type?: string | null;
+  condition_status?: string | null;
+};
+
+const MAP_PREFERENCES_KEY = "municipal-map-preferences-v1";
+const MAP_LAYER_COLORS: Record<GeoEntityType, string> = {
+  requirement: "#c0603a",
+  project: "#2f74d0",
+  asset: "#3caf8c",
+};
+const STATUS_COLORS = [
+  "#3caf8c",
+  "#d9a520",
+  "#c0603a",
+  "#2f74d0",
+  "#8a5cd1",
+  "#17b3c4",
+  "#c0568f",
+] as const;
 
 type MapContextMenu = {
   latitude: number;
@@ -189,14 +228,169 @@ function defaultOrganizationId(user: User) {
   return user.organizations?.[0]?.id ? String(user.organizations[0].id) : "";
 }
 
+function normalizeSearchText(value: string | null | undefined) {
+  return (value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("es")
+    .trim();
+}
+
+function safeLayerColor(value: string | null | undefined, fallback: string) {
+  return value && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+
+function mapItemLayerKey(item: GeoMapItem) {
+  const layeredItem = item as LayeredGeoMapItem;
+  if (layeredItem.layer_key) {
+    return layeredItem.layer_key;
+  }
+  if (item.entity_type === "requirement") {
+    return "requirements";
+  }
+  if (item.entity_type === "project") {
+    return "projects";
+  }
+  return "assets";
+}
+
+function mapItemLayerLabel(item: GeoMapItem) {
+  const layeredItem = item as LayeredGeoMapItem;
+  return layeredItem.layer_label || entityTypeLabel(item.entity_type);
+}
+
+function mapItemLayerColor(item: GeoMapItem) {
+  const layeredItem = item as LayeredGeoMapItem;
+  return safeLayerColor(
+    layeredItem.layer_color,
+    MAP_LAYER_COLORS[item.entity_type],
+  );
+}
+
+function mapItemState(item: GeoMapItem) {
+  const layeredItem = item as LayeredGeoMapItem;
+  return layeredItem.condition_status || item.status;
+}
+
+function mapItemMatchesSearch(item: GeoMapItem, normalizedQuery: string) {
+  if (!normalizedQuery) {
+    return true;
+  }
+  const layeredItem = item as LayeredGeoMapItem;
+  return normalizeSearchText(
+    [
+      item.title,
+      item.subtitle,
+      item.status,
+      item.priority,
+      item.organization_name,
+      item.location.label,
+      item.location.address_text,
+      item.location.place_name,
+      item.location.cadastral_reference,
+      layeredItem.layer_label,
+      layeredItem.item_type,
+      layeredItem.condition_status,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  ).includes(normalizedQuery);
+}
+
+function statusColor(status: string) {
+  const normalized = normalizeSearchText(status);
+  if (
+    ["active", "accepted", "completed", "reviewed", "good"].includes(
+      normalized,
+    )
+  ) {
+    return "#3caf8c";
+  }
+  if (
+    [
+      "draft",
+      "submitted",
+      "in_review",
+      "planned",
+      "scheduled",
+      "paused",
+      "fair",
+    ].includes(normalized)
+  ) {
+    return "#d9a520";
+  }
+  if (
+    [
+      "rejected",
+      "archived",
+      "inactive",
+      "retired",
+      "cancelled",
+      "poor",
+    ].includes(normalized)
+  ) {
+    return "#c0603a";
+  }
+
+  let hash = 0;
+  for (const character of normalized) {
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  }
+  return STATUS_COLORS[hash % STATUS_COLORS.length];
+}
+
+function itemIsInsideBounds(item: GeoMapItem, bounds: MapBounds) {
+  const latitude = item.location.latitude;
+  const longitude = item.location.longitude;
+  return (
+    typeof latitude === "number" &&
+    typeof longitude === "number" &&
+    latitude >= bounds.south &&
+    latitude <= bounds.north &&
+    longitude >= bounds.west &&
+    longitude <= bounds.east
+  );
+}
+
+function csvCell(value: string | number | null | undefined) {
+  const serialized = value == null ? "" : String(value);
+  return `"${serialized.replace(/"/g, '""')}"`;
+}
+
+function downloadTextFile(contents: string, filename: string, type: string) {
+  const url = URL.createObjectURL(new Blob([contents], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function MapPanel({ user }: MapPanelProps) {
   const searchParams = useSearchParams();
   const { getStoredToken, handleRequestError } = useSession();
-  const [entityType, setEntityType] = useState<EntityTypeFilter>("all");
-  const [status, setStatus] = useState("");
+  const [activeView, setActiveView] = useState<MapView>("territory");
   const [includeArchived, setIncludeArchived] = useState(false);
   const [items, setItems] = useState<GeoMapItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<GeoMapItem | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [visibleLayerKeys, setVisibleLayerKeys] = useState<
+    Record<string, boolean>
+  >({});
+  const [layerOrder, setLayerOrder] = useState<string[]>([]);
+  const [layerPanelOpen, setLayerPanelOpen] = useState(true);
+  const [stateLayerEnabled, setStateLayerEnabled] = useState(false);
+  const [visibleStatuses, setVisibleStatuses] = useState<
+    Record<string, boolean>
+  >({});
+  const [baseLayer, setBaseLayer] = useState<MapBaseLayer>("street");
+  const [fitRequest, setFitRequest] = useState(0);
+  const [locateRequest, setLocateRequest] = useState(0);
+  const [areaSelectionEnabled, setAreaSelectionEnabled] = useState(false);
+  const [areaBounds, setAreaBounds] = useState<MapBounds | null>(null);
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [mapContextMenu, setMapContextMenu] = useState<MapContextMenu | null>(
@@ -227,6 +421,7 @@ export function MapPanel({ user }: MapPanelProps) {
   const mapAbortControllerRef = useRef<AbortController | null>(null);
   const assetAbortControllerRef = useRef<AbortController | null>(null);
   const assetSearchRef = useRef<HTMLInputElement | null>(null);
+  const layerDragKeyRef = useRef<string | null>(null);
   const handleRequestErrorRef = useRef(handleRequestError);
 
   const canViewMap =
@@ -292,9 +487,6 @@ export function MapPanel({ user }: MapPanelProps) {
 
   const queryParams = useMemo(() => {
     const params = new URLSearchParams();
-    if (entityType !== "all" && (entityType !== "asset" || canViewAssets)) {
-      params.set("entity_type", entityType);
-    }
     if (focusedEntityType && focusedEntityId !== null) {
       params.set("entity_type", focusedEntityType);
       params.set("entity_id", String(focusedEntityId));
@@ -302,22 +494,16 @@ export function MapPanel({ user }: MapPanelProps) {
     if (focusedOrganizationId !== null) {
       params.set("organization_id", String(focusedOrganizationId));
     }
-    if (status.trim()) {
-      params.set("status", status.trim());
-    }
     if (includeArchived) {
       params.set("include_archived", "true");
     }
     params.set("limit", "500");
     return params;
   }, [
-    canViewAssets,
-    entityType,
     focusedEntityId,
     focusedEntityType,
     focusedOrganizationId,
     includeArchived,
-    status,
   ]);
 
   useEffect(() => {
@@ -400,6 +586,212 @@ export function MapPanel({ user }: MapPanelProps) {
       }
     };
   }, [canViewAssets, canViewMap, focusedItemKey, queryParams]);
+
+  const mapLayers = useMemo(() => {
+    const definitions = new Map<string, MapLayer>();
+    definitions.set("requirements", {
+      key: "requirements",
+      label: "Necesidades",
+      entityType: "requirement",
+      color: MAP_LAYER_COLORS.requirement,
+      group: "work",
+      count: 0,
+    });
+    definitions.set("projects", {
+      key: "projects",
+      label: "Proyectos",
+      entityType: "project",
+      color: MAP_LAYER_COLORS.project,
+      group: "work",
+      count: 0,
+    });
+
+    for (const item of items) {
+      const key = mapItemLayerKey(item);
+      const current = definitions.get(key);
+      if (current) {
+        current.count += 1;
+        continue;
+      }
+      definitions.set(key, {
+        key,
+        label: mapItemLayerLabel(item),
+        entityType: item.entity_type,
+        color: mapItemLayerColor(item),
+        group: item.entity_type === "asset" ? "assets" : "work",
+        count: 1,
+      });
+    }
+
+    if (
+      canViewAssets &&
+      !Array.from(definitions.values()).some(
+        (definition) => definition.entityType === "asset",
+      )
+    ) {
+      definitions.set("assets", {
+        key: "assets",
+        label: "Activos municipales",
+        entityType: "asset",
+        color: MAP_LAYER_COLORS.asset,
+        group: "assets",
+        count: 0,
+      });
+    }
+
+    return Array.from(definitions.values());
+  }, [canViewAssets, items]);
+
+  const orderedLayers = useMemo(() => {
+    const orderIndex = new Map(
+      layerOrder.map((layerKey, index) => [layerKey, index]),
+    );
+    return [...mapLayers].sort((layerA, layerB) => {
+      const indexA = orderIndex.get(layerA.key);
+      const indexB = orderIndex.get(layerB.key);
+      if (indexA !== undefined || indexB !== undefined) {
+        return (indexA ?? Number.MAX_SAFE_INTEGER) -
+          (indexB ?? Number.MAX_SAFE_INTEGER);
+      }
+      if (layerA.group !== layerB.group) {
+        return layerA.group === "work" ? -1 : 1;
+      }
+      return layerA.label.localeCompare(layerB.label, "es");
+    });
+  }, [layerOrder, mapLayers]);
+
+  const availableStatuses = useMemo(
+    () =>
+      Array.from(new Set(items.map(mapItemState))).sort((statusA, statusB) =>
+        formatStatus(statusA).localeCompare(formatStatus(statusB), "es"),
+      ),
+    [items],
+  );
+  const normalizedSearchQuery = normalizeSearchText(searchQuery);
+  const displayedItems = useMemo(
+    () =>
+      items.filter((item) => {
+        if (visibleLayerKeys[mapItemLayerKey(item)] === false) {
+          return false;
+        }
+        const itemStatus = mapItemState(item);
+        if (stateLayerEnabled && visibleStatuses[itemStatus] === false) {
+          return false;
+        }
+        return mapItemMatchesSearch(item, normalizedSearchQuery);
+      }),
+    [
+      items,
+      normalizedSearchQuery,
+      stateLayerEnabled,
+      visibleLayerKeys,
+      visibleStatuses,
+    ],
+  );
+  const searchResults = useMemo(
+    () => (normalizedSearchQuery ? displayedItems.slice(0, 12) : []),
+    [displayedItems, normalizedSearchQuery],
+  );
+  const areaItems = useMemo(
+    () =>
+      areaBounds
+        ? displayedItems.filter((item) => itemIsInsideBounds(item, areaBounds))
+        : [],
+    [areaBounds, displayedItems],
+  );
+  const markerColors = useMemo(
+    () =>
+      Object.fromEntries(
+        displayedItems.map((item) => [
+          getItemKey(item),
+          stateLayerEnabled
+            ? statusColor(mapItemState(item))
+            : mapItemLayerColor(item),
+        ]),
+      ),
+    [displayedItems, stateLayerEnabled],
+  );
+
+  useEffect(() => {
+    try {
+      const serialized = window.localStorage.getItem(MAP_PREFERENCES_KEY);
+      if (serialized) {
+        const preferences = JSON.parse(serialized) as {
+          visibleLayerKeys?: Record<string, boolean>;
+          layerOrder?: string[];
+          layerPanelOpen?: boolean;
+          stateLayerEnabled?: boolean;
+          visibleStatuses?: Record<string, boolean>;
+          baseLayer?: MapBaseLayer;
+        };
+        if (preferences.visibleLayerKeys) {
+          setVisibleLayerKeys(preferences.visibleLayerKeys);
+        }
+        if (Array.isArray(preferences.layerOrder)) {
+          setLayerOrder(preferences.layerOrder);
+        }
+        if (typeof preferences.layerPanelOpen === "boolean") {
+          setLayerPanelOpen(preferences.layerPanelOpen);
+        }
+        if (typeof preferences.stateLayerEnabled === "boolean") {
+          setStateLayerEnabled(preferences.stateLayerEnabled);
+        }
+        if (preferences.visibleStatuses) {
+          setVisibleStatuses(preferences.visibleStatuses);
+        }
+        if (
+          preferences.baseLayer === "street" ||
+          preferences.baseLayer === "topographic"
+        ) {
+          setBaseLayer(preferences.baseLayer);
+        }
+      }
+    } catch {
+      window.localStorage.removeItem(MAP_PREFERENCES_KEY);
+    } finally {
+      setPreferencesReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    setLayerOrder((currentOrder) => {
+      const availableKeys = new Set(mapLayers.map((layer) => layer.key));
+      const nextOrder = currentOrder.filter((key) => availableKeys.has(key));
+      for (const layer of mapLayers) {
+        if (!nextOrder.includes(layer.key)) {
+          nextOrder.push(layer.key);
+        }
+      }
+      return nextOrder.join("|") === currentOrder.join("|")
+        ? currentOrder
+        : nextOrder;
+    });
+  }, [mapLayers]);
+
+  useEffect(() => {
+    if (!preferencesReady) {
+      return;
+    }
+    window.localStorage.setItem(
+      MAP_PREFERENCES_KEY,
+      JSON.stringify({
+        visibleLayerKeys,
+        layerOrder,
+        layerPanelOpen,
+        stateLayerEnabled,
+        visibleStatuses,
+        baseLayer,
+      }),
+    );
+  }, [
+    baseLayer,
+    layerOrder,
+    layerPanelOpen,
+    preferencesReady,
+    stateLayerEnabled,
+    visibleLayerKeys,
+    visibleStatuses,
+  ]);
 
   const isAssetDialogOpen = assetLocationDraft !== null;
   const assetOrganizationId = assetLocationDraft?.organizationId ?? "";
@@ -554,6 +946,133 @@ export function MapPanel({ user }: MapPanelProps) {
     setMapContextMenu(null);
   }, []);
 
+  function toggleLayer(layerKey: string) {
+    setVisibleLayerKeys((current) => ({
+      ...current,
+      [layerKey]: current[layerKey] === false,
+    }));
+  }
+
+  function handleLayerDragStart(
+    event: DragEvent<HTMLButtonElement>,
+    layerKey: string,
+  ) {
+    layerDragKeyRef.current = layerKey;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", layerKey);
+  }
+
+  function handleLayerDrop(
+    event: DragEvent<HTMLDivElement>,
+    targetLayerKey: string,
+  ) {
+    event.preventDefault();
+    const sourceLayerKey =
+      layerDragKeyRef.current || event.dataTransfer.getData("text/plain");
+    layerDragKeyRef.current = null;
+    if (!sourceLayerKey || sourceLayerKey === targetLayerKey) {
+      return;
+    }
+    setLayerOrder((currentOrder) => {
+      const nextOrder = currentOrder.filter((key) => key !== sourceLayerKey);
+      const targetIndex = nextOrder.indexOf(targetLayerKey);
+      nextOrder.splice(
+        targetIndex < 0 ? nextOrder.length : targetIndex,
+        0,
+        sourceLayerKey,
+      );
+      return nextOrder;
+    });
+  }
+
+  function toggleAreaSelection() {
+    setAreaSelectionEnabled((current) => {
+      if (current) {
+        setAreaBounds(null);
+      }
+      return !current;
+    });
+  }
+
+  function clearAreaSelection() {
+    setAreaSelectionEnabled(false);
+    setAreaBounds(null);
+  }
+
+  function exportAreaItems(format: "geojson" | "csv") {
+    const timestamp = new Date().toISOString().slice(0, 10);
+    if (format === "geojson") {
+      const featureCollection = {
+        type: "FeatureCollection",
+        features: areaItems.flatMap((item) => {
+          const latitude = item.location.latitude;
+          const longitude = item.location.longitude;
+          if (typeof latitude !== "number" || typeof longitude !== "number") {
+            return [];
+          }
+          return [
+            {
+              type: "Feature",
+              geometry: {
+                type: "Point",
+                coordinates: [longitude, latitude],
+              },
+              properties: {
+                entity_type: item.entity_type,
+                entity_id: item.entity_id,
+                role: item.role,
+                title: item.title,
+                status: item.status,
+                priority: item.priority,
+                organization: item.organization_name,
+                layer: mapItemLayerLabel(item),
+                location: item.location.label,
+              },
+            },
+          ];
+        }),
+      };
+      downloadTextFile(
+        JSON.stringify(featureCollection, null, 2),
+        `recorte-mapa-${timestamp}.geojson`,
+        "application/geo+json;charset=utf-8",
+      );
+      return;
+    }
+
+    const rows = [
+      [
+        "tipo",
+        "id",
+        "titulo",
+        "capa",
+        "estado",
+        "prioridad",
+        "organizacion",
+        "ubicacion",
+        "latitud",
+        "longitud",
+      ],
+      ...areaItems.map((item) => [
+        item.entity_type,
+        item.entity_id,
+        item.title,
+        mapItemLayerLabel(item),
+        item.status,
+        item.priority,
+        item.organization_name,
+        item.location.label,
+        item.location.latitude,
+        item.location.longitude,
+      ]),
+    ];
+    downloadTextFile(
+      rows.map((row) => row.map(csvCell).join(",")).join("\n"),
+      `recorte-mapa-${timestamp}.csv`,
+      "text/csv;charset=utf-8",
+    );
+  }
+
   const handleMapContextMenu = useCallback(
     (payload: {
       latitude: number;
@@ -562,7 +1081,7 @@ export function MapPanel({ user }: MapPanelProps) {
       x: number;
       y: number;
     }) => {
-      const nearest = items.reduce<{
+      const nearest = displayedItems.reduce<{
         item: GeoMapItem;
         distanceMeters: number;
       } | null>((currentNearest, item) => {
@@ -592,7 +1111,7 @@ export function MapPanel({ user }: MapPanelProps) {
         nearestDistanceMeters: nearest?.distanceMeters ?? null,
       });
     },
-    [items],
+    [displayedItems],
   );
 
   function focusContextPoint() {
@@ -899,42 +1418,111 @@ export function MapPanel({ user }: MapPanelProps) {
           <p className="eyebrow">Territorio</p>
           <h1>Mapa municipal</h1>
           <p className="muted map-panel-helper">
-            Consulta necesidades, proyectos y activos con una ubicación
-            municipal.
+            Explora el trabajo geolocalizado, el inventario y el contexto de
+            otros municipios desde una única vista.
           </p>
         </div>
-        <span className="map-count" aria-live="polite">
-          {items.length} {items.length === 1 ? "elemento" : "elementos"}
-        </span>
+        {activeView === "territory" ? (
+          <span className="map-count" aria-live="polite">
+            {displayedItems.length}
+            {displayedItems.length !== items.length ? ` de ${items.length}` : ""}{" "}
+            {items.length === 1 ? "elemento" : "elementos"}
+          </span>
+        ) : null}
       </div>
 
-      <div className="map-filters" aria-label="Filtros del mapa municipal">
-        <label>
-          Tipo
-          <select
-            value={
-              entityType === "asset" && !canViewAssets ? "all" : entityType
-            }
-            onChange={(event) =>
-              setEntityType(event.target.value as EntityTypeFilter)
-            }
-          >
-            <option value="all">Todos</option>
-            <option value="requirement">Necesidades</option>
-            <option value="project">Proyectos</option>
-            {canViewAssets ? (
-              <option value="asset">Activos municipales</option>
+      <div className="map-view-tabs" role="tablist" aria-label="Vistas del mapa">
+        <button
+          aria-selected={activeView === "territory"}
+          className={activeView === "territory" ? "is-active" : ""}
+          onClick={() => setActiveView("territory")}
+          role="tab"
+          type="button"
+        >
+          Territorio municipal
+        </button>
+        <button
+          aria-selected={activeView === "municipalities"}
+          className={activeView === "municipalities" ? "is-active" : ""}
+          onClick={() => setActiveView("municipalities")}
+          role="tab"
+          type="button"
+        >
+          Municipios y normativa
+        </button>
+      </div>
+
+      {activeView === "municipalities" ? (
+        <MunicipalityMapDirectory user={user} />
+      ) : (
+        <>
+
+      <div className="map-command-bar" aria-label="Herramientas del mapa municipal">
+        <div className="map-global-search">
+          <label htmlFor="map-global-search">Buscar en el mapa</label>
+          <div className="map-search-input-row">
+            <span aria-hidden="true">⌕</span>
+            <input
+              autoComplete="off"
+              id="map-global-search"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Nombre, calle, estado, responsable…"
+              type="search"
+              value={searchQuery}
+            />
+            {searchQuery ? (
+              <button
+                aria-label="Limpiar búsqueda"
+                onClick={() => setSearchQuery("")}
+                type="button"
+              >
+                ×
+              </button>
             ) : null}
+          </div>
+          {normalizedSearchQuery ? (
+            <div className="map-search-results" aria-label="Resultados de búsqueda">
+              {searchResults.length > 0 ? (
+                searchResults.map((item) => (
+                  <button
+                    key={getItemKey(item)}
+                    onClick={() => {
+                      handleSelectItem(item);
+                      setSearchQuery("");
+                    }}
+                    type="button"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="map-search-result-dot"
+                      style={{ backgroundColor: mapItemLayerColor(item) }}
+                    />
+                    <span>
+                      <strong>{item.title}</strong>
+                      <small>
+                        {mapItemLayerLabel(item)} · {item.location.label}
+                      </small>
+                    </span>
+                    <small>{formatStatus(mapItemState(item))}</small>
+                  </button>
+                ))
+              ) : (
+                <p>No hay elementos que coincidan con la búsqueda.</p>
+              )}
+            </div>
+          ) : null}
+        </div>
+        <label className="map-base-layer-control">
+          Mapa base
+          <select
+            onChange={(event) =>
+              setBaseLayer(event.target.value as MapBaseLayer)
+            }
+            value={baseLayer}
+          >
+            <option value="street">Calles</option>
+            <option value="topographic">Topográfico</option>
           </select>
-        </label>
-        <label>
-          Estado
-          <input
-            placeholder="Ej. accepted, active..."
-            type="search"
-            value={status}
-            onChange={(event) => setStatus(event.target.value)}
-          />
         </label>
         <label className="checkbox-row map-archive-filter">
           <input
@@ -944,6 +1532,22 @@ export function MapPanel({ user }: MapPanelProps) {
           />
           Incluir archivados
         </label>
+        <div className="map-command-actions">
+          <button
+            className="secondary-button"
+            onClick={() => setFitRequest((current) => current + 1)}
+            type="button"
+          >
+            Ver todo
+          </button>
+          <button
+            className="secondary-button"
+            onClick={() => setLocateRequest((current) => current + 1)}
+            type="button"
+          >
+            Mi ubicación
+          </button>
+        </div>
       </div>
 
       {message ? (
@@ -952,20 +1556,247 @@ export function MapPanel({ user }: MapPanelProps) {
         </p>
       ) : null}
 
-      <div className="map-content-grid">
+      <div
+        className={`map-content-grid${layerPanelOpen ? "" : " map-content-grid--layers-collapsed"}`}
+      >
+        <aside className="map-layer-panel" aria-label="Capas del mapa">
+          <div className="map-layer-panel-heading">
+            {layerPanelOpen ? <strong>Capas</strong> : null}
+            <button
+              aria-label={
+                layerPanelOpen
+                  ? "Plegar panel de capas"
+                  : "Desplegar panel de capas"
+              }
+              onClick={() => setLayerPanelOpen((current) => !current)}
+              title={layerPanelOpen ? "Plegar capas" : "Desplegar capas"}
+              type="button"
+            >
+              {layerPanelOpen ? "‹" : "›"}
+            </button>
+          </div>
+
+          {layerPanelOpen ? (
+            <div className="map-layer-groups">
+              {(["work", "assets"] as const).map((group) => {
+                const groupLayers = orderedLayers.filter(
+                  (layer) => layer.group === group,
+                );
+                if (groupLayers.length === 0) {
+                  return null;
+                }
+                return (
+                  <section key={group}>
+                    <h2>
+                      {group === "work"
+                        ? "Trabajo municipal"
+                        : "Patrimonio e instalaciones"}
+                    </h2>
+                    <div>
+                      {groupLayers.map((layer) => {
+                        const isVisible = visibleLayerKeys[layer.key] !== false;
+                        return (
+                          <div
+                            className="map-layer-row"
+                            key={layer.key}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={(event) =>
+                              handleLayerDrop(event, layer.key)
+                            }
+                          >
+                            <button
+                              aria-label={`Reordenar ${layer.label}`}
+                              className="map-layer-drag"
+                              draggable
+                              onDragEnd={() => {
+                                layerDragKeyRef.current = null;
+                              }}
+                              onDragStart={(event) =>
+                                handleLayerDragStart(event, layer.key)
+                              }
+                              title="Arrastrar para reordenar"
+                              type="button"
+                            >
+                              ⠿
+                            </button>
+                            <label>
+                              <input
+                                checked={isVisible}
+                                onChange={() => toggleLayer(layer.key)}
+                                type="checkbox"
+                              />
+                              <span
+                                aria-hidden="true"
+                                className="map-layer-swatch"
+                                style={{ backgroundColor: layer.color }}
+                              />
+                              <span title={layer.label}>{layer.label}</span>
+                              <small>{layer.count}</small>
+                            </label>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })}
+              {canViewAssets ? (
+                <Link className="map-layer-manage-link" href="/inventario">
+                  Gestionar categorías y activos
+                </Link>
+              ) : null}
+            </div>
+          ) : (
+            <div className="map-layer-rail">
+              {orderedLayers.map((layer) => {
+                const isVisible = visibleLayerKeys[layer.key] !== false;
+                return (
+                  <button
+                    aria-pressed={isVisible}
+                    key={layer.key}
+                    onClick={() => toggleLayer(layer.key)}
+                    style={{
+                      borderColor: isVisible ? layer.color : undefined,
+                      color: isVisible ? layer.color : undefined,
+                    }}
+                    title={`${layer.label} · ${layer.count}`}
+                    type="button"
+                  >
+                    <span
+                      aria-hidden="true"
+                      style={{ backgroundColor: layer.color }}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+
         <div className="map-main-column">
+          <div className="map-layer-chips" aria-label="Acceso rápido a capas">
+            {orderedLayers.map((layer) => {
+              const isVisible = visibleLayerKeys[layer.key] !== false;
+              return (
+                <button
+                  aria-pressed={isVisible}
+                  className={isVisible ? "is-active" : ""}
+                  key={layer.key}
+                  onClick={() => toggleLayer(layer.key)}
+                  style={{ borderColor: isVisible ? layer.color : undefined }}
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{ backgroundColor: layer.color }}
+                  />
+                  {layer.label}
+                </button>
+              );
+            })}
+          </div>
           <MunicipalMap
+            areaBounds={areaBounds}
+            areaSelectionEnabled={areaSelectionEnabled}
+            baseLayer={baseLayer}
+            fitRequest={fitRequest}
             focusLocation={
               manualFocusLocation ??
               explicitFocusLocation ??
               selectedFocusLocation
             }
             initialZoom={manualFocusZoom ?? focusedZoom}
-            items={items}
+            items={displayedItems}
+            locateRequest={locateRequest}
+            markerColors={markerColors}
+            onAreaSelectionChange={setAreaBounds}
+            onLocationError={setMessage}
             onMapContextMenu={handleMapContextMenu}
             onSelectItem={handleSelectItem}
             selectedItemId={selectedItem ? getItemKey(selectedItem) : null}
           />
+
+          <div className="map-overlay-tools">
+            <button
+              aria-pressed={areaSelectionEnabled}
+              className={areaSelectionEnabled ? "is-active" : ""}
+              onClick={toggleAreaSelection}
+              type="button"
+            >
+              Seleccionar área
+            </button>
+            <button
+              aria-pressed={stateLayerEnabled}
+              className={stateLayerEnabled ? "is-active" : ""}
+              onClick={() => setStateLayerEnabled((current) => !current)}
+              type="button"
+            >
+              Capa de estado
+            </button>
+          </div>
+
+          {stateLayerEnabled ? (
+            <div className="map-state-legend" aria-label="Leyenda de estados">
+              {availableStatuses.map((itemStatus) => {
+                const isVisible = visibleStatuses[itemStatus] !== false;
+                const color = statusColor(itemStatus);
+                return (
+                  <button
+                    aria-pressed={isVisible}
+                    className={isVisible ? "is-active" : ""}
+                    key={itemStatus}
+                    onClick={() =>
+                      setVisibleStatuses((current) => ({
+                        ...current,
+                        [itemStatus]: current[itemStatus] === false,
+                      }))
+                    }
+                    type="button"
+                  >
+                    <span
+                      aria-hidden="true"
+                      style={{ backgroundColor: isVisible ? color : undefined }}
+                    />
+                    {formatStatus(itemStatus)}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {areaSelectionEnabled || areaBounds ? (
+            <div className="map-area-export" role="status">
+              <span>
+                {areaBounds
+                  ? `${areaItems.length} ${areaItems.length === 1 ? "elemento" : "elementos"} en el área`
+                  : "Arrastra sobre el mapa para delimitar un área"}
+              </span>
+              <button
+                disabled={!areaBounds}
+                onClick={() => exportAreaItems("geojson")}
+                type="button"
+              >
+                GeoJSON
+              </button>
+              <button
+                disabled={!areaBounds}
+                onClick={() => exportAreaItems("csv")}
+                type="button"
+              >
+                CSV
+              </button>
+              <button
+                disabled={!areaBounds}
+                onClick={() => window.print()}
+                type="button"
+              >
+                Imprimir
+              </button>
+              <button onClick={clearAreaSelection} type="button">
+                Cerrar
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <aside
@@ -974,16 +1805,35 @@ export function MapPanel({ user }: MapPanelProps) {
         >
           {selectedItem ? (
             <>
-              <span className="map-item-type">
-                {entityTypeLabel(selectedItem.entity_type)}
-              </span>
+              <div className="map-detail-heading">
+                <span className="map-item-type">
+                  {entityTypeLabel(selectedItem.entity_type)}
+                </span>
+                <button
+                  aria-label="Cerrar detalle"
+                  onClick={() => setSelectedItem(null)}
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
               <h2>{selectedItem.title}</h2>
               {selectedItem.subtitle ? <p>{selectedItem.subtitle}</p> : null}
               <dl>
                 <div>
+                  <dt>Capa</dt>
+                  <dd>{mapItemLayerLabel(selectedItem)}</dd>
+                </div>
+                <div>
                   <dt>Estado</dt>
                   <dd>{formatStatus(selectedItem.status)}</dd>
                 </div>
+                {selectedItem.condition_status ? (
+                  <div>
+                    <dt>Conservación</dt>
+                    <dd>{formatStatus(selectedItem.condition_status)}</dd>
+                  </div>
+                ) : null}
                 {selectedItem.priority ? (
                   <div>
                     <dt>Prioridad</dt>
@@ -1032,21 +1882,25 @@ export function MapPanel({ user }: MapPanelProps) {
             <div className="map-detail-placeholder">
               <h2>Registra trabajo sobre el territorio</h2>
               <p>
-                Haz click derecho en cualquier punto para crear una necesidad, un
+                Haz clic derecho en cualquier punto para crear una necesidad, un
                 proyecto o ubicar un activo existente. Pulsa un marcador para
                 consultar su detalle en el mapa.
               </p>
-              {items.length === 0 ? (
+              {displayedItems.length === 0 ? (
                 <p className="small-muted">
                   {isLoading
                     ? "Cargando ubicaciones…"
-                    : "Aún no hay elementos ubicados, pero puedes registrar o ubicar el primero desde el mapa."}
+                    : items.length > 0
+                      ? "No hay elementos que cumplan los filtros y capas activos."
+                      : "Aún no hay elementos ubicados, pero puedes registrar o ubicar el primero desde el mapa."}
                 </p>
               ) : null}
             </div>
           )}
         </aside>
       </div>
+        </>
+      )}
 
       {mapContextMenu ? (
         <div
