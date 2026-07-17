@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -85,6 +86,7 @@ from app.rbac.permissions import has_permission
 from app.users.models import User
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
+logger = logging.getLogger(__name__)
 
 MEMORY_STATUS_TRANSITIONS = {
     "proposed": frozenset({"approved", "rejected", "archived", "blocked"}),
@@ -116,6 +118,16 @@ def require_assistant_use(db: Session, current_user: User) -> None:
     )
 
 
+def configured_assistant_model() -> str:
+    if settings.assistant_runtime == "hermes_agent":
+        return settings.hermes_agent_model
+    if settings.assistant_runtime == "openai_responses":
+        return settings.openai_responses_model
+    if settings.assistant_runtime == "codex_subscription":
+        return settings.codex_subscription_model or "codex-subscription-default"
+    return settings.assistant_model
+
+
 @router.get("/status", response_model=AssistantStatusRead)
 def get_assistant_status(
     db: Annotated[Session, Depends(get_db)],
@@ -126,15 +138,12 @@ def get_assistant_status(
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
         runtime=settings.assistant_runtime,
-        model=(
-            settings.hermes_agent_model
-            if settings.assistant_runtime == "hermes_agent"
-            else settings.assistant_model
-        ),
+        model=getattr(agent_gateway, "model", configured_assistant_model()),
         runtime_healthy=getattr(agent_gateway, "runtime_healthy", None),
         speech_transcription_enabled=settings.speech_transcription_runtime
         != "disabled",
         speech_synthesis_enabled=settings.speech_synthesis_runtime != "disabled",
+        speech_synthesis_max_chars=settings.speech_synthesis_max_chars,
         realtime_voice_enabled=realtime_voice_enabled(),
         realtime_voice_provider="openai" if realtime_voice_enabled() else None,
         realtime_voice_model=(
@@ -796,6 +805,15 @@ def send_message_stream(
             )
         except AssistantRealtimeConflictError as error:
             yield format_sse_event(TurnEvent("error", {"detail": str(error)}))
+        except Exception as error:
+            yield format_sse_event(
+                recover_unexpected_stream_error(
+                    db,
+                    conversation_id=conversation_id,
+                    stream_kind="text",
+                    error=error,
+                )
+            )
 
     return StreamingResponse(
         event_stream(),
@@ -852,6 +870,15 @@ async def send_voice_turn_stream(
             )
         except AssistantRealtimeConflictError as error:
             yield format_sse_event(TurnEvent("error", {"detail": str(error)}))
+        except Exception as error:
+            yield format_sse_event(
+                recover_unexpected_stream_error(
+                    db,
+                    conversation_id=conversation_id,
+                    stream_kind="voice",
+                    error=error,
+                )
+            )
 
     return StreamingResponse(
         event_stream(),
@@ -1039,6 +1066,34 @@ def persist_realtime_voice_turn(
 def format_sse_event(event: TurnEvent) -> str:
     data = json.dumps(event.data, ensure_ascii=False)
     return f"event: {event.type}\ndata: {data}\n\n"
+
+
+def recover_unexpected_stream_error(
+    db: Session,
+    *,
+    conversation_id: int,
+    stream_kind: str,
+    error: Exception,
+) -> TurnEvent:
+    """Roll back failed stream work and return a safe terminal event."""
+    logger.error(
+        "Unexpected assistant stream failure "
+        "(conversation=%s stream=%s error_type=%s)",
+        conversation_id,
+        stream_kind,
+        type(error).__name__,
+    )
+    try:
+        db.rollback()
+    except Exception as rollback_error:
+        logger.error(
+            "Assistant stream rollback failed "
+            "(conversation=%s stream=%s error_type=%s)",
+            conversation_id,
+            stream_kind,
+            type(rollback_error).__name__,
+        )
+    return TurnEvent("error", {"detail": "Assistant request failed"})
 
 
 def get_own_conversation(

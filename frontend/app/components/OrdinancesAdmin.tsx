@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import {
   formatMunicipalityOption,
@@ -163,6 +164,9 @@ export function OrdinancesAdmin({
     userHasPermission(currentUser, "ordinances.manage");
   const canArchive =
     userHasPermission(currentUser, "ordinances.archive") ||
+    userHasPermission(currentUser, "ordinances.manage");
+  const canReview =
+    userHasPermission(currentUser, "ordinances.review") ||
     userHasPermission(currentUser, "ordinances.manage");
 
   // La lista renderiza exactamente lo que devolvió el servidor; el filtrado
@@ -370,7 +374,9 @@ export function OrdinancesAdmin({
                     // The list omits text_content, so a row only becomes
                     // editable after loading the full detail with "Editar".
                     const isRowEditing =
-                      canEdit && Boolean(ordinanceDetailLoaded[ordinance.id]);
+                      (canEdit || canReview) &&
+                      Boolean(ordinanceDetailLoaded[ordinance.id]);
+                    const canEditRowContent = canEdit && isRowEditing;
                     const isLoadingDetail =
                       loadingOrdinanceDetailId === ordinance.id;
 
@@ -378,7 +384,7 @@ export function OrdinancesAdmin({
                       <tr key={ordinance.id}>
                         <td>{ordinance.id}</td>
                         <td>
-                          {isRowEditing ? (
+                          {canEditRowContent ? (
                             <select
                               aria-label={`Municipio de ${ordinance.title}`}
                               className="table-input"
@@ -402,33 +408,8 @@ export function OrdinancesAdmin({
                             formatMunicipalityOption(ordinance.municipality)
                           )}
                         </td>
-                        <td>
-                          {isRowEditing ? (
-                            <select
-                              aria-label={`Revisión de ${ordinance.title}`}
-                              className="table-input"
-                              onChange={(event) =>
-                                onUpdateOrdinanceEdit(ordinance.id, {
-                                  curation_status: event.target
-                                    .value as OrdinanceCurationStatus,
-                                })
-                              }
-                              value={edit.curation_status}
-                            >
-                              {ORDINANCE_CURATION_STATUSES.map((status) => (
-                                <option key={status} value={status}>
-                                  {formatOrdinanceCurationStatus(status)}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            formatOrdinanceCurationStatus(
-                              ordinance.curation_status,
-                            )
-                          )}
-                        </td>
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Título de ${ordinance.title}`}
                           value={edit.title}
                           onChange={(value) =>
@@ -438,7 +419,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Tema de ${ordinance.title}`}
                           value={edit.topic}
                           onChange={(value) =>
@@ -448,7 +429,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Subtema de ${ordinance.title}`}
                           value={edit.subtopic}
                           onChange={(value) =>
@@ -458,7 +439,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <td>
-                          {isRowEditing ? (
+                          {canEditRowContent ? (
                             <select
                               aria-label={`Tipo de ${ordinance.title}`}
                               className="table-input"
@@ -484,7 +465,7 @@ export function OrdinancesAdmin({
                           )}
                         </td>
                         <td>
-                          {isRowEditing ? (
+                          {isRowEditing && canReview ? (
                             <select
                               aria-label={`Estado de ${ordinance.title}`}
                               className="table-input"
@@ -496,7 +477,12 @@ export function OrdinancesAdmin({
                               }
                               value={edit.status}
                             >
-                              {ORDINANCE_STATUSES.map((status) => (
+                              {ORDINANCE_STATUSES.filter(
+                                (status) =>
+                                  status !== "archived" ||
+                                  canArchive ||
+                                  edit.status === "archived",
+                              ).map((status) => (
                                 <option key={status} value={status}>
                                   {formatOrdinanceStatus(status)}
                                 </option>
@@ -506,8 +492,33 @@ export function OrdinancesAdmin({
                             formatOrdinanceStatus(ordinance.status)
                           )}
                         </td>
+                        <td>
+                          {isRowEditing && canReview ? (
+                            <select
+                              aria-label={`Revisión de ${ordinance.title}`}
+                              className="table-input"
+                              onChange={(event) =>
+                                onUpdateOrdinanceEdit(ordinance.id, {
+                                  curation_status: event.target
+                                    .value as OrdinanceCurationStatus,
+                                })
+                              }
+                              value={edit.curation_status}
+                            >
+                              {ORDINANCE_CURATION_STATUSES.map((status) => (
+                                <option key={status} value={status}>
+                                  {formatOrdinanceCurationStatus(status)}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            formatOrdinanceCurationStatus(
+                              ordinance.curation_status,
+                            )
+                          )}
+                        </td>
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Fuente oficial de ${ordinance.title}`}
                           type="url"
                           value={edit.source_url}
@@ -518,7 +529,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Boletín oficial de ${ordinance.title}`}
                           value={edit.official_bulletin}
                           onChange={(value) =>
@@ -528,7 +539,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Número de boletín de ${ordinance.title}`}
                           value={edit.bulletin_number}
                           onChange={(value) =>
@@ -538,7 +549,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Fecha de aprobación de ${ordinance.title}`}
                           type="date"
                           value={edit.approval_date}
@@ -549,7 +560,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Fecha de publicación de ${ordinance.title}`}
                           type="date"
                           value={edit.publication_date}
@@ -560,7 +571,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Fecha de vigencia de ${ordinance.title}`}
                           type="date"
                           value={edit.effective_date}
@@ -571,7 +582,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           inputMode="numeric"
                           label={`Documento ID de ${ordinance.title}`}
                           type="number"
@@ -583,7 +594,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextareaCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Resumen de ${ordinance.title}`}
                           value={edit.summary}
                           onChange={(value) =>
@@ -593,7 +604,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <td>
-                          {isRowEditing ? (
+                          {canEditRowContent ? (
                             <textarea
                               aria-label={`Texto de la ordenanza de ${ordinance.title}`}
                               className="table-textarea"
@@ -614,7 +625,7 @@ export function OrdinancesAdmin({
                           )}
                         </td>
                         <EditableTextareaCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Notas de ${ordinance.title}`}
                           value={edit.notes}
                           onChange={(value) =>
@@ -624,7 +635,7 @@ export function OrdinancesAdmin({
                           }
                         />
                         <EditableTextareaCell
-                          canEdit={isRowEditing}
+                          canEdit={canEditRowContent}
                           label={`Notas jurídicas de ${ordinance.title}`}
                           value={edit.legal_review_notes}
                           onChange={(value) =>
@@ -635,7 +646,20 @@ export function OrdinancesAdmin({
                         />
                         <td>
                           <div className="table-actions">
-                            {canEdit && !isRowEditing ? (
+                            {ordinance.curation_status === "approved" ? (
+                              <Link
+                                href={`/ordenanzas?id=${ordinance.id}${
+                                  ["repealed", "superseded", "archived"].includes(
+                                    ordinance.status,
+                                  )
+                                    ? "&include_inactive=true"
+                                    : ""
+                                }`}
+                              >
+                                Ver ficha
+                              </Link>
+                            ) : null}
+                            {(canEdit || canReview) && !isRowEditing ? (
                               <button
                                 type="button"
                                 onClick={() =>
@@ -643,10 +667,14 @@ export function OrdinancesAdmin({
                                 }
                                 disabled={isLoadingDetail || isLoadingAdmin}
                               >
-                                {isLoadingDetail ? "Cargando..." : "Editar"}
+                                {isLoadingDetail
+                                  ? "Cargando..."
+                                  : canEdit
+                                    ? "Editar"
+                                    : "Revisar"}
                               </button>
                             ) : null}
-                            {canEdit && isRowEditing ? (
+                            {(canEdit || canReview) && isRowEditing ? (
                               <button
                                 type="button"
                                 onClick={() => onUpdateOrdinance(ordinance.id)}
@@ -729,6 +757,8 @@ export function OrdinancesAdmin({
           <h4>Nueva ordenanza</h4>
           <div className="form-grid">
             <OrdinanceFormFields
+              canArchive={canArchive}
+              canReview={canReview}
               edit={newOrdinance}
               municipalities={activeMunicipalityOptions}
               onUpdate={onUpdateNewOrdinance}
@@ -838,10 +868,14 @@ function EditableTextareaCell({
 }
 
 function OrdinanceFormFields({
+  canArchive,
+  canReview,
   edit,
   municipalities,
   onUpdate,
 }: {
+  canArchive: boolean;
+  canReview: boolean;
   edit: OrdinanceEditState;
   municipalities: ReturnType<typeof getMunicipalityOptions>;
   onUpdate: (updates: Partial<OrdinanceEditState>) => void;
@@ -910,41 +944,47 @@ function OrdinanceFormFields({
         </select>
       </label>
 
-      <label>
-        Estado
-        <select
-          onChange={(event) =>
-            onUpdate({ status: event.target.value as OrdinanceStatus })
-          }
-          required
-          value={edit.status}
-        >
-          {ORDINANCE_STATUSES.map((status) => (
-            <option key={status} value={status}>
-              {formatOrdinanceStatus(status)}
-            </option>
-          ))}
-        </select>
-      </label>
+      {canReview ? (
+        <>
+          <label>
+            Estado
+            <select
+              onChange={(event) =>
+                onUpdate({ status: event.target.value as OrdinanceStatus })
+              }
+              required
+              value={edit.status}
+            >
+              {ORDINANCE_STATUSES.filter(
+                (status) => status !== "archived" || canArchive,
+              ).map((status) => (
+                <option key={status} value={status}>
+                  {formatOrdinanceStatus(status)}
+                </option>
+              ))}
+            </select>
+          </label>
 
-      <label>
-        Revisión
-        <select
-          onChange={(event) =>
-            onUpdate({
-              curation_status: event.target.value as OrdinanceCurationStatus,
-            })
-          }
-          required
-          value={edit.curation_status}
-        >
-          {ORDINANCE_CURATION_STATUSES.map((status) => (
-            <option key={status} value={status}>
-              {formatOrdinanceCurationStatus(status)}
-            </option>
-          ))}
-        </select>
-      </label>
+          <label>
+            Revisión
+            <select
+              onChange={(event) =>
+                onUpdate({
+                  curation_status: event.target.value as OrdinanceCurationStatus,
+                })
+              }
+              required
+              value={edit.curation_status}
+            >
+              {ORDINANCE_CURATION_STATUSES.map((status) => (
+                <option key={status} value={status}>
+                  {formatOrdinanceCurationStatus(status)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      ) : null}
 
       <label>
         Fuente oficial

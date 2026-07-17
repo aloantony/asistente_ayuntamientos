@@ -52,7 +52,7 @@ Proyecto: asistente_ayuntamientos (FastAPI + Next.js, multi-tenant, RBAC usuario
 
 ## Reglas duras que esta implementación debe respetar ⟦r⟧
 
-Todo egress de IA solo por `gateway.py` (cambio de runtime = gateway + configuración; `ASSISTANT_RUNTIME`, `ASSISTANT_MODEL` y `HERMES_AGENT_*` por variables de entorno); nunca enviar documentos originales ni datos municipales almacenados, logs solo con metadatos; tests del asistente sin llamar a la API real (override de `get_gateway` vía `dependency_overrides`, ver `tests/test_assistant.py`); nuevos endpoints con tests de tenancy y permisos; archivar-no-borrar con las excepciones de memoria documentadas; sin tooling nuevo sin ADR; UI en español, errores traducidos en `frontend/app/lib/api.ts`.
+Todo egress de IA solo por `gateway.py` (cambio de runtime = gateway + configuración; `ASSISTANT_RUNTIME`, `ASSISTANT_MODEL`, `HERMES_AGENT_*` y `OPENAI_RESPONSES_*` por variables de entorno); nunca enviar documentos originales ni datos municipales almacenados, logs solo con metadatos; tests del asistente sin llamar a APIs reales ni al servidor de Hermes Agent (override de `get_gateway` vía `dependency_overrides`, ver `tests/test_assistant.py`); nuevos endpoints con tests de tenancy y permisos; archivar-no-borrar con las excepciones de memoria documentadas; sin tooling nuevo sin ADR; UI en español, errores traducidos en `frontend/app/lib/api.ts`.
 
 ## Fuentes (las URL llegaron parcialmente corruptas; se listan las identificables) ⟦r⟧
 

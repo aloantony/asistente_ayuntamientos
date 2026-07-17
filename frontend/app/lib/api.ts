@@ -97,7 +97,10 @@ function translateProviderError(detail: string) {
 }
 
 function translateApiDetail(detail: string, fallback: string) {
-  if (detail.startsWith("Permission required:")) {
+  if (
+    detail.startsWith("Permission required:") ||
+    detail.startsWith("Permissions required:")
+  ) {
     return "No tienes el permiso necesario para esta acción.";
   }
 
@@ -170,6 +173,28 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se encontró la organización indicada.";
     case "Organization access denied":
       return "No tienes acceso a esa organización.";
+    case "Organization is not available for asset inventory reads":
+      return "La organización ya no está disponible para consultar su inventario.";
+    case "Organization must be active to modify asset inventory":
+      return "La organización debe estar activa para modificar su inventario.";
+    case "Organization must have a municipality to modify asset inventory":
+      return "La organización necesita un municipio asociado para modificar su inventario.";
+    case "Organization municipality must be active to modify asset inventory":
+      return "El municipio asociado debe estar activo para modificar el inventario.";
+    case "Entity access denied":
+      return "No tienes acceso al elemento indicado.";
+    case "Asset changed while assigning its location":
+      return "El activo cambió mientras se guardaba su ubicación. Vuelve a buscarlo e inténtalo de nuevo.";
+    case "Asset municipality does not match organization municipality":
+      return "El activo no pertenece al municipio actual de la organización.";
+    case "Location organization does not match asset organization":
+      return "La ubicación no pertenece a la misma organización que el activo.";
+    case "Location municipality does not match asset municipality":
+      return "La ubicación no pertenece al mismo municipio que el activo.";
+    case "Asset location update conflicts with existing data":
+      return "No se pudo guardar la ubicación porque el activo cambió. Actualiza el inventario e inténtalo de nuevo.";
+    case "Asset locations only support the primary role":
+      return "Los activos solo admiten una ubicación principal.";
     case "Municipality not found":
       return "No se encontró el municipio indicado.";
     case "Municipality already exists":
@@ -178,10 +203,30 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se puede usar un municipio archivado.";
     case "Ordinance not found":
       return "No se encontró la ordenanza indicada.";
+    case "Ordinance semantic search is unavailable":
+      return "La búsqueda semántica de ordenanzas no está disponible ahora mismo. Inténtalo de nuevo más tarde.";
+    case "Ordinance search query is too short":
+      return "Escribe al menos dos caracteres para buscar ordenanzas.";
+    case "population_gte must be lower than population_lt":
+      return "La población mínima debe ser menor que el límite superior.";
+    case "Comparison needs between 1 and 20 municipalities":
+      return "Selecciona entre uno y veinte municipios para comparar.";
+    case "Changed ordinance content requires a separate review":
+      return "El contenido jurídico ha cambiado. Guárdalo primero y apruébalo después en una revisión separada.";
+    case "Imported ordinance review must use the import item endpoint":
+      return "Las ordenanzas importadas deben revisarse desde su elemento de importación.";
+    case "Import item is not pending review":
+      return "Este elemento de importación ya no está pendiente de revisión.";
+    case "Import item does not own this ordinance review":
+      return "El elemento de importación no puede revisar esa ordenanza.";
+    case "El texto de la ordenanza supera el máximo de fragmentos buscables.":
+      return "El texto es demasiado extenso para indexarlo de forma segura. Divídelo o revisa el límite configurado.";
     case "Required ordinance fields cannot be null":
       return "Los campos obligatorios de la ordenanza no pueden estar vacíos.";
     case "Official legal source not found":
       return "No se encontró la fuente oficial.";
+    case "Invalid official legal source definition":
+      return "La fuente oficial no tiene una URL y un dominio seguros y coherentes.";
     case "Import job needs seed URLs or search query with municipalities":
       return "La importación necesita URLs semilla o una búsqueda con municipios.";
     case "Import job needs active official sources":
@@ -384,9 +429,70 @@ type AssistantStreamHandlers = {
   onTranscriptFinal?: (event: AssistantStreamTranscriptFinal) => void;
   onMessageStart?: (event: AssistantStreamMessageStart) => void;
   onTextDelta?: (text: string) => void;
+  onTextReset?: (text: string) => void;
   onToolActivity?: (event: AssistantStreamToolActivity) => void;
   onDone?: (event: AssistantStreamDone) => void;
 };
+
+type AssistantStreamTerminalEvent =
+  | { type: "done"; event: AssistantStreamDone }
+  | { type: "error"; error: ApiRequestError };
+
+const ASSISTANT_STREAM_INACTIVITY_TIMEOUT_MS = 90_000;
+const ASSISTANT_STREAM_TIMEOUT_MESSAGE =
+  "El asistente ha tardado demasiado en responder. Inténtalo de nuevo.";
+
+async function consumeAssistantStream(
+  request: (signal: AbortSignal) => Promise<Response>,
+  handlers: AssistantStreamHandlers,
+  signal?: AbortSignal,
+) {
+  const streamController = new AbortController();
+  let inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const abortFromParent = () => streamController.abort(signal?.reason);
+  const resetInactivityWatchdog = () => {
+    if (inactivityTimeout !== null) {
+      clearTimeout(inactivityTimeout);
+    }
+    inactivityTimeout = setTimeout(() => {
+      timedOut = true;
+      streamController.abort(
+        new DOMException(ASSISTANT_STREAM_TIMEOUT_MESSAGE, "TimeoutError"),
+      );
+    }, ASSISTANT_STREAM_INACTIVITY_TIMEOUT_MS);
+  };
+
+  if (signal?.aborted) {
+    abortFromParent();
+  } else {
+    signal?.addEventListener("abort", abortFromParent, { once: true });
+  }
+  resetInactivityWatchdog();
+
+  try {
+    const response = await request(streamController.signal);
+    if (!response.body) {
+      throw new ApiRequestError("El asistente no ha podido responder.", 0);
+    }
+    resetInactivityWatchdog();
+    await readAssistantStream(response, handlers, resetInactivityWatchdog);
+  } catch (requestError) {
+    if (timedOut && !signal?.aborted) {
+      throw new ApiRequestError(ASSISTANT_STREAM_TIMEOUT_MESSAGE, 408);
+    }
+    throw requestError;
+  } finally {
+    if (inactivityTimeout !== null) {
+      clearTimeout(inactivityTimeout);
+    }
+    signal?.removeEventListener("abort", abortFromParent);
+    if (!streamController.signal.aborted) {
+      streamController.abort();
+    }
+  }
+}
 
 export async function streamAssistantMessage(
   conversationId: number,
@@ -394,19 +500,23 @@ export async function streamAssistantMessage(
   accessToken: string,
   handlers: AssistantStreamHandlers,
   inputMode: "text" | "voice" = "text",
+  signal?: AbortSignal,
 ) {
-  const response = await performAdminRequest(
-    `/assistant/conversations/${conversationId}/messages/stream`,
-    accessToken,
-    "El asistente no ha podido responder.",
-    { method: "POST", body: JSON.stringify({ content, input_mode: inputMode }) },
+  await consumeAssistantStream(
+    (streamSignal) =>
+      performAdminRequest(
+        `/assistant/conversations/${conversationId}/messages/stream`,
+        accessToken,
+        "El asistente no ha podido responder.",
+        {
+          method: "POST",
+          body: JSON.stringify({ content, input_mode: inputMode }),
+          signal: streamSignal,
+        },
+      ),
+    handlers,
+    signal,
   );
-
-  if (!response.body) {
-    throw new ApiRequestError("El asistente no ha podido responder.", 0);
-  }
-
-  await readAssistantStream(response, handlers);
 }
 
 export async function streamAssistantVoiceTurn(
@@ -414,21 +524,21 @@ export async function streamAssistantVoiceTurn(
   audio: Blob,
   accessToken: string,
   handlers: AssistantStreamHandlers,
+  signal?: AbortSignal,
 ) {
   const formData = new FormData();
   formData.append("file", audio, "anacleto-audio.webm");
-  const response = await performAdminRequest(
-    `/assistant/conversations/${conversationId}/voice-turns/stream`,
-    accessToken,
-    "El asistente no ha podido responder.",
-    { method: "POST", body: formData },
+  await consumeAssistantStream(
+    (streamSignal) =>
+      performAdminRequest(
+        `/assistant/conversations/${conversationId}/voice-turns/stream`,
+        accessToken,
+        "El asistente no ha podido responder.",
+        { method: "POST", body: formData, signal: streamSignal },
+      ),
+    handlers,
+    signal,
   );
-
-  if (!response.body) {
-    throw new ApiRequestError("El asistente no ha podido responder.", 0);
-  }
-
-  await readAssistantStream(response, handlers);
 }
 
 export async function createAssistantRealtimeSession(
@@ -491,6 +601,7 @@ export async function completeAssistantRealtimeTurn(
 async function readAssistantStream(
   response: Response,
   handlers: AssistantStreamHandlers,
+  onActivity: () => void,
 ) {
   if (!response.body) {
     throw new ApiRequestError("El asistente no ha podido responder.", 0);
@@ -499,24 +610,63 @@ async function readAssistantStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminalEvent: AssistantStreamTerminalEvent | null = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  const dispatchFrame = (frame: string) => {
+    const nextTerminalEvent = dispatchAssistantStreamFrame(
+      frame,
+      terminalEvent ? {} : handlers,
+    );
+    if (!nextTerminalEvent) {
+      return null;
     }
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      dispatchAssistantStreamFrame(frame, handlers);
+    if (terminalEvent) {
+      throw new ApiRequestError(
+        "El asistente ha enviado una respuesta no válida. Inténtalo de nuevo.",
+        0,
+      );
     }
+    return nextTerminalEvent;
+  };
+
+  try {
+    while (!terminalEvent) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      onActivity();
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        terminalEvent = dispatchFrame(frame) ?? terminalEvent;
+      }
+    }
+
+    if (!terminalEvent) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        terminalEvent = dispatchFrame(buffer) ?? terminalEvent;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    dispatchAssistantStreamFrame(buffer, handlers);
+  if (!terminalEvent) {
+    throw new ApiRequestError(
+      "La respuesta del asistente se ha interrumpido antes de terminar. Inténtalo de nuevo.",
+      0,
+    );
   }
+
+  if (terminalEvent.type === "error") {
+    throw terminalEvent.error;
+  }
+
+  handlers.onDone?.(terminalEvent.event);
 }
 
 export async function synthesizeAssistantSpeech(
@@ -569,23 +719,32 @@ function dispatchAssistantStreamFrame(
         handlers.onTextDelta?.(data.text);
       }
       break;
+    case "text_reset":
+      if (typeof data.text === "string") {
+        handlers.onTextReset?.(data.text);
+      }
+      break;
     case "tool_activity":
       handlers.onToolActivity?.(data as AssistantStreamToolActivity);
       break;
     case "done":
-      handlers.onDone?.(data as AssistantStreamDone);
-      break;
+      return { type: "done" as const, event: data as AssistantStreamDone };
     case "error":
-      throw new ApiRequestError(
-        translateApiDetail(
-          typeof data.detail === "string" ? data.detail : "",
-          "El asistente no ha podido responder.",
+      return {
+        type: "error" as const,
+        error: new ApiRequestError(
+          translateApiDetail(
+            typeof data.detail === "string" ? data.detail : "",
+            "El asistente no ha podido responder.",
+          ),
+          500,
         ),
-        500,
-      );
+      };
     default:
       break;
   }
+
+  return null;
 }
 
 export function getErrorMessage(error: unknown, fallback: string) {

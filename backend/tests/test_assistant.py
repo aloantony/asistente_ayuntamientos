@@ -4,17 +4,23 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.assistant import gateway as assistant_gateway
 from app.assistant import guards as assistant_guards
+from app.assistant import hermes_web as assistant_hermes_web
 from app.assistant import realtime as assistant_realtime
 from app.assistant import tools as assistant_tools
 from app.assistant import turn as assistant_turn
+from app.assistant import web_search as assistant_web_search
 from app.assistant.gateway import (
+    AIGateway,
     AITextDelta,
+    AssistantTimeoutError,
     AssistantUnavailableError,
     _from_openai_response,
     _hermes_agent_url,
@@ -26,6 +32,7 @@ from app.assistant.models import (
 )
 from app.assistant.speech import SpeechTranscriptionError, build_azure_ssml
 from app.assistant.routes import get_gateway
+from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.schemas import AssistantRealtimeTurnStartCreate
 from app.assistant.turn import ERROR_REPLY, build_history
 from app.core.config import settings
@@ -51,13 +58,19 @@ def tool_use_block(block_id: str, name: str, tool_input: dict) -> FakeToolUseBlo
     return FakeToolUseBlock(type="tool_use", id=block_id, name=name, input=tool_input)
 
 
-def fake_response(stop_reason: str, content: list, deltas: list[str] | None = None):
+def fake_response(
+    stop_reason: str,
+    content: list,
+    deltas: list[str] | None = None,
+    provider_state: tuple[dict, ...] = (),
+):
     return SimpleNamespace(
         model="fake-model",
         stop_reason=stop_reason,
         content=content,
         usage=SimpleNamespace(input_tokens=1, output_tokens=1),
         deltas=deltas or [],
+        provider_state=provider_state,
     )
 
 
@@ -73,8 +86,24 @@ class FakeGateway:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def complete(self, *, system, messages, tools):
-        self.calls.append({"system": system, "messages": messages, "tools": tools})
+    def complete(
+        self,
+        *,
+        system,
+        messages,
+        tools,
+        timeout_seconds=None,
+        safety_identifier=None,
+    ):
+        self.calls.append(
+            {
+                "system": system,
+                "messages": messages,
+                "tools": tools,
+                "timeout_seconds": timeout_seconds,
+                "safety_identifier": safety_identifier,
+            }
+        )
         if not self.responses:
             raise AssertionError("FakeGateway ran out of scripted responses")
         response = self.responses.pop(0)
@@ -82,8 +111,22 @@ class FakeGateway:
             raise response
         return response
 
-    def complete_stream(self, *, system, messages, tools):
-        response = self.complete(system=system, messages=messages, tools=tools)
+    def complete_stream(
+        self,
+        *,
+        system,
+        messages,
+        tools,
+        timeout_seconds=None,
+        safety_identifier=None,
+    ):
+        response = self.complete(
+            system=system,
+            messages=messages,
+            tools=tools,
+            timeout_seconds=timeout_seconds,
+            safety_identifier=safety_identifier,
+        )
         for delta in response.deltas:
             yield AITextDelta(text=delta)
         return response
@@ -116,8 +159,29 @@ class FakeHTTPResponse:
     def __exit__(self, exc_type, exc, traceback):
         return False
 
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size: int = -1):
+        body = json.dumps(self.payload).encode("utf-8")
+        return body if size < 0 else body[:size]
+
+
+class FakeStreamingHTTPResponse:
+    def __init__(self, body: bytes):
+        self.body = body
+        self.position = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read1(self, size: int) -> bytes:
+        chunk = self.body[self.position : self.position + size]
+        self.position += len(chunk)
+        return chunk
+
+    def set_read_timeout(self, timeout: float) -> None:
+        pass
 
 
 @pytest.fixture()
@@ -225,6 +289,274 @@ def test_status_exposes_single_assistant_contract_and_filtered_tools(
     assert "web_search" not in tool_names
 
 
+def test_status_reports_openai_responses_model(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "assistant_runtime", "openai_responses")
+    monkeypatch.setattr(settings, "openai_responses_model", "gpt-5.6")
+    use_gateway(FakeGateway([]))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    assert response.json()["runtime"] == "openai_responses"
+    assert response.json()["model"] == "gpt-5.6"
+
+
+def test_status_reports_codex_subscription_model(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "assistant_runtime", "codex_subscription")
+    monkeypatch.setattr(settings, "codex_subscription_model", "")
+    use_gateway(FakeGateway([], runtime_healthy=True))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    assert response.json()["runtime"] == "codex_subscription"
+    assert response.json()["model"] == "codex-subscription-default"
+
+
+def test_web_search_is_hidden_when_permission_exists_but_runtime_is_incomplete(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", None)
+
+    specs = assistant_tools.get_available_tool_specs(db, user)
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert "web_search" not in {spec.name for spec in specs}
+    assert response.status_code == 200
+    assert "web_search" not in {
+        tool["name"] for tool in response.json()["tools"]
+    }
+
+
+def test_web_search_is_available_with_permission_and_complete_runtime_config(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    use_gateway(FakeGateway([]))
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+
+    specs = assistant_tools.get_available_tool_specs(db, user)
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert "web_search" in {spec.name for spec in specs}
+    assert response.status_code == 200
+    assert "web_search" in {
+        tool["name"] for tool in response.json()["tools"]
+    }
+
+
+def test_web_search_compacts_complete_sources_below_action_limit(
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    sources = [
+        {
+            "title": f"Fuente {index} " + ("T" * 200),
+            "url": f"https://source-{index}.example/" + ("u" * 500),
+            "snippet": f"Resumen {index} " + ("s" * 1000),
+            "published_at": "2026-07-15",
+        }
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda *, query, limit: sources[:limit],
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "contratación pública municipal", "limit": 5},
+        allowed=frozenset({"web_search"}),
+    )
+
+    assert result.ok is True
+    assert len(result.content) < assistant_tools.MAX_WEB_TOOL_RESULT_CHARS
+    payload = json.loads(result.content)
+    assert payload["truncated"] is True
+    assert 0 < len(payload["results"]) < len(sources)
+    assert payload["results"] == sources[: len(payload["results"])]
+    next_candidate = {
+        **payload,
+        "results": [
+            *payload["results"],
+            sources[len(payload["results"])],
+        ],
+    }
+    assert (
+        len(assistant_tools._serialize_web_search_payload(next_candidate))
+        >= assistant_tools.MAX_WEB_TOOL_RESULT_CHARS
+    )
+
+
+def test_web_search_reports_complete_result_set_without_truncation(
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    sources = [
+        {
+            "title": "Portal de contratación",
+            "url": "https://contratacion.example/noticia",
+            "snippet": "Información pública.",
+            "published_at": None,
+        },
+        {
+            "title": "Boletín oficial",
+            "url": "http://boletin.example/anuncio",
+            "snippet": "Anuncio oficial.",
+            "published_at": "2026-07-15",
+        },
+    ]
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        lambda *, query, limit: sources[:limit],
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "contratación pública municipal", "limit": 5},
+        allowed=frozenset({"web_search"}),
+    )
+
+    assert result.ok is True
+    assert json.loads(result.content)["results"] == sources
+    assert json.loads(result.content)["truncated"] is False
+    assert result.content == json.dumps(
+        json.loads(result.content),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def test_hermes_web_keeps_only_absolute_credential_free_http_urls():
+    content = json.dumps(
+        {
+            "results": [
+                {"title": "HTTPS", "url": "https://example.org/noticia"},
+                {"title": "HTTP", "url": "http://example.org/anuncio"},
+                {"title": "Relative", "url": "/noticia"},
+                {"title": "Protocol relative", "url": "//example.org/noticia"},
+                {"title": "FTP", "url": "ftp://example.org/file"},
+                {"title": "Script", "url": "javascript:alert(1)"},
+                {
+                    "title": "Credentials",
+                    "url": "https://user:secret@example.org/private",
+                },
+                {"title": "No host", "url": "https:///missing-host"},
+                {"title": "Whitespace", "url": "https://exa mple.org"},
+                {"title": "Bad port", "url": "https://example.org:not-a-port"},
+                {"title": "Too long", "url": "https://example.org/" + ("a" * 2000)},
+            ]
+        }
+    )
+
+    results = assistant_hermes_web._parse_results(content, limit=20)
+
+    assert [result["url"] for result in results] == [
+        "https://example.org/noticia",
+        "http://example.org/anuncio",
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "DNI 12 345 678-A",
+        "DNI 12.345.678 A",
+        "NIE X-123 456-7-A",
+        "Teléfono +34 612-345-678",
+        "Teléfono 612 345 678",
+        "Teléfono 612 34 56 78",
+        "DNI １２ ３４５ ６７８-A",
+    ],
+)
+def test_web_personal_data_guard_recognizes_formatted_identifiers(query):
+    assert assistant_tools.PERSONAL_DATA_PATTERN.search(query)
+
+
+def test_web_personal_data_guard_allows_benign_public_query():
+    assert not assistant_tools.PERSONAL_DATA_PATTERN.search(
+        "Ordenanza de terrazas publicada en julio de 2026"
+    )
+
+
+def test_web_search_rejects_formatted_personal_data_before_runtime(
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    runtime_called = False
+
+    def unexpected_search(*, query, limit):
+        nonlocal runtime_called
+        runtime_called = True
+        return []
+
+    monkeypatch.setattr(
+        assistant_tools.web_search_client,
+        "search",
+        unexpected_search,
+    )
+
+    result = assistant_tools.execute_tool(
+        db,
+        user,
+        "web_search",
+        {"query": "Busca información sobre el DNI 12 345 678-A"},
+        allowed=frozenset({"web_search"}),
+    )
+
+    assert result.ok is False
+    assert "datos personales identificables" in result.content
+    assert runtime_called is False
+
+
 def test_status_reports_speech_flags(
     client,
     assistant_user,
@@ -235,6 +567,7 @@ def test_status_reports_speech_flags(
     use_gateway(FakeGateway([]))
     monkeypatch.setattr(settings, "speech_transcription_runtime", "nvidia_nim")
     monkeypatch.setattr(settings, "speech_synthesis_runtime", "azure")
+    monkeypatch.setattr(settings, "speech_synthesis_max_chars", 2345)
 
     response = client.get("/assistant/status", headers=headers_for(user))
 
@@ -242,6 +575,7 @@ def test_status_reports_speech_flags(
     body = response.json()
     assert body["speech_transcription_enabled"] is True
     assert body["speech_synthesis_enabled"] is True
+    assert body["speech_synthesis_max_chars"] == 2345
 
 
 def test_status_reports_realtime_voice_flags(
@@ -412,6 +746,8 @@ def test_voice_turn_stream_transcribes_runs_agent_and_persists_reply(
     assert events[2][1] == {"state": "thinking"}
     assert ("text_delta", {"text": "Claro, "}) in events
     assert ("text_delta", {"text": "te ayudo con la consulta."}) in events
+    assert events[-2] == ("voice_state", {"state": "done"})
+    assert events[-1][0] == "done"
     done = next(data for name, data in events if name == "done")
     assert done["message"]["content"] == "Claro, te ayudo con la consulta."
     assert done["message"]["role"] == "assistant"
@@ -501,6 +837,9 @@ def test_realtime_session_creates_openai_client_secret(
         captured["url"] = request.full_url
         captured["timeout"] = timeout
         captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["safety_identifier"] = request.get_header(
+            "Openai-safety-identifier"
+        )
         return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
 
     monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
@@ -534,6 +873,9 @@ def test_realtime_session_creates_openai_client_secret(
         "realtime_url": settings.assistant_realtime_url,
     }
     assert captured["url"] == settings.assistant_realtime_client_secret_url
+    assert captured["safety_identifier"] == build_assistant_safety_identifier(
+        user.id
+    )
     session = captured["payload"]["session"]
     assert session["type"] == "realtime"
     assert session["model"] == "gpt-realtime-2.1"
@@ -557,6 +899,36 @@ def test_realtime_session_creates_openai_client_secret(
     assert abandoned["status"] == "abandoned"
     assert abandoned["assistant_message_id"]
     assert "Respuesta de voz interrumpida" in session["instructions"]
+
+
+def test_realtime_session_hides_web_search_when_runtime_is_incomplete(
+    client,
+    db,
+    assistant_user,
+    grant_permissions,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "")
+    conversation_data = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    conversation = db.get(AssistantConversation, conversation_data["id"])
+    assert conversation is not None
+
+    payload = assistant_realtime.build_realtime_client_secret_payload(
+        db,
+        user,
+        conversation,
+    )
+
+    assert "web_search" not in {
+        tool["name"] for tool in payload["session"]["tools"]
+    }
 
 
 def test_realtime_session_history_marks_finished_actions_as_already_processed(
@@ -1860,7 +2232,15 @@ def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
         def __init__(self):
             self.call_count = 0
 
-        def complete(self, *, system, messages, tools):
+        def complete(
+            self,
+            *,
+            system,
+            messages,
+            tools,
+            timeout_seconds=None,
+            safety_identifier=None,
+        ):
             self.call_count += 1
             if self.call_count == 1:
                 normal_waiting.set()
@@ -2109,6 +2489,38 @@ def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     assert stored.title == "¿qué puedes hacer?"
 
 
+def test_normal_turn_hides_web_search_when_runtime_is_incomplete(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", None)
+    gateway = use_gateway(
+        FakeGateway([fake_response("end_turn", [text_block("Respuesta final.")])])
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca información pública"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert "web_search" not in {
+        tool["name"] for tool in gateway.calls[0]["tools"]
+    }
+
+
 def test_voice_input_mode_adds_oral_style_prompt(
     client,
     assistant_user,
@@ -2165,6 +2577,22 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     use_gateway,
 ):
     user, organization = assistant_user
+    provider_state = (
+        {
+            "id": "rs_1",
+            "type": "reasoning",
+            "encrypted_content": "encrypted",
+            "summary": [],
+        },
+        {
+            "id": "fc_1",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_1",
+            "name": "list_requirements",
+            "arguments": json.dumps({"organization_id": organization.id}),
+        },
+    )
     gateway = use_gateway(
         FakeGateway(
             [
@@ -2177,6 +2605,7 @@ def test_tool_loop_executes_available_tool_and_persists_action(
                             {"organization_id": organization.id},
                         )
                     ],
+                    provider_state=provider_state,
                 ),
                 fake_response(
                     "end_turn",
@@ -2205,6 +2634,757 @@ def test_tool_loop_executes_available_tool_and_persists_action(
     assert assistant_message["actions"][0]["ok"] is True
     assert len(gateway.calls) == 2
     assert gateway.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+    assert gateway.calls[1]["messages"][-2]["provider_state"] == provider_state
+    safety_identifier = gateway.calls[0]["safety_identifier"]
+    assert safety_identifier == gateway.calls[1]["safety_identifier"]
+    assert len(safety_identifier) == 64
+
+
+def test_cancel_during_tool_activity_discards_paused_provider_state(
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+
+    class CleanupGateway(FakeGateway):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.discarded_messages = []
+
+        def discard_provider_state(self, messages):
+            self.discarded_messages.append(list(messages))
+
+    provider_state = (
+        {
+            "type": "codex_subscription_session",
+            "handle": "a" * 32,
+        },
+    )
+    gateway = CleanupGateway(
+        [
+            fake_response(
+                "tool_use",
+                [
+                    tool_use_block(
+                        "call_1",
+                        "list_requirements",
+                        {"organization_id": organization.id},
+                    )
+                ],
+                provider_state=provider_state,
+            )
+        ]
+    )
+    conversation = AssistantConversation(
+        title="Conversación",
+        created_by_id=user.id,
+    )
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+
+    events = assistant_turn._run_agent_turn_events(
+        db,
+        user,
+        conversation,
+        "Lista necesidades",
+        gateway,
+    )
+    assert next(events).type == "message_start"
+    activity = next(events)
+    assert activity.type == "tool_activity"
+    assert activity.data["status"] == "started"
+    events.close()
+
+    assert gateway.discarded_messages
+    assert any(
+        message.get("provider_state") == provider_state
+        for message in gateway.discarded_messages[-1]
+    )
+
+
+def test_openai_responses_web_search_executes_brave_and_replays_function_output(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["assistant.web.search"])
+
+    monkeypatch.setattr(settings, "assistant_runtime", "openai_responses")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-openai-test")
+    monkeypatch.setattr(
+        settings,
+        "openai_responses_base_url",
+        "https://api.openai.com/v1",
+    )
+    monkeypatch.setattr(settings, "openai_responses_model", "gpt-5.6")
+    monkeypatch.setattr(settings, "openai_responses_reasoning_effort", "medium")
+    monkeypatch.setattr(settings, "openai_responses_max_output_tokens", 25000)
+
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-test-secret")
+    monkeypatch.setattr(
+        settings,
+        "brave_search_storage_rights_confirmed",
+        True,
+    )
+    monkeypatch.setattr(settings, "brave_search_timeout_seconds", 12.5)
+    monkeypatch.setattr(settings, "brave_search_country", "ES")
+    monkeypatch.setattr(settings, "brave_search_language", "es")
+    monkeypatch.setattr(settings, "brave_search_ui_language", "es-ES")
+
+    query = "ordenanza de terrazas Burgos"
+    source_url = "https://burgos.example/ordenanza-terrazas"
+    reasoning_item = {
+        "id": "rs_web_1",
+        "type": "reasoning",
+        "encrypted_content": "encrypted-web-reasoning",
+        "summary": [],
+    }
+    function_item = {
+        "id": "fc_web_1",
+        "type": "function_call",
+        "status": "completed",
+        "call_id": "call_web_1",
+        "name": "web_search",
+        "arguments": json.dumps(
+            {"query": query, "limit": 2},
+            separators=(",", ":"),
+        ),
+    }
+    pending_openai_responses = [
+        {
+            "id": "resp_web_tool",
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "model": "gpt-5.6-sol",
+            "output": [reasoning_item, function_item],
+            "usage": {"input_tokens": 20, "output_tokens": 8},
+        },
+        {
+            "id": "resp_web_final",
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "model": "gpt-5.6-sol",
+            "output": [
+                {
+                    "id": "msg_web_final",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "La información está en el "
+                                f"[portal oficial]({source_url})."
+                            ),
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 35, "output_tokens": 12},
+        },
+    ]
+    openai_requests = []
+
+    def fake_openai_urlopen(request, *, timeout):
+        openai_requests.append((request, timeout))
+        assert pending_openai_responses
+        terminal_event = {
+            "type": "response.completed",
+            "response": pending_openai_responses.pop(0),
+        }
+        body = (
+            "data: "
+            + json.dumps(terminal_event, ensure_ascii=False, separators=(",", ":"))
+            + "\n\n"
+        ).encode("utf-8")
+        return FakeStreamingHTTPResponse(body)
+
+    monkeypatch.setattr(
+        assistant_gateway,
+        "_openai_responses_urlopen",
+        fake_openai_urlopen,
+    )
+
+    brave_requests = []
+
+    def fake_brave_open(request, *, timeout):
+        brave_requests.append((request, timeout))
+        return FakeHTTPResponse(
+            {
+                "web": {
+                    "results": [
+                        {
+                            "title": "Portal oficial de Burgos",
+                            "url": source_url,
+                            "description": "Ordenanza municipal de terrazas.",
+                            "page_age": "2026-07-15",
+                        }
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr(
+        assistant_web_search._brave_opener,
+        "open",
+        fake_brave_open,
+    )
+
+    use_gateway(AIGateway())
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca la ordenanza de terrazas de Burgos"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert pending_openai_responses == []
+    assert len(openai_requests) == 2
+    assert len(brave_requests) == 1
+
+    first_openai = json.loads(openai_requests[0][0].data.decode("utf-8"))
+    second_openai = json.loads(openai_requests[1][0].data.decode("utf-8"))
+    web_tool = next(
+        tool for tool in first_openai["tools"] if tool.get("name") == "web_search"
+    )
+    assert web_tool["type"] == "function"
+    assert web_tool["strict"] is False
+    assert web_tool["parameters"] == (
+        assistant_tools.TOOL_CATALOG["web_search"].definition["input_schema"]
+    )
+    assert not any(
+        tool.get("type") in {"web_search", "web_search_preview"}
+        for tool in first_openai["tools"]
+    )
+    assert first_openai["store"] is False
+    assert second_openai["store"] is False
+    assert len(first_openai["safety_identifier"]) == 64
+    assert second_openai["safety_identifier"] == first_openai["safety_identifier"]
+
+    brave_request, brave_timeout = brave_requests[0]
+    brave_query = parse_qs(urlsplit(brave_request.full_url).query)
+    brave_headers = {
+        key.lower(): value for key, value in brave_request.header_items()
+    }
+    assert (
+        urlsplit(brave_request.full_url)._replace(query="").geturl()
+        == assistant_web_search.BRAVE_WEB_SEARCH_URL
+    )
+    assert brave_query["q"] == [query]
+    assert brave_query["count"] == ["2"]
+    assert brave_headers["x-subscription-token"] == "brave-test-secret"
+    assert brave_timeout == pytest.approx(12.5)
+
+    expected_tool_payload = {
+        "query": query,
+        "limit": 2,
+        "provider": "brave",
+        "results": [
+            {
+                "title": "Portal oficial de Burgos",
+                "url": source_url,
+                "snippet": "Ordenanza municipal de terrazas.",
+                "published_at": "2026-07-15",
+            }
+        ],
+        "truncated": False,
+    }
+    expected_tool_output = json.dumps(
+        expected_tool_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert second_openai["input"][-3:] == [
+        reasoning_item,
+        function_item,
+        {
+            "type": "function_call_output",
+            "call_id": "call_web_1",
+            "output": expected_tool_output,
+        },
+    ]
+
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == (
+        f"La información está en el [portal oficial]({source_url})."
+    )
+    assert len(assistant_message["actions"]) == 1
+    action = assistant_message["actions"][0]
+    assert action["tool"] == "web_search"
+    assert action["ok"] is True
+    assert action["input"] == {"query": query, "limit": 2}
+    assert json.loads(action["result"]) == expected_tool_payload
+
+
+def test_tool_call_budget_skips_excess_calls_and_forces_tool_free_synthesis(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 2)
+    executed_inputs: list[dict] = []
+
+    def record_execution(
+        db,
+        current_user,
+        tool_name,
+        tool_input,
+        context,
+        *,
+        allowed,
+    ):
+        executed_inputs.append(tool_input)
+        return assistant_tools.ToolResult(content="[]", ok=True)
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", record_execution)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        text_block("Voy a consultar varias veces antes de responder."),
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "draft",
+                            },
+                        ),
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "submitted",
+                            },
+                        ),
+                        tool_use_block(
+                            "call_3",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "accepted",
+                            },
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("Consulté dos estados; no pude consultar el tercero.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Resume las necesidades por estado"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == (
+        "Consulté dos estados; no pude consultar el tercero."
+    )
+    assert "Voy a consultar" not in assistant_message["content"]
+    assert len(executed_inputs) == 2
+    assert [action["ok"] for action in assistant_message["actions"]] == [
+        True,
+        True,
+        False,
+    ]
+    assert "presupuesto" in assistant_message["actions"][-1]["result"].lower()
+    assert len(gateway.calls) == 2
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_repeated_equivalent_read_call_is_suppressed_and_forces_synthesis(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    execution_count = 0
+
+    def record_execution(
+        db,
+        current_user,
+        tool_name,
+        tool_input,
+        context,
+        *,
+        allowed,
+    ):
+        nonlocal execution_count
+        execution_count += 1
+        return assistant_tools.ToolResult(content="[]", ok=True)
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", record_execution)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "draft",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {
+                                "status": "  DRAFT ",
+                                "organization_id": organization.id,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("No hay necesidades en borrador.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Lista las necesidades en borrador"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == "No hay necesidades en borrador."
+    assert execution_count == 1
+    assert [action["ok"] for action in assistant_message["actions"]] == [True, False]
+    assert "equivalente" in assistant_message["actions"][-1]["result"].lower()
+    assert len(gateway.calls) == 3
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_non_retryable_failed_read_tool_is_not_retried_with_new_arguments(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    execution_count = 0
+
+    def fail_execution(
+        db,
+        current_user,
+        tool_name,
+        tool_input,
+        context,
+        *,
+        allowed,
+    ):
+        nonlocal execution_count
+        execution_count += 1
+        return assistant_tools.ToolResult(
+            content="Error (503): servicio no configurado",
+            ok=False,
+        )
+
+    monkeypatch.setattr(assistant_turn, "execute_tool", fail_execution)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": "draft",
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [
+                        text_block(
+                            "No pude consultar las necesidades porque el servicio "
+                            "no está configurado."
+                        )
+                    ],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Lista las necesidades"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert execution_count == 1
+    assert "no está configurado" in assistant_message["content"]
+    assert [action["ok"] for action in assistant_message["actions"]] == [False, False]
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_tool_round_limit_forces_tool_free_completion_instead_of_fallback(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 1)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        text_block("Voy a revisar los datos."),
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        ),
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("La consulta terminó sin necesidades visibles.")],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta las necesidades"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == (
+        "La consulta terminó sin necesidades visibles."
+    )
+    assert "Voy a revisar" not in assistant_message["content"]
+    assert assistant_message["content"] != assistant_turn.FALLBACK_REPLY
+    assert len(gateway.calls) == 2
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_invalid_forced_synthesis_uses_explicit_loop_limit_reply(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 1)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        text_block("Voy a consultar otra vez."),
+                        tool_use_block(
+                            "call_2",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        ),
+                    ],
+                    deltas=["Voy a consultar otra vez."],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta las necesidades"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == assistant_turn.TOOL_LOOP_LIMIT_REPLY
+    assert assistant_message["content"] != assistant_turn.FALLBACK_REPLY
+    assert "Voy a consultar" not in assistant_message["content"]
+    assert len(gateway.calls) == 2
+    assert gateway.calls[-1]["tools"] == []
+
+
+def test_turn_wall_clock_budget_bounds_gateway_calls_and_stops_before_overrun(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_turn_timeout_seconds", 10.0)
+    monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 3.0)
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 8)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    clock = [100.0]
+
+    class AdvancingGateway:
+        enabled = True
+
+        def __init__(self):
+            self.calls: list[dict] = []
+            self.responses = [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            f"call_{index}",
+                            "list_requirements",
+                            {
+                                "organization_id": organization.id,
+                                "status": status,
+                            },
+                        )
+                    ],
+                )
+                for index, status in enumerate(
+                    ("draft", "submitted", "accepted", "archived"),
+                    start=1,
+                )
+            ]
+
+        def complete(
+            self,
+            *,
+            system,
+            messages,
+            tools,
+            timeout_seconds=None,
+            safety_identifier=None,
+        ):
+            assert timeout_seconds is not None
+            self.calls.append(
+                {"tools": tools, "timeout_seconds": timeout_seconds}
+            )
+            clock[0] += min(2.5, timeout_seconds)
+            return self.responses.pop(0)
+
+    gateway = AdvancingGateway()
+    monkeypatch.setattr(assistant_turn, "monotonic", lambda: clock[0])
+    use_gateway(gateway)
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta todos los estados"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["content"] == assistant_turn.TURN_TIMEOUT_REPLY
+    assert [call["timeout_seconds"] for call in gateway.calls] == pytest.approx(
+        [3.0, 3.0, 3.0, 2.5]
+    )
+    assert [action["ok"] for action in assistant_message["actions"]] == [
+        True,
+        True,
+        True,
+    ]
 
 
 def get_conversation_state(db, conversation_id: int) -> dict:
@@ -3807,12 +4987,14 @@ def test_sse_stream_emits_deltas_tool_activity_and_done(
                 fake_response(
                     "tool_use",
                     [
+                        text_block("Voy a consultar."),
                         tool_use_block(
                             "call_1",
                             "list_requirements",
                             {"organization_id": organization.id},
                         )
                     ],
+                    deltas=["Voy a consultar."],
                 ),
                 fake_response(
                     "end_turn",
@@ -3840,19 +5022,122 @@ def test_sse_stream_emits_deltas_tool_activity_and_done(
     events = parse_sse(body)
     assert [event["event"] for event in events] == [
         "message_start",
+        "text_delta",
         "tool_activity",
         "tool_activity",
         "text_delta",
         "text_delta",
+        "text_reset",
         "done",
     ]
-    assert events[1]["data"]["status"] == "started"
-    assert events[2]["data"]["status"] == "finished"
-    assert events[2]["data"]["ok"] is True
-    assert events[3]["data"]["text"] == "Respuesta "
+    assert events[1]["data"]["text"] == "Voy a consultar."
+    assert events[2]["data"]["status"] == "started"
+    assert events[3]["data"]["status"] == "finished"
+    assert events[3]["data"]["ok"] is True
+    assert events[4]["data"]["text"] == "Respuesta "
+    assert events[-2]["data"]["text"] == "Respuesta final."
     assert events[-1]["data"]["message"]["content"] == "Respuesta final."
     assert events[-1]["data"]["message"]["agent_key"] == "anacleto"
     assert len(gateway.calls) == 2
+
+
+def test_sse_pause_turn_reconciles_partial_text_with_final_message(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "pause_turn",
+                    [text_block("Respuesta todavía incompleta")],
+                    deltas=["Respuesta todavía incompleta"],
+                    provider_state=(
+                        {
+                            "id": "rs_partial",
+                            "type": "reasoning",
+                            "encrypted_content": "encrypted",
+                            "summary": [],
+                        },
+                    ),
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("Respuesta final verificada.")],
+                    deltas=["Respuesta final verificada."],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Continua hasta terminar"},
+        headers=headers_for(user),
+    ) as response:
+        events = parse_sse("".join(response.iter_text()))
+
+    assert response.status_code == 200
+    assert [event["event"] for event in events] == [
+        "message_start",
+        "text_delta",
+        "text_delta",
+        "text_reset",
+        "done",
+    ]
+    assert events[-2]["data"]["text"] == "Respuesta final verificada."
+    assert events[-1]["data"]["message"]["content"] == (
+        "Respuesta final verificada."
+    )
+
+
+def test_sse_delta_then_gateway_failure_resets_to_persisted_error(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+
+    class PartialFailureGateway:
+        enabled = True
+        runtime_healthy = None
+
+        def complete_stream(self, **kwargs):
+            yield AITextDelta(text="Texto provisional no fiable")
+            raise AssistantUnavailableError("upstream disconnected")
+
+    use_gateway(PartialFailureGateway())
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Responde"},
+        headers=headers_for(user),
+    ) as response:
+        events = parse_sse("".join(response.iter_text()))
+
+    assert response.status_code == 200
+    assert [event["event"] for event in events] == [
+        "message_start",
+        "text_delta",
+        "text_reset",
+        "done",
+    ]
+    assert events[-2]["data"]["text"] == ERROR_REPLY
+    assert events[-1]["data"]["message"]["content"] == ERROR_REPLY
 
 
 def test_sse_precondition_errors_are_http(client, assistant_user, use_gateway):
@@ -3874,6 +5159,54 @@ def test_sse_precondition_errors_are_http(client, assistant_user, use_gateway):
     assert response.json()["detail"] == "Assistant is not configured"
 
 
+def test_sse_unexpected_exception_emits_terminal_error_without_leaking_detail(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+    caplog,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    def fail_after_start(*args, **kwargs):
+        yield assistant_turn.TurnEvent(
+            "message_start",
+            {"conversation_id": conversation["id"], "user_message_id": 999},
+        )
+        raise RuntimeError("sensitive internal detail")
+
+    monkeypatch.setattr(
+        "app.assistant.routes.run_agent_turn_events",
+        fail_after_start,
+    )
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Hola"},
+        headers=headers_for(user),
+    ) as response:
+        body = "".join(response.iter_text())
+        events = parse_sse_events(body)
+
+    assert response.status_code == 200
+    assert events == [
+        (
+            "message_start",
+            {"conversation_id": conversation["id"], "user_message_id": 999},
+        ),
+        ("error", {"detail": "Assistant request failed"}),
+    ]
+    assert "sensitive internal detail" not in body
+    assert "Unexpected assistant stream failure" in caplog.text
+
+
 def test_gateway_failure_mid_turn_persists_error_reply(client, assistant_user, use_gateway):
     user, _ = assistant_user
     use_gateway(FakeGateway([AssistantUnavailableError("boom")]))
@@ -3891,6 +5224,31 @@ def test_gateway_failure_mid_turn_persists_error_reply(client, assistant_user, u
 
     assert response.status_code == 200
     assert response.json()["messages"][-1]["content"] == ERROR_REPLY
+
+
+def test_gateway_timeout_mid_turn_persists_honest_timeout_reply(
+    client,
+    assistant_user,
+    use_gateway,
+):
+    user, _ = assistant_user
+    use_gateway(FakeGateway([AssistantTimeoutError("deadline")]))
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Hola"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][-1]["content"] == (
+        assistant_turn.TURN_TIMEOUT_REPLY
+    )
 
 
 def test_textual_read_tool_call_recovery_executes_matching_read_tool(
@@ -3972,6 +5330,56 @@ def test_hermes_agent_url_normalizes_v1(monkeypatch):
         "http://127.0.0.1:8642/v1/chat/completions"
     )
     assert _hermes_agent_url("health") == "http://127.0.0.1:8642/health"
+
+
+def test_hermes_gateway_uses_smaller_turn_timeout(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(settings, "assistant_runtime", "hermes_agent")
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "hermes_agent_api_key", "test-key")
+    monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 5.0)
+    monkeypatch.setattr(settings, "hermes_agent_timeout_seconds", 120.0)
+
+    def fake_complete_hermes_agent(**kwargs):
+        captured.update(kwargs)
+        return fake_response("end_turn", [text_block("Respuesta acotada")])
+
+    monkeypatch.setattr(
+        assistant_gateway,
+        "complete_hermes_agent",
+        fake_complete_hermes_agent,
+    )
+
+    completion = AIGateway().complete(
+        system="system",
+        messages=[{"role": "user", "content": "hola"}],
+        tools=[],
+        timeout_seconds=2.5,
+    )
+
+    assert completion.content[0].text == "Respuesta acotada"
+    assert captured["timeout"] == pytest.approx(2.5)
+
+
+def test_hermes_blocking_timeout_is_classified_as_turn_timeout(monkeypatch):
+    monkeypatch.setattr(assistant_gateway, "hermes_agent_enabled", lambda: True)
+
+    def raise_timeout(*args, **kwargs):
+        raise TimeoutError("socket deadline")
+
+    monkeypatch.setattr(assistant_gateway.urlrequest, "urlopen", raise_timeout)
+
+    with pytest.raises(AssistantTimeoutError):
+        assistant_gateway.complete_hermes_agent(
+            system="system",
+            messages=[{"role": "user", "content": "hola"}],
+            tools=[],
+            model="hermes-agent",
+            max_tokens=100,
+            timeout=1.0,
+            tool_choice="auto",
+            log_context="test",
+        )
 
 
 def parse_sse(body: str) -> list[dict]:

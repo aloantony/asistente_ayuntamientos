@@ -2,11 +2,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, func, insert, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.assets.models import MunicipalAsset
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
 from app.municipalities.models import Municipality
+from app.maintenance.guards import ensure_membership_has_no_open_assignments
 from app.organizations.access import get_accessible_organizations_query
 from app.organizations.models import Organization, organization_users
 from app.organizations.schemas import (
@@ -21,6 +24,11 @@ from app.rbac.permissions import has_permission
 from app.users.models import User
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
+
+ORGANIZATION_ASSET_MUNICIPALITY_CONFLICT = (
+    "Organization municipality cannot change while assets exist"
+)
+ORGANIZATION_UPDATE_CONFLICT = "Organization update conflicts with existing data"
 
 
 @router.get("", response_model=list[OrganizationRead])
@@ -101,15 +109,28 @@ def update_organization(
     require_organizations_manage(db, current_user, organization_id=organization.id)
 
     updates = payload.model_dump(exclude_unset=True)
-    if (
+    municipality_changed = (
         "municipality_id" in updates
         and updates["municipality_id"] != organization.municipality_id
-    ):
+    )
+    if municipality_changed:
+        ensure_organization_has_no_assets(db, organization.id)
         ensure_municipality_can_be_linked(db, updates["municipality_id"])
     for field, value in updates.items():
         setattr(organization, field, value)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                ORGANIZATION_ASSET_MUNICIPALITY_CONFLICT
+                if municipality_changed
+                else ORGANIZATION_UPDATE_CONFLICT
+            ),
+        ) from None
     return get_existing_organization(db, organization_id)
 
 
@@ -171,6 +192,11 @@ def remove_user_from_organization(
     require_organizations_manage(db, current_user, organization_id=organization.id)
 
     prevent_organization_lockout(db, current_user, target_user)
+    ensure_membership_has_no_open_assignments(
+        db,
+        organization_id=organization.id,
+        user_id=target_user.id,
+    )
 
     group_ids = select(Group.id).where(Group.organization_id == organization.id)
     project_ids = select(Project.id).where(Project.organization_id == organization.id)
@@ -316,4 +342,20 @@ def ensure_municipality_can_be_linked(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Municipality is archived",
+        )
+
+
+def ensure_organization_has_no_assets(
+    db: Session,
+    organization_id: int,
+) -> None:
+    asset_id = db.scalar(
+        select(MunicipalAsset.id)
+        .where(MunicipalAsset.organization_id == organization_id)
+        .limit(1)
+    )
+    if asset_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=ORGANIZATION_ASSET_MUNICIPALITY_CONFLICT,
         )

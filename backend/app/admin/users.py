@@ -15,6 +15,11 @@ from app.admin.schemas import (
 from app.auth.dependencies import get_current_user
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
+from app.maintenance.guards import (
+    ensure_user_has_no_maintenance_history,
+    ensure_user_has_no_open_assignments,
+    lock_maintenance_users,
+)
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import organization_users
 from app.projects.models import project_users
@@ -157,6 +162,9 @@ def update_admin_user(
 
     updates = payload.model_dump(exclude_unset=True)
 
+    if user.is_active and updates.get("is_active") is False:
+        ensure_user_has_no_open_assignments(db, user.id)
+
     new_password = updates.pop("password", None)
     if new_password is not None:
         # Resetting a superuser's password would be an account takeover; the
@@ -226,6 +234,9 @@ def delete_admin_user(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AdminUserDeleteResponse:
     require_users_manage(db, current_user)
+    # Maintenance assignment and audit writers take this advisory lock before
+    # locking User rows. Keep the same order to avoid a User/advisory deadlock.
+    lock_maintenance_users(db, user_id)
 
     active_superuser_ids = list(
         db.scalars(
@@ -260,13 +271,22 @@ def delete_admin_user(
             detail="Cannot delete your own account",
         )
 
+    ensure_user_has_no_maintenance_history(db, user.id)
+
     db.execute(delete(user_groups).where(user_groups.c.user_id == user.id))
     db.execute(delete(project_users).where(project_users.c.user_id == user.id))
     db.execute(
         delete(organization_users).where(organization_users.c.user_id == user.id)
     )
     db.delete(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User has linked records and cannot be deleted",
+        ) from None
 
     return AdminUserDeleteResponse(user_id=user_id, detail="User deleted")
 

@@ -1,6 +1,9 @@
 from functools import lru_cache
+from math import isfinite
+from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +27,9 @@ class Settings(BaseSettings):
     assistant_model: str = "claude-opus-4-8"
     assistant_max_tokens: int = 16000
     assistant_max_tool_iterations: int = 8
+    assistant_max_tool_calls: int = 8
+    assistant_turn_timeout_seconds: float = 120.0
+    assistant_gateway_timeout_seconds: float = 30.0
     assistant_history_max_messages: int = 40
     hermes_agent_base_url: str = "http://127.0.0.1:8642/v1"
     hermes_agent_api_key: str | None = None
@@ -35,7 +41,29 @@ class Settings(BaseSettings):
     hermes_web_api_key: str | None = None
     hermes_web_model: str = "hermes-agent"
     hermes_web_timeout_seconds: float = 60.0
+    web_search_provider: str = "hermes"
+    brave_search_api_key: str | None = None
+    brave_search_timeout_seconds: float = 15.0
+    brave_search_country: str = "ES"
+    brave_search_language: str = "es"
+    brave_search_ui_language: str = "es-ES"
+    brave_search_storage_rights_confirmed: bool = False
     openai_api_key: str | None = None
+    openai_responses_base_url: str = "https://api.openai.com/v1"
+    openai_responses_model: str = "gpt-5.6"
+    openai_responses_reasoning_effort: str = "medium"
+    openai_responses_max_output_tokens: int = 25000
+    # Local development bridge backed by an interactive ChatGPT/Codex login.
+    # It is deliberately isolated from the developer's normal ~/.codex home.
+    codex_subscription_enabled: bool = False
+    codex_subscription_real_data_allowed: bool = False
+    codex_subscription_command: str = "codex"
+    codex_subscription_home: str = "~/.codex-asistente-ayuntamientos"
+    codex_subscription_model: str = ""
+    codex_subscription_reasoning_effort: str = "medium"
+    codex_subscription_session_ttl_seconds: float = 180.0
+    codex_subscription_max_sessions: int = 4
+    codex_subscription_health_timeout_seconds: float = 3.0
     assistant_realtime_enabled: bool = True
     assistant_realtime_model: str = "gpt-realtime-2.1"
     assistant_realtime_voice: str = "marin"
@@ -101,9 +129,202 @@ class Settings(BaseSettings):
     @classmethod
     def validate_assistant_runtime(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"anthropic", "hermes_agent"}:
-            raise ValueError("assistant_runtime must be 'anthropic' or 'hermes_agent'")
+        if normalized not in {
+            "anthropic",
+            "hermes_agent",
+            "openai_responses",
+            "codex_subscription",
+        }:
+            raise ValueError(
+                "assistant_runtime must be 'anthropic', 'hermes_agent' or "
+                "'openai_responses' or 'codex_subscription'"
+            )
         return normalized
+
+    @field_validator("codex_subscription_command")
+    @classmethod
+    def validate_codex_subscription_command(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("codex_subscription_command must not be empty")
+        return normalized
+
+    @field_validator("codex_subscription_home")
+    @classmethod
+    def validate_codex_subscription_home(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("codex_subscription_home must not be empty")
+        expanded = Path(normalized).expanduser().resolve(strict=False)
+        personal_home = Path("~/.codex").expanduser().resolve(strict=False)
+        if expanded == personal_home:
+            raise ValueError(
+                "codex_subscription_home must be dedicated and cannot be ~/.codex"
+            )
+        return str(expanded)
+
+    @field_validator("codex_subscription_model")
+    @classmethod
+    def validate_codex_subscription_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if "\x00" in normalized or len(normalized) > 128:
+            raise ValueError("codex_subscription_model is invalid")
+        return normalized
+
+    @field_validator("codex_subscription_reasoning_effort")
+    @classmethod
+    def validate_codex_subscription_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError(
+                "codex_subscription_reasoning_effort must be one of: none, "
+                "minimal, low, medium, high, xhigh"
+            )
+        return normalized
+
+    @field_validator(
+        "codex_subscription_session_ttl_seconds",
+        "codex_subscription_health_timeout_seconds",
+    )
+    @classmethod
+    def validate_codex_subscription_timeouts(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError(
+                "codex_subscription timeouts must be finite and greater than zero"
+            )
+        return value
+
+    @field_validator("codex_subscription_max_sessions")
+    @classmethod
+    def validate_codex_subscription_max_sessions(cls, value: int) -> int:
+        if not 1 <= value <= 32:
+            raise ValueError(
+                "codex_subscription_max_sessions must be between 1 and 32"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def reject_codex_subscription_outside_development(self):
+        if self.assistant_runtime != "codex_subscription":
+            return self
+        if self.environment != "development":
+            raise ValueError(
+                "codex_subscription is a local development runtime and is "
+                "forbidden outside environment=development"
+            )
+        if not self.codex_subscription_enabled:
+            raise ValueError(
+                "codex_subscription requires the explicit local-development "
+                "opt-in CODEX_SUBSCRIPTION_ENABLED=true"
+            )
+        if not self.codex_subscription_real_data_allowed:
+            raise ValueError(
+                "codex_subscription requires explicit approval before application "
+                "data is sent to the shared ChatGPT account"
+            )
+        return self
+
+    @field_validator("openai_responses_base_url")
+    @classmethod
+    def validate_openai_responses_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        allowed_hosts = {
+            "api.openai.com",
+            "ae.api.openai.com",
+            "au.api.openai.com",
+            "ca.api.openai.com",
+            "eu.api.openai.com",
+            "gb.api.openai.com",
+            "in.api.openai.com",
+            "jp.api.openai.com",
+            "kr.api.openai.com",
+            "sg.api.openai.com",
+            "us.api.openai.com",
+        }
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in allowed_hosts
+            or parsed.netloc != parsed.hostname
+            or parsed.path not in {"", "/v1"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "openai_responses_base_url must be an official HTTPS OpenAI "
+                "API base URL ending in /v1"
+            )
+        return f"https://{parsed.hostname}/v1"
+
+    @field_validator("openai_responses_model")
+    @classmethod
+    def validate_openai_responses_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not (
+            normalized == "gpt-5.6" or normalized.startswith("gpt-5.6-")
+        ):
+            raise ValueError(
+                "openai_responses_model must use the supported GPT-5.6 family"
+            )
+        return normalized
+
+    @field_validator("openai_responses_reasoning_effort")
+    @classmethod
+    def validate_openai_responses_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError(
+                "openai_responses_reasoning_effort must be one of: none, low, "
+                "medium, high, xhigh, max"
+            )
+        return normalized
+
+    @field_validator("openai_responses_max_output_tokens")
+    @classmethod
+    def validate_openai_responses_max_output_tokens(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError(
+                "openai_responses_max_output_tokens must be greater than zero"
+            )
+        return value
+
+    @field_validator("speech_synthesis_max_chars")
+    @classmethod
+    def validate_speech_synthesis_max_chars(cls, value: int) -> int:
+        if not 1 <= value <= 20000:
+            raise ValueError(
+                "speech_synthesis_max_chars must be between 1 and 20000"
+            )
+        return value
+
+    @field_validator("web_search_provider")
+    @classmethod
+    def validate_web_search_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"brave", "hermes", "disabled"}:
+            raise ValueError(
+                "web_search_provider must be 'brave', 'hermes' or 'disabled'"
+            )
+        return normalized
+
+    @field_validator(
+        "assistant_turn_timeout_seconds",
+        "assistant_gateway_timeout_seconds",
+    )
+    @classmethod
+    def validate_assistant_timeouts(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError("assistant timeouts must be finite and greater than zero")
+        return value
+
+    @field_validator("brave_search_timeout_seconds")
+    @classmethod
+    def validate_brave_search_timeout(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError(
+                "brave_search_timeout_seconds must be finite and greater than zero"
+            )
+        return value
 
     @field_validator("embeddings_runtime")
     @classmethod

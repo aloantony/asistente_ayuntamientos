@@ -58,6 +58,7 @@ def test_ordinance_listing_omits_text_content(client, superuser):
             "title": "Ordenanza de prueba",
             "topic": "residuos",
             "ordinance_type": "ordinance",
+            "curation_status": "approved",
             "text_content": "Texto legal completo de la ordenanza.",
         },
         headers=headers_for(superuser),

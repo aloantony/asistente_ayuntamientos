@@ -1,8 +1,12 @@
 import hashlib
+import ipaddress
 import json
+import logging
 import re
+import socket
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from http import client as http_client
 from html.parser import HTMLParser
 from io import BytesIO
 from urllib import error as urlerror
@@ -10,11 +14,13 @@ from urllib import parse as urlparse
 from urllib import request as urlrequest
 
 from pypdf import PdfReader
+from rq import Retry
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.assistant.hermes_web import HermesWebUnavailableError, hermes_web_client
+from app.assistant.web_search import WebSearchUnavailableError, web_search_client
 from app.core.config import settings
+from app.core.jobs import get_default_queue
 from app.db.session import SessionLocal
 from app.municipalities.models import Municipality
 from app.ordinances.bop_burgos import (
@@ -41,6 +47,20 @@ ORDINANCE_TITLE_RE = re.compile(
 )
 MAX_TITLE_CHARS = 500
 MAX_SUMMARY_CHARS = 900
+ALLOWED_SOURCE_SCHEMES = {"http", "https"}
+SOURCE_REDIRECT_CODES = {301, 302, 303, 307, 308}
+MAX_SOURCE_REDIRECTS = 5
+NAT64_TRANSLATION_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+logger = logging.getLogger(__name__)
+STABLE_IMPORT_ITEM_STATUSES = {
+    "pending_review",
+    "approved",
+    "rejected",
+    "duplicate",
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +73,190 @@ class SourceCandidate:
 
 class ImportSourceError(Exception):
     pass
+
+
+def _canonical_domain(value: str) -> str:
+    domain = value.strip().rstrip(".").lower()
+    if not domain or any(character.isspace() for character in domain):
+        raise ImportSourceError("El dominio de la fuente oficial no es válido.")
+    try:
+        canonical = domain.encode("idna").decode("ascii")
+        ipaddress.ip_address(canonical)
+    except UnicodeError as error:
+        raise ImportSourceError(
+            "El dominio de la fuente oficial no es válido."
+        ) from error
+    except ValueError:
+        pass
+    else:
+        raise ImportSourceError("Una fuente oficial no puede usar una IP como dominio.")
+    labels = canonical.split(".")
+    if (
+        len(labels) < 2
+        or canonical == "localhost"
+        or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not re.fullmatch(r"[a-z0-9-]+", label)
+            for label in labels
+        )
+    ):
+        raise ImportSourceError("El dominio de la fuente oficial no es válido.")
+    return canonical
+
+
+def _validated_source_url_host(url: str) -> str:
+    if not url or "\\" in url or any(ord(character) < 32 for character in url):
+        raise ImportSourceError("La URL de la fuente oficial no es válida.")
+    try:
+        parsed = urlparse.urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        raise ImportSourceError("La URL de la fuente oficial no es válida.") from error
+    if (
+        parsed.scheme.lower() not in ALLOWED_SOURCE_SCHEMES
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ImportSourceError("La URL de la fuente oficial no es válida.")
+    expected_port = 443 if parsed.scheme.lower() == "https" else 80
+    if port is not None and port != expected_port:
+        raise ImportSourceError("La URL de la fuente oficial usa un puerto no permitido.")
+    return _canonical_domain(parsed.hostname)
+
+
+def _require_official_source_url(
+    url: str,
+    sources: list[OfficialLegalSource],
+) -> None:
+    host = _validated_source_url_host(url)
+    for source in sources:
+        try:
+            domain = _canonical_domain(source.domain)
+        except ImportSourceError:
+            continue
+        if host == domain or host.endswith(f".{domain}"):
+            return
+    raise ImportSourceError("La URL no pertenece a una fuente oficial permitida.")
+
+
+def is_official_source_url(
+    url: str,
+    sources: list[OfficialLegalSource],
+) -> bool:
+    try:
+        _require_official_source_url(url, sources)
+    except ImportSourceError:
+        return False
+    return True
+
+
+def is_valid_official_source_definition(base_url: str, domain: str) -> bool:
+    try:
+        canonical = _canonical_domain(domain)
+        host = _validated_source_url_host(base_url)
+    except ImportSourceError:
+        return False
+    return host == canonical or host.endswith(f".{canonical}")
+
+
+def _require_public_unicast_ip(value: str) -> None:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ImportSourceError("La fuente oficial resolvió a una IP no válida.") from error
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    if (
+        not address.is_global
+        or address.is_multicast
+        or getattr(address, "is_site_local", False)
+        or getattr(address, "sixtofour", None) is not None
+        or getattr(address, "teredo", None) is not None
+        or any(address in prefix for prefix in NAT64_TRANSLATION_PREFIXES)
+    ):
+        raise ImportSourceError(
+            "La fuente oficial resolvió a una dirección de red no pública."
+        )
+
+
+def _create_public_connection(
+    address,
+    timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+    source_address=None,
+):
+    host, port = address
+    try:
+        candidates = socket.getaddrinfo(
+            host,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as error:
+        raise ImportSourceError("La fuente oficial no se pudo resolver.") from error
+    if not candidates:
+        raise ImportSourceError("La fuente oficial no se pudo resolver.")
+
+    for _family, _socktype, _proto, _canonname, sockaddr in candidates:
+        _require_public_unicast_ip(sockaddr[0])
+
+    last_error: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in candidates:
+        sock = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as error:
+            last_error = error
+            if sock is not None:
+                sock.close()
+    raise ImportSourceError("No se pudo conectar con la fuente oficial.") from last_error
+
+
+class _PinnedHTTPConnection(http_client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _create_public_connection
+
+
+class _PinnedHTTPSConnection(http_client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _create_public_connection
+
+
+class _PinnedHTTPHandler(urlrequest.HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(_PinnedHTTPConnection, request)
+
+
+class _PinnedHTTPSHandler(urlrequest.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(_PinnedHTTPSConnection, request)
+
+
+class _RejectRedirects(urlrequest.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+_SOURCE_OPENER = urlrequest.build_opener(
+    urlrequest.ProxyHandler({}),
+    _RejectRedirects(),
+    _PinnedHTTPHandler(),
+    _PinnedHTTPSHandler(),
+)
 
 
 def run_import_job(job_id: int, db: Session | None = None) -> None:
@@ -69,17 +273,35 @@ def run_import_job(job_id: int, db: Session | None = None) -> None:
         official_sources = _load_official_sources(db, job)
         municipalities = _load_municipalities(db, job)
         candidates = _load_seed_candidates(job)
-        candidates.extend(_discover_candidates(job, official_sources, municipalities))
+        try:
+            candidates.extend(
+                _discover_candidates(job, official_sources, municipalities)
+            )
+        except Exception:
+            if not candidates:
+                raise
+            # A best-effort discovery failure must not discard explicit,
+            # already validated seed URLs supplied by the operator.
+            logger.warning(
+                "Ordinance discovery failed; continuing with seed URLs",
+                extra={"job_id": job.id},
+                exc_info=True,
+            )
 
         if not candidates:
             job.status = "failed"
             job.finished_at = datetime.now(UTC)
-            job.error_message = (
-                "No se encontraron fuentes oficiales. Añade URLs semilla o "
-                "configura Hermes Web para búsqueda oficial."
-            )
+            if not job.error_message:
+                job.error_message = (
+                    "No se encontraron fuentes oficiales. Añade URLs semilla o "
+                    "configura el proveedor de búsqueda web oficial."
+                )
             db.commit()
             return
+
+        # A valid seed/discovered candidate makes a partial discovery warning
+        # non-terminal; individual source failures remain on their import item.
+        job.error_message = None
 
         item_ids = _create_items(db, job, candidates)
         for item_id in item_ids:
@@ -178,7 +400,7 @@ def _discover_candidates(
             bop_burgos_sources[0],
             municipalities,
         )
-    if not hermes_web_client.enabled:
+    if not web_search_client.enabled:
         return []
 
     candidates: list[SourceCandidate] = []
@@ -189,11 +411,17 @@ def _discover_candidates(
         for source in official_sources:
             query = f"{query_base} {municipality.name} site:{source.domain}"
             try:
-                results = hermes_web_client.search(
+                results = web_search_client.search(
                     query=query,
                     limit=settings.ordinance_import_search_limit,
                 )
-            except HermesWebUnavailableError:
+            except WebSearchUnavailableError as error:
+                if not candidates:
+                    job.error_message = f"Proveedor de búsqueda no disponible: {error}"
+                return candidates
+            except ValueError as error:
+                if not candidates:
+                    job.error_message = f"Consulta de búsqueda no válida: {error}"
                 return candidates
             for result in results:
                 url = str(result.get("url") or "").strip()
@@ -222,6 +450,10 @@ def _discover_bop_burgos_candidates(
         query = f"{query_base} {municipality.name}".strip()
         announcements = search_bop_burgos_announcements(
             query,
+            fetch_content=lambda url: _fetch_source(
+                url,
+                [official_source],
+            ).content,
             limit=settings.ordinance_import_search_limit,
         )
         for announcement in announcements:
@@ -287,13 +519,29 @@ def _process_item(
     )
     if item is None:
         return
+    if item.ordinance_id is not None and item.status in STABLE_IMPORT_ITEM_STATUSES:
+        # Re-running a completed or partially completed job must not fetch and
+        # classify its own ordinance as a duplicate. Pending/approved records
+        # may still need idempotent embedding recovery after a queue outage.
+        if item.status in {"pending_review", "approved"}:
+            dispatch_ordinance_embeddings(db, item.ordinance_id)
+        return
     try:
-        if not _url_allowed(item.source_url, official_sources):
+        item_sources = (
+            [
+                source
+                for source in official_sources
+                if source.id == item.official_source_id
+            ]
+            if item.official_source_id is not None
+            else official_sources
+        )
+        if not is_official_source_url(item.source_url, item_sources):
             raise ImportSourceError("La URL no pertenece a una fuente oficial permitida.")
         item.status = "fetching"
         db.commit()
 
-        fetched = _fetch_source(item.source_url)
+        fetched = _fetch_source(item.source_url, item_sources)
         text = _extract_text(fetched.content, fetched.content_type, item.source_url)
         if len(text.strip()) < 80:
             raise ImportSourceError("No se pudo extraer texto suficiente de la fuente.")
@@ -320,12 +568,15 @@ def _process_item(
         item.extracted_metadata_json = json.dumps(metadata, ensure_ascii=False)
         item.source_hash = source_hash
         item.confidence_score = ordinance.confidence_score
-        db.commit()
-
         _create_chunks(db, ordinance, item)
-        _create_review_report(db, ordinance, item)
+        create_review_report(db, ordinance, item)
         db.commit()
+        dispatch_ordinance_embeddings(db, ordinance.id)
     except Exception as error:
+        db.rollback()
+        item = db.get(OrdinanceImportItem, item_id)
+        if item is None:
+            raise
         item.status = "failed"
         item.error_message = str(error)[:2000]
         db.commit()
@@ -337,14 +588,41 @@ class FetchedSource:
     content_type: str
 
 
-def _fetch_source(url: str) -> FetchedSource:
-    request = urlrequest.Request(
-        url,
-        headers={"User-Agent": "AsistenteAyuntamientos/0.1 ordinance-import"},
-        method="GET",
-    )
-    try:
-        with urlrequest.urlopen(request, timeout=30) as response:
+def _fetch_source(
+    url: str,
+    official_sources: list[OfficialLegalSource],
+) -> FetchedSource:
+    current_url = url
+    for redirect_count in range(MAX_SOURCE_REDIRECTS + 1):
+        _require_official_source_url(current_url, official_sources)
+        request = urlrequest.Request(
+            current_url,
+            headers={"User-Agent": "AsistenteAyuntamientos/0.1 ordinance-import"},
+            method="GET",
+        )
+        try:
+            response = _SOURCE_OPENER.open(request, timeout=30)
+        except urlerror.HTTPError as error:
+            if error.code not in SOURCE_REDIRECT_CODES:
+                raise ImportSourceError(
+                    f"No se pudo descargar la fuente: HTTP {error.code}"
+                ) from error
+            location = error.headers.get("location")
+            error.close()
+            if not location:
+                raise ImportSourceError(
+                    "La fuente devolvió una redirección sin destino."
+                )
+            if redirect_count >= MAX_SOURCE_REDIRECTS:
+                raise ImportSourceError("La fuente supera el máximo de redirecciones.")
+            next_url = urlparse.urljoin(current_url, location)
+            _require_official_source_url(next_url, official_sources)
+            current_url = next_url
+            continue
+        except (urlerror.URLError, TimeoutError, OSError) as error:
+            raise ImportSourceError("No se pudo descargar la fuente.") from error
+
+        with response:
             content_type = (response.headers.get("content-type") or "").lower()
             chunks: list[bytes] = []
             size = 0
@@ -353,11 +631,8 @@ def _fetch_source(url: str) -> FetchedSource:
                 if size > settings.ordinance_import_max_fetch_bytes:
                     raise ImportSourceError("La fuente supera el tamaño máximo.")
                 chunks.append(chunk)
-    except urlerror.HTTPError as error:
-        raise ImportSourceError(f"No se pudo descargar la fuente: HTTP {error.code}") from error
-    except (urlerror.URLError, TimeoutError) as error:
-        raise ImportSourceError("No se pudo descargar la fuente.") from error
-    return FetchedSource(content=b"".join(chunks), content_type=content_type)
+        return FetchedSource(content=b"".join(chunks), content_type=content_type)
+    raise ImportSourceError("La fuente supera el máximo de redirecciones.")
 
 
 def _extract_text(content: bytes, content_type: str, url: str) -> str:
@@ -445,6 +720,35 @@ def _create_chunks(
     ordinance: Ordinance,
     item: OrdinanceImportItem,
 ) -> None:
+    rebuild_ordinance_chunks(
+        db,
+        ordinance,
+        import_item=item,
+        generate_embeddings=False,
+    )
+
+
+def rebuild_ordinance_chunks(
+    db: Session,
+    ordinance: Ordinance,
+    *,
+    import_item: OrdinanceImportItem | None = None,
+    review_status: str = "pending_review",
+    generate_embeddings: bool = True,
+) -> None:
+    """Replace derived chunks after legal text changes.
+
+    Chunks are never kept approved across a text rewrite unless an authorized
+    reviewer is creating an already-reviewed manual record explicitly.
+    """
+
+    text_content = (ordinance.text_content or "").strip()
+    chunks = _split_chunks(text_content) if text_content else []
+    if len(chunks) > settings.ordinance_import_max_chunks:
+        raise ImportSourceError(
+            "El texto de la ordenanza supera el máximo de fragmentos buscables."
+        )
+
     for chunk in list(
         db.scalars(
             select(OrdinanceLegalChunk).where(
@@ -453,29 +757,35 @@ def _create_chunks(
         )
     ):
         db.delete(chunk)
-    chunks = _split_chunks(ordinance.text_content or "")
-    for index, text in enumerate(chunks[: settings.ordinance_import_max_chunks]):
+    db.flush()
+    if not text_content:
+        return
+    for index, text in enumerate(chunks):
         embedding = None
-        embedding_model = None
-        embedding_status = "pending"
+        embedding_model = settings.embeddings_model
+        embedding_status = (
+            "disabled" if settings.embeddings_runtime == "disabled" else "pending"
+        )
         embedded_at = None
-        try:
-            embedding, embedding_model, embedding_status = embed_text(text)
-            embedded_at = datetime.now(UTC) if embedding_status == "ready" else None
-        except EmbeddingsUnavailableError:
-            embedding_status = "failed"
-            embedding_model = settings.embeddings_model
+        if generate_embeddings:
+            try:
+                embedding, embedding_model, embedding_status = embed_text(text)
+                embedded_at = (
+                    datetime.now(UTC) if embedding_status == "ready" else None
+                )
+            except EmbeddingsUnavailableError:
+                embedding_status = "failed"
         db.add(
             OrdinanceLegalChunk(
                 ordinance_id=ordinance.id,
-                import_item_id=item.id,
+                import_item_id=import_item.id if import_item else None,
                 chunk_index=index,
                 heading=_chunk_heading(text),
                 citation=f"Fragmento {index + 1}",
                 text=text,
-                source_url=item.source_url,
+                source_url=ordinance.source_url,
                 source_locator=f"fragmento-{index + 1}",
-                review_status="pending_review",
+                review_status=review_status,
                 embedding_model=embedding_model,
                 embedding=embedding,
                 embedding_status=embedding_status,
@@ -484,7 +794,198 @@ def _create_chunks(
         )
 
 
-def _create_review_report(
+def embed_ordinance_chunks(
+    ordinance_id: int,
+    db: Session | None = None,
+) -> dict[str, int]:
+    """Generate pending embeddings without holding a database transaction.
+
+    HTTP mutations enqueue this entrypoint for remote providers. The local
+    deterministic runtime may invoke it inline after the ordinance transaction
+    has committed.
+    """
+
+    owns_session = db is None
+    if db is None:
+        db = SessionLocal()
+    try:
+        pending = list(
+            db.execute(
+                select(
+                    OrdinanceLegalChunk.id,
+                    OrdinanceLegalChunk.text,
+                )
+                .where(
+                    OrdinanceLegalChunk.ordinance_id == ordinance_id,
+                    OrdinanceLegalChunk.embedding_status.in_(("pending", "failed")),
+                )
+                .order_by(OrdinanceLegalChunk.chunk_index)
+            )
+        )
+        # End the read transaction before a potentially slow provider call.
+        db.commit()
+
+        ready = 0
+        failed = 0
+        skipped = 0
+        for chunk_id, expected_text in pending:
+            try:
+                embedding, embedding_model, embedding_status = embed_text(expected_text)
+            except EmbeddingsUnavailableError:
+                embedding = None
+                embedding_model = settings.embeddings_model
+                embedding_status = "failed"
+
+            chunk = db.get(OrdinanceLegalChunk, chunk_id)
+            if (
+                chunk is None
+                or chunk.ordinance_id != ordinance_id
+                or chunk.text != expected_text
+                or chunk.embedding_status not in {"pending", "failed"}
+            ):
+                db.rollback()
+                skipped += 1
+                continue
+            chunk.embedding = embedding
+            chunk.embedding_model = embedding_model
+            chunk.embedding_status = embedding_status
+            chunk.embedded_at = (
+                datetime.now(UTC) if embedding_status == "ready" else None
+            )
+            db.commit()
+            if embedding_status == "ready":
+                ready += 1
+            elif embedding_status == "failed":
+                failed += 1
+            else:
+                skipped += 1
+        return {"ready": ready, "failed": failed, "skipped": skipped}
+    finally:
+        if owns_session:
+            db.close()
+
+
+def embed_ordinance_chunk(
+    chunk_id: int,
+    db: Session | None = None,
+) -> str:
+    """Embed one chunk as an idempotent, bounded RQ unit of work."""
+
+    owns_session = db is None
+    if db is None:
+        db = SessionLocal()
+    try:
+        row = db.execute(
+            select(
+                OrdinanceLegalChunk.text,
+                OrdinanceLegalChunk.embedding_status,
+            ).where(OrdinanceLegalChunk.id == chunk_id)
+        ).one_or_none()
+        if row is None or row.embedding_status not in {"pending", "failed"}:
+            db.rollback()
+            return "skipped"
+        expected_text = row.text
+        db.commit()
+
+        provider_error: EmbeddingsUnavailableError | None = None
+        try:
+            embedding, embedding_model, embedding_status = embed_text(expected_text)
+        except EmbeddingsUnavailableError as error:
+            embedding = None
+            embedding_model = settings.embeddings_model
+            embedding_status = "failed"
+            provider_error = error
+
+        chunk = db.get(OrdinanceLegalChunk, chunk_id)
+        if (
+            chunk is None
+            or chunk.text != expected_text
+            or chunk.embedding_status not in {"pending", "failed"}
+        ):
+            db.rollback()
+            return "skipped"
+        chunk.embedding = embedding
+        chunk.embedding_model = embedding_model
+        chunk.embedding_status = embedding_status
+        chunk.embedded_at = (
+            datetime.now(UTC) if embedding_status == "ready" else None
+        )
+        db.commit()
+        if provider_error is not None:
+            raise provider_error
+        return embedding_status
+    finally:
+        if owns_session:
+            db.close()
+
+
+def dispatch_ordinance_embeddings(
+    db: Session,
+    ordinance_id: int,
+    *,
+    embedding_statuses: tuple[str, ...] = ("pending", "failed"),
+) -> dict:
+    """Run cheap local embeddings inline and queue network-backed providers."""
+
+    if settings.embeddings_runtime != "openai_compatible":
+        try:
+            result = embed_ordinance_chunks(ordinance_id, db=db)
+        except Exception:  # pragma: no cover - defensive local runtime boundary
+            db.rollback()
+            logger.exception(
+                "Could not generate local ordinance embeddings",
+                extra={"ordinance_id": ordinance_id},
+            )
+            return {"requested": 0, "queued": 0, "queue_failed": 0}
+        return {
+            "requested": result["ready"] + result["failed"] + result["skipped"],
+            "queued": 0,
+            "queue_failed": 0,
+        }
+
+    chunk_ids = list(
+        db.scalars(
+            select(OrdinanceLegalChunk.id)
+            .where(
+                OrdinanceLegalChunk.ordinance_id == ordinance_id,
+                OrdinanceLegalChunk.embedding_status.in_(embedding_statuses),
+            )
+            .order_by(OrdinanceLegalChunk.chunk_index)
+        )
+    )
+    db.commit()
+    queued = 0
+    try:
+        queue = get_default_queue()
+        for chunk_id in chunk_ids:
+            queue.enqueue(
+                embed_ordinance_chunk,
+                chunk_id,
+                job_timeout=int(
+                    max(90, settings.embeddings_timeout_seconds + 30)
+                ),
+                retry=Retry(max=3),
+            )
+            queued += 1
+    except Exception:  # pragma: no cover - depends on external Redis availability
+        # Pending chunks remain outside the recoverable corpus and a later
+        # dispatch can safely enqueue them again; chunk workers are idempotent.
+        logger.exception(
+            "Could not enqueue all ordinance embeddings",
+            extra={
+                "ordinance_id": ordinance_id,
+                "queued": queued,
+                "requested": len(chunk_ids),
+            },
+        )
+    return {
+        "requested": len(chunk_ids),
+        "queued": queued,
+        "queue_failed": len(chunk_ids) - queued,
+    }
+
+
+def create_review_report(
     db: Session,
     ordinance: Ordinance,
     item: OrdinanceImportItem,
@@ -581,19 +1082,7 @@ def _split_chunks(text: str) -> list[str]:
     article_chunks = _split_article_chunks(text)
     if article_chunks:
         return article_chunks
-    paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
-    chunks: list[str] = []
-    current = ""
-    for paragraph in paragraphs:
-        if len(current) + len(paragraph) + 2 <= settings.ordinance_chunk_chars:
-            current = f"{current}\n\n{paragraph}".strip()
-            continue
-        if current:
-            chunks.append(current)
-        current = paragraph
-    if current:
-        chunks.append(current)
-    return chunks or [text[: settings.ordinance_chunk_chars]]
+    return _split_oversized_chunk(text)
 
 
 def _split_article_chunks(text: str) -> list[str]:
@@ -620,24 +1109,37 @@ def _split_article_chunks(text: str) -> list[str]:
 def _split_oversized_chunk(text: str) -> list[str]:
     if len(text) <= settings.ordinance_chunk_chars:
         return [text]
-    paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
-    if len(paragraphs) <= 1:
-        return [
-            text[index : index + settings.ordinance_chunk_chars].strip()
-            for index in range(0, len(text), settings.ordinance_chunk_chars)
-        ]
+    limit = settings.ordinance_chunk_chars
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in text.split("\n\n")
+        if paragraph.strip()
+    ]
+    pieces = [
+        piece.strip()
+        for paragraph in paragraphs
+        for piece in (
+            [paragraph]
+            if len(paragraph) <= limit
+            else [
+                paragraph[index : index + limit]
+                for index in range(0, len(paragraph), limit)
+            ]
+        )
+        if piece.strip()
+    ]
     chunks: list[str] = []
     current = ""
-    for paragraph in paragraphs:
-        if len(current) + len(paragraph) + 2 <= settings.ordinance_chunk_chars:
-            current = f"{current}\n\n{paragraph}".strip()
+    for piece in pieces:
+        if len(current) + len(piece) + 2 <= limit:
+            current = f"{current}\n\n{piece}".strip()
             continue
         if current:
             chunks.append(current)
-        current = paragraph
+        current = piece
     if current:
         chunks.append(current)
-    return chunks
+    return chunks or ([text[:limit]] if text else [])
 
 
 def _chunk_heading(text: str) -> str | None:
@@ -646,14 +1148,7 @@ def _chunk_heading(text: str) -> str | None:
 
 
 def _url_allowed(url: str, official_sources: list[OfficialLegalSource]) -> bool:
-    host = (urlparse.urlparse(url).hostname or "").lower()
-    if not host:
-        return False
-    for source in official_sources:
-        domain = source.domain.lower()
-        if host == domain or host.endswith(f".{domain}"):
-            return True
-    return False
+    return is_official_source_url(url, official_sources)
 
 
 def _json_list(value: str | None) -> list:

@@ -1,6 +1,14 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, String, Table
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    Index,
+    String,
+    Table,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -30,6 +38,11 @@ class Organization(TimestampMixin, Base):
         CheckConstraint(
             "status in ('active', 'paused', 'archived')",
             name="ck_organizations_status",
+        ),
+        UniqueConstraint(
+            "id",
+            "municipality_id",
+            name="uq_organizations_id_municipality",
         ),
     )
 

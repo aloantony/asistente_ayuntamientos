@@ -94,8 +94,8 @@ class Ordinance(TimestampMixin, Base):
     curation_status: Mapped[str] = mapped_column(
         String(30),
         index=True,
-        default="approved",
-        server_default="approved",
+        default="pending_review",
+        server_default="pending_review",
         nullable=False,
     )
     import_job_id: Mapped[int | None] = mapped_column(

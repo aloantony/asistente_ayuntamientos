@@ -13,6 +13,7 @@ import {
   MapPin,
   PanelLeftClose,
   PanelLeftOpen,
+  Square,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -73,6 +74,7 @@ type AssistantPanelProps = {
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
   onSendMessage: () => void;
+  onStopMessageGeneration: () => void;
   onSendVoiceAudio: (audio: Blob) => Promise<void>;
   onStartRealtimeVoice: () => Promise<void>;
   onStopRealtimeVoice: (options?: { interrupted?: boolean }) => void;
@@ -587,6 +589,7 @@ export function AssistantPanel({
   onSelectConversation,
   onStartConversation,
   onSendMessage,
+  onStopMessageGeneration,
   onSendVoiceAudio,
   onStartRealtimeVoice,
   onStopRealtimeVoice,
@@ -603,12 +606,14 @@ export function AssistantPanel({
 }: AssistantPanelProps) {
   const assistantDisabled = assistantStatus !== null && !assistantStatus.enabled;
   const runtimeHealthFailed =
-    assistantStatus?.runtime === "hermes_agent" &&
-    assistantStatus.runtime_healthy === false &&
+    assistantStatus?.runtime_healthy === false &&
     assistantStatus.enabled;
   const selectedIsArchived = selectedConversation?.status === "archived";
   const composerDisabled =
-    isSendingMessage || assistantDisabled || Boolean(selectedIsArchived);
+    isSendingMessage ||
+    assistantDisabled ||
+    runtimeHealthFailed ||
+    Boolean(selectedIsArchived);
   const emptyThreadMessage = useMemo(
     () =>
       EMPTY_THREAD_MESSAGES[
@@ -853,11 +858,13 @@ export function AssistantPanel({
 
   function stopListening(options: { discardAudio?: boolean } = {}) {
     const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
+    if (recorder) {
       if (options.discardAudio) {
         discardNextAudioRef.current = true;
       }
-      recorder.stop();
+      if (recorder.state !== "inactive") {
+        recorder.stop();
+      }
       return;
     }
     discardNextAudioRef.current = false;
@@ -1195,14 +1202,14 @@ export function AssistantPanel({
       return;
     }
 
-    stopListening();
+    stopListening({ discardAudio: true });
     onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    stopListening();
+    stopListening({ discardAudio: true });
     onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
   }
@@ -1543,6 +1550,16 @@ export function AssistantPanel({
       })
       .catch(() => undefined);
   }
+
+  // The empty optimistic assistant message reserves the streaming slot. The
+  // dedicated typing row below already represents it until output arrives.
+  const displayedMessages =
+    selectedConversation?.messages.filter(
+      (message) =>
+        message.id !== -2 ||
+        message.content.trim().length > 0 ||
+        message.actions.length > 0,
+    ) ?? [];
 
   return (
     <section className="panel assistant-agent-panel">
@@ -1926,7 +1943,7 @@ export function AssistantPanel({
                     <p>{emptyThreadMessage.body}</p>
                   </div>
                 ) : null}
-                {selectedConversation.messages.map((message) => {
+                {displayedMessages.map((message) => {
                   const isAssistant = message.role === "assistant";
                   return (
                     <article
@@ -2116,15 +2133,27 @@ export function AssistantPanel({
                           )}
                         </button>
                       ) : null}
-                      <button
-                        type="submit"
-                        disabled={
-                          composerDisabled || draftMessage.trim().length === 0
-                        }
-                      >
-                        <AssistantSymbolIcon name="send" size={17} />
-                        <span>{isSendingMessage ? "Enviando" : "Enviar"}</span>
-                      </button>
+                      {isSendingMessage ? (
+                        <button
+                          type="button"
+                          className="secondary-button assistant-stop-generation"
+                          onClick={onStopMessageGeneration}
+                          aria-label="Detener generación"
+                        >
+                          <Square aria-hidden size={13} fill="currentColor" />
+                          <span>Detener</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="submit"
+                          disabled={
+                            composerDisabled || draftMessage.trim().length === 0
+                          }
+                        >
+                          <AssistantSymbolIcon name="send" size={17} />
+                          <span>Enviar</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </form>

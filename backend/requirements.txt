@@ -13,3 +13,4 @@ pypdf==5.1.0
 redis==5.2.1
 rq==2.1.0
 nvidia-riva-client==2.20.0
+openpyxl==3.1.5

@@ -54,6 +54,18 @@ export function fetchMunicipalityOptions() {
   );
 }
 
+export function fetchMunicipality(
+  municipalityId: number,
+  signal?: AbortSignal,
+) {
+  return adminRequest<Municipality>(
+    `/municipalities/${municipalityId}`,
+    "",
+    "No se pudo cargar la información del municipio.",
+    { signal },
+  );
+}
+
 // Totales para las tarjetas de métricas del panel de inicio: piden una sola
 // fila (limit=1) y leen el conteo real de la cabecera X-Total-Count, sin
 // traerse la lista entera. Cada llamada exige el permiso de su recurso, así
@@ -81,9 +93,37 @@ export function fetchMunicipalitiesTotal() {
   );
 }
 
-export function fetchOrdinancesTotal() {
+export function fetchOrdinancesTotal(municipalityId?: number) {
+  const params = new URLSearchParams({ limit: "1" });
+  if (municipalityId) {
+    params.set("municipality_id", String(municipalityId));
+  }
   return fetchTotal(
-    "/ordinances?limit=1",
+    `/ordinances?${params.toString()}`,
     "No se pudo contar la lista de ordenanzas.",
+  );
+}
+
+export function fetchMunicipalAssetsTotal(organizationId: number) {
+  const params = new URLSearchParams({
+    organization_id: String(organizationId),
+    include_archived: "false",
+    limit: "1",
+  });
+  return fetchTotal(
+    `/assets?${params.toString()}`,
+    "No se pudo contar el inventario municipal.",
+  );
+}
+
+export function fetchOpenMaintenanceTotal(organizationId: number) {
+  const params = new URLSearchParams({
+    organization_id: String(organizationId),
+    include_closed: "false",
+    limit: "1",
+  });
+  return fetchTotal(
+    `/maintenance/orders?${params.toString()}`,
+    "No se pudieron contar las órdenes de mantenimiento.",
   );
 }

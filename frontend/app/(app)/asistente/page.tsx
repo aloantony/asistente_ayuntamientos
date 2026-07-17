@@ -38,16 +38,17 @@ function AsistentePageInner() {
   // El panel de inicio (y la barra superior) abren el asistente con el texto ya
   // escrito vía ?q=. Se vuelca una sola vez en el borrador y se limpia el
   // parámetro de la URL para que no reaparezca al navegar atrás/adelante.
-  const seededQueryRef = useRef(false);
+  const seededQueryRef = useRef<string | null>(null);
+  const seededConversationStartedRef = useRef(false);
   useEffect(() => {
-    if (seededQueryRef.current) {
+    if (seededQueryRef.current !== null) {
       return;
     }
-    const seededQuery = searchParams.get("q");
+    const seededQuery = searchParams.get("q")?.trim();
     if (!seededQuery) {
       return;
     }
-    seededQueryRef.current = true;
+    seededQueryRef.current = seededQuery;
     assistantController.setDraftMessage(seededQuery);
     const params = new URLSearchParams(searchParams.toString());
     params.delete("q");
@@ -57,6 +58,34 @@ function AsistentePageInner() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
+
+  // Entrar desde el dashboard equivale a iniciar un chat nuevo: se crea la
+  // conversación sin borrar la consulta sembrada. La acción explícita
+  // "Nueva conversación" sigue usando startConversation(), que sí limpia el
+  // borrador.
+  useEffect(() => {
+    const seededQuery = seededQueryRef.current;
+    if (
+      !canUseAssistant ||
+      !seededQuery ||
+      seededConversationStartedRef.current ||
+      urlConversationId !== null ||
+      assistantController.assistantStatus === null ||
+      !assistantController.assistantStatus.enabled ||
+      assistantController.isLoadingAssistant
+    ) {
+      return;
+    }
+
+    seededConversationStartedRef.current = true;
+    void assistantController.startConversationWithDraft(seededQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    assistantController.assistantStatus,
+    assistantController.isLoadingAssistant,
+    canUseAssistant,
+    urlConversationId,
+  ]);
 
   useEffect(() => {
     if (!canUseAssistant) {
@@ -159,6 +188,7 @@ function AsistentePageInner() {
         onSelectConversation={handleSelectConversation}
         onStartConversation={assistantController.startConversation}
         onSendMessage={assistantController.sendMessage}
+        onStopMessageGeneration={assistantController.stopMessageGeneration}
         onSendVoiceAudio={assistantController.sendVoiceAudio}
         onStartRealtimeVoice={assistantController.startRealtimeVoice}
         onStopRealtimeVoice={assistantController.stopRealtimeVoice}

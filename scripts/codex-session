@@ -1,0 +1,560 @@
+#!/usr/bin/env python3
+"""Create and coordinate isolated Codex worktree sessions.
+
+This helper deliberately avoids publishing or deleting work. It stores local,
+ignored coordination metadata in the main worktree and delegates repository
+mutations to Git so normal worktree protections remain in force.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+
+SESSION_DIR_NAME = ".codex-sessions"
+SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$")
+
+
+class SessionError(RuntimeError):
+    """An expected, user-actionable coordination error."""
+
+
+def now_iso() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def run_git(
+    args: list[str],
+    *,
+    cwd: Path,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise SessionError(f"git {' '.join(args)} failed: {detail}")
+    return result
+
+
+def current_repo_root(cwd: Path | None = None) -> Path:
+    start = (cwd or Path.cwd()).resolve()
+    output = run_git(["rev-parse", "--show-toplevel"], cwd=start).stdout.strip()
+    return Path(output).resolve()
+
+
+def parse_worktrees(repo: Path) -> list[dict[str, str]]:
+    output = run_git(["worktree", "list", "--porcelain"], cwd=repo).stdout
+    worktrees: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in [*output.splitlines(), ""]:
+        if not line:
+            if current:
+                worktrees.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value
+    return worktrees
+
+
+def coordination_root(repo: Path | None = None) -> Path:
+    root = repo or current_repo_root()
+    worktrees = parse_worktrees(root)
+    if not worktrees:
+        raise SessionError("Git did not report a main coordination worktree")
+    return Path(worktrees[0]["worktree"]).resolve()
+
+
+def registry_root(repo: Path, *, create: bool = False) -> Path:
+    root = coordination_root(repo) / SESSION_DIR_NAME
+    if create:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return root
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=".session-", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SessionError(f"Cannot read session metadata {path}: {exc}") from exc
+
+
+def load_sessions(repo: Path) -> list[dict[str, Any]]:
+    root = registry_root(repo)
+    if not root.exists():
+        return []
+    return [load_json(path) for path in sorted(root.glob("*/session.json"))]
+
+
+def validate_slug(value: str) -> str:
+    if not SLUG_RE.fullmatch(value):
+        raise SessionError(
+            "Task slug must use lowercase letters, numbers, and internal hyphens "
+            "(maximum 64 characters)"
+        )
+    return value
+
+
+def validate_owner(value: str) -> str:
+    if not OWNER_RE.fullmatch(value):
+        raise SessionError(
+            "Owner must use letters, numbers, dots, underscores, or internal hyphens "
+            "(maximum 64 characters)"
+        )
+    return value
+
+
+def branch_name(worktree: dict[str, str]) -> str:
+    branch = worktree.get("branch", "")
+    return branch.removeprefix("refs/heads/")
+
+
+def status_details(path: Path) -> tuple[int, int]:
+    output = run_git(["status", "--porcelain"], cwd=path).stdout.splitlines()
+    deleted = sum(1 for line in output if "D" in line[:2])
+    return len(output), deleted
+
+
+def optional_git_output(args: list[str], cwd: Path) -> str | None:
+    result = run_git(args, cwd=cwd, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def ahead_behind(left: str, right: str, cwd: Path) -> tuple[int, int]:
+    output = run_git(
+        ["rev-list", "--left-right", "--count", f"{left}...{right}"],
+        cwd=cwd,
+    ).stdout.split()
+    return int(output[0]), int(output[1])
+
+
+def registered_by_path(repo: Path) -> dict[Path, dict[str, Any]]:
+    return {
+        Path(session["path"]).resolve(): session
+        for session in load_sessions(repo)
+        if session.get("path")
+    }
+
+
+def worktree_snapshot(repo: Path, item: dict[str, str]) -> dict[str, Any]:
+    path = Path(item["worktree"]).resolve()
+    branch = branch_name(item)
+    dirty, deleted = status_details(path)
+    upstream = optional_git_output(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], path
+    )
+    upstream_ahead = upstream_behind = None
+    if upstream:
+        upstream_ahead, upstream_behind = ahead_behind("HEAD", "@{u}", path)
+
+    main_only = unique_commits = None
+    merged = False
+    if branch:
+        comparison = run_git(
+            ["rev-list", "--left-right", "--count", f"origin/main...{branch}"],
+            cwd=path,
+            check=False,
+        )
+        if comparison.returncode == 0:
+            left, right = comparison.stdout.split()
+            main_only, unique_commits = int(left), int(right)
+        merged = (
+            run_git(
+                ["merge-base", "--is-ancestor", branch, "origin/main"],
+                cwd=path,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    if dirty:
+        classification = (
+            "quarantine-candidate"
+            if deleted >= 10 and deleted * 4 >= dirty * 3
+            else "reserved-dirty"
+        )
+    elif merged:
+        classification = "clean-merged"
+    elif unique_commits == 0:
+        classification = "clean-base"
+    else:
+        classification = "clean-unmerged"
+
+    session = registered_by_path(repo).get(path, {})
+    return {
+        "path": str(path),
+        "branch": branch or "(detached)",
+        "head": item.get("HEAD", ""),
+        "owner": session.get("owner", "-"),
+        "session_status": session.get("status", "unregistered"),
+        "dirty": dirty,
+        "deleted": deleted,
+        "upstream": upstream or "-",
+        "upstream_ahead": upstream_ahead,
+        "upstream_behind": upstream_behind,
+        "main_only": main_only,
+        "unique_commits": unique_commits,
+        "classification": classification,
+    }
+
+
+def print_rows(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        print("No sessions or worktrees found.")
+        return
+    columns = ["owner", "session_status", "classification", "dirty", "branch", "path"]
+    widths = {
+        column: max(len(column), *(len(str(row.get(column, ""))) for row in rows))
+        for column in columns
+    }
+    print("  ".join(column.ljust(widths[column]) for column in columns))
+    for row in rows:
+        print(
+            "  ".join(str(row.get(column, "")).ljust(widths[column]) for column in columns)
+        )
+
+
+def command_audit(args: argparse.Namespace) -> None:
+    repo = current_repo_root()
+    rows = [worktree_snapshot(repo, item) for item in parse_worktrees(repo)]
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print_rows(rows)
+
+
+def session_snapshot(repo: Path, session: dict[str, Any]) -> dict[str, Any]:
+    path = Path(session["path"])
+    if not path.exists():
+        return {
+            **session,
+            "session_status": session["status"],
+            "classification": "missing",
+            "dirty": "-",
+        }
+    item = next(
+        (
+            worktree
+            for worktree in parse_worktrees(repo)
+            if Path(worktree["worktree"]).resolve() == path.resolve()
+        ),
+        None,
+    )
+    if item is None:
+        return {
+            **session,
+            "session_status": session["status"],
+            "classification": "unregistered-path",
+            "dirty": "-",
+        }
+    snapshot = worktree_snapshot(repo, item)
+    return {**snapshot, **session, "session_status": session["status"]}
+
+
+def command_list(args: argparse.Namespace) -> None:
+    repo = current_repo_root()
+    rows = [session_snapshot(repo, session) for session in load_sessions(repo)]
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print_rows(rows)
+
+
+def command_create(args: argparse.Namespace) -> None:
+    slug = validate_slug(args.slug)
+    owner = validate_owner(args.owner)
+    repo = current_repo_root()
+    coordinator = coordination_root(repo)
+
+    if run_git(["status", "--porcelain"], cwd=coordinator).stdout.strip():
+        raise SessionError(
+            f"Coordination worktree is not clean: {coordinator}. Audit it before creating work."
+        )
+    if not args.no_fetch:
+        run_git(["fetch", "origin"], cwd=coordinator)
+
+    base_sha = run_git(
+        ["rev-parse", "--verify", f"{args.base}^{{commit}}"], cwd=coordinator
+    ).stdout.strip()
+    date = datetime.now(UTC).strftime("%Y%m%d")
+    branch = f"codex/{slug}-{date}"
+    worktree_parent = coordinator.parent / f"{coordinator.name}-worktrees"
+    path = worktree_parent / slug
+
+    branch_exists = run_git(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=coordinator,
+        check=False,
+    ).returncode == 0
+    if branch_exists:
+        raise SessionError(f"Branch already exists: {branch}")
+    if path.exists():
+        raise SessionError(f"Worktree path already exists: {path}")
+
+    sessions_root = registry_root(repo, create=True)
+    session_dir = sessions_root / slug
+    try:
+        session_dir.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise SessionError(f"Task is already reserved: {slug}") from exc
+
+    record: dict[str, Any] = {
+        "task": slug,
+        "owner": owner,
+        "status": "provisioning",
+        "branch": branch,
+        "path": str(path),
+        "base_ref": args.base,
+        "base_sha": base_sha,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "tests": [],
+    }
+    record_path = session_dir / "session.json"
+    atomic_write_json(record_path, record)
+    try:
+        worktree_parent.mkdir(parents=True, exist_ok=True)
+        run_git(
+            ["worktree", "add", str(path), "-b", branch, args.base],
+            cwd=coordinator,
+        )
+    except Exception as exc:
+        record["status"] = "provisioning-failed"
+        record["updated_at"] = now_iso()
+        record["error"] = str(exc)
+        atomic_write_json(record_path, record)
+        raise
+
+    record["status"] = "active"
+    record["updated_at"] = now_iso()
+    atomic_write_json(record_path, record)
+    print(f"Created {branch}")
+    print(f"Worktree: {path}")
+    print(f"Owner: {owner}")
+    print(f"Base: {args.base} ({base_sha})")
+
+
+def find_current_session(repo: Path) -> tuple[dict[str, Any], Path]:
+    current = current_repo_root().resolve()
+    for session in load_sessions(repo):
+        if Path(session.get("path", "")).resolve() == current:
+            record_path = registry_root(repo) / session["task"] / "session.json"
+            return session, record_path
+    raise SessionError(
+        f"Current worktree is not registered as a Codex session: {current}"
+    )
+
+
+def runtime_record_path(repo: Path) -> Path:
+    return registry_root(repo, create=True) / "runtime.json"
+
+
+def command_handoff(args: argparse.Namespace) -> None:
+    repo = current_repo_root()
+    coordinator = coordination_root(repo)
+    session, record_path = find_current_session(coordinator)
+    current = Path(session["path"])
+    status_output = run_git(["status", "--short", "--branch"], cwd=current).stdout
+    diff_output = run_git(["diff", "--stat", "HEAD"], cwd=current).stdout
+    print(status_output, end="")
+    if diff_output:
+        print(diff_output, end="")
+
+    if runtime_record_path(coordinator).exists():
+        runtime = load_json(runtime_record_path(coordinator))
+        if runtime.get("task") == session["task"]:
+            raise SessionError("Release the shared runtime before handing off this task")
+
+    if args.status == "ready":
+        if run_git(["status", "--porcelain"], cwd=current).stdout.strip():
+            raise SessionError("A ready handoff requires a clean worktree")
+        upstream = optional_git_output(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], current
+        )
+        expected_upstream = f"origin/{session['branch']}"
+        if upstream != expected_upstream:
+            raise SessionError(
+                f"Ready handoff requires upstream {expected_upstream}; found {upstream or 'none'}"
+            )
+        local_only, remote_only = ahead_behind("HEAD", "@{u}", current)
+        if local_only or remote_only:
+            raise SessionError(
+                "Ready handoff requires local and remote task branches to be synchronized"
+            )
+        if not args.test:
+            raise SessionError("Ready handoff requires at least one --test command")
+
+    session.update(
+        {
+            "status": args.status,
+            "updated_at": now_iso(),
+            "handoff_commit": run_git(["rev-parse", "HEAD"], cwd=current).stdout.strip(),
+            "tests": args.test,
+        }
+    )
+    atomic_write_json(record_path, session)
+    print(f"Session {session['task']} handed off as {args.status}.")
+
+
+def infer_runtime_identity(
+    repo: Path, owner: str | None, task: str | None
+) -> tuple[str, str]:
+    sessions = load_sessions(repo)
+    current = current_repo_root().resolve()
+    current_session = next(
+        (
+            session
+            for session in sessions
+            if Path(session.get("path", "")).resolve() == current
+        ),
+        None,
+    )
+    resolved_owner = owner or (current_session or {}).get("owner")
+    resolved_task = task or (current_session or {}).get("task") or "coordination"
+    if not resolved_owner:
+        raise SessionError("Provide --owner when acquiring or releasing from coordination")
+    return validate_owner(resolved_owner), validate_slug(resolved_task)
+
+
+def command_runtime_acquire(args: argparse.Namespace) -> None:
+    repo = coordination_root(current_repo_root())
+    owner, task = infer_runtime_identity(repo, args.owner, args.task)
+    path = runtime_record_path(repo)
+    payload = {
+        "owner": owner,
+        "task": task,
+        "acquired_at": now_iso(),
+        "hostname": socket.gethostname(),
+    }
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        current = load_json(path)
+        raise SessionError(
+            f"Runtime is already leased by {current.get('owner')} "
+            f"for {current.get('task')} since {current.get('acquired_at')}"
+        ) from exc
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(f"Runtime acquired by {owner} for {task}.")
+
+
+def command_runtime_status(args: argparse.Namespace) -> None:
+    repo = coordination_root(current_repo_root())
+    path = runtime_record_path(repo)
+    payload = load_json(path) if path.exists() else None
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    elif payload:
+        print(
+            f"Runtime leased by {payload['owner']} for {payload['task']} "
+            f"since {payload['acquired_at']}."
+        )
+    else:
+        print("Runtime is not leased.")
+
+
+def command_runtime_release(args: argparse.Namespace) -> None:
+    repo = coordination_root(current_repo_root())
+    owner, _ = infer_runtime_identity(repo, args.owner, args.task)
+    path = runtime_record_path(repo)
+    if not path.exists():
+        raise SessionError("Runtime is not leased")
+    payload = load_json(path)
+    if payload.get("owner") != owner:
+        raise SessionError(
+            f"Runtime belongs to {payload.get('owner')}; {owner} cannot release it"
+        )
+    path.unlink()
+    print(f"Runtime released by {owner}.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    audit = subparsers.add_parser("audit", help="Inspect and classify every worktree")
+    audit.add_argument("--json", action="store_true")
+    audit.set_defaults(handler=command_audit)
+
+    list_parser = subparsers.add_parser("list", help="List registered sessions")
+    list_parser.add_argument("--json", action="store_true")
+    list_parser.set_defaults(handler=command_list)
+
+    create = subparsers.add_parser("create", help="Create an isolated task worktree")
+    create.add_argument("slug")
+    create.add_argument("--owner", required=True)
+    create.add_argument("--base", default="origin/main")
+    create.add_argument(
+        "--no-fetch", action="store_true", help="Use existing remote refs without fetching"
+    )
+    create.set_defaults(handler=command_create)
+
+    handoff = subparsers.add_parser("handoff", help="Record a worker handoff")
+    handoff.add_argument("--status", choices=("ready", "paused", "blocked"), required=True)
+    handoff.add_argument("--test", action="append", default=[])
+    handoff.set_defaults(handler=command_handoff)
+
+    runtime = subparsers.add_parser("runtime", help="Manage the shared runtime lease")
+    runtime_subparsers = runtime.add_subparsers(dest="runtime_command", required=True)
+    acquire = runtime_subparsers.add_parser("acquire")
+    acquire.add_argument("--owner")
+    acquire.add_argument("--task")
+    acquire.set_defaults(handler=command_runtime_acquire)
+    status = runtime_subparsers.add_parser("status")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=command_runtime_status)
+    release = runtime_subparsers.add_parser("release")
+    release.add_argument("--owner")
+    release.add_argument("--task")
+    release.set_defaults(handler=command_runtime_release)
+    return parser
+
+
+def main() -> int:
+    try:
+        args = build_parser().parse_args()
+        args.handler(args)
+    except SessionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

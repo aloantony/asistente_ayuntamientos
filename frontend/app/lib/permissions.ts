@@ -12,6 +12,17 @@ export const MUNICIPALITY_PERMISSIONS = [
   "municipalities.manage",
 ];
 
+export const MUNICIPAL_HUB_PERMISSIONS = [
+  "municipalities.view",
+  "municipalities.manage",
+];
+
+export function canViewMunicipalHub(user: User) {
+  return MUNICIPAL_HUB_PERMISSIONS.some((permissionCode) =>
+    userHasPermission(user, permissionCode),
+  );
+}
+
 export const ORDINANCE_PERMISSIONS = [
   "ordinances.view",
   "ordinances.create",
@@ -22,6 +33,20 @@ export const ORDINANCE_PERMISSIONS = [
   "ordinances.compare",
   "ordinances.manage",
 ];
+
+export function canViewOrdinanceLibrary(user: User) {
+  return (
+    userHasPermission(user, "ordinances.view") ||
+    userHasPermission(user, "ordinances.manage")
+  );
+}
+
+export function canCompareOrdinances(user: User) {
+  return (
+    userHasPermission(user, "ordinances.compare") ||
+    userHasPermission(user, "ordinances.manage")
+  );
+}
 
 export const PROJECT_PERMISSIONS = [
   "projects.view_all",

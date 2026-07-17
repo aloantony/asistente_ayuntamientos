@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
 from app.auth.schemas import (
@@ -19,6 +19,7 @@ from app.core.rate_limit import change_password_rate_limiter, login_rate_limiter
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
+from app.organizations.models import Organization
 from app.rbac.permissions import get_user_permission_codes
 from app.users.crud import count_users, create_user, get_user_by_email
 from app.users.models import User
@@ -131,7 +132,13 @@ def read_me(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> UserRead:
-    organizations = list(db.scalars(get_accessible_organizations_query(current_user)))
+    organizations = list(
+        db.scalars(
+            get_accessible_organizations_query(current_user).options(
+                selectinload(Organization.municipality)
+            )
+        )
+    )
     return UserRead.model_validate(current_user).model_copy(
         update={
             "permissions": sorted(get_user_permission_codes(current_user, db)),

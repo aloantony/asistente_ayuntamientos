@@ -94,6 +94,9 @@ export type Municipality = MunicipalitySummary & {
   country: string;
   ine_code: string | null;
   population: number | null;
+  population_reference_year: number | null;
+  population_source_url: string | null;
+  population_source_sha256: string | null;
   surface_km2: number | null;
   density: number | null;
   postal_codes: string | null;
@@ -212,8 +215,43 @@ export type Role = {
   updated_at: string;
 };
 
-export type GeoEntityType = "requirement" | "project";
+export type GeoEntityType = "requirement" | "project" | "asset";
+export type GeoLocationRole = "primary" | "affected_area" | "reference";
 export type GeoReviewStatus = "draft" | "proposed" | "reviewed" | "rejected";
+export type AssetTaxonomyStatus = "active" | "archived";
+export type AssetStatus = "active" | "inactive" | "retired" | "archived";
+export type AssetConditionStatus = "good" | "fair" | "poor" | "unknown";
+
+export type MunicipalAssetCategory = {
+  id: number;
+  organization_id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  color: string | null;
+  sort_order: number;
+  status: AssetTaxonomyStatus;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MunicipalAssetType = {
+  id: number;
+  organization_id: number;
+  category_id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  sort_order: number;
+  status: AssetTaxonomyStatus;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  category: MunicipalAssetCategory;
+};
 
 export type GeoLocation = {
   id: number;
@@ -234,9 +272,124 @@ export type GeoLocation = {
   updated_at: string;
 };
 
+export type MunicipalAsset = {
+  id: number;
+  organization_id: number;
+  municipality_id: number;
+  asset_type_id: number;
+  location_id: number | null;
+  code: string | null;
+  name: string;
+  description: string | null;
+  status: AssetStatus;
+  condition_status: AssetConditionStatus;
+  material: string | null;
+  dimensions: string | null;
+  installed_on: string | null;
+  last_inspected_on: string | null;
+  notes: string | null;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  asset_type: MunicipalAssetType;
+  location: GeoLocation | null;
+};
+
+export type MaintenanceOrderStatus =
+  | "planned"
+  | "scheduled"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
+
+export type MaintenanceOrderPriority = "low" | "normal" | "high" | "urgent";
+
+export type MaintenanceType =
+  | "preventive"
+  | "corrective"
+  | "inspection"
+  | "cleaning"
+  | "other";
+
+export type MaintenanceEventType = "created" | "updated" | "transition";
+
+export type MaintenanceAssetSummary = {
+  id: number;
+  code: string | null;
+  name: string;
+  status: AssetStatus;
+};
+
+export type MaintenanceAssigneeSummary = {
+  id: number;
+  full_name: string;
+};
+
+export type MaintenanceOrder = {
+  id: number;
+  organization_id: number;
+  municipality_id: number;
+  asset_id: number;
+  title: string;
+  description: string | null;
+  maintenance_type: MaintenanceType;
+  priority: MaintenanceOrderPriority;
+  status: MaintenanceOrderStatus;
+  scheduled_for: string | null;
+  estimated_minutes: number | null;
+  assigned_to_id: number | null;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  asset: MaintenanceAssetSummary;
+  assigned_to: MaintenanceAssigneeSummary | null;
+};
+
+export type MaintenanceOrderEvent = {
+  id: number;
+  order_id: number;
+  organization_id: number;
+  event_type: MaintenanceEventType;
+  from_status: MaintenanceOrderStatus | null;
+  to_status: MaintenanceOrderStatus | null;
+  changed_fields: string[];
+  note: string | null;
+  actor_id: number | null;
+  created_at: string;
+};
+
+export type MaintenanceOrderDetail = MaintenanceOrder & {
+  events: MaintenanceOrderEvent[];
+};
+
+export type MaintenanceOrderCreate = {
+  asset_id: number;
+  title: string;
+  description?: string | null;
+  maintenance_type?: MaintenanceType;
+  priority?: MaintenanceOrderPriority;
+  scheduled_for?: string | null;
+  estimated_minutes?: number | null;
+  assigned_to_id?: number | null;
+};
+
+export type MaintenanceOrderUpdate = Omit<
+  Partial<MaintenanceOrderCreate>,
+  "asset_id"
+>;
+
+export type MaintenanceOrderTransition = {
+  status: MaintenanceOrderStatus;
+  note?: string | null;
+  scheduled_for?: string | null;
+};
+
 export type GeoMapItem = {
   entity_type: GeoEntityType;
   entity_id: number;
+  role: GeoLocationRole;
   title: string;
   subtitle: string | null;
   status: string;
@@ -535,11 +688,18 @@ export type OrdinanceComparisonEntry = {
   subtopic: string | null;
   status: OrdinanceStatus;
   curation_status: OrdinanceCurationStatus;
+  approval_date: string | null;
   publication_date: string | null;
   effective_date: string | null;
   source_url: string | null;
   summary: string | null;
   confidence_score: number | null;
+};
+
+export type OrdinanceComparisonMunicipality = {
+  id: number;
+  name: string;
+  province: string;
 };
 
 export type OrdinanceComparisonRow = {
@@ -550,8 +710,90 @@ export type OrdinanceComparisonRow = {
 
 export type OrdinanceComparison = {
   municipality_ids: number[];
+  municipalities: OrdinanceComparisonMunicipality[];
   include_pending: boolean;
+  include_inactive: boolean;
   rows: OrdinanceComparisonRow[];
+};
+
+export type OrdinanceResultScope =
+  | "fragments"
+  | "ordinances"
+  | "municipalities";
+
+export type OrdinanceSemanticSearchResult = {
+  chunk_id: number;
+  ordinance_id: number;
+  title: string;
+  municipality_id: number;
+  municipality_name: string;
+  province: string;
+  population: number | null;
+  topic: string;
+  status: OrdinanceStatus;
+  curation_status: OrdinanceCurationStatus;
+  approval_date: string | null;
+  publication_date: string | null;
+  effective_date: string | null;
+  chunk_index: number;
+  heading: string | null;
+  citation: string | null;
+  source_locator: string | null;
+  text: string;
+  text_truncated: boolean;
+  source_url: string | null;
+  score: number;
+};
+
+export type OrdinancePopulationFilter = {
+  applied: boolean;
+  gte: number | null;
+  lt: number | null;
+  eligible_municipalities: number;
+  municipalities_with_population: number;
+  municipalities_without_population: number;
+  coverage_complete: boolean;
+};
+
+export type OrdinanceLegalStatusFilter = {
+  include_inactive: boolean;
+  excluded_statuses: OrdinanceStatus[];
+};
+
+export type OrdinanceSearchPage = {
+  query: string;
+  result_scope: OrdinanceResultScope;
+  limit: number;
+  offset: number;
+  returned: number;
+  total_matches: number;
+  has_more: boolean;
+  next_offset: number | null;
+  corpus_scan_complete: boolean;
+  search_backend: "pgvector" | "python";
+  topic_filter_mode: "none" | "preference" | "strict";
+  legal_status_filter: OrdinanceLegalStatusFilter;
+  population_filter: OrdinancePopulationFilter;
+  eligible_chunks: number;
+  results: OrdinanceSemanticSearchResult[];
+};
+
+export type OrdinanceLegalChunk = {
+  id: number;
+  ordinance_id: number;
+  import_item_id: number | null;
+  chunk_index: number;
+  heading: string | null;
+  citation: string | null;
+  text: string;
+  source_url: string | null;
+  source_locator: string | null;
+  review_status: "pending_review" | "approved" | "rejected";
+  embedding_model: string | null;
+  embedding_status: "pending" | "ready" | "failed" | "disabled";
+  embedded_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type TelegramLinkStatus = {
@@ -800,7 +1042,7 @@ const ORDINANCE_STATUS_LABELS: Record<OrdinanceStatus, string> = {
   repealed: "Derogada",
   partially_repealed: "Parcialmente derogada",
   superseded: "Sustituida",
-  unknown: "Desconocida",
+  unknown: "Vigencia desconocida",
   archived: "Archivada",
 };
 
@@ -954,6 +1196,7 @@ export type AssistantStatus = {
   runtime_healthy: boolean | null;
   speech_transcription_enabled: boolean;
   speech_synthesis_enabled: boolean;
+  speech_synthesis_max_chars: number;
   realtime_voice_enabled: boolean;
   realtime_voice_provider: "openai" | null;
   realtime_voice_model: string | null;

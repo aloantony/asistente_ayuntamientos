@@ -21,6 +21,12 @@ class GeoLocation(TimestampMixin, Base):
         CheckConstraint("longitude is null or (longitude >= -180 and longitude <= 180)", name="ck_geo_locations_longitude_range"),
         CheckConstraint("confidence is null or (confidence >= 0 and confidence <= 1)", name="ck_geo_locations_confidence_range"),
         CheckConstraint("geometry_type != 'point' or (latitude is not null and longitude is not null)", name="ck_geo_locations_point_coordinates"),
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            "municipality_id",
+            name="uq_geo_locations_id_org_municipality",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

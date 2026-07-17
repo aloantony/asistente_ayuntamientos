@@ -29,8 +29,9 @@ from app.assistant.schemas import (
     AssistantRealtimeTurnCreate,
     AssistantRealtimeTurnStartCreate,
 )
+from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import ToolContext, execute_tool, get_available_tool_specs
-from app.assistant.turn import MAX_TOOL_RESULT_CHARS, build_history
+from app.assistant.turn import build_history, tool_result_for_activity
 from app.core.config import settings
 from app.users.models import User
 
@@ -92,7 +93,9 @@ def create_realtime_client_secret(
         headers={
             "Authorization": f"Bearer {settings.openai_api_key}",
             "Content-Type": "application/json",
-            "OpenAI-Safety-Identifier": _safety_identifier(current_user),
+            "OpenAI-Safety-Identifier": build_assistant_safety_identifier(
+                current_user.id
+            ),
         },
         method="POST",
     )
@@ -366,7 +369,7 @@ def execute_realtime_tool_call(
             "tool": payload.name,
             "ok": result.ok,
             "input": tool_input,
-            "result": result.content[:MAX_TOOL_RESULT_CHARS],
+            "result": tool_result_for_activity(payload.name, result.content),
         }
 
         confirmation_context = _confirmation_context_from_result(guarded_result)
@@ -398,7 +401,7 @@ def execute_realtime_tool_call(
             input_mode="voice",
             turn_user_message_id=user_message.id,
         )
-        output = result.content[:MAX_TOOL_RESULT_CHARS]
+        output = tool_result_for_activity(payload.name, result.content)
         if confirmation_prompt:
             output = json.dumps(
                 {"status": "confirmation_required"},
@@ -1111,8 +1114,3 @@ def _transcription_config() -> dict | None:
     if delay:
         config["delay"] = delay
     return config
-
-
-def _safety_identifier(current_user: User) -> str:
-    raw = f"assistant-user:{current_user.id}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
