@@ -663,6 +663,7 @@ class _Parser:
                         ReferenceLayerStyleDefinition(
                             source_key=style.casefold(),
                             title=style,
+                            remote_name=style,
                             is_default=True,
                         ),
                     )

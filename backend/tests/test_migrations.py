@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0032"
+HEAD_REVISION = "20260717_0033"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -116,6 +117,66 @@ REFERENCE_CATALOG_TABLES = {
     "reference_layers",
     "reference_layer_styles",
     "organization_reference_layer_settings",
+}
+REFERENCE_DELIVERY_EVIDENCE_TABLES = {
+    "reference_wms_capabilities_snapshots",
+    "reference_license_reviews",
+    "reference_delivery_attestations",
+}
+REFERENCE_DELIVERY_EVIDENCE_COLUMNS = {
+    "reference_wms_capabilities_snapshots": {
+        "id",
+        "provider_key",
+        "service_id",
+        "raw_xml",
+        "raw_size_bytes",
+        "raw_sha256",
+        "normalized_sha256",
+        "normalization_version",
+        "wms_version",
+        "get_map_endpoint",
+        "get_legend_endpoint",
+        "get_feature_info_endpoint",
+        "get_map_formats_json",
+        "get_legend_formats_json",
+        "get_feature_info_formats_json",
+        "layer_manifest_json",
+        "created_at",
+    },
+    "reference_license_reviews": {
+        "id",
+        "provider_key",
+        "service_id",
+        "reviewed_document",
+        "document_size_bytes",
+        "evidence_sha256",
+        "review_sha256",
+        "supersedes_review_sha256",
+        "decision",
+        "reviewer",
+        "reviewed_at",
+        "license_name",
+        "license_url",
+        "license_terms",
+        "allow_proxy",
+        "allow_cache",
+        "created_at",
+    },
+    "reference_delivery_attestations": {
+        "id",
+        "provider_key",
+        "service_id",
+        "catalog_snapshot_id",
+        "catalog_definition_sha256",
+        "capabilities_snapshot_id",
+        "license_review_id",
+        "attestation_kind",
+        "sequence_number",
+        "previous_attestation_id",
+        "previous_attestation_sha256",
+        "attestation_sha256",
+        "created_at",
+    },
 }
 REFERENCE_CATALOG_COLUMNS = {
     "reference_catalog_snapshots": {
@@ -345,11 +406,18 @@ def assert_reference_geography_schema(inspector: Inspector) -> None:
 
 
 def assert_reference_catalog_schema(inspector: Inspector) -> None:
-    assert REFERENCE_CATALOG_TABLES <= set(inspector.get_table_names())
+    table_names = set(inspector.get_table_names())
+    assert REFERENCE_CATALOG_TABLES <= table_names
     for table_name, expected_columns in REFERENCE_CATALOG_COLUMNS.items():
+        effective_columns = set(expected_columns)
+        if (
+            table_name == "reference_layer_styles"
+            and "reference_delivery_attestations" in table_names
+        ):
+            effective_columns.add("remote_name")
         assert {
             column["name"] for column in inspector.get_columns(table_name)
-        } == expected_columns
+        } == effective_columns
 
     assert {
         index["name"]
@@ -405,15 +473,20 @@ def assert_reference_catalog_schema(inspector: Inspector) -> None:
         "ix_org_reference_layer_settings_updated_by",
     }
 
+    expected_snapshot_uniques = {
+        "uq_reference_catalog_snapshots_provider_hashes",
+        "uq_reference_catalog_snapshots_provider_id",
+    }
+    if "reference_delivery_attestations" in inspector.get_table_names():
+        expected_snapshot_uniques.add(
+            "uq_reference_catalog_snapshots_provider_id_definition"
+        )
     assert {
         constraint["name"]
         for constraint in inspector.get_unique_constraints(
             "reference_catalog_snapshots"
         )
-    } == {
-        "uq_reference_catalog_snapshots_provider_hashes",
-        "uq_reference_catalog_snapshots_provider_id",
-    }
+    } == expected_snapshot_uniques
     assert {
         constraint["name"]
         for constraint in inspector.get_unique_constraints("reference_services")
@@ -489,6 +562,172 @@ def assert_reference_catalog_schema(inspector: Inspector) -> None:
         "ck_reference_layer_styles_legend_url",
         "ck_reference_layer_styles_sort_order",
         "ck_reference_layer_styles_status",
+    }
+
+
+def assert_reference_delivery_evidence_schema(inspector: Inspector) -> None:
+    assert REFERENCE_DELIVERY_EVIDENCE_TABLES <= set(
+        inspector.get_table_names()
+    )
+    for table_name, expected_columns in (
+        REFERENCE_DELIVERY_EVIDENCE_COLUMNS.items()
+    ):
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+
+    capability_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes(
+            "reference_wms_capabilities_snapshots"
+        )
+        if not index.get("duplicates_constraint")
+    }
+    assert set(capability_indexes) == {
+        "ix_reference_wms_capabilities_service_created"
+    }
+    assert capability_indexes[
+        "ix_reference_wms_capabilities_service_created"
+    ]["column_names"] == ["provider_key", "service_id", "id"]
+    review_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes("reference_license_reviews")
+        if not index.get("duplicates_constraint")
+    }
+    assert set(review_indexes) == {
+        "ix_reference_license_reviews_service_reviewed",
+        "uq_reference_license_reviews_genesis",
+        "uq_reference_license_reviews_successor",
+    }
+    assert review_indexes[
+        "ix_reference_license_reviews_service_reviewed"
+    ]["column_names"] == ["provider_key", "service_id", "id"]
+    assert review_indexes[
+        "uq_reference_license_reviews_genesis"
+    ]["column_names"] == ["provider_key", "service_id"]
+    assert review_indexes[
+        "uq_reference_license_reviews_successor"
+    ]["column_names"] == [
+        "provider_key",
+        "service_id",
+        "supersedes_review_sha256",
+    ]
+    attestation_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes("reference_delivery_attestations")
+        if not index.get("duplicates_constraint")
+    }
+    assert set(attestation_indexes) == {
+        "ix_reference_delivery_attestations_current_lookup",
+        "uq_reference_delivery_attestations_genesis",
+        "uq_reference_delivery_attestations_successor",
+    }
+    assert attestation_indexes[
+        "ix_reference_delivery_attestations_current_lookup"
+    ]["column_names"] == ["provider_key", "service_id", "sequence_number"]
+
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_wms_capabilities_snapshots"
+        )
+    } == {
+        "uq_reference_wms_capabilities_content",
+        "uq_reference_wms_capabilities_provider_service_id",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_license_reviews"
+        )
+    } == {
+        "uq_reference_license_reviews_content",
+        "uq_reference_license_reviews_provider_service_id",
+        "uq_reference_license_reviews_review_hash",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_delivery_attestations"
+        )
+    } == {
+        "uq_reference_delivery_attestations_chain_target",
+        "uq_reference_delivery_attestations_hash",
+        "uq_reference_delivery_attestations_sequence",
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_delivery_attestations"
+        )
+    } == {
+        ("provider_key", "service_id"),
+        (
+            "provider_key",
+            "catalog_snapshot_id",
+            "catalog_definition_sha256",
+        ),
+        ("provider_key", "service_id", "capabilities_snapshot_id"),
+        ("provider_key", "service_id", "license_review_id"),
+        (
+            "provider_key",
+            "service_id",
+            "previous_attestation_id",
+            "previous_attestation_sha256",
+        ),
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_wms_capabilities_snapshots"
+        )
+    } == {
+        "ck_reference_wms_capabilities_provider_nonempty",
+        "ck_reference_wms_capabilities_raw_size",
+        "ck_reference_wms_capabilities_hashes",
+        "ck_reference_wms_capabilities_normalization",
+        "ck_reference_wms_capabilities_version",
+        "ck_reference_wms_capabilities_endpoints",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_license_reviews"
+        )
+    } == {
+        "ck_reference_license_reviews_required_text",
+        "ck_reference_license_reviews_document_size",
+        "ck_reference_license_reviews_hashes",
+        "ck_reference_license_reviews_decision",
+        "ck_reference_license_reviews_license_url",
+        "ck_reference_license_reviews_cache_requires_proxy",
+        "ck_reference_license_reviews_permissions_approved",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_delivery_attestations"
+        )
+    } == {
+        "ck_reference_delivery_attestations_provider_nonempty",
+        "ck_reference_delivery_attestations_hashes",
+        "ck_reference_delivery_attestations_kind",
+        "ck_reference_delivery_attestations_chain",
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_wms_capabilities_snapshots"
+        )
+    } == {("provider_key", "service_id")}
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_license_reviews"
+        )
+    } == {
+        ("provider_key", "service_id"),
+        ("provider_key", "service_id", "supersedes_review_sha256"),
     }
 
 
@@ -2057,6 +2296,529 @@ def test_reference_layer_styles_migration_is_isolated_and_reversible(
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
         assert_reference_catalog_schema(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0032")
+    engine = create_engine(migration_database_url)
+
+    try:
+        assert REFERENCE_DELIVERY_EVIDENCE_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "20260717_0033")
+        assert_reference_catalog_schema(inspect(engine))
+        assert_reference_delivery_evidence_schema(inspect(engine))
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0032")
+        assert REFERENCE_DELIVERY_EVIDENCE_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_delivery_evidence_schema(inspect(engine))
+
+        with engine.begin() as connection:
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_snapshots (
+                        provider_key, source_url, content_sha256,
+                        definition_sha256, raw_catalog_json,
+                        normalized_definition_json, retrieved_at,
+                        service_count, group_count, layer_count,
+                        unresolved_count, status, is_current
+                    ) VALUES (
+                        'siur', 'https://example.test/settings.json', :content,
+                        :definition, CAST('{}' AS JSON), CAST('{}' AS JSON),
+                        now(), 1, 0, 1, 0, 'applied', true
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "c" * 64, "definition": "d" * 64},
+            ).scalar_one()
+            service_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_services (
+                        last_seen_snapshot_id, provider_key, source_key, title,
+                        upstream_protocol, base_url, version, license_status,
+                        cache_policy, status
+                    ) VALUES (
+                        :snapshot_id, 'siur', 'service:test', 'Test WMS',
+                        'wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        '1.3.0', 'pending', 'none', 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id},
+            ).scalar_one()
+            capabilities_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_wms_capabilities_snapshots (
+                        provider_key, service_id, raw_xml, raw_size_bytes,
+                        raw_sha256, normalized_sha256, normalization_version,
+                        wms_version, get_map_endpoint,
+                        get_legend_endpoint, get_feature_info_endpoint,
+                        get_map_formats_json, get_legend_formats_json,
+                        get_feature_info_formats_json, layer_manifest_json
+                    ) VALUES (
+                        'siur', :service_id, :raw_xml, :raw_size,
+                        :raw_hash, :normalized_hash,
+                        'siur-wms-capabilities-v1', '1.3.0',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        CAST('["image/png"]' AS JSON),
+                        CAST('["image/png"]' AS JSON),
+                        CAST('["application/json"]' AS JSON),
+                        CAST(:manifest AS JSON)
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "service_id": service_id,
+                    "raw_xml": b"<WMS_Capabilities/>",
+                    "raw_size": len(b"<WMS_Capabilities/>"),
+                    "raw_hash": "a" * 64,
+                    "normalized_hash": "b" * 64,
+                    "manifest": json.dumps(
+                        [
+                            {
+                                "name": "test:layer",
+                                "crs": ["EPSG:3857"],
+                                "queryable": True,
+                                "styles": [""],
+                            }
+                        ]
+                    ),
+                },
+            ).scalar_one()
+            review_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_license_reviews (
+                        provider_key, service_id, reviewed_document,
+                        document_size_bytes, evidence_sha256, review_sha256,
+                        decision, reviewer, reviewed_at, license_name,
+                        license_url, license_terms, allow_proxy, allow_cache
+                    ) VALUES (
+                        'siur', :service_id, :document, :document_size,
+                        :evidence_hash, :review_hash, 'approved',
+                        'Migration test reviewer', now(),
+                        'Synthetic migration test license',
+                        'https://example.test/license',
+                        'Synthetic only; not a real SIUR approval.', true, true
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "service_id": service_id,
+                    "document": b"{}",
+                    "document_size": 2,
+                    "evidence_hash": "e" * 64,
+                    "review_hash": "b" * 64,
+                },
+            ).scalar_one()
+            attestation_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_delivery_attestations (
+                        provider_key, service_id, catalog_snapshot_id,
+                        catalog_definition_sha256, capabilities_snapshot_id,
+                        license_review_id, attestation_kind, sequence_number,
+                        previous_attestation_id,
+                        previous_attestation_sha256, attestation_sha256
+                    ) VALUES (
+                        'siur', :service_id, :snapshot_id, :definition,
+                        :capabilities_id, :review_id, 'delivery', 1,
+                        NULL, NULL, :attestation_hash
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "service_id": service_id,
+                    "snapshot_id": snapshot_id,
+                    "definition": "d" * 64,
+                    "capabilities_id": capabilities_id,
+                    "review_id": review_id,
+                    "attestation_hash": "f" * 64,
+                },
+            ).scalar_one()
+
+        invalid_review_permissions = (
+            ("approved", False, True, "1" * 64, "2" * 64),
+            ("restricted", True, False, "3" * 64, "4" * 64),
+        )
+        for decision, allow_proxy, allow_cache, evidence_hash, review_hash in (
+            invalid_review_permissions
+        ):
+            with pytest.raises(DBAPIError) as error:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO reference_license_reviews (
+                                provider_key, service_id, reviewed_document,
+                                document_size_bytes, evidence_sha256,
+                                review_sha256, supersedes_review_sha256,
+                                decision, reviewer,
+                                reviewed_at, license_name, license_terms,
+                                allow_proxy, allow_cache
+                            ) VALUES (
+                                'siur', :service_id, CAST('{}' AS BYTEA), 2,
+                                :evidence_hash, :review_hash, :supersedes,
+                                :decision,
+                                'Invalid permissions test', now(),
+                                'Synthetic invalid license',
+                                'Synthetic invalid permissions only.',
+                                :allow_proxy, :allow_cache
+                            )
+                            """
+                        ),
+                        {
+                            "service_id": service_id,
+                            "evidence_hash": evidence_hash,
+                            "review_hash": review_hash,
+                            "supersedes": "b" * 64,
+                            "decision": decision,
+                            "allow_proxy": allow_proxy,
+                            "allow_cache": allow_cache,
+                        },
+                    )
+            assert error.value.orig.sqlstate == "23514"
+
+        lineage_insert = text(
+            """
+            INSERT INTO reference_license_reviews (
+                provider_key, service_id, reviewed_document,
+                document_size_bytes, evidence_sha256, review_sha256,
+                supersedes_review_sha256, decision, reviewer, reviewed_at,
+                license_name, license_terms, allow_proxy, allow_cache
+            ) VALUES (
+                'siur', :service_id, CAST('{}' AS BYTEA), 2,
+                :evidence_hash, :review_hash, :supersedes, 'approved',
+                :reviewer, now(), 'Synthetic lineage license',
+                'Synthetic lineage constraint test only.', false, false
+            )
+            """
+        )
+        with pytest.raises(DBAPIError) as duplicate_genesis:
+            with engine.begin() as connection:
+                connection.execute(
+                    lineage_insert,
+                    {
+                        "service_id": service_id,
+                        "evidence_hash": "5" * 64,
+                        "review_hash": "6" * 64,
+                        "supersedes": None,
+                        "reviewer": "Duplicate genesis test",
+                    },
+                )
+        assert duplicate_genesis.value.orig.sqlstate == "23505"
+
+        with engine.begin() as connection:
+            connection.execute(
+                lineage_insert,
+                {
+                    "service_id": service_id,
+                    "evidence_hash": "7" * 64,
+                    "review_hash": "8" * 64,
+                    "supersedes": "b" * 64,
+                    "reviewer": "First successor test",
+                },
+            )
+        with pytest.raises(DBAPIError) as forked_successor:
+            with engine.begin() as connection:
+                connection.execute(
+                    lineage_insert,
+                    {
+                        "service_id": service_id,
+                        "evidence_hash": "9" * 64,
+                        "review_hash": "a" * 64,
+                        "supersedes": "b" * 64,
+                        "reviewer": "Forked successor test",
+                    },
+                )
+        assert forked_successor.value.orig.sqlstate == "23505"
+
+        mutations = (
+            (
+                "UPDATE reference_wms_capabilities_snapshots "
+                "SET wms_version = '1.1.1' WHERE id = :row_id",
+                capabilities_id,
+            ),
+            (
+                "DELETE FROM reference_wms_capabilities_snapshots "
+                "WHERE id = :row_id",
+                capabilities_id,
+            ),
+            (
+                "UPDATE reference_license_reviews "
+                "SET reviewer = 'tampered' WHERE id = :row_id",
+                review_id,
+            ),
+            (
+                "DELETE FROM reference_license_reviews WHERE id = :row_id",
+                review_id,
+            ),
+            (
+                "UPDATE reference_delivery_attestations "
+                "SET attestation_sha256 = :hash WHERE id = :row_id",
+                attestation_id,
+            ),
+            (
+                "DELETE FROM reference_delivery_attestations "
+                "WHERE id = :row_id",
+                attestation_id,
+            ),
+        )
+        for statement, row_id in mutations:
+            with pytest.raises(DBAPIError) as error:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(statement),
+                        {"row_id": row_id, "hash": "0" * 64},
+                    )
+            assert error.value.orig.sqlstate == "55000"
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0032",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "immutable reference delivery evidence exists" in refused.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0033"
+    finally:
+        engine.dispose()
+
+
+def test_reference_delivery_evidence_downgrade_waits_for_concurrent_insert(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0033")
+    engine = create_engine(migration_database_url)
+    writer = engine.connect()
+    transaction = writer.begin()
+    migration_process: subprocess.Popen[str] | None = None
+
+    try:
+        snapshot_id = writer.execute(
+            text(
+                """
+                INSERT INTO reference_catalog_snapshots (
+                    provider_key, source_url, content_sha256,
+                    definition_sha256, raw_catalog_json,
+                    normalized_definition_json, retrieved_at,
+                    service_count, group_count, layer_count,
+                    unresolved_count, status, is_current
+                ) VALUES (
+                    'siur', 'https://example.test/settings.json', :content,
+                    :definition, CAST('{}' AS JSON), CAST('{}' AS JSON),
+                    now(), 1, 0, 1, 0, 'applied', true
+                ) RETURNING id
+                """
+            ),
+            {"content": "1" * 64, "definition": "2" * 64},
+        ).scalar_one()
+        service_id = writer.execute(
+            text(
+                """
+                INSERT INTO reference_services (
+                    last_seen_snapshot_id, provider_key, source_key, title,
+                    upstream_protocol, base_url, version, license_status,
+                    cache_policy, status
+                ) VALUES (
+                    :snapshot_id, 'siur', 'service:concurrent',
+                    'Concurrent WMS', 'wms',
+                    'https://idecyl.jcyl.es/geoserver/test/wms',
+                    '1.3.0', 'pending', 'none', 'active'
+                ) RETURNING id
+                """
+            ),
+            {"snapshot_id": snapshot_id},
+        ).scalar_one()
+        capabilities_id = writer.execute(
+            text(
+                """
+                INSERT INTO reference_wms_capabilities_snapshots (
+                    provider_key, service_id, raw_xml, raw_size_bytes,
+                    raw_sha256, normalized_sha256, normalization_version,
+                    wms_version, get_map_endpoint, get_legend_endpoint,
+                    get_feature_info_endpoint, get_map_formats_json,
+                    get_legend_formats_json,
+                    get_feature_info_formats_json, layer_manifest_json
+                ) VALUES (
+                    'siur', :service_id, :raw_xml, :raw_size,
+                    :raw_hash, :normalized_hash,
+                    'siur-wms-capabilities-v1', '1.3.0',
+                    'https://idecyl.jcyl.es/geoserver/test/wms', NULL, NULL,
+                    CAST('["image/png"]' AS JSON), CAST('[]' AS JSON),
+                    CAST('[]' AS JSON), CAST(:manifest AS JSON)
+                ) RETURNING id
+                """
+            ),
+            {
+                "service_id": service_id,
+                "raw_xml": b"<WMS_Capabilities/>",
+                "raw_size": len(b"<WMS_Capabilities/>"),
+                "raw_hash": "3" * 64,
+                "normalized_hash": "4" * 64,
+                "manifest": json.dumps(
+                    [
+                        {
+                            "name": "test:layer",
+                            "crs": ["EPSG:3857"],
+                            "queryable": False,
+                            "styles": [""],
+                        }
+                    ]
+                ),
+            },
+        ).scalar_one()
+
+        migration_process = start_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0032",
+        )
+        wait_for_exclusive_lock(
+            engine,
+            "reference_wms_capabilities_snapshots",
+            migration_process,
+        )
+        assert migration_process.poll() is None
+
+        transaction.commit()
+        stdout, stderr = migration_process.communicate(timeout=15)
+        assert migration_process.returncode != 0, stdout
+        assert "immutable reference delivery evidence exists" in stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0033"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "reference_wms_capabilities_snapshots WHERE id = :id"
+                ),
+                {"id": capabilities_id},
+            ).scalar_one() == 1
+    finally:
+        if migration_process is not None and migration_process.poll() is None:
+            migration_process.kill()
+            migration_process.communicate()
+        if transaction.is_active:
+            transaction.rollback()
+        writer.close()
+        engine.dispose()
+
+
+def test_reference_delivery_evidence_downgrade_preserves_exact_style_names(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0033")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_snapshots (
+                        provider_key, source_url, content_sha256,
+                        definition_sha256, raw_catalog_json,
+                        normalized_definition_json, retrieved_at,
+                        service_count, group_count, layer_count,
+                        unresolved_count, status, is_current
+                    ) VALUES (
+                        'siur', 'https://example.test/settings.json', :content,
+                        :definition, CAST('{}' AS JSON), CAST('{}' AS JSON),
+                        now(), 1, 0, 1, 0, 'applied', true
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "5" * 64, "definition": "6" * 64},
+            ).scalar_one()
+            service_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_services (
+                        last_seen_snapshot_id, provider_key, source_key, title,
+                        upstream_protocol, base_url, version, license_status,
+                        cache_policy, status
+                    ) VALUES (
+                        :snapshot_id, 'siur', 'service:style', 'Style WMS',
+                        'wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        '1.3.0', 'pending', 'none', 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id},
+            ).scalar_one()
+            layer_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layers (
+                        last_seen_snapshot_id, service_id, provider_key,
+                        source_key, node_type, title, remote_name, role,
+                        renderer, delivery_mode, sort_order, default_visible,
+                        default_opacity, queryable, downloadable, status
+                    ) VALUES (
+                        :snapshot_id, :service_id, 'siur', 'layer:style',
+                        'layer', 'Style layer', 'test:layer', 'overlay',
+                        'raster_tile', 'proxy', 0, false, 1, false, false,
+                        'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id, "service_id": service_id},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layer_styles (
+                        last_seen_snapshot_id, layer_id, provider_key,
+                        source_key, remote_name, title, sort_order,
+                        is_default, status
+                    ) VALUES (
+                        :snapshot_id, :layer_id, 'siur', 'mixed:style',
+                        'Mixed:Style', 'Mixed style', 0, true, 'active'
+                    )
+                    """
+                ),
+                {"snapshot_id": snapshot_id, "layer_id": layer_id},
+            )
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0032",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "exact remote style names would be lost" in refused.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0033"
+            assert connection.execute(
+                text(
+                    "SELECT remote_name FROM reference_layer_styles "
+                    "WHERE id = (SELECT max(id) FROM reference_layer_styles)"
+                )
+            ).scalar_one() == "Mixed:Style"
     finally:
         engine.dispose()
 
