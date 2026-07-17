@@ -38,20 +38,6 @@ jobs:
     name: Backend
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.0-pg17@sha256:40b404964359299eefdd5f8518facf1886c562848cf4de13b6eaf91cb70c2b87
-        env:
-          POSTGRES_DB: app
-          POSTGRES_USER: app
-          POSTGRES_PASSWORD: app
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U app -d app"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       ENVIRONMENT: test
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
@@ -65,6 +51,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      - name: Build and start PostgreSQL with PostGIS and pgvector
+        run: docker compose -f ../docker-compose.yml up -d --build --wait postgres
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -92,6 +81,10 @@ jobs:
 
       - name: Run backend test suite
         run: python -m pytest tests -q
+
+      - name: Show PostgreSQL logs
+        if: ${{ always() }}
+        run: docker compose -f ../docker-compose.yml logs --no-color postgres
 
   frontend:
     name: Frontend
