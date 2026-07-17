@@ -552,14 +552,21 @@ export default function AppLayout({
     ? "Desplegar menú lateral"
     : "Plegar menú lateral";
 
+  const isAssistantRoute = pathname === "/asistente";
   const contentClassName =
-    pathname === "/asistente"
+    isAssistantRoute
       ? "app-content app-content-assistant"
       : "app-content app-content-wide";
 
   return (
     <div
-      className={`app-shell${isSidebarCollapsed ? " app-shell--sidebar-collapsed" : ""}`}
+      className={[
+        "app-shell",
+        isSidebarCollapsed ? "app-shell--sidebar-collapsed" : "",
+        isAssistantRoute ? "app-shell--assistant" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
       <aside className="app-sidebar">
         <div className="app-brand">

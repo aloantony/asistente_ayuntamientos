@@ -29,6 +29,10 @@
   --accent: #3caf8c;
   --accent-hover: #34a07f;
   --accent-contrast: #fdfcf9;
+  --assistant-accent-text: #24745e;
+  --assistant-accent-solid: #287d65;
+  --assistant-accent-solid-hover: #226b57;
+  --assistant-focus-ring: #24745e;
   --success-fg: #2f6a4e;
   --success-bg: #eaf3ee;
   --success-border: #cfe2d6;
@@ -61,6 +65,8 @@ html.dark {
   --text-secondary: #b8b4ad;
   --text-muted: #8a857d;
   --text-faint: #6f6a62;
+  --assistant-accent-text: #70d8b7;
+  --assistant-focus-ring: #70d8b7;
   --success-fg: #6fbf95;
   --success-bg: #1c2a22;
   --success-border: #2f4a3a;
@@ -2862,17 +2868,17 @@ tr:last-child td {
 .assistant-page-shell {
   width: 100%;
   min-width: 0;
-  height: calc(100vh - 60px);
-  height: calc(100dvh - 60px);
-  min-height: calc(100vh - 60px);
-  min-height: calc(100dvh - 60px);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
   overflow: hidden;
 }
 
 .assistant-agent-panel {
   width: 100%;
   height: 100%;
-  min-height: inherit;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border: 0;
@@ -2955,7 +2961,12 @@ tr:last-child td {
 
 .assistant-conversations,
 .assistant-thread {
+  min-width: 0;
   min-height: 0;
+}
+
+.assistant-conversations-scrim {
+  display: none;
 }
 
 .assistant-conversations {
@@ -3064,7 +3075,7 @@ tr:last-child td {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 6px 10px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: var(--surface-raised);
   font-size: 12px;
   line-height: 1;
@@ -3105,7 +3116,7 @@ tr:last-child td {
   border: 1px dashed var(--border-strong);
   border-radius: 12px;
   padding: 9px 10px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: var(--surface-raised);
   font-size: 12px;
   line-height: 1.45;
@@ -3118,13 +3129,14 @@ tr:last-child td {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 12px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: var(--surface-raised);
 }
 
 .assistant-search:focus-within {
-  border-color: var(--border-strong);
-  outline: 2px solid rgb(45 39 30 / 8%);
+  border-color: var(--assistant-focus-ring);
+  outline: 2px solid var(--assistant-focus-ring);
+  outline-offset: 2px;
 }
 
 .assistant-search input {
@@ -3133,6 +3145,11 @@ tr:last-child td {
   outline: 0;
   background: transparent;
   font-size: 14px;
+}
+
+.assistant-search input::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
 }
 
 .assistant-search input:focus-visible {
@@ -3212,7 +3229,7 @@ html.dark .assistant-search input {
   gap: 7px;
   border-radius: 10px;
   padding: 6px 8px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 11px;
   font-weight: 700;
@@ -3231,9 +3248,9 @@ html.dark .assistant-search input {
 }
 
 .assistant-conversation-group.drop-target summary {
-  color: var(--accent);
+  color: var(--assistant-accent-text);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  box-shadow: inset 0 0 0 1px var(--assistant-accent-text);
 }
 
 .assistant-conversation-group.just-created summary {
@@ -3245,7 +3262,7 @@ html.dark .assistant-search input {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 6px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0;
@@ -3280,7 +3297,7 @@ html.dark .assistant-search input {
 
 .assistant-conversation-row.selected {
   background: var(--fill-strong);
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: inset 3px 0 0 var(--assistant-accent-text);
 }
 
 .assistant-conversation-row.dragging {
@@ -3291,7 +3308,7 @@ html.dark .assistant-search input {
 .assistant-conversation-row.drop-target {
   background: color-mix(in srgb, var(--accent) 12%, var(--surface));
   box-shadow:
-    inset 0 0 0 1px var(--accent),
+    inset 0 0 0 1px var(--assistant-accent-text),
     0 8px 24px rgb(0 0 0 / 9%);
 }
 
@@ -3349,7 +3366,7 @@ html.dark .assistant-search input {
   border: 1px solid transparent;
   border-radius: 999px;
   padding: 0;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: transparent;
   opacity: 0;
   transition:
@@ -3419,7 +3436,7 @@ html.dark .assistant-search input {
 }
 
 .assistant-context-menu button.selected {
-  color: var(--accent);
+  color: var(--assistant-accent-text);
 }
 
 .assistant-context-menu button.danger {
@@ -3427,7 +3444,7 @@ html.dark .assistant-search input {
 }
 
 .assistant-context-menu-title {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   cursor: default;
 }
 
@@ -3443,7 +3460,7 @@ html.dark .assistant-search input {
 .assistant-context-menu-section p {
   margin: 0;
   padding: 2px 9px 4px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -3493,7 +3510,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   align-items: center;
   flex-wrap: wrap;
   gap: 5px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -3510,7 +3527,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 1px 6px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: var(--surface-muted);
   font-size: 10.5px;
   font-weight: 650;
@@ -3537,7 +3554,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   margin: -2px 8px 7px 25px;
   border-radius: 999px;
   padding: 5px 8px;
-  color: var(--accent);
+  color: var(--assistant-accent-text);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   font-size: 11px;
   font-weight: 700;
@@ -3583,30 +3600,31 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-thread-new {
-  justify-content: center;
-  padding: clamp(28px, 6vh, 72px) 0;
+  justify-content: initial;
+  padding: 0;
 }
 
 .assistant-thread-new .assistant-messages {
-  flex: 0 0 auto;
-  min-height: auto;
-  overflow: visible;
-  padding-bottom: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
-.assistant-thread-new .assistant-composer-stack {
-  position: static;
-  margin-bottom: 0;
+.assistant-thread-new .assistant-empty-thread {
+  margin-block: auto;
 }
 
 .assistant-thread-actions {
-  position: absolute;
-  top: 14px;
-  right: 16px;
+  position: relative;
   z-index: 3;
   display: flex;
+  flex: 0 0 auto;
   gap: 7px;
   justify-content: flex-end;
+  min-height: 58px;
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  background: var(--surface-raised);
   pointer-events: none;
 }
 
@@ -3632,8 +3650,11 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   flex-direction: column;
   gap: 22px;
   min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 24px clamp(18px, 4vw, 56px) 20px;
+  overscroll-behavior: contain;
   scrollbar-color: var(--border-strong) transparent;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
@@ -3646,6 +3667,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   gap: 12px;
   align-items: start;
   margin: 0 auto;
+  min-width: 0;
 }
 
 .assistant-message.user {
@@ -3676,7 +3698,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 .assistant-message.assistant .assistant-message-avatar {
   border-color: transparent;
   color: var(--accent-contrast);
-  background: var(--accent);
+  background: var(--assistant-accent-solid);
 }
 
 .assistant-message-main {
@@ -3684,6 +3706,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   flex-direction: column;
   align-items: flex-start;
   min-width: 0;
+  max-width: 100%;
   border: 0;
   border-radius: 0;
   padding: 0;
@@ -3699,10 +3722,12 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 /* Burbujas con esquinas asimétricas (Anacleto): la asistente, panel con borde
  * sobre superficie; la del usuario, relleno suave alineado a la derecha. */
 .assistant-message-bubble {
+  min-width: 0;
   max-width: 100%;
 }
 
 .assistant-message.assistant .assistant-message-bubble {
+  width: 100%;
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 13px 16px;
@@ -3725,17 +3750,16 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   justify-content: flex-start;
   gap: 8px;
   margin-bottom: 6px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.3;
-  opacity: 0.28;
-  transition: opacity 140ms ease;
+  opacity: 1;
 }
 
 .assistant-message:hover .assistant-message-meta,
 .assistant-message:focus-within .assistant-message-meta,
 .assistant-message.working .assistant-message-meta {
-  opacity: 0.78;
+  opacity: 1;
 }
 
 .assistant-message.user .assistant-message-meta {
@@ -3748,7 +3772,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-message-meta small:last-child {
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .assistant-message-content {
@@ -3758,7 +3782,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   font-size: 15px;
   line-height: 1.62;
   white-space: pre-wrap;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   word-break: normal;
 }
 
@@ -3796,7 +3820,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   place-items: center;
   overflow: hidden;
   border-radius: 8px;
-  color: var(--accent);
+  color: var(--assistant-accent-text);
   background: var(--fill);
 }
 
@@ -3840,7 +3864,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-message-attachment-copy small {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 10.5px;
 }
 
@@ -3862,7 +3886,11 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-message-content.markdown-content {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .assistant-message-content.markdown-content > *:first-child {
@@ -3881,7 +3909,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 .assistant-message-content.markdown-content h3,
 .assistant-message-content.markdown-content blockquote,
 .assistant-message-content.markdown-content pre,
-.assistant-message-content.markdown-content table {
+.assistant-markdown-table-scroll {
   margin: 0 0 10px;
 }
 
@@ -3909,6 +3937,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-message-content.markdown-content pre {
+  max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -3922,21 +3951,57 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-message-content.markdown-content a {
-  color: var(--accent);
+  color: var(--assistant-accent-text);
   font-weight: 600;
 }
 
-.assistant-message-content.markdown-content table {
+.assistant-markdown-table-scroll {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overscroll-behavior-inline: contain;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.assistant-markdown-table-scroll:focus-visible {
+  outline: 2px solid var(--assistant-focus-ring);
+  outline-offset: 2px;
+}
+
+.assistant-message-content.markdown-content .assistant-markdown-table-scroll table {
+  width: 100%;
+  min-width: 700px;
+  max-width: none;
+  margin: 0;
   border-collapse: collapse;
   font-size: 14px;
 }
 
-.assistant-message-content.markdown-content th,
-.assistant-message-content.markdown-content td {
+.assistant-message-content.markdown-content .assistant-markdown-table-scroll th,
+.assistant-message-content.markdown-content .assistant-markdown-table-scroll td {
   border: 1px solid var(--border);
   padding: 6px 8px;
   text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.assistant-message-content.markdown-content .assistant-markdown-table-scroll th {
+  color: var(--text);
+  background: var(--surface-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  overflow-wrap: normal;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .assistant-message.working .assistant-message-main {
@@ -4009,7 +4074,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 5px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   text-align: center;
 }
@@ -4043,7 +4108,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-action-event.pending .assistant-action-marker {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: var(--surface-muted);
 }
 
@@ -4131,13 +4196,40 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-composer-stack {
-  position: sticky;
-  bottom: 22px;
-  z-index: 2;
-  width: min(calc(100% - 36px), 980px);
+  position: static;
+  z-index: 1;
+  width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
   display: grid;
   gap: 8px;
-  margin: 0 auto 22px;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding: 10px clamp(18px, 4vw, 56px)
+    max(12px, env(safe-area-inset-bottom));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-raised) 92%, transparent), var(--surface-raised));
+  box-shadow: 0 -10px 24px rgb(0 0 0 / 3%);
+}
+
+.assistant-composer-stack > * {
+  width: min(100%, 980px);
+  margin-inline: auto;
+}
+
+.assistant-scroll-follow {
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.assistant-jump-to-latest {
+  min-height: 38px;
+  border-radius: 999px;
+  padding: 7px 13px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-soft);
+  pointer-events: auto;
 }
 
 .assistant-attachment-picker {
@@ -4161,7 +4253,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   display: grid;
   flex: 1;
   gap: 3px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -4176,7 +4268,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .assistant-attachment-picker > p {
   margin: 0;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -4206,7 +4298,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-attachment-options > button.selected {
-  border-color: var(--accent);
+  border-color: var(--assistant-accent-text);
   background: var(--fill);
 }
 
@@ -4218,7 +4310,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-attachment-options small {
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .assistant-composer {
@@ -4226,7 +4318,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--assistant-accent-text);
   border-radius: 16px;
   padding: 13px 16px 11px;
   background: var(--surface-raised);
@@ -4268,6 +4360,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -4276,13 +4369,14 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   align-items: center;
   gap: 7px;
   min-width: 0;
-  color: var(--text-muted);
+  flex: 1 1 280px;
+  color: var(--text-secondary);
   font-size: 11.5px;
 }
 
 .assistant-composer-context svg {
   flex: none;
-  color: var(--accent);
+  color: var(--assistant-accent-text);
 }
 
 .assistant-composer-context span {
@@ -4320,7 +4414,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 .assistant-attach-button:hover:not(:disabled),
 .assistant-attach-button.active {
   color: var(--accent-contrast);
-  background: var(--accent);
+  background: var(--assistant-accent-solid);
 }
 
 .assistant-attachment-error {
@@ -4329,19 +4423,24 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-composer:focus-within {
-  border-color: var(--accent-hover);
-  box-shadow: var(--shadow-raised);
+  border-color: var(--assistant-focus-ring);
+  box-shadow: var(--shadow-raised), 0 0 0 2px color-mix(in srgb, var(--assistant-focus-ring) 28%, transparent);
 }
 
 .assistant-composer textarea {
-  min-height: 48px;
+  min-height: 34px;
   max-height: 180px;
   border: 0;
   border-radius: 16px;
-  padding: 9px 0;
+  padding: 6px 0;
   resize: none;
   background: transparent;
   line-height: 1.5;
+}
+
+.assistant-composer textarea::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
 }
 
 .assistant-composer textarea:focus,
@@ -4355,6 +4454,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   align-items: center;
   gap: 6px;
   padding-bottom: 1px;
+  flex: 0 0 auto;
 }
 
 .assistant-composer-actions button[type="submit"],
@@ -4362,6 +4462,12 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   min-height: 38px;
   border-radius: 999px;
   padding: 0 13px;
+}
+
+.assistant-composer-actions button[type="submit"]:hover:not(:disabled) {
+  border-color: var(--assistant-accent-solid-hover);
+  color: var(--accent-contrast);
+  background: var(--assistant-accent-solid-hover);
 }
 
 .assistant-stop-generation svg {
@@ -4409,9 +4515,9 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .voice-mode-toggle.active {
-  border-color: var(--accent);
+  border-color: var(--assistant-accent-solid);
   color: var(--accent-contrast);
-  background: var(--accent);
+  background: var(--assistant-accent-solid);
 }
 
 .voice-status {
@@ -4422,7 +4528,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   gap: 10px;
   margin: 0;
   padding: 0 2px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
 }
@@ -4502,12 +4608,12 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 @keyframes assistant-folder-pop {
   0% {
     transform: scale(1);
-    box-shadow: inset 0 0 0 1px var(--accent);
+    box-shadow: inset 0 0 0 1px var(--assistant-accent-text);
   }
 
   38% {
     transform: scale(1.025);
-    box-shadow: inset 0 0 0 1px var(--accent), 0 10px 28px rgb(0 0 0 / 10%);
+    box-shadow: inset 0 0 0 1px var(--assistant-accent-text), 0 10px 28px rgb(0 0 0 / 10%);
   }
 
   100% {
@@ -4560,14 +4666,19 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 /* Sugerencias rápidas: sólo prerrellenan el borrador del compositor. */
 .assistant-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   width: 100%;
   margin: 0;
   padding: 0 2px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
 }
 
 .assistant-chip {
+  flex: 0 0 auto;
+  min-height: 36px;
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 7px 13px;
@@ -4581,6 +4692,19 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   border-color: var(--border-strong);
   color: var(--text);
   background: var(--fill);
+}
+
+.assistant-agent-panel button:focus-visible,
+.assistant-agent-panel input:focus-visible,
+.assistant-agent-panel select:focus-visible,
+.assistant-agent-panel textarea:focus-visible {
+  outline: 2px solid var(--assistant-focus-ring);
+  outline-offset: 2px;
+}
+
+.assistant-composer textarea:focus-visible,
+.assistant-search input:focus-visible {
+  outline: 0;
 }
 
 /* Acciones por respuesta del asistente. */
@@ -4642,7 +4766,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .assistant-map-action-card small,
 .assistant-map-action-card em {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-style: normal;
 }
@@ -4654,7 +4778,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   border: 0;
   border-radius: 7px;
   padding: 5px 9px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: transparent;
   font-size: 11.5px;
   font-weight: 500;
@@ -4666,7 +4790,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .assistant-canvas-action {
-  color: var(--accent);
+  color: var(--assistant-accent-text);
 }
 
 /* ---------------------------------------------------------------------------
@@ -4696,6 +4820,24 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   }
 }
 
+@media (min-width: 901px) and (max-width: 952px) {
+  .assistant-agent-grid.canvas-open,
+  .assistant-agent-grid.canvas-open.conversations-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .assistant-agent-grid.canvas-open .assistant-thread,
+  .assistant-agent-grid.canvas-open .assistant-conversations,
+  .assistant-agent-grid.canvas-open .assistant-floating-actions {
+    display: none;
+  }
+
+  .assistant-agent-grid.canvas-open > aside[aria-label="Lienzo documental"] {
+    min-height: 0;
+    height: 100%;
+  }
+}
+
 @media (max-width: 900px) {
   .assistant-agent-panel {
     padding: 0;
@@ -4707,7 +4849,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .assistant-agent-grid,
   .assistant-agent-grid.conversations-collapsed {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .assistant-agent-grid {
@@ -4726,29 +4868,46 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   }
 
   .assistant-agent-grid.canvas-open > aside[aria-label="Lienzo documental"] {
-    min-height: min(760px, calc(100vh - 72px));
+    min-height: 0;
+    height: 100%;
   }
 
   .assistant-thread {
-    order: 1;
+    min-height: 0;
   }
 
   .assistant-conversations {
-    order: 2;
-    border-top: 1px solid var(--border);
-    border-right: 0;
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 7;
+    width: min(340px, calc(100% - 48px));
+    max-width: calc(100% - 48px);
+    height: 100%;
+    border-top: 0;
+    border-right: 1px solid var(--border-strong);
+    box-shadow: 18px 0 40px rgb(0 0 0 / 18%);
   }
 
   .assistant-conversation-groups {
-    max-height: 240px;
+    max-height: none;
   }
 
-  .assistant-thread {
-    min-height: min(680px, calc(100vh - 112px));
+  .assistant-conversations-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: rgb(0 0 0 / 34%);
+    cursor: default;
   }
 
   .assistant-messages {
-    min-height: 360px;
+    min-height: 0;
   }
 
   .assistant-message-actions {
@@ -4792,16 +4951,21 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .assistant-messages {
     gap: 24px;
-    padding: 20px 0;
+    padding: 20px 12px;
   }
 
   .assistant-message {
     width: 100%;
     grid-template-columns: 28px minmax(0, 1fr);
+    gap: 9px;
   }
 
   .assistant-message.user .assistant-message-main {
-    max-width: 86%;
+    max-width: 92%;
+  }
+
+  .assistant-composer-stack {
+    padding: 9px 12px max(10px, env(safe-area-inset-bottom));
   }
 
   .assistant-composer {
@@ -4809,6 +4973,39 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     border-radius: 20px;
     margin-bottom: 0;
     padding: 8px 8px 8px 12px;
+  }
+
+  .assistant-composer-foot {
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  .assistant-composer-context {
+    flex-basis: 100%;
+    flex-wrap: wrap;
+  }
+
+  .assistant-composer-context > span {
+    flex: 1 1 170px;
+  }
+
+  .assistant-canvas-context {
+    max-width: 100%;
+  }
+
+  .assistant-composer-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .assistant-attachment-picker-head {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .assistant-attachment-picker-head label {
+    flex-basis: 100%;
   }
 
   .assistant-message-avatar {
@@ -4857,9 +5054,17 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 232px 1fr;
+  grid-template-columns: 232px minmax(0, 1fr);
   min-height: 100vh;
   transition: grid-template-columns 180ms ease;
+}
+
+.app-shell--assistant {
+  height: 100vh;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* Columna principal: el contenido ocupa toda la altura disponible. */
@@ -4867,6 +5072,12 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.app-shell--assistant .app-main {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .app-sidebar {
@@ -5078,9 +5289,11 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .app-content-assistant {
+  display: flex;
+  flex: 1 1 auto;
   padding: 0;
-  height: 100vh;
-  height: 100dvh;
+  height: 100%;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -5122,7 +5335,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 @media (min-width: 901px) {
   .app-shell--sidebar-collapsed {
-    grid-template-columns: 72px 1fr;
+    grid-template-columns: 72px minmax(0, 1fr);
   }
 
   .app-shell--sidebar-collapsed .app-sidebar {
@@ -5205,6 +5418,14 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .app-shell--assistant {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .app-shell--assistant .app-main {
+    height: auto;
+  }
+
   .app-sidebar {
     /* "relative" en lugar de "static" para anclar el menú desplegable. */
     position: relative;
@@ -5278,8 +5499,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .app-content-assistant {
     padding: 0;
-    height: calc(100vh - 60px);
-    height: calc(100dvh - 60px);
+    height: 100%;
   }
 }
 

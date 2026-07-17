@@ -19,5 +19,8 @@ postgres_data/
 
 .DS_Store
 frontend/tsconfig.tsbuildinfo
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
 .claude/settings.local.json
 .codex-sessions/

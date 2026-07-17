@@ -1,4 +1,5 @@
 import {
+  ArrowDown,
   Brain,
   CheckCircle2,
   CircleAlert,
@@ -23,18 +24,18 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { AssistantMarkdown } from "./AssistantMarkdown";
 import {
   formatAssistantTool,
   type AssistantAction,
@@ -151,6 +152,21 @@ const SUGGESTED_PROMPTS = [
   "Comparar dos ordenanzas",
   "Ordenar mis notas de trabajo",
 ];
+
+const ASSISTANT_COMPACT_MEDIA_QUERY = "(max-width: 900px)";
+const MESSAGE_BOTTOM_THRESHOLD_PX = 100;
+const MESSAGE_TEXTAREA_MAX_HEIGHT_PX = 180;
+
+function resizeMessageTextarea(textarea: HTMLTextAreaElement) {
+  textarea.style.height = "auto";
+  const nextHeight = Math.min(
+    textarea.scrollHeight,
+    MESSAGE_TEXTAREA_MAX_HEIGHT_PX,
+  );
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY =
+    textarea.scrollHeight > MESSAGE_TEXTAREA_MAX_HEIGHT_PX ? "auto" : "hidden";
+}
 
 const EMPTY_THREAD_MESSAGES = [
   {
@@ -576,46 +592,6 @@ function ActionTimeline({
   );
 }
 
-function AssistantMarkdown({ content }: { content: string }) {
-  return (
-    <ReactMarkdown
-      allowedElements={[
-        "p",
-        "strong",
-        "em",
-        "ul",
-        "ol",
-        "li",
-        "blockquote",
-        "code",
-        "pre",
-        "a",
-        "h1",
-        "h2",
-        "h3",
-        "table",
-        "thead",
-        "tbody",
-        "tr",
-        "th",
-        "td",
-        "hr",
-        "br",
-      ]}
-      components={{
-        a: ({ href, children }) => (
-          <a href={href} rel="noreferrer" target="_blank">
-            {children}
-          </a>
-        ),
-      }}
-      remarkPlugins={[remarkGfm]}
-    >
-      {content}
-    </ReactMarkdown>
-  );
-}
-
 const ATTACHMENT_STATUS_LABELS: Record<
   AssistantMessageAttachment["context_status"],
   string
@@ -817,8 +793,13 @@ export function AssistantPanel({
   const [realtimeSupported, setRealtimeSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
   const [isConversationListOpen, setIsConversationListOpen] = useState(true);
+  const [isCompactLayout, setIsCompactLayout] = useState(false);
   const canvasWasOpenRef = useRef(false);
   const canvasButtonRef = useRef<HTMLButtonElement | null>(null);
+  const conversationSidebarOpenButtonRef = useRef<HTMLButtonElement | null>(null);
+  const conversationSidebarCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const focusConversationCloseOnOpenRef = useRef(false);
+  const restoreConversationSidebarFocusRef = useRef(false);
   const [conversationListMode, setConversationListMode] =
     useState<ConversationListMode>("recent");
   const conversationFolderMap = useMemo(
@@ -877,7 +858,11 @@ export function AssistantPanel({
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const shouldFollowMessagesRef = useRef(true);
+  const scrollConversationIdRef = useRef<number | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const selectedConversationId = selectedConversation?.id ?? null;
   const speechTranscriptionEnabled = Boolean(
     assistantStatus?.speech_transcription_enabled,
   );
@@ -968,6 +953,68 @@ export function AssistantPanel({
   }, [selectedConversation?.id]);
 
   useEffect(() => {
+    const compactMedia = window.matchMedia(ASSISTANT_COMPACT_MEDIA_QUERY);
+    const updateCompactLayout = () => {
+      setIsCompactLayout(compactMedia.matches);
+      if (compactMedia.matches) {
+        restoreConversationSidebarFocusRef.current = false;
+        setIsConversationListOpen(false);
+      }
+    };
+    updateCompactLayout();
+    compactMedia.addEventListener("change", updateCompactLayout);
+    return () =>
+      compactMedia.removeEventListener("change", updateCompactLayout);
+  }, []);
+
+  useEffect(() => {
+    let focusFrame: number | null = null;
+    if (
+      isConversationListOpen &&
+      focusConversationCloseOnOpenRef.current
+    ) {
+      focusConversationCloseOnOpenRef.current = false;
+      focusFrame = window.requestAnimationFrame(() => {
+        conversationSidebarCloseButtonRef.current?.focus({
+          preventScroll: true,
+        });
+      });
+    } else if (
+      !isConversationListOpen &&
+      restoreConversationSidebarFocusRef.current
+    ) {
+      restoreConversationSidebarFocusRef.current = false;
+      focusFrame = window.requestAnimationFrame(() => {
+        conversationSidebarOpenButtonRef.current?.focus({
+          preventScroll: true,
+        });
+      });
+    }
+    return () => {
+      if (focusFrame !== null) {
+        window.cancelAnimationFrame(focusFrame);
+      }
+    };
+  }, [isConversationListOpen]);
+
+  useEffect(() => {
+    if (!isConversationListOpen) {
+      return;
+    }
+    const closeDrawerWithEscape = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.key === "Escape" &&
+        window.matchMedia(ASSISTANT_COMPACT_MEDIA_QUERY).matches
+      ) {
+        restoreConversationSidebarFocusRef.current = true;
+        setIsConversationListOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeDrawerWithEscape);
+    return () => window.removeEventListener("keydown", closeDrawerWithEscape);
+  }, [isConversationListOpen]);
+
+  useEffect(() => {
     if (attachmentsBlockedByVoice) {
       setIsAttachmentPickerOpen(false);
     }
@@ -994,6 +1041,52 @@ export function AssistantPanel({
     draftMessageRef.current = draftMessage;
   }, [draftMessage]);
 
+  useLayoutEffect(() => {
+    const textarea = messageTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+    resizeMessageTextarea(textarea);
+  }, [canvas.isOpen, draftMessage, selectedConversationId]);
+
+  useEffect(() => {
+    const textarea = messageTextareaRef.current;
+    const thread = textarea?.closest<HTMLElement>(".assistant-thread");
+    if (!textarea || !thread) {
+      return;
+    }
+
+    let resizeFrame: number | null = null;
+    let observedWidth = Math.round(thread.getBoundingClientRect().width);
+    const scheduleResize = () => {
+      if (resizeFrame !== null) {
+        window.cancelAnimationFrame(resizeFrame);
+      }
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = null;
+        resizeMessageTextarea(textarea);
+      });
+    };
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      const nextWidth = Math.round(entry.contentRect.width);
+      if (nextWidth === observedWidth) {
+        return;
+      }
+      observedWidth = nextWidth;
+      scheduleResize();
+    });
+
+    resizeObserver.observe(thread);
+    window.addEventListener("resize", scheduleResize);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", scheduleResize);
+      if (resizeFrame !== null) {
+        window.cancelAnimationFrame(resizeFrame);
+      }
+    };
+  }, [canvas.isOpen, selectedConversationId]);
+
   const messageScrollSignature = selectedConversation?.messages
     .map(
       (message) =>
@@ -1003,8 +1096,33 @@ export function AssistantPanel({
     .join("|");
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [messageScrollSignature, isSendingMessage]);
+    if (selectedConversationId !== null) {
+      return;
+    }
+    scrollConversationIdRef.current = null;
+    shouldFollowMessagesRef.current = true;
+    setShowJumpToLatest(false);
+  }, [selectedConversationId]);
+
+  useEffect(() => {
+    const messages = messagesContainerRef.current;
+    if (!messages) {
+      return;
+    }
+    if (scrollConversationIdRef.current !== selectedConversationId) {
+      scrollConversationIdRef.current = selectedConversationId;
+      shouldFollowMessagesRef.current = true;
+      setShowJumpToLatest(false);
+      messages.scrollTop = messages.scrollHeight;
+      return;
+    }
+    if (shouldFollowMessagesRef.current) {
+      messages.scrollTop = messages.scrollHeight;
+      setShowJumpToLatest(false);
+    } else {
+      setShowJumpToLatest(true);
+    }
+  }, [isSendingMessage, messageScrollSignature, selectedConversationId]);
 
   useEffect(() => {
     if (!conversationContextMenu) {
@@ -1046,6 +1164,8 @@ export function AssistantPanel({
 
   useEffect(() => {
     if (canvas.isOpen && !canvasWasOpenRef.current) {
+      focusConversationCloseOnOpenRef.current = false;
+      restoreConversationSidebarFocusRef.current = false;
       setIsConversationListOpen(false);
     } else if (!canvas.isOpen && canvasWasOpenRef.current) {
       canvasButtonRef.current?.focus({ preventScroll: true });
@@ -1413,6 +1533,56 @@ export function AssistantPanel({
         loop: voiceModeEnabled && handsFreeEnabled,
       });
     }
+  }
+
+  function handleMessagesScroll() {
+    const messages = messagesContainerRef.current;
+    if (!messages) {
+      return;
+    }
+    const distanceFromBottom =
+      messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+    const isNearBottom = distanceFromBottom <= MESSAGE_BOTTOM_THRESHOLD_PX;
+    shouldFollowMessagesRef.current = isNearBottom;
+    setShowJumpToLatest(!isNearBottom);
+  }
+
+  function scrollToLatestResponse() {
+    const messages = messagesContainerRef.current;
+    if (!messages) {
+      return;
+    }
+    shouldFollowMessagesRef.current = true;
+    setShowJumpToLatest(false);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function openConversationSidebar() {
+    focusConversationCloseOnOpenRef.current = true;
+    restoreConversationSidebarFocusRef.current = false;
+    setIsConversationListOpen(true);
+  }
+
+  function closeConversationSidebar(restoreFocus = true) {
+    focusConversationCloseOnOpenRef.current = false;
+    restoreConversationSidebarFocusRef.current = restoreFocus;
+    setIsConversationListOpen(false);
+  }
+
+  function closeCompactConversationDrawer() {
+    if (window.matchMedia(ASSISTANT_COMPACT_MEDIA_QUERY).matches) {
+      closeConversationSidebar();
+    }
+  }
+
+  function selectConversationFromList(conversationId: number) {
+    onSelectConversation(conversationId);
+    closeCompactConversationDrawer();
+  }
+
+  function startConversationFromPanel() {
+    onStartConversation();
+    closeCompactConversationDrawer();
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -1850,7 +2020,9 @@ export function AssistantPanel({
             <button
               className="assistant-conversations-toggle assistant-conversations-toggle-floating"
               type="button"
-              onClick={() => setIsConversationListOpen(true)}
+              onClick={openConversationSidebar}
+              ref={conversationSidebarOpenButtonRef}
+              aria-controls="assistant-conversation-sidebar"
               aria-expanded={false}
               aria-label="Desplegar lista de chats"
               title="Desplegar lista de chats"
@@ -1861,7 +2033,7 @@ export function AssistantPanel({
             <button
               className="secondary-button assistant-new-chat assistant-new-chat-floating"
               type="button"
-              onClick={onStartConversation}
+              onClick={startConversationFromPanel}
               disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
               aria-label="Nueva conversación"
               title="Nueva conversación"
@@ -1873,12 +2045,28 @@ export function AssistantPanel({
         ) : null}
 
         {isConversationListOpen ? (
-        <aside className="assistant-conversations">
+          <button
+            aria-label="Cerrar lista de conversaciones"
+            className="assistant-conversations-scrim"
+            onClick={() => closeConversationSidebar()}
+            tabIndex={-1}
+            type="button"
+          />
+        ) : null}
+
+        {isConversationListOpen ? (
+          <aside
+            aria-label="Conversaciones"
+            className="assistant-conversations"
+            id="assistant-conversation-sidebar"
+          >
           <div className="assistant-conversations-head">
             <button
               className="assistant-conversations-toggle"
               type="button"
-              onClick={() => setIsConversationListOpen(false)}
+              onClick={() => closeConversationSidebar()}
+              ref={conversationSidebarCloseButtonRef}
+              aria-controls="assistant-conversation-sidebar"
               aria-expanded={true}
               aria-label="Plegar lista de chats"
               title="Plegar lista de chats"
@@ -1889,7 +2077,7 @@ export function AssistantPanel({
             <button
               className="secondary-button assistant-new-chat assistant-new-chat-compact"
               type="button"
-              onClick={onStartConversation}
+              onClick={startConversationFromPanel}
               disabled={isLoadingAssistant || isSendingMessage || assistantDisabled}
               aria-label="Nueva conversación"
               title="Nueva conversación"
@@ -2077,7 +2265,9 @@ export function AssistantPanel({
                                 <button
                                   type="button"
                                   className="assistant-conversation-item"
-                                  onClick={() => onSelectConversation(conversation.id)}
+                                  onClick={() =>
+                                    selectConversationFromList(conversation.id)
+                                  }
                                   disabled={isSendingMessage}
                                 >
                                   <span className="assistant-conversation-drag-handle">
@@ -2137,10 +2327,13 @@ export function AssistantPanel({
                   );
                 })}
               </div>
-        </aside>
+          </aside>
         ) : null}
 
         <main
+          aria-hidden={
+            isCompactLayout && isConversationListOpen ? true : undefined
+          }
           className={[
             "assistant-thread",
             selectedConversation ? "" : "assistant-thread-empty",
@@ -2150,6 +2343,9 @@ export function AssistantPanel({
           ]
             .filter(Boolean)
             .join(" ")}
+          inert={
+            isCompactLayout && isConversationListOpen ? true : undefined
+          }
         >
           {selectedConversation ? (
             <>
@@ -2209,7 +2405,11 @@ export function AssistantPanel({
                 )}
               </div>
 
-              <div className="assistant-messages">
+              <div
+                className="assistant-messages"
+                onScroll={handleMessagesScroll}
+                ref={messagesContainerRef}
+              >
                 {selectedConversation.messages.length === 0 ? (
                   <div className="assistant-empty-thread">
                     <h3>{emptyThreadMessage.title}</h3>
@@ -2339,7 +2539,6 @@ export function AssistantPanel({
                     </div>
                   </article>
                 ) : null}
-                <div ref={messagesEndRef} />
               </div>
 
               {selectedIsArchived ? (
@@ -2350,7 +2549,22 @@ export function AssistantPanel({
               ) : null}
 
               <div className="assistant-composer-stack">
-                {!composerDisabled ? (
+                {showJumpToLatest ? (
+                  <div className="assistant-scroll-follow">
+                    <button
+                      aria-label="Ir a la última respuesta"
+                      className="secondary-button assistant-jump-to-latest"
+                      onClick={scrollToLatestResponse}
+                      type="button"
+                    >
+                      <ArrowDown aria-hidden size={15} />
+                      <span>Ir a la última respuesta</span>
+                    </button>
+                  </div>
+                ) : null}
+
+                {!composerDisabled &&
+                selectedConversation.messages.length === 0 ? (
                   <div className="assistant-chips">
                     {SUGGESTED_PROMPTS.map((prompt) => (
                       <button
@@ -2492,12 +2706,15 @@ export function AssistantPanel({
                     </div>
                   ) : null}
                   <textarea
+                    aria-label="Mensaje para Anacleto"
                     ref={messageTextareaRef}
                     value={draftMessage}
-                    onChange={(event) => onDraftMessageChange(event.target.value)}
+                    onChange={(event) =>
+                      onDraftMessageChange(event.target.value)
+                    }
                     onKeyDown={handleComposerKeyDown}
                     placeholder="Escribe tu consulta o pide un borrador…"
-                    rows={3}
+                    rows={1}
                     disabled={composerDisabled}
                   />
                   <div className="assistant-composer-foot">
@@ -2557,7 +2774,17 @@ export function AssistantPanel({
                               ? "voice-mode-toggle active"
                               : "voice-mode-toggle"
                           }
+                          aria-label={
+                            voiceModeEnabled
+                              ? "Desactivar modo voz"
+                              : "Activar modo voz"
+                          }
                           aria-pressed={voiceModeEnabled}
+                          title={
+                            voiceModeEnabled
+                              ? "Desactivar modo voz"
+                              : "Activar modo voz"
+                          }
                           onClick={() => onVoiceModeChange(!voiceModeEnabled)}
                           disabled={composerDisabled}
                         >
@@ -2623,6 +2850,8 @@ export function AssistantPanel({
                       ) : (
                         <button
                           type="submit"
+                          aria-label="Enviar mensaje"
+                          title="Enviar mensaje"
                           disabled={
                             composerDisabled ||
                             attachmentSendBlocked ||
@@ -2699,7 +2928,7 @@ export function AssistantPanel({
               </p>
               <button
                 type="button"
-                onClick={onStartConversation}
+                onClick={startConversationFromPanel}
                 disabled={
                   isLoadingAssistant || isSendingMessage || assistantDisabled
                 }
@@ -2744,7 +2973,7 @@ export function AssistantPanel({
                     type="button"
                     role="menuitem"
                     onClick={() => {
-                      onSelectConversation(conversation.id);
+                      selectConversationFromList(conversation.id);
                       closeConversationContextMenu();
                     }}
                   >
