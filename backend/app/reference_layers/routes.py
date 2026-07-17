@@ -103,7 +103,7 @@ def get_reference_catalog(
             ReferenceLayerRead.model_validate(layer).model_copy(
                 update={
                     "effective_visible": effective_visible,
-                    "effective_opacity": effective_opacity,
+                    "effective_opacity": float(effective_opacity),
                     "legend_available": layer.legend_url is not None,
                     "metadata_available": layer.metadata_url is not None,
                 }
