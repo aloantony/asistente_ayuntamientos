@@ -53,6 +53,9 @@ repetir la validación en cada redirección y limitar tiempos, tamaño y tipo de
 respuesta. La validación sintáctica al guardar una URL no se tratará como una
 barrera SSRF suficiente.
 
+La inmutabilidad se aplica a los payloads y hashes del snapshot. `status`,
+`is_current` y `updated_at` son estado explícito de su ciclo de promoción.
+
 ## Matriz de paridad
 
 Antes de considerar completa la integración se mantendrá una matriz versionada con una fila por capa y una fila por función del visor. Cada fila tendrá estado, evidencia automatizada, restricciones de licencia y estrategia de entrega:
