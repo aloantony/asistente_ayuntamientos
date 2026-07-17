@@ -32,14 +32,26 @@ El dominio `reference_layers` es global y queda separado de:
 
 El catálogo conserva:
 
-- snapshots íntegros, hash, fecha y conteos de cada sincronización;
+- snapshots íntegros e inmutables del bruto y de su definición normalizada,
+  cada uno con su hash, fecha y conteos;
 - servicios WMS, WFS, WMTS, XYZ, ArcGIS REST o locales;
 - nodos jerárquicos `group | layer` con identidad estable ajena al título visible;
 - configuración de representación, escalas, CRS, consulta, descarga y procedencia;
 - estados `active | degraded | missing | disabled`;
 - preferencias de visibilidad y opacidad por organización.
 
-Una entrada que desaparece del origen pasa a `missing`; no se elimina ni pierde sus preferencias. El API público no devuelve URL base, URL de capacidades ni opciones internas del proveedor.
+Una entrada que desaparece del origen pasa a `missing`; no se elimina ni pierde
+sus preferencias. El consumidor debe indicar explícitamente el proveedor al
+consultar el catálogo. El API público no devuelve URL base, URL de capacidades,
+URL de licencia, errores del upstream ni opciones internas del proveedor.
+
+El catálogo solo persiste definiciones de adaptadores internos; sus rutas
+públicas nunca realizan peticiones a una URL aportada por el usuario. Los
+adaptadores que se incorporen después deberán aplicar una lista de hosts por
+proveedor, resolver y bloquear redes privadas, locales, reservadas y link-local,
+repetir la validación en cada redirección y limitar tiempos, tamaño y tipo de
+respuesta. La validación sintáctica al guardar una URL no se tratará como una
+barrera SSRF suficiente.
 
 ## Matriz de paridad
 
