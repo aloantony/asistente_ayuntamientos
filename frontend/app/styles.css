@@ -4066,7 +4066,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   transition: grid-template-columns 180ms ease;
 }
 
-/* Columna principal: barra superior (contexto de ruta) + contenido. */
+/* Columna principal: el contenido ocupa toda la altura disponible. */
 .app-main {
   display: flex;
   flex-direction: column;
@@ -4176,12 +4176,6 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   background: var(--fill-strong);
 }
 
-/* En escritorio el cambio de tema vive en la barra superior; en móvil (sin
- * barra superior) se mantiene aquí, en la barra lateral. */
-.app-session .app-theme-toggle {
-  display: none;
-}
-
 .app-session-user {
   display: grid;
   gap: 2px;
@@ -4289,8 +4283,8 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .app-content-assistant {
   padding: 0;
-  height: calc(100vh - 60px);
-  height: calc(100dvh - 60px);
+  height: 100vh;
+  height: 100dvh;
   min-height: 0;
   overflow: hidden;
 }
@@ -4378,6 +4372,17 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .app-shell--sidebar-collapsed .app-session {
     justify-items: center;
+  }
+
+  .app-shell--sidebar-collapsed .app-theme-toggle {
+    width: 40px;
+    height: 40px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .app-shell--sidebar-collapsed .app-theme-toggle span {
+    display: none;
   }
 
   .app-shell--sidebar-collapsed .app-session-logout {
@@ -4477,6 +4482,8 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .app-content-assistant {
     padding: 0;
+    height: calc(100vh - 60px);
+    height: calc(100dvh - 60px);
   }
 }
 
@@ -4580,155 +4587,17 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   font-weight: 600;
 }
 
-/* ---------------------------------------------------------------------------
- * Barra superior (búsqueda global centrada + acciones rápidas)
- * ------------------------------------------------------------------------ */
-
-.app-topbar {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  min-height: 60px;
-  border-bottom: 1px solid var(--border-strong);
-  padding: 12px 32px;
-  background: var(--surface-raised);
-}
-
-.app-topbar::before {
-  content: "";
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.app-topbar-search {
-  flex: 0 1 min(560px, 48vw);
-  width: min(560px, 48vw);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 560px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 0 12px;
-  color: var(--text-muted);
-  background: var(--surface-muted);
-}
-
-.app-topbar-search:focus-within {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.app-topbar-search input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  padding: 9px 0;
-  background: transparent;
-  font-size: 13px;
-}
-
-.app-topbar-search input:focus,
-.app-topbar-search input:focus-visible {
-  outline: 0;
-}
-
-html.dark .app-topbar-search,
 html.dark .dashboard-ask {
   background: var(--surface-raised);
 }
 
-html.dark .app-topbar-search input,
 html.dark .dashboard-ask input {
   background: transparent;
 }
 
-.app-topbar-actions {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-/* Botón cuadrado de tema (icono sol/luna), como en el prototipo. */
-.app-topbar-theme {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text-secondary);
-  background: var(--surface);
-}
-
-.app-topbar-theme:hover:not(:disabled) {
-  border-color: var(--text);
-  color: var(--text);
-  background: var(--surface);
-}
-
-/* Acceso rápido al asistente con contorno de acento. */
-.app-topbar-anacleto {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--accent);
-  border-radius: 9px;
-  color: var(--accent);
-  background: var(--surface);
-}
-
-.app-topbar-anacleto:hover:not(:disabled) {
-  color: var(--accent-contrast);
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.app-topbar-user {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  color: var(--text-secondary);
-  background: var(--fill);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.app-topbar-user:hover:not(:disabled) {
-  border-color: var(--text);
-  color: var(--text);
-  background: var(--surface);
-}
-
-.app-topbar.onboarding-active.onboarding-step-theme .app-topbar-theme,
-.app-topbar.onboarding-active.onboarding-step-assistant .app-topbar-anacleto,
-.app-topbar.onboarding-active.onboarding-step-account .app-topbar-user {
-  position: relative;
-  z-index: 32;
-  box-shadow:
-    0 0 0 4px color-mix(in srgb, var(--surface-raised) 82%, transparent),
-    0 18px 40px rgb(0 0 0 / 28%);
-}
+/* ---------------------------------------------------------------------------
+ * Ayuda inicial
+ * ------------------------------------------------------------------------ */
 
 .app-onboarding-layer {
   position: fixed;
@@ -4756,6 +4625,8 @@ html.dark .dashboard-ask input {
 
 .app-onboarding-note {
   position: absolute;
+  top: 50%;
+  left: 50%;
   z-index: 31;
   display: grid;
   gap: 8px;
@@ -4767,17 +4638,7 @@ html.dark .dashboard-ask input {
   background: color-mix(in srgb, var(--surface-raised) 96%, transparent);
   box-shadow: var(--shadow-raised);
   pointer-events: auto;
-}
-
-.app-onboarding-note::before {
-  content: "";
-  position: absolute;
-  width: 11px;
-  height: 11px;
-  border-top: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
-  border-left: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
-  background: var(--surface-raised);
-  transform: rotate(45deg);
+  transform: translate(-50%, -50%);
 }
 
 .app-onboarding-note .eyebrow,
@@ -4837,36 +4698,6 @@ html.dark .dashboard-ask input {
 .app-onboarding-note .app-onboarding-dismiss:hover:not(:disabled) {
   color: var(--text);
   background: transparent;
-}
-
-.app-onboarding-note-theme {
-  top: 76px;
-  right: 112px;
-}
-
-.app-onboarding-note-theme::before,
-.app-onboarding-note-assistant::before,
-.app-onboarding-note-account::before {
-  top: -6px;
-  right: 24px;
-}
-
-.app-onboarding-note-assistant {
-  top: 76px;
-  right: 64px;
-}
-
-.app-onboarding-note-account {
-  top: 76px;
-  right: 16px;
-}
-
-@media (max-width: 900px) {
-  /* En móvil manda la barra lateral colapsada + las cabeceras propias de cada
-   * página; la barra superior se oculta para no duplicar contexto. */
-  .app-topbar {
-    display: none;
-  }
 }
 
 /* ---------------------------------------------------------------------------
