@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import struct
 import zlib
 from datetime import datetime, timezone
@@ -8,8 +9,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from conftest import headers_for
+from redis import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 
+import app.reference_layers.wms_cache as wms_cache
 import app.reference_layers.wms_routes as wms_routes
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
@@ -23,10 +27,11 @@ from app.reference_layers.wms_cache import (
     CACHE_INDEX_KEY,
     CACHE_SIZES_KEY,
     CACHE_TOTAL_KEY,
-    WMS_CACHE_BUDGET_BYTES,
+    WMS_CACHE_ENTRY_OVERHEAD_BYTES,
     CachedWMSResponse,
     build_wms_cache_key,
     deserialize_cached_wms_response,
+    get_cached_wms_response,
     serialize_cached_wms_response,
     store_cached_wms_response,
 )
@@ -163,6 +168,45 @@ def make_png(width: int, height: int) -> bytes:
         + chunk(b"IDAT", zlib.compress(rows))
         + chunk(b"IEND", b"")
     )
+
+
+def make_cached_response(body_size: int, *, marker: int = 1) -> CachedWMSResponse:
+    body = bytes([marker]) * body_size
+    return CachedWMSResponse(
+        body=body,
+        content_type="image/png",
+        etag=f'"{hashlib.sha256(body).hexdigest()}"',
+        stored_at=100,
+        fresh_for_seconds=900,
+    )
+
+
+def assert_cache_namespace(redis: Redis, expected_keys: set[str]) -> None:
+    encoded_keys = {key.encode() for key in expected_keys}
+    assert set(redis.zrange(CACHE_INDEX_KEY, 0, -1)) == encoded_keys
+    assert set(redis.hkeys(CACHE_SIZES_KEY)) == encoded_keys
+    assert redis.zcard(CACHE_INDEX_KEY) == len(expected_keys)
+    assert redis.hlen(CACHE_SIZES_KEY) == len(expected_keys)
+    tracked_total = sum(int(value) for value in redis.hvals(CACHE_SIZES_KEY))
+    assert int(redis.get(CACHE_TOTAL_KEY) or b"0") == tracked_total
+    assert all(redis.exists(key) == 1 for key in expected_keys)
+
+
+@pytest.fixture
+def isolated_wms_cache_redis(monkeypatch):
+    redis = Redis.from_url(
+        os.environ.get("TEST_REDIS_URL", "redis://127.0.0.1:6379/15")
+    )
+    try:
+        redis.ping()
+    except RedisError as error:
+        pytest.fail(f"isolated Redis test database is unavailable: {error}")
+    redis.flushdb()
+    monkeypatch.setattr(wms_cache, "get_redis_connection", lambda: redis)
+    try:
+        yield redis
+    finally:
+        redis.flushdb()
 
 
 def disable_test_cache(monkeypatch) -> None:
@@ -606,39 +650,137 @@ def test_cache_keys_are_opaque_deterministic_and_integrity_checked() -> None:
         deserialize_cached_wms_response(serialized + b"tampered")
 
 
-def test_cache_store_uses_an_atomic_namespace_budget(monkeypatch) -> None:
-    calls = []
+def test_cache_accounts_for_metadata_and_replacement_without_double_counting(
+    isolated_wms_cache_redis,
+    monkeypatch,
+) -> None:
+    redis = isolated_wms_cache_redis
+    scores = iter((100, 200))
+    monkeypatch.setattr(wms_cache, "_current_lru_score", lambda: next(scores))
+    key = build_wms_cache_key({"entry": "replacement"})
+    first = make_cached_response(32)
+    second = make_cached_response(96, marker=2)
 
-    class FakeRedis:
+    store_cached_wms_response(key, first, stale_ttl_seconds=3600)
+
+    first_size = (
+        len(serialize_cached_wms_response(first)) + WMS_CACHE_ENTRY_OVERHEAD_BYTES
+    )
+    assert int(redis.hget(CACHE_SIZES_KEY, key)) == first_size
+    assert int(redis.get(CACHE_TOTAL_KEY)) == first_size
+    assert_cache_namespace(redis, {key})
+
+    store_cached_wms_response(key, second, stale_ttl_seconds=3600)
+
+    second_size = (
+        len(serialize_cached_wms_response(second)) + WMS_CACHE_ENTRY_OVERHEAD_BYTES
+    )
+    assert int(redis.hget(CACHE_SIZES_KEY, key)) == second_size
+    assert int(redis.get(CACHE_TOTAL_KEY)) == second_size
+    assert_cache_namespace(redis, {key})
+
+
+def test_cache_evicts_oldest_entry_at_exact_byte_budget(
+    isolated_wms_cache_redis,
+    monkeypatch,
+) -> None:
+    redis = isolated_wms_cache_redis
+    response = make_cached_response(48)
+    accounted_size = (
+        len(serialize_cached_wms_response(response)) + WMS_CACHE_ENTRY_OVERHEAD_BYTES
+    )
+    monkeypatch.setattr(wms_cache, "WMS_CACHE_BUDGET_BYTES", accounted_size * 2)
+    scores = iter((100, 200, 300))
+    monkeypatch.setattr(wms_cache, "_current_lru_score", lambda: next(scores))
+    keys = [build_wms_cache_key({"byte-entry": index}) for index in range(3)]
+
+    for key in keys:
+        store_cached_wms_response(key, response, stale_ttl_seconds=3600)
+
+    assert redis.exists(keys[0]) == 0
+    assert int(redis.get(CACHE_TOTAL_KEY)) == accounted_size * 2
+    assert_cache_namespace(redis, set(keys[1:]))
+
+
+def test_cache_enforces_entry_limit_independently_of_byte_budget(
+    isolated_wms_cache_redis,
+    monkeypatch,
+) -> None:
+    redis = isolated_wms_cache_redis
+    monkeypatch.setattr(wms_cache, "WMS_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(wms_cache, "WMS_CACHE_BUDGET_BYTES", 10 * 1024 * 1024)
+    scores = iter((100, 200, 300))
+    monkeypatch.setattr(wms_cache, "_current_lru_score", lambda: next(scores))
+    keys = [build_wms_cache_key({"count-entry": index}) for index in range(3)]
+
+    for index, key in enumerate(keys):
+        store_cached_wms_response(
+            key,
+            make_cached_response(16, marker=index + 1),
+            stale_ttl_seconds=3600,
+        )
+
+    assert redis.exists(keys[0]) == 0
+    assert_cache_namespace(redis, set(keys[1:]))
+
+
+def test_atomic_cache_get_touches_lru_before_entry_limit_eviction(
+    isolated_wms_cache_redis,
+    monkeypatch,
+) -> None:
+    redis = isolated_wms_cache_redis
+    monkeypatch.setattr(wms_cache, "WMS_CACHE_MAX_ENTRIES", 2)
+    scores = iter((100, 200, 300, 400))
+    monkeypatch.setattr(wms_cache, "_current_lru_score", lambda: next(scores))
+    keys = [build_wms_cache_key({"lru-entry": index}) for index in range(3)]
+    response = make_cached_response(24)
+    store_cached_wms_response(keys[0], response, stale_ttl_seconds=3600)
+    store_cached_wms_response(keys[1], response, stale_ttl_seconds=3600)
+
+    assert get_cached_wms_response(keys[0]) == response
+    store_cached_wms_response(keys[2], response, stale_ttl_seconds=3600)
+
+    assert redis.exists(keys[1]) == 0
+    assert_cache_namespace(redis, {keys[0], keys[2]})
+
+
+def test_atomic_cache_get_cleans_expired_value_and_metadata(
+    isolated_wms_cache_redis,
+    monkeypatch,
+) -> None:
+    redis = isolated_wms_cache_redis
+    scores = iter((100, 200, 300))
+    monkeypatch.setattr(wms_cache, "_current_lru_score", lambda: next(scores))
+    expired_key = build_wms_cache_key({"entry": "expired"})
+    live_key = build_wms_cache_key({"entry": "live"})
+    response = make_cached_response(40)
+    store_cached_wms_response(expired_key, response, stale_ttl_seconds=3600)
+    store_cached_wms_response(live_key, response, stale_ttl_seconds=3600)
+    live_size = int(redis.hget(CACHE_SIZES_KEY, live_key))
+    redis.delete(expired_key)
+
+    assert get_cached_wms_response(expired_key) is None
+
+    assert redis.zscore(CACHE_INDEX_KEY, expired_key) is None
+    assert redis.hget(CACHE_SIZES_KEY, expired_key) is None
+    assert int(redis.get(CACHE_TOTAL_KEY)) == live_size
+    assert_cache_namespace(redis, {live_key})
+
+
+def test_cache_redis_failures_are_misses_and_noop_writes(monkeypatch) -> None:
+    class BrokenRedis:
         def eval(self, *args):
-            calls.append(args)
-            return len(args[-5])
+            raise RedisError("unavailable")
 
-    monkeypatch.setattr(
-        "app.reference_layers.wms_cache.get_redis_connection",
-        lambda: FakeRedis(),
-    )
-    upstream = fake_png_response()
-    cached = CachedWMSResponse(
-        body=upstream.body,
-        content_type=upstream.content_type,
-        etag=upstream.etag,
-        stored_at=100,
-        fresh_for_seconds=900,
-    )
+    monkeypatch.setattr(wms_cache, "get_redis_connection", lambda: BrokenRedis())
+    key = build_wms_cache_key({"entry": "fail-open"})
 
-    store_cached_wms_response("reference-wms:v1:test", cached, stale_ttl_seconds=3600)
-
-    assert len(calls) == 1
-    call = calls[0]
-    assert call[1:6] == (
-        4,
-        "reference-wms:v1:test",
-        CACHE_INDEX_KEY,
-        CACHE_SIZES_KEY,
-        CACHE_TOTAL_KEY,
+    assert get_cached_wms_response(key) is None
+    store_cached_wms_response(
+        key,
+        make_cached_response(16),
+        stale_ttl_seconds=3600,
     )
-    assert call[-2] == WMS_CACHE_BUDGET_BYTES
 
 
 def test_png_validation_rejects_wrong_tile_dimensions_and_invalid_headers() -> None:
