@@ -26,7 +26,8 @@ NODE_TYPES = {"group", "layer"}
 ROLES = {"base", "overlay"}
 RENDERERS = {"raster_tile", "vector_tile"}
 DELIVERY_MODES = {"proxy", "mirror"}
-KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+PROVIDER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$")
+SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
 
 
 class ReferenceCatalogValidationError(ValueError):
@@ -398,9 +399,9 @@ def validate_catalog_definition(
     definition: ReferenceCatalogDefinition,
 ) -> list[str]:
     issues: list[str] = []
-    if not KEY_RE.fullmatch(definition.provider_key):
+    if not PROVIDER_KEY_RE.fullmatch(definition.provider_key):
         issues.append("Invalid provider_key")
-    if not _safe_http_url(definition.source_url, require_https=True):
+    if not _valid_declared_http_url(definition.source_url, require_https=True):
         issues.append("Catalog source_url must be an absolute HTTPS URL")
     if definition.unresolved_count < 0:
         issues.append("unresolved_count cannot be negative")
@@ -412,19 +413,21 @@ def validate_catalog_definition(
         if service.source_key in service_keys:
             issues.append(f"Duplicate service key: {service.source_key}")
         service_keys.add(service.source_key)
-        if not KEY_RE.fullmatch(service.source_key):
+        if not SOURCE_KEY_RE.fullmatch(service.source_key):
             issues.append(f"Invalid service key: {service.source_key}")
         if not service.title.strip():
             issues.append(f"Service title is empty: {service.source_key}")
         if service.upstream_protocol not in PROTOCOLS:
             issues.append(f"Unsupported protocol: {service.source_key}")
-        if not _safe_http_url(service.base_url):
+        if not _valid_declared_http_url(service.base_url):
             issues.append(f"Invalid service URL: {service.source_key}")
-        if service.capabilities_url and not _safe_http_url(
+        if service.capabilities_url and not _valid_declared_http_url(
             service.capabilities_url
         ):
             issues.append(f"Invalid capabilities URL: {service.source_key}")
-        if service.license_url and not _safe_http_url(service.license_url):
+        if service.license_url and not _valid_declared_http_url(
+            service.license_url
+        ):
             issues.append(f"Invalid license URL: {service.source_key}")
         if service.license_status not in LICENSE_STATUSES:
             issues.append(f"Invalid license status: {service.source_key}")
@@ -442,7 +445,7 @@ def validate_catalog_definition(
         if layer.source_key in layer_definitions:
             issues.append(f"Duplicate layer key: {layer.source_key}")
         layer_definitions[layer.source_key] = layer
-        if not KEY_RE.fullmatch(layer.source_key):
+        if not SOURCE_KEY_RE.fullmatch(layer.source_key):
             issues.append(f"Invalid layer key: {layer.source_key}")
         if not layer.title.strip():
             issues.append(f"Layer title is empty: {layer.source_key}")
@@ -486,7 +489,7 @@ def validate_catalog_definition(
             ("legend", layer.legend_url),
             ("metadata", layer.metadata_url),
         ):
-            if url and not _safe_http_url(url):
+            if url and not _valid_declared_http_url(url):
                 issues.append(f"Invalid {label} URL: {layer.source_key}")
 
     for layer in definition.layers:
@@ -502,7 +505,13 @@ def validate_catalog_definition(
     return sorted(set(issues))
 
 
-def _safe_http_url(value: str, *, require_https: bool = False) -> bool:
+def _valid_declared_http_url(
+    value: str,
+    *,
+    require_https: bool = False,
+) -> bool:
+    # Persistence-time validation only. Any outbound client must also apply a
+    # provider allowlist and validate DNS answers and every redirect target.
     try:
         parsed = urlsplit(value)
         port = parsed.port
