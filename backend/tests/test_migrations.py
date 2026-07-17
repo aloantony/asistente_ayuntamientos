@@ -122,7 +122,9 @@ REFERENCE_CATALOG_COLUMNS = {
         "provider_key",
         "source_url",
         "content_sha256",
+        "definition_sha256",
         "raw_catalog_json",
+        "normalized_definition_json",
         "retrieved_at",
         "service_count",
         "group_count",
@@ -364,6 +366,42 @@ def assert_reference_catalog_schema(inspector: Inspector) -> None:
     } == {
         "ix_org_reference_layer_settings_layer",
         "ix_org_reference_layer_settings_updated_by",
+    }
+
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_catalog_snapshots"
+        )
+    } == {
+        "uq_reference_catalog_snapshots_provider_hashes",
+        "uq_reference_catalog_snapshots_provider_id",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("reference_services")
+    } == {
+        "uq_reference_services_provider_id",
+        "uq_reference_services_provider_source",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("reference_layers")
+    } == {
+        "uq_reference_layers_provider_id",
+        "uq_reference_layers_provider_source",
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("reference_services")
+    } == {("provider_key", "last_seen_snapshot_id")}
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("reference_layers")
+    } == {
+        ("provider_key", "last_seen_snapshot_id"),
+        ("provider_key", "service_id"),
+        ("provider_key", "parent_id"),
     }
 
 
