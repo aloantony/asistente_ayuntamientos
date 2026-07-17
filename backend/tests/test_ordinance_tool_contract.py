@@ -1,6 +1,8 @@
 import json
+from types import SimpleNamespace
 
 import pytest
+from app.agent_office.service import _tool_input_for_task
 from app.assistant import tools as assistant_tools
 
 
@@ -77,3 +79,27 @@ def test_manifest_input_validation_is_server_side(tool_input, message):
 def test_catalog_input_validation_is_server_side(tool_input, message):
     with pytest.raises(ValueError, match=message):
         assistant_tools._validate_ordinance_catalog_tool_input(tool_input)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+    ],
+)
+def test_agent_office_removes_internal_organization_from_ordinance_input(action):
+    task = SimpleNamespace(
+        requested_action=action,
+        input={"organization_id": 42, "province": "Burgos"},
+        organization_id=42,
+        description="Consulta",
+        title="Inventario",
+        priority="medium",
+    )
+
+    tool_input = _tool_input_for_task(task)
+
+    assert "organization_id" not in tool_input
+    assert tool_input["province"] == "Burgos"
