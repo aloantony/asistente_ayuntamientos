@@ -1,5 +1,7 @@
 import hashlib
 import json
+import struct
+import zlib
 from datetime import datetime, timezone
 from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
@@ -18,10 +20,15 @@ from app.reference_layers.catalog import (
 )
 from app.reference_layers.models import ReferenceLayer
 from app.reference_layers.wms_cache import (
+    CACHE_INDEX_KEY,
+    CACHE_SIZES_KEY,
+    CACHE_TOTAL_KEY,
+    WMS_CACHE_BUDGET_BYTES,
     CachedWMSResponse,
     build_wms_cache_key,
     deserialize_cached_wms_response,
     serialize_cached_wms_response,
+    store_cached_wms_response,
 )
 from app.reference_layers.wms_proxy import (
     PNG_SIGNATURE,
@@ -29,6 +36,7 @@ from app.reference_layers.wms_proxy import (
     WMSResponse,
     WMSUpstreamUnavailableError,
     _require_public_addresses,
+    _validate_response_body,
     build_identify_request,
     build_tile_request,
     tile_bbox,
@@ -45,6 +53,9 @@ def make_wms_definition(
     license_status: str = "approved",
     queryable: bool = True,
     supported_crs: tuple[str, ...] = ("EPSG:25830", "EPSG:3857"),
+    min_zoom: int | None = None,
+    max_zoom: int | None = None,
+    bounds: dict[str, float] | None = None,
 ) -> ReferenceCatalogDefinition:
     return ReferenceCatalogDefinition(
         provider_key="siur",
@@ -85,8 +96,11 @@ def make_wms_definition(
                 style_name="plau_cyl_clasificacion_color",
                 image_format="image/png",
                 supported_crs=supported_crs,
+                bounds=bounds,
                 default_visible=True,
                 default_opacity=Decimal("0.750"),
+                min_zoom=min_zoom,
+                max_zoom=max_zoom,
                 queryable=queryable,
                 styles=(
                     ReferenceLayerStyleDefinition(
@@ -128,11 +142,26 @@ def prepare_viewer(
 
 
 def fake_png_response() -> WMSResponse:
-    body = PNG_SIGNATURE + b"centrally-proxied"
+    body = make_png(256, 256)
     return WMSResponse(
         body=body,
         content_type="image/png",
         etag=f'"{hashlib.sha256(body).hexdigest()}"',
+    )
+
+
+def make_png(width: int, height: int) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", checksum)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    rows = b"".join(b"\x00" + b"\x00" * (width * 4) for _ in range(height))
+    return (
+        PNG_SIGNATURE
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
     )
 
 
@@ -261,6 +290,41 @@ def test_tile_route_requires_web_mercator_support(
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Layer does not support web map tiles"
+
+
+def test_tile_route_respects_layer_zoom_and_geographic_bounds(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(
+        db,
+        min_zoom=5,
+        max_zoom=15,
+        bounds={"west": -7.1, "south": 39.9, "east": -1.7, "north": 43.3},
+    )
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden_fetch(request):
+        raise AssertionError("out-of-scope tile must not call upstream")
+
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden_fetch)
+    prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}/tiles"
+    headers = headers_for(viewer)
+
+    wrong_zoom = client.get(f"{prefix}/4/0/0.png", headers=headers)
+    outside_bounds = client.get(f"{prefix}/5/0/0.png", headers=headers)
+
+    assert wrong_zoom.status_code == 404
+    assert outside_bounds.status_code == 404
 
 
 def test_cache_hit_and_conditional_request_do_not_reach_upstream(
@@ -539,6 +603,63 @@ def test_cache_keys_are_opaque_deterministic_and_integrity_checked() -> None:
     assert deserialize_cached_wms_response(serialized) == cached
     with pytest.raises(ValueError, match="digest"):
         deserialize_cached_wms_response(serialized + b"tampered")
+
+
+def test_cache_store_uses_an_atomic_namespace_budget(monkeypatch) -> None:
+    calls = []
+
+    class FakeRedis:
+        def eval(self, *args):
+            calls.append(args)
+            return len(args[-5])
+
+    monkeypatch.setattr(
+        "app.reference_layers.wms_cache.get_redis_connection",
+        lambda: FakeRedis(),
+    )
+    upstream = fake_png_response()
+    cached = CachedWMSResponse(
+        body=upstream.body,
+        content_type=upstream.content_type,
+        etag=upstream.etag,
+        stored_at=100,
+        fresh_for_seconds=900,
+    )
+
+    store_cached_wms_response("reference-wms:v1:test", cached, stale_ttl_seconds=3600)
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call[1:6] == (
+        4,
+        "reference-wms:v1:test",
+        CACHE_INDEX_KEY,
+        CACHE_SIZES_KEY,
+        CACHE_TOTAL_KEY,
+    )
+    assert call[-2] == WMS_CACHE_BUDGET_BYTES
+
+
+def test_png_validation_rejects_wrong_tile_dimensions_and_invalid_headers() -> None:
+    _validate_response_body(
+        make_png(256, 256),
+        operation="tile",
+        content_type="image/png",
+    )
+    with pytest.raises(WMSUpstreamUnavailableError, match="dimensions"):
+        _validate_response_body(
+            make_png(512, 512),
+            operation="tile",
+            content_type="image/png",
+        )
+    invalid_crc = bytearray(make_png(256, 256))
+    invalid_crc[29] ^= 1
+    with pytest.raises(WMSUpstreamUnavailableError, match="PNG header"):
+        _validate_response_body(
+            bytes(invalid_crc),
+            operation="tile",
+            content_type="image/png",
+        )
 
 
 def test_feature_collection_parser_rejects_duplicates_constants_and_limits() -> None:
