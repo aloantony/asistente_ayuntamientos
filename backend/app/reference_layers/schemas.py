@@ -57,9 +57,9 @@ class ReferenceLayerRead(BaseModel):
     bounds_json: dict[str, Any] | None
     sort_order: int
     default_visible: bool
-    default_opacity: Decimal
+    default_opacity: float
     effective_visible: bool = False
-    effective_opacity: Decimal = Decimal("1")
+    effective_opacity: float = 1.0
     min_zoom: int | None
     max_zoom: int | None
     min_scale_denominator: Decimal | None
@@ -97,7 +97,7 @@ class ReferenceLayerSettingRead(BaseModel):
     organization_id: int
     layer_id: int
     visible: bool | None
-    opacity: Decimal | None
+    opacity: float | None
     updated_by_id: int | None
     created_at: datetime
     updated_at: datetime
