@@ -152,11 +152,30 @@ def _refuse_unsafe_legacy_history_mutation(connection) -> None:
         )
 
 
+def _include_object(
+    object_,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to,
+) -> bool:
+    """Ignore only the table owned by the PostGIS extension."""
+
+    return not (
+        type_ == "table"
+        and reflected
+        and compare_to is None
+        and name == "spatial_ref_sys"
+        and getattr(object_, "schema", None) in {None, "public"}
+    )
+
+
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=_include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -173,7 +192,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=_include_object,
+        )
 
         with context.begin_transaction():
             _refuse_unsafe_legacy_history_mutation(connection)
