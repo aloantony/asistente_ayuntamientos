@@ -38,6 +38,10 @@ router = APIRouter(tags=["reference-layers"])
 def get_reference_catalog(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    provider_key: Annotated[
+        str,
+        Query(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_.:/-]*$"),
+    ],
     organization_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> ReferenceCatalogRead:
     require_catalog_view(db, current_user, organization_id)
@@ -46,8 +50,8 @@ def get_reference_catalog(
         .where(
             ReferenceCatalogSnapshot.is_current.is_(True),
             ReferenceCatalogSnapshot.status == "applied",
+            ReferenceCatalogSnapshot.provider_key == provider_key,
         )
-        .order_by(ReferenceCatalogSnapshot.provider_key)
     )
     if snapshot is None:
         raise HTTPException(
