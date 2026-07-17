@@ -1,0 +1,691 @@
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
+import hashlib
+import json
+import re
+from typing import Any
+from urllib.parse import urlsplit
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from app.reference_layers.models import (
+    ReferenceCatalogSnapshot,
+    ReferenceLayer,
+    ReferenceService,
+)
+
+PROTOCOLS = {"wms", "wfs", "wmts", "xyz", "arcgis_rest", "local"}
+SERVICE_STATUSES = {"active", "degraded", "disabled"}
+LAYER_STATUSES = {"active", "degraded", "disabled"}
+LICENSE_STATUSES = {"pending", "approved", "restricted"}
+CACHE_POLICIES = {"none", "on_demand", "mirror"}
+NODE_TYPES = {"group", "layer"}
+ROLES = {"base", "overlay"}
+RENDERERS = {"raster_tile", "vector_tile"}
+DELIVERY_MODES = {"proxy", "mirror"}
+KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+
+
+class ReferenceCatalogValidationError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ReferenceServiceDefinition:
+    source_key: str
+    title: str
+    upstream_protocol: str
+    base_url: str
+    capabilities_url: str | None = None
+    version: str | None = None
+    default_crs: str | None = None
+    default_format: str | None = None
+    attribution: str | None = None
+    license_name: str | None = None
+    license_url: str | None = None
+    license_status: str = "pending"
+    cache_policy: str = "none"
+    capabilities_sha256: str | None = None
+    status: str = "active"
+    last_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ReferenceLayerDefinition:
+    source_key: str
+    node_type: str
+    title: str
+    parent_key: str | None = None
+    service_key: str | None = None
+    description: str | None = None
+    remote_name: str | None = None
+    role: str | None = None
+    renderer: str | None = None
+    delivery_mode: str | None = None
+    style_name: str | None = None
+    image_format: str | None = None
+    supported_crs: tuple[str, ...] = ()
+    bounds: dict[str, Any] | None = None
+    options: dict[str, Any] | None = None
+    sort_order: int = 0
+    default_visible: bool = False
+    default_opacity: Decimal = Decimal("1")
+    min_zoom: int | None = None
+    max_zoom: int | None = None
+    min_scale_denominator: Decimal | None = None
+    max_scale_denominator: Decimal | None = None
+    queryable: bool = False
+    downloadable: bool = False
+    legend_url: str | None = None
+    metadata_url: str | None = None
+    status: str = "active"
+
+
+@dataclass(frozen=True)
+class ReferenceCatalogDefinition:
+    provider_key: str
+    source_url: str
+    raw_catalog: dict[str, Any]
+    services: tuple[ReferenceServiceDefinition, ...]
+    layers: tuple[ReferenceLayerDefinition, ...]
+    unresolved_count: int = 0
+    retrieved_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+@dataclass(frozen=True)
+class ReferenceCatalogSyncPlan:
+    definition: ReferenceCatalogDefinition
+    content_sha256: str
+    new_services: tuple[str, ...]
+    updated_services: tuple[str, ...]
+    missing_services: tuple[str, ...]
+    new_layers: tuple[str, ...]
+    updated_layers: tuple[str, ...]
+    missing_layers: tuple[str, ...]
+    unchanged_count: int
+    blocking_issues: tuple[str, ...]
+
+    @property
+    def service_count(self) -> int:
+        return len(self.definition.services)
+
+    @property
+    def group_count(self) -> int:
+        return sum(layer.node_type == "group" for layer in self.definition.layers)
+
+    @property
+    def layer_count(self) -> int:
+        return sum(layer.node_type == "layer" for layer in self.definition.layers)
+
+
+def canonical_catalog_sha256(raw_catalog: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        raw_catalog,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_catalog_sync_plan(
+    db: Session,
+    definition: ReferenceCatalogDefinition,
+) -> ReferenceCatalogSyncPlan:
+    issues = validate_catalog_definition(definition)
+    try:
+        content_sha256 = canonical_catalog_sha256(definition.raw_catalog)
+    except (TypeError, ValueError):
+        content_sha256 = "0" * 64
+        issues.append("raw_catalog must contain only JSON-compatible values")
+    if issues:
+        return ReferenceCatalogSyncPlan(
+            definition=definition,
+            content_sha256=content_sha256,
+            new_services=(),
+            updated_services=(),
+            missing_services=(),
+            new_layers=(),
+            updated_layers=(),
+            missing_layers=(),
+            unchanged_count=0,
+            blocking_issues=tuple(issues),
+        )
+
+    existing_services = {
+        service.source_key: service
+        for service in db.scalars(
+            select(ReferenceService).where(
+                ReferenceService.provider_key == definition.provider_key
+            )
+        )
+    }
+    existing_layers = {
+        layer.source_key: layer
+        for layer in db.scalars(
+            select(ReferenceLayer)
+            .options(
+                selectinload(ReferenceLayer.parent),
+                selectinload(ReferenceLayer.service),
+            )
+            .where(ReferenceLayer.provider_key == definition.provider_key)
+        )
+    }
+
+    new_services: list[str] = []
+    updated_services: list[str] = []
+    missing_services: list[str] = []
+    new_layers: list[str] = []
+    updated_layers: list[str] = []
+    missing_layers: list[str] = []
+    unchanged_count = 0
+
+    service_definitions = {service.source_key: service for service in definition.services}
+    for key, service_definition in service_definitions.items():
+        existing = existing_services.get(key)
+        if existing is None:
+            new_services.append(key)
+        elif _service_signature(existing) != _service_definition_signature(
+            service_definition
+        ):
+            updated_services.append(key)
+        else:
+            unchanged_count += 1
+    for key, existing in existing_services.items():
+        if key not in service_definitions:
+            if existing.status != "missing":
+                missing_services.append(key)
+            else:
+                unchanged_count += 1
+
+    layer_definitions = {layer.source_key: layer for layer in definition.layers}
+    for key, layer_definition in layer_definitions.items():
+        existing = existing_layers.get(key)
+        if existing is None:
+            new_layers.append(key)
+        elif _layer_signature(existing) != _layer_definition_signature(
+            layer_definition
+        ):
+            updated_layers.append(key)
+        else:
+            unchanged_count += 1
+    for key, existing in existing_layers.items():
+        if key not in layer_definitions:
+            if existing.status != "missing":
+                missing_layers.append(key)
+            else:
+                unchanged_count += 1
+
+    return ReferenceCatalogSyncPlan(
+        definition=definition,
+        content_sha256=content_sha256,
+        new_services=tuple(sorted(new_services)),
+        updated_services=tuple(sorted(updated_services)),
+        missing_services=tuple(sorted(missing_services)),
+        new_layers=tuple(sorted(new_layers)),
+        updated_layers=tuple(sorted(updated_layers)),
+        missing_layers=tuple(sorted(missing_layers)),
+        unchanged_count=unchanged_count,
+        blocking_issues=(),
+    )
+
+
+def apply_catalog_definition(
+    db: Session,
+    definition: ReferenceCatalogDefinition,
+) -> tuple[ReferenceCatalogSnapshot, ReferenceCatalogSyncPlan]:
+    plan = build_catalog_sync_plan(db, definition)
+    if plan.blocking_issues:
+        raise ReferenceCatalogValidationError("; ".join(plan.blocking_issues))
+
+    try:
+        snapshot = db.scalar(
+            select(ReferenceCatalogSnapshot).where(
+                ReferenceCatalogSnapshot.provider_key == definition.provider_key,
+                ReferenceCatalogSnapshot.content_sha256 == plan.content_sha256,
+            )
+        )
+        if snapshot is None:
+            snapshot = ReferenceCatalogSnapshot(
+                provider_key=definition.provider_key,
+                source_url=definition.source_url,
+                content_sha256=plan.content_sha256,
+                raw_catalog_json=definition.raw_catalog,
+                retrieved_at=definition.retrieved_at,
+                service_count=plan.service_count,
+                group_count=plan.group_count,
+                layer_count=plan.layer_count,
+                unresolved_count=definition.unresolved_count,
+                status="validated",
+                is_current=False,
+            )
+            db.add(snapshot)
+            db.flush()
+        else:
+            snapshot.source_url = definition.source_url
+            snapshot.raw_catalog_json = definition.raw_catalog
+            snapshot.retrieved_at = definition.retrieved_at
+            snapshot.service_count = plan.service_count
+            snapshot.group_count = plan.group_count
+            snapshot.layer_count = plan.layer_count
+            snapshot.unresolved_count = definition.unresolved_count
+
+        services = {
+            service.source_key: service
+            for service in db.scalars(
+                select(ReferenceService)
+                .where(ReferenceService.provider_key == definition.provider_key)
+                .with_for_update()
+            )
+        }
+        incoming_service_keys = {item.source_key for item in definition.services}
+        for key, service in services.items():
+            if key not in incoming_service_keys:
+                service.status = "missing"
+        for item in definition.services:
+            service = services.get(item.source_key)
+            if service is None:
+                service = ReferenceService(
+                    provider_key=definition.provider_key,
+                    source_key=item.source_key,
+                    last_seen_snapshot_id=snapshot.id,
+                )
+                db.add(service)
+                services[item.source_key] = service
+            _apply_service_definition(service, item, snapshot.id)
+        db.flush()
+
+        layers = {
+            layer.source_key: layer
+            for layer in db.scalars(
+                select(ReferenceLayer)
+                .where(ReferenceLayer.provider_key == definition.provider_key)
+                .with_for_update()
+            )
+        }
+        incoming_layer_keys = {item.source_key for item in definition.layers}
+        for key, layer in layers.items():
+            if key not in incoming_layer_keys:
+                layer.status = "missing"
+
+        for item in _topological_layers(definition.layers):
+            layer = layers.get(item.source_key)
+            if layer is None:
+                layer = ReferenceLayer(
+                    provider_key=definition.provider_key,
+                    source_key=item.source_key,
+                    node_type=item.node_type,
+                    title=item.title,
+                    last_seen_snapshot_id=snapshot.id,
+                )
+                db.add(layer)
+                layers[item.source_key] = layer
+                db.flush()
+            parent = layers.get(item.parent_key) if item.parent_key else None
+            service = services.get(item.service_key) if item.service_key else None
+            _apply_layer_definition(layer, item, snapshot.id, parent, service)
+
+        current_snapshots = list(
+            db.scalars(
+                select(ReferenceCatalogSnapshot)
+                .where(
+                    ReferenceCatalogSnapshot.provider_key == definition.provider_key,
+                    ReferenceCatalogSnapshot.is_current.is_(True),
+                    ReferenceCatalogSnapshot.id != snapshot.id,
+                )
+                .with_for_update()
+            )
+        )
+        for current in current_snapshots:
+            current.is_current = False
+        db.flush()
+        snapshot.status = "applied"
+        snapshot.is_current = True
+        db.commit()
+        db.refresh(snapshot)
+        return snapshot, plan
+    except Exception:
+        db.rollback()
+        raise
+
+
+def validate_catalog_definition(
+    definition: ReferenceCatalogDefinition,
+) -> list[str]:
+    issues: list[str] = []
+    if not KEY_RE.fullmatch(definition.provider_key):
+        issues.append("Invalid provider_key")
+    if not _safe_http_url(definition.source_url, require_https=True):
+        issues.append("Catalog source_url must be an absolute HTTPS URL")
+    if definition.unresolved_count < 0:
+        issues.append("unresolved_count cannot be negative")
+    if definition.retrieved_at.tzinfo is None:
+        issues.append("retrieved_at must be timezone-aware")
+
+    service_keys: set[str] = set()
+    for service in definition.services:
+        if service.source_key in service_keys:
+            issues.append(f"Duplicate service key: {service.source_key}")
+        service_keys.add(service.source_key)
+        if not KEY_RE.fullmatch(service.source_key):
+            issues.append(f"Invalid service key: {service.source_key}")
+        if not service.title.strip():
+            issues.append(f"Service title is empty: {service.source_key}")
+        if service.upstream_protocol not in PROTOCOLS:
+            issues.append(f"Unsupported protocol: {service.source_key}")
+        if not _safe_http_url(service.base_url):
+            issues.append(f"Invalid service URL: {service.source_key}")
+        if service.capabilities_url and not _safe_http_url(
+            service.capabilities_url
+        ):
+            issues.append(f"Invalid capabilities URL: {service.source_key}")
+        if service.license_url and not _safe_http_url(service.license_url):
+            issues.append(f"Invalid license URL: {service.source_key}")
+        if service.license_status not in LICENSE_STATUSES:
+            issues.append(f"Invalid license status: {service.source_key}")
+        if service.cache_policy not in CACHE_POLICIES:
+            issues.append(f"Invalid cache policy: {service.source_key}")
+        if service.status not in SERVICE_STATUSES:
+            issues.append(f"Invalid service status: {service.source_key}")
+        if service.capabilities_sha256 and not re.fullmatch(
+            r"[0-9a-f]{64}", service.capabilities_sha256
+        ):
+            issues.append(f"Invalid capabilities hash: {service.source_key}")
+
+    layer_definitions: dict[str, ReferenceLayerDefinition] = {}
+    for layer in definition.layers:
+        if layer.source_key in layer_definitions:
+            issues.append(f"Duplicate layer key: {layer.source_key}")
+        layer_definitions[layer.source_key] = layer
+        if not KEY_RE.fullmatch(layer.source_key):
+            issues.append(f"Invalid layer key: {layer.source_key}")
+        if not layer.title.strip():
+            issues.append(f"Layer title is empty: {layer.source_key}")
+        if layer.node_type not in NODE_TYPES:
+            issues.append(f"Invalid node type: {layer.source_key}")
+        if layer.status not in LAYER_STATUSES:
+            issues.append(f"Invalid layer status: {layer.source_key}")
+        if layer.sort_order < 0:
+            issues.append(f"Negative sort order: {layer.source_key}")
+        if not Decimal("0") <= layer.default_opacity <= Decimal("1"):
+            issues.append(f"Invalid opacity: {layer.source_key}")
+        if not _valid_zoom_range(layer.min_zoom, layer.max_zoom):
+            issues.append(f"Invalid zoom range: {layer.source_key}")
+        for scale in (
+            layer.min_scale_denominator,
+            layer.max_scale_denominator,
+        ):
+            if scale is not None and scale <= 0:
+                issues.append(f"Invalid scale denominator: {layer.source_key}")
+        if layer.node_type == "group":
+            if any(
+                value is not None
+                for value in (
+                    layer.service_key,
+                    layer.role,
+                    layer.renderer,
+                    layer.delivery_mode,
+                )
+            ):
+                issues.append(f"Group has layer-only fields: {layer.source_key}")
+        elif layer.node_type == "layer":
+            if layer.service_key not in service_keys:
+                issues.append(f"Unknown service for layer: {layer.source_key}")
+            if layer.role not in ROLES:
+                issues.append(f"Invalid role: {layer.source_key}")
+            if layer.renderer not in RENDERERS:
+                issues.append(f"Invalid renderer: {layer.source_key}")
+            if layer.delivery_mode not in DELIVERY_MODES:
+                issues.append(f"Invalid delivery mode: {layer.source_key}")
+        for label, url in (
+            ("legend", layer.legend_url),
+            ("metadata", layer.metadata_url),
+        ):
+            if url and not _safe_http_url(url):
+                issues.append(f"Invalid {label} URL: {layer.source_key}")
+
+    for layer in definition.layers:
+        if layer.parent_key is None:
+            continue
+        parent = layer_definitions.get(layer.parent_key)
+        if parent is None:
+            issues.append(f"Unknown parent for layer: {layer.source_key}")
+        elif parent.node_type != "group":
+            issues.append(f"Parent is not a group: {layer.source_key}")
+
+    issues.extend(_hierarchy_issues(layer_definitions))
+    return sorted(set(issues))
+
+
+def _safe_http_url(value: str, *, require_https: bool = False) -> bool:
+    parsed = urlsplit(value)
+    allowed_schemes = {"https"} if require_https else {"http", "https"}
+    return bool(
+        parsed.scheme in allowed_schemes
+        and parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.fragment == ""
+    )
+
+
+def _valid_zoom_range(min_zoom: int | None, max_zoom: int | None) -> bool:
+    if min_zoom is not None and not 0 <= min_zoom <= 24:
+        return False
+    if max_zoom is not None and not 0 <= max_zoom <= 24:
+        return False
+    return min_zoom is None or max_zoom is None or min_zoom <= max_zoom
+
+
+def _hierarchy_issues(
+    definitions: dict[str, ReferenceLayerDefinition],
+) -> list[str]:
+    issues: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(key: str) -> None:
+        if key in visited:
+            return
+        if key in visiting:
+            issues.append(f"Layer hierarchy contains a cycle at: {key}")
+            return
+        visiting.add(key)
+        parent_key = definitions[key].parent_key
+        if parent_key in definitions:
+            visit(parent_key)
+        visiting.remove(key)
+        visited.add(key)
+
+    for key in definitions:
+        visit(key)
+    return issues
+
+
+def _topological_layers(
+    definitions: tuple[ReferenceLayerDefinition, ...],
+) -> list[ReferenceLayerDefinition]:
+    by_key = {item.source_key: item for item in definitions}
+    depth_cache: dict[str, int] = {}
+
+    def depth(key: str) -> int:
+        if key in depth_cache:
+            return depth_cache[key]
+        parent_key = by_key[key].parent_key
+        value = 0 if parent_key is None else depth(parent_key) + 1
+        depth_cache[key] = value
+        return value
+
+    return sorted(definitions, key=lambda item: (depth(item.source_key), item.sort_order, item.source_key))
+
+
+def _service_definition_signature(item: ReferenceServiceDefinition) -> tuple:
+    return (
+        item.title,
+        item.upstream_protocol,
+        item.base_url,
+        item.capabilities_url,
+        item.version,
+        item.default_crs,
+        item.default_format,
+        item.attribution,
+        item.license_name,
+        item.license_url,
+        item.license_status,
+        item.cache_policy,
+        item.capabilities_sha256,
+        item.status,
+        item.last_error,
+    )
+
+
+def _service_signature(item: ReferenceService) -> tuple:
+    return (
+        item.title,
+        item.upstream_protocol,
+        item.base_url,
+        item.capabilities_url,
+        item.version,
+        item.default_crs,
+        item.default_format,
+        item.attribution,
+        item.license_name,
+        item.license_url,
+        item.license_status,
+        item.cache_policy,
+        item.capabilities_sha256,
+        item.status,
+        item.last_error,
+    )
+
+
+def _layer_definition_signature(item: ReferenceLayerDefinition) -> tuple:
+    return (
+        item.parent_key,
+        item.service_key,
+        item.node_type,
+        item.title,
+        item.description,
+        item.remote_name,
+        item.role,
+        item.renderer,
+        item.delivery_mode,
+        item.style_name,
+        item.image_format,
+        tuple(item.supported_crs),
+        item.bounds,
+        item.options,
+        item.sort_order,
+        item.default_visible,
+        Decimal(item.default_opacity),
+        item.min_zoom,
+        item.max_zoom,
+        item.min_scale_denominator,
+        item.max_scale_denominator,
+        item.queryable,
+        item.downloadable,
+        item.legend_url,
+        item.metadata_url,
+        item.status,
+    )
+
+
+def _layer_signature(item: ReferenceLayer) -> tuple:
+    return (
+        item.parent.source_key if item.parent else None,
+        item.service.source_key if item.service else None,
+        item.node_type,
+        item.title,
+        item.description,
+        item.remote_name,
+        item.role,
+        item.renderer,
+        item.delivery_mode,
+        item.style_name,
+        item.image_format,
+        tuple(item.supported_crs_json or ()),
+        item.bounds_json,
+        item.options_json,
+        item.sort_order,
+        item.default_visible,
+        Decimal(item.default_opacity),
+        item.min_zoom,
+        item.max_zoom,
+        item.min_scale_denominator,
+        item.max_scale_denominator,
+        item.queryable,
+        item.downloadable,
+        item.legend_url,
+        item.metadata_url,
+        item.status,
+    )
+
+
+def _apply_service_definition(
+    service: ReferenceService,
+    item: ReferenceServiceDefinition,
+    snapshot_id: int,
+) -> None:
+    service.last_seen_snapshot_id = snapshot_id
+    for name, value in (
+        ("title", item.title),
+        ("upstream_protocol", item.upstream_protocol),
+        ("base_url", item.base_url),
+        ("capabilities_url", item.capabilities_url),
+        ("version", item.version),
+        ("default_crs", item.default_crs),
+        ("default_format", item.default_format),
+        ("attribution", item.attribution),
+        ("license_name", item.license_name),
+        ("license_url", item.license_url),
+        ("license_status", item.license_status),
+        ("cache_policy", item.cache_policy),
+        ("capabilities_sha256", item.capabilities_sha256),
+        ("status", item.status),
+        ("last_error", item.last_error),
+    ):
+        setattr(service, name, value)
+
+
+def _apply_layer_definition(
+    layer: ReferenceLayer,
+    item: ReferenceLayerDefinition,
+    snapshot_id: int,
+    parent: ReferenceLayer | None,
+    service: ReferenceService | None,
+) -> None:
+    layer.last_seen_snapshot_id = snapshot_id
+    layer.parent_id = parent.id if parent else None
+    layer.service_id = service.id if service else None
+    values = {
+        "node_type": item.node_type,
+        "title": item.title,
+        "description": item.description,
+        "remote_name": item.remote_name,
+        "role": item.role,
+        "renderer": item.renderer,
+        "delivery_mode": item.delivery_mode,
+        "style_name": item.style_name,
+        "image_format": item.image_format,
+        "supported_crs_json": list(item.supported_crs) or None,
+        "bounds_json": item.bounds,
+        "options_json": item.options,
+        "sort_order": item.sort_order,
+        "default_visible": item.default_visible,
+        "default_opacity": item.default_opacity,
+        "min_zoom": item.min_zoom,
+        "max_zoom": item.max_zoom,
+        "min_scale_denominator": item.min_scale_denominator,
+        "max_scale_denominator": item.max_scale_denominator,
+        "queryable": item.queryable,
+        "downloadable": item.downloadable,
+        "legend_url": item.legend_url,
+        "metadata_url": item.metadata_url,
+        "status": item.status,
+    }
+    for name, value in values.items():
+        setattr(layer, name, value)
