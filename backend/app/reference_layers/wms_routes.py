@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from math import isfinite
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -25,6 +25,15 @@ from app.reference_layers.wms_cache import (
     build_wms_cache_key,
     get_cached_wms_response,
     store_cached_wms_response,
+)
+from app.reference_layers.wms_delivery import (
+    AttestedWMSDelivery,
+    WMSDeliveryCapabilityError,
+    WMSDeliveryEvidenceUnavailableError,
+    WMSDeliveryIdentifyError,
+    WMSDeliveryLicenseDeniedError,
+    WMSDeliveryWebMercatorError,
+    resolve_attested_wms_delivery,
 )
 from app.reference_layers.wms_proxy import (
     UnsafeWMSEndpointError,
@@ -63,10 +72,7 @@ class ReferenceWMSContext:
     layer: ReferenceLayer
     service: ReferenceService
     style: ReferenceLayerStyle | None
-
-    @property
-    def style_name(self) -> str:
-        return self.style.source_key if self.style is not None else ""
+    delivery: AttestedWMSDelivery
 
 
 @router.get(
@@ -91,15 +97,16 @@ def get_reference_layer_tile(
         organization_id=organization_id,
         layer_id=layer_id,
         style_id=style_id,
+        operation="tile",
     )
     _require_rate_limit(_tile_rate_limiter, "tile", current_user.id)
     _require_tile_scope(context.layer, z=z, x=x, y=y)
     try:
         wms_request = build_tile_request(
-            endpoint_url=context.service.base_url,
-            version=context.service.version or "",
-            remote_name=context.layer.remote_name or "",
-            style_name=context.style_name,
+            endpoint_url=context.delivery.endpoint_url,
+            version=context.delivery.version,
+            remote_name=context.delivery.remote_name,
+            style_name=context.delivery.style_name,
             z=z,
             x=x,
             y=y,
@@ -134,14 +141,15 @@ def get_reference_layer_legend(
         organization_id=organization_id,
         layer_id=layer_id,
         style_id=style_id,
+        operation="legend",
     )
     _require_rate_limit(_legend_rate_limiter, "legend", current_user.id)
     try:
         wms_request = build_legend_request(
-            endpoint_url=context.service.base_url,
-            version=context.service.version or "",
-            remote_name=context.layer.remote_name or "",
-            style_name=context.style_name,
+            endpoint_url=context.delivery.endpoint_url,
+            version=context.delivery.version,
+            remote_name=context.delivery.remote_name,
+            style_name=context.delivery.style_name,
         )
     except ValueError:
         raise HTTPException(
@@ -182,15 +190,16 @@ def identify_reference_layer(
         layer_id=layer_id,
         style_id=style_id,
         require_queryable=True,
+        operation="identify",
     )
     _require_rate_limit(_identify_rate_limiter, "identify", current_user.id)
     _require_tile_scope(context.layer, z=z, x=x, y=y)
     try:
         wms_request = build_identify_request(
-            endpoint_url=context.service.base_url,
-            version=context.service.version or "",
-            remote_name=context.layer.remote_name or "",
-            style_name=context.style_name,
+            endpoint_url=context.delivery.endpoint_url,
+            version=context.delivery.version,
+            remote_name=context.delivery.remote_name,
+            style_name=context.delivery.style_name,
             z=z,
             x=x,
             y=y,
@@ -236,6 +245,7 @@ def _resolve_wms_context(
     organization_id: int,
     layer_id: int,
     style_id: int | None,
+    operation: Literal["tile", "legend", "identify"],
     require_queryable: bool = False,
 ) -> ReferenceWMSContext:
     require_catalog_view(db, current_user, organization_id)
@@ -256,38 +266,54 @@ def _resolve_wms_context(
         raise HTTPException(status_code=409, detail="Layer cannot be rendered")
     if require_queryable and not layer.queryable:
         raise HTTPException(status_code=409, detail="Layer is not queryable")
-    supported_crs = {
-        value.upper()
-        for value in (layer.supported_crs_json or [])
-        if isinstance(value, str)
-    }
-    if "EPSG:3857" not in supported_crs:
-        raise HTTPException(
-            status_code=409,
-            detail="Layer does not support web map tiles",
-        )
-    snapshot = layer.last_seen_snapshot
-    if not snapshot.is_current or snapshot.status != "applied":
-        raise HTTPException(
-            status_code=503,
-            detail="Reference layer catalog is not available",
-        )
     service = layer.service
     if (
         service is None
         or service.provider_key != SIUR_PROVIDER_KEY
         or service.upstream_protocol != "wms"
         or service.status not in {"active", "degraded"}
-        or service.version not in {"1.1.1", "1.3.0"}
     ):
         raise HTTPException(status_code=409, detail="Layer cannot be rendered")
-    if service.license_status != "approved":
+    style = _resolve_style(db, layer=layer, style_id=style_id)
+    try:
+        delivery = resolve_attested_wms_delivery(
+            db,
+            layer=layer,
+            service=service,
+            style=style,
+            operation=operation,
+        )
+    except WMSDeliveryLicenseDeniedError:
         raise HTTPException(
             status_code=451,
             detail="Reference layer license is not approved",
-        )
-    style = _resolve_style(db, layer=layer, style_id=style_id)
-    return ReferenceWMSContext(layer=layer, service=service, style=style)
+        ) from None
+    except WMSDeliveryWebMercatorError:
+        raise HTTPException(
+            status_code=409,
+            detail="Layer does not support web map tiles",
+        ) from None
+    except WMSDeliveryIdentifyError:
+        raise HTTPException(
+            status_code=409,
+            detail="Layer is not queryable",
+        ) from None
+    except WMSDeliveryCapabilityError:
+        raise HTTPException(
+            status_code=409,
+            detail="Layer cannot be rendered",
+        ) from None
+    except WMSDeliveryEvidenceUnavailableError:
+        raise HTTPException(
+            status_code=503,
+            detail="Reference layer delivery is not attested",
+        ) from None
+    return ReferenceWMSContext(
+        layer=layer,
+        service=service,
+        style=style,
+        delivery=delivery,
+    )
 
 
 def _resolve_style(
@@ -334,11 +360,14 @@ def _cached_binary_response(
     fresh_seconds: int,
     stale_seconds: int,
 ) -> Response:
-    cache_enabled = context.service.cache_policy in {"mirror", "on_demand"}
+    cache_enabled = (
+        context.delivery.allow_cache
+        and context.service.cache_policy in {"mirror", "on_demand"}
+    )
     cache_key = build_wms_cache_key(
         {
             "coordinates": cache_coordinates,
-            "definition_sha256": context.layer.last_seen_snapshot.definition_sha256,
+            "attestation_sha256": context.delivery.attestation_sha256,
             "layer_id": context.layer.id,
             "operation": wms_request.operation,
             "provider_key": context.layer.provider_key,
