@@ -23,7 +23,9 @@ def upgrade() -> None:
         sa.Column("provider_key", sa.String(length=64), nullable=False),
         sa.Column("source_url", sa.Text(), nullable=False),
         sa.Column("content_sha256", sa.String(length=64), nullable=False),
+        sa.Column("definition_sha256", sa.String(length=64), nullable=False),
         sa.Column("raw_catalog_json", sa.JSON(), nullable=False),
+        sa.Column("normalized_definition_json", sa.JSON(), nullable=False),
         sa.Column("retrieved_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("service_count", sa.Integer(), nullable=False),
         sa.Column("group_count", sa.Integer(), nullable=False),
@@ -66,6 +68,10 @@ def upgrade() -> None:
             name="ck_reference_catalog_snapshots_sha256",
         ),
         sa.CheckConstraint(
+            "definition_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_catalog_snapshots_definition_sha256",
+        ),
+        sa.CheckConstraint(
             "service_count >= 0 and group_count >= 0 and layer_count >= 0 "
             "and unresolved_count >= 0",
             name="ck_reference_catalog_snapshots_counts",
@@ -81,7 +87,8 @@ def upgrade() -> None:
         sa.UniqueConstraint(
             "provider_key",
             "content_sha256",
-            name="uq_reference_catalog_snapshots_provider_hash",
+            "definition_sha256",
+            name="uq_reference_catalog_snapshots_provider_hashes",
         ),
     )
     op.create_index(
@@ -183,6 +190,11 @@ def upgrade() -> None:
             "source_key",
             name="uq_reference_services_provider_source",
         ),
+        sa.UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_services_provider_id",
+        ),
     )
     op.create_index(
         "ix_reference_services_snapshot",
@@ -270,13 +282,15 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["service_id"],
-            ["reference_services.id"],
+            ["provider_key", "service_id"],
+            ["reference_services.provider_key", "reference_services.id"],
+            name="fk_reference_layers_provider_service",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["parent_id"],
-            ["reference_layers.id"],
+            ["provider_key", "parent_id"],
+            ["reference_layers.provider_key", "reference_layers.id"],
+            name="fk_reference_layers_provider_parent",
             ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
@@ -340,6 +354,11 @@ def upgrade() -> None:
             "provider_key",
             "source_key",
             name="uq_reference_layers_provider_source",
+        ),
+        sa.UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_layers_provider_id",
         ),
     )
     op.create_index(
