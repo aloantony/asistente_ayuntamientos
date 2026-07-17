@@ -9,6 +9,7 @@ class ReferenceCatalogSnapshotRead(BaseModel):
     id: int
     provider_key: str
     content_sha256: str
+    definition_sha256: str
     retrieved_at: datetime
     service_count: int
     group_count: int
@@ -30,11 +31,9 @@ class ReferenceServiceRead(BaseModel):
     default_format: str | None
     attribution: str | None
     license_name: str | None
-    license_url: str | None
     license_status: str
     cache_policy: str
     status: str
-    last_error: str | None
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -109,6 +108,7 @@ class ReferenceLayerSettingRead(BaseModel):
 class ReferenceCatalogSyncPlanRead(BaseModel):
     provider_key: str
     content_sha256: str
+    definition_sha256: str
     service_count: int
     group_count: int
     layer_count: int
