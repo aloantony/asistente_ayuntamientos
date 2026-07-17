@@ -418,7 +418,7 @@ type AssistantStreamTerminalEvent =
   | { type: "done"; event: AssistantStreamDone }
   | { type: "error"; error: ApiRequestError };
 
-const ASSISTANT_STREAM_INACTIVITY_TIMEOUT_MS = 90_000;
+const ASSISTANT_STREAM_INACTIVITY_TIMEOUT_MS = 240_000;
 const ASSISTANT_STREAM_TIMEOUT_MESSAGE =
   "El asistente ha tardado demasiado en responder. Inténtalo de nuevo.";
 
