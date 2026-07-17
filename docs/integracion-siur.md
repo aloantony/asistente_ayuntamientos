@@ -36,6 +36,8 @@ El catálogo conserva:
   cada uno con su hash, fecha y conteos;
 - servicios WMS, WFS, WMTS, XYZ, ArcGIS REST o locales;
 - nodos jerárquicos `group | layer` con identidad estable ajena al título visible;
+- estilos normalizados por capa, incluido el predeterminado y la disponibilidad
+  de leyenda, sin entregar al navegador la URL remota;
 - configuración de representación, escalas, CRS, consulta, descarga y procedencia;
 - estados `active | degraded | missing | disabled`;
 - preferencias de visibilidad y opacidad por organización.
@@ -55,6 +57,51 @@ barrera SSRF suficiente.
 
 La inmutabilidad se aplica a los payloads y hashes del snapshot. `status`,
 `is_current` y `updated_at` son estado explícito de su ciclo de promoción.
+
+## Fuentes y evidencias SIUR
+
+La fuente autoritativa del inventario es
+`assets/settings/settings.json`. Su adaptador funciona primero en `dry-run`,
+conserva el JSON bruto y su SHA-256, contabiliza todos los nodos no resueltos y
+solo permite promover una definición con paridad completa y un hash aprobado.
+La futura descarga programada, sus redirecciones y límites se ejecutará
+exclusivamente en backend contra host y ruta fijos; el comando de esta entrega
+solo lee archivos locales revisados.
+
+El WMC aportado se conserva como fixture de evidencia independiente. El parser
+acepta únicamente WMC 1.1.0, rechaza DTD y entidades, limita tamaño y número de
+elementos y valida las URL contra el host SIUR. En el archivo recibido comprueba
+11 capas visibles y consultables, 3 servicios WMS, 28 estilos, 11 estilos
+seleccionados y 10 referencias de metadatos en `EPSG:25830`. Esta sonda puede
+bloquear la promoción si el catálogo completo pierde uno de esos elementos,
+pero ignora correctamente todas las capas adicionales del catálogo: nunca se
+aplica el WMC como inventario. En esta entrega la comparación automatizada
+cubre proveedor, protocolo/endpoint/versión WMS, identidad de capa, presencia
+de estilos y selección predeterminada. La paridad visual y funcional de CRS,
+escalas, opacidad, consulta, leyenda y metadatos se mantiene como filas
+separadas de la matriz y no se da por satisfecha solo por superar esta sonda.
+
+El flujo de operador empieza siempre en solo lectura:
+
+```bash
+python -m app.reference_layers.siur_sync \
+  --settings /ruta/settings.json \
+  --wmc /ruta/context.xml
+```
+
+El informe enumera conteos, identidades de todas las capas, hashes, campos no
+resueltos y diferencias. Para el siguiente dry-run se indican juntos los cuatro
+conteos revisados, un manifiesto JSON con todas las identidades, el SHA-256
+exacto del JSON y el del WMC. Ese informe produce además los hashes de la
+definición normalizada y del plan contra el estado actual de la base de datos.
+Solo cuando también se aprueban esos dos hashes puede repetirse el mismo comando
+con `--apply`. Cambiar los bytes, el resultado del adaptador o las altas,
+cambios y desapariciones del plan invalida la aprobación. El comando no acepta
+URL ni descarga nada, por lo que esta fase tampoco introduce un proxy abierto.
+
+El WMC puede completar estilos, leyendas y versión WMS únicamente sobre capas
+que ya existan y coincidan de forma unívoca en el catálogo completo. Nunca crea
+una capa ausente en `settings.json`; esa ausencia sigue siendo un bloqueo.
 
 ## Matriz de paridad
 
