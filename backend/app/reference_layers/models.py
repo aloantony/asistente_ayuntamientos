@@ -65,6 +65,11 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
             "definition_sha256",
             name="uq_reference_catalog_snapshots_provider_hashes",
         ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_catalog_snapshots_provider_id",
+        ),
         Index(
             "uq_reference_catalog_snapshots_current_provider",
             "provider_key",
@@ -107,10 +112,20 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
     services: Mapped[list["ReferenceService"]] = relationship(
         "ReferenceService",
         back_populates="last_seen_snapshot",
+        foreign_keys="ReferenceService.last_seen_snapshot_id",
+        primaryjoin=(
+            "ReferenceCatalogSnapshot.id == "
+            "ReferenceService.last_seen_snapshot_id"
+        ),
     )
     layers: Mapped[list["ReferenceLayer"]] = relationship(
         "ReferenceLayer",
         back_populates="last_seen_snapshot",
+        foreign_keys="ReferenceLayer.last_seen_snapshot_id",
+        primaryjoin=(
+            "ReferenceCatalogSnapshot.id == "
+            "ReferenceLayer.last_seen_snapshot_id"
+        ),
     )
 
 
@@ -160,13 +175,21 @@ class ReferenceService(TimestampMixin, Base):
             "id",
             name="uq_reference_services_provider_id",
         ),
+        ForeignKeyConstraint(
+            ["provider_key", "last_seen_snapshot_id"],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+            ],
+            name="fk_reference_services_provider_snapshot",
+            ondelete="RESTRICT",
+        ),
         Index("ix_reference_services_snapshot", "last_seen_snapshot_id"),
         Index("ix_reference_services_status", "provider_key", "status"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     last_seen_snapshot_id: Mapped[int] = mapped_column(
-        ForeignKey("reference_catalog_snapshots.id", ondelete="RESTRICT"),
         nullable=False,
     )
     provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -208,11 +231,17 @@ class ReferenceService(TimestampMixin, Base):
     last_seen_snapshot: Mapped[ReferenceCatalogSnapshot] = relationship(
         "ReferenceCatalogSnapshot",
         back_populates="services",
+        foreign_keys=[last_seen_snapshot_id],
+        primaryjoin=(
+            "ReferenceService.last_seen_snapshot_id == "
+            "ReferenceCatalogSnapshot.id"
+        ),
     )
     layers: Mapped[list["ReferenceLayer"]] = relationship(
         "ReferenceLayer",
         back_populates="service",
         foreign_keys="ReferenceLayer.service_id",
+        primaryjoin="ReferenceService.id == ReferenceLayer.service_id",
     )
 
 
@@ -287,6 +316,15 @@ class ReferenceLayer(TimestampMixin, Base):
             name="uq_reference_layers_provider_id",
         ),
         ForeignKeyConstraint(
+            ["provider_key", "last_seen_snapshot_id"],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+            ],
+            name="fk_reference_layers_provider_snapshot",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
             ["provider_key", "service_id"],
             ["reference_services.provider_key", "reference_services.id"],
             name="fk_reference_layers_provider_service",
@@ -310,7 +348,6 @@ class ReferenceLayer(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     last_seen_snapshot_id: Mapped[int] = mapped_column(
-        ForeignKey("reference_catalog_snapshots.id", ondelete="RESTRICT"),
         nullable=False,
     )
     service_id: Mapped[int | None] = mapped_column(
@@ -388,22 +425,30 @@ class ReferenceLayer(TimestampMixin, Base):
     last_seen_snapshot: Mapped[ReferenceCatalogSnapshot] = relationship(
         "ReferenceCatalogSnapshot",
         back_populates="layers",
+        foreign_keys=[last_seen_snapshot_id],
+        primaryjoin=(
+            "ReferenceLayer.last_seen_snapshot_id == "
+            "ReferenceCatalogSnapshot.id"
+        ),
     )
     service: Mapped[ReferenceService | None] = relationship(
         "ReferenceService",
         back_populates="layers",
         foreign_keys=[service_id],
+        primaryjoin="ReferenceLayer.service_id == ReferenceService.id",
     )
     parent: Mapped["ReferenceLayer | None"] = relationship(
         "ReferenceLayer",
         remote_side="ReferenceLayer.id",
         back_populates="children",
         foreign_keys=[parent_id],
+        primaryjoin="ReferenceLayer.parent_id == ReferenceLayer.id",
     )
     children: Mapped[list["ReferenceLayer"]] = relationship(
         "ReferenceLayer",
         back_populates="parent",
         foreign_keys=[parent_id],
+        primaryjoin="ReferenceLayer.id == ReferenceLayer.parent_id",
     )
     organization_settings: Mapped[list["OrganizationReferenceLayerSetting"]] = (
         relationship(
