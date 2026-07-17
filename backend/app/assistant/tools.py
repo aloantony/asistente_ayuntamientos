@@ -9,7 +9,7 @@ human-only.
 import json
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -44,12 +44,17 @@ from app.organizations.access import (
 )
 from app.ordinances.embeddings import embed_text, vector_similarity
 from app.ordinances.models import Ordinance, OrdinanceLegalChunk
-from app.projects.access import select_visible_projects
+from app.projects.access import (
+    get_project_with_memberships,
+    select_visible_projects,
+    user_can_access_project,
+)
 from app.projects.models import Project
 from app.rbac.permissions import has_permission
 from app.requirements.models import Requirement, RequirementMessage
 from app.requirements.routes import (
     build_requirement_visibility_filter,
+    can_view_requirement,
     ensure_organization_exists,
     ensure_project_matches_organization,
     get_existing_requirement,
@@ -93,6 +98,7 @@ MAX_ORDINANCE_RESULTS = 5
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
+MAX_EMBEDDED_VIEW_TITLE_CHARS = 255
 
 REQUIREMENT_CONTENT_FIELDS = (
     "title",
@@ -212,6 +218,50 @@ _TOOL_DEFINITIONS: list[dict] = [
                     "description": "Número de ubicaciones, máximo 10",
                 },
             },
+        },
+    },
+    {
+        "name": "open_app_view",
+        "description": (
+            "Abre dentro de la conversación una ventana interactiva de la "
+            "aplicación. Úsala cuando el usuario pida abrir, mostrar o trabajar "
+            "visualmente con el mapa, las necesidades o los proyectos. Si hace "
+            "falta identificar primero una entidad concreta, consulta antes la "
+            "herramienta de su dominio. Solo admite superficies internas "
+            "autorizadas; nunca acepta URLs, HTML ni nombres de componentes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "surface": {
+                    "type": "string",
+                    "enum": ["map", "requirements", "projects"],
+                    "description": "Superficie interna que se abrirá",
+                },
+                "organization_id": {
+                    "type": "integer",
+                    "description": "Organización con la que filtrar la superficie (opcional)",
+                },
+                "requirement_id": {
+                    "type": "integer",
+                    "description": "Necesidad concreta para la superficie requirements",
+                },
+                "project_id": {
+                    "type": "integer",
+                    "description": "Proyecto concreto o filtro de proyecto (opcional)",
+                },
+                "entity_type": {
+                    "type": "string",
+                    "enum": ["requirement", "project"],
+                    "description": "Tipo de entidad que debe enfocar el mapa",
+                },
+                "entity_id": {
+                    "type": "integer",
+                    "description": "ID de la entidad que debe enfocar el mapa",
+                },
+            },
+            "required": ["surface"],
+            "additionalProperties": False,
         },
     },
     {
@@ -649,6 +699,7 @@ _TOOL_DEFINITIONS: list[dict] = [
 class ToolResult:
     content: str
     ok: bool
+    ui_action: dict | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -661,6 +712,7 @@ class ToolSpec:
     read_only: bool
     domain: str
     required_permission: str | None = None
+    emits_ui_action: bool = False
 
     @property
     def definition(self) -> dict:
@@ -727,7 +779,11 @@ def execute_tool(
         content = _serialize_web_search_payload(result)
     else:
         content = json.dumps(result, ensure_ascii=False)
-    return ToolResult(content=content, ok=True)
+    return ToolResult(
+        content=content,
+        ok=True,
+        ui_action=result if spec.emits_ui_action and isinstance(result, dict) else None,
+    )
 
 
 def _serialize_requirement(requirement: Requirement, *, full: bool) -> dict:
@@ -904,6 +960,226 @@ def _get_map_items(
             break
 
     return {"limit": limit, "results": results}
+
+
+_REQUIREMENT_VIEW_PERMISSIONS = (
+    "requirements.view",
+    "requirements.create",
+    "requirements.edit",
+    "requirements.review",
+    "requirements.archive",
+    "requirements.manage",
+)
+_PROJECT_VIEW_PERMISSIONS = (
+    "projects.view_all",
+    "projects.create",
+    "projects.edit",
+    "projects.archive",
+    "projects.manage_members",
+    "projects.manage",
+)
+
+
+def _optional_positive_int(tool_input: dict, key: str) -> int | None:
+    value = tool_input.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{key} debe ser un entero positivo")
+    return value
+
+
+def _has_any_permission_for_organizations(
+    db: Session,
+    current_user: User,
+    permission_codes: tuple[str, ...],
+    *,
+    organization_id: int | None = None,
+) -> bool:
+    if current_user.is_superuser:
+        return True
+    organization_ids = get_user_organization_ids(db, current_user)
+    if organization_id is not None:
+        if organization_id not in organization_ids:
+            return False
+        organization_ids = [organization_id]
+    return any(
+        has_permission(
+            current_user,
+            permission_code,
+            db,
+            organization_id=candidate_organization_id,
+        )
+        for candidate_organization_id in organization_ids
+        for permission_code in permission_codes
+    )
+
+
+def _open_app_view(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    allowed_keys = {
+        "surface",
+        "organization_id",
+        "requirement_id",
+        "project_id",
+        "entity_type",
+        "entity_id",
+    }
+    unexpected_keys = sorted(set(tool_input) - allowed_keys)
+    if unexpected_keys:
+        raise ValueError(
+            "parámetros no admitidos: " + ", ".join(unexpected_keys)
+        )
+    surface = tool_input.get("surface")
+    if surface not in {"map", "requirements", "projects"}:
+        raise ValueError("surface no es una superficie embebible")
+
+    organization_id = _optional_positive_int(tool_input, "organization_id")
+    requirement_id = _optional_positive_int(tool_input, "requirement_id")
+    project_id = _optional_positive_int(tool_input, "project_id")
+    requested_project_id = project_id
+    entity_id = _optional_positive_int(tool_input, "entity_id")
+    entity_type = tool_input.get("entity_type")
+    normalized_context: dict[str, int | str] = {}
+
+    if surface == "map":
+        if requirement_id is not None or project_id is not None:
+            raise ValueError(
+                "requirement_id y project_id no se usan en la superficie map"
+            )
+        if (entity_type is None) != (entity_id is None):
+            raise ValueError("entity_type y entity_id deben indicarse juntos")
+        if entity_type is not None and entity_type not in {
+            "requirement",
+            "project",
+        }:
+            raise ValueError("entity_type debe ser 'requirement' o 'project'")
+        if not has_any_map_view_permission(db, current_user):
+            raise HTTPException(status_code=403, detail="Permission required: map.view")
+
+        title = "Mapa municipal"
+        if entity_type is not None and entity_id is not None:
+            visible = get_visible_entity(db, current_user, entity_type, entity_id)
+            if visible is None or not has_map_view_permission(
+                db,
+                current_user,
+                visible.organization_id,
+            ):
+                raise HTTPException(status_code=404, detail="App view target not found")
+            if (
+                organization_id is not None
+                and organization_id != visible.organization_id
+            ):
+                raise ValueError("organization_id no coincide con la entidad del mapa")
+            organization_id = visible.organization_id
+            normalized_context.update(
+                {"entity_type": entity_type, "entity_id": entity_id}
+            )
+            title = f"Mapa · {visible.title}"[:MAX_EMBEDDED_VIEW_TITLE_CHARS]
+        elif organization_id is not None and not has_map_view_permission(
+            db,
+            current_user,
+            organization_id,
+        ):
+            raise HTTPException(status_code=403, detail="Permission required: map.view")
+
+    elif surface == "requirements":
+        if entity_type is not None or entity_id is not None:
+            raise ValueError("entity_type y entity_id solo se usan en la superficie map")
+        title = "Necesidades"
+        if requirement_id is not None:
+            requirement = db.get(Requirement, requirement_id)
+            if requirement is None:
+                raise HTTPException(status_code=404, detail="App view target not found")
+            if not can_view_requirement(db, current_user, requirement):
+                raise HTTPException(
+                    status_code=404,
+                    detail="App view target not found",
+                )
+            if (
+                organization_id is not None
+                and organization_id != requirement.organization_id
+            ):
+                raise ValueError("organization_id no coincide con la necesidad")
+            if project_id is not None and project_id != requirement.project_id:
+                raise ValueError("project_id no coincide con la necesidad")
+            organization_id = requirement.organization_id
+            project_id = requirement.project_id
+            normalized_context["requirement_id"] = requirement.id
+            title = f"Necesidad · {requirement.title}"[
+                :MAX_EMBEDDED_VIEW_TITLE_CHARS
+            ]
+        elif not _has_any_permission_for_organizations(
+            db,
+            current_user,
+            _REQUIREMENT_VIEW_PERMISSIONS,
+            organization_id=organization_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Permission required: requirements.view",
+            )
+
+        if project_id is not None and requirement_id is None:
+            project = get_project_with_memberships(db, project_id)
+            if project is None or not user_can_access_project(
+                db,
+                current_user,
+                project,
+            ):
+                raise HTTPException(status_code=404, detail="App view target not found")
+            if organization_id is not None and organization_id != project.organization_id:
+                raise ValueError("project_id no pertenece a organization_id")
+            organization_id = project.organization_id
+            normalized_context["project_id"] = project.id
+        elif requested_project_id is not None:
+            normalized_context["project_id"] = requested_project_id
+
+    else:
+        if requirement_id is not None or entity_type is not None or entity_id is not None:
+            raise ValueError(
+                "requirement_id, entity_type y entity_id no se usan en projects"
+            )
+        title = "Proyectos"
+        if project_id is not None:
+            project = get_project_with_memberships(db, project_id)
+            if project is None or not user_can_access_project(
+                db,
+                current_user,
+                project,
+            ):
+                raise HTTPException(status_code=404, detail="App view target not found")
+            if organization_id is not None and organization_id != project.organization_id:
+                raise ValueError("organization_id no coincide con el proyecto")
+            organization_id = project.organization_id
+            normalized_context["project_id"] = project.id
+            title = f"Proyecto · {project.name}"[:MAX_EMBEDDED_VIEW_TITLE_CHARS]
+        elif not _has_any_permission_for_organizations(
+            db,
+            current_user,
+            _PROJECT_VIEW_PERMISSIONS,
+            organization_id=organization_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Permission required: projects.view_all",
+            )
+
+    if organization_id is not None:
+        normalized_context["organization_id"] = organization_id
+
+    return {
+        "type": "ui.open_embedded",
+        "version": 1,
+        "id": uuid.uuid4().hex,
+        "surface": surface,
+        "title": title,
+        "context": normalized_context,
+    }
 
 
 def _list_requirements(
@@ -1672,6 +1948,7 @@ _EXECUTORS = {
     "list_organizations": _list_organizations,
     "list_projects": _list_projects,
     "get_map_items": _get_map_items,
+    "open_app_view": _open_app_view,
     "web_search": _web_search,
     "semantic_search_ordinances": _semantic_search_ordinances,
     "list_requirements": _list_requirements,
@@ -1703,6 +1980,12 @@ _TOOL_METADATA: dict[str, dict] = {
         "read_only": True,
         "domain": "map",
         "required_permission": "map.view",
+    },
+    "open_app_view": {
+        "label": "Abrir ventana de la aplicación",
+        "read_only": True,
+        "domain": "app_views",
+        "emits_ui_action": True,
     },
     "web_search": {
         "label": "Buscar en web",
@@ -1790,6 +2073,7 @@ def _build_tool_catalog() -> dict[str, ToolSpec]:
             read_only=metadata["read_only"],
             domain=metadata["domain"],
             required_permission=metadata.get("required_permission"),
+            emits_ui_action=metadata.get("emits_ui_action", False),
         )
     return catalog
 

@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from app.organizations.schemas import OrganizationSummary
 
@@ -96,6 +96,14 @@ class AssistantActionRead(BaseModel):
     ok: bool
     input: dict
     result: str
+    ui_action: dict | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_action(self, handler):
+        data = handler(self)
+        if self.ui_action is None:
+            data.pop("ui_action", None)
+        return data
 
 
 class AssistantMessageRead(BaseModel):

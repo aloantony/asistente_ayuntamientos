@@ -32,6 +32,11 @@ import { userHasPermission } from "./types";
 
 type MapPanelProps = {
   user: User;
+  embeddedContext?: {
+    organizationId?: number;
+    entityType?: GeoEntityType;
+    entityId?: number;
+  };
 };
 
 type EntityTypeFilter = "all" | GeoEntityType;
@@ -189,7 +194,7 @@ function defaultOrganizationId(user: User) {
   return user.organizations?.[0]?.id ? String(user.organizations[0].id) : "";
 }
 
-export function MapPanel({ user }: MapPanelProps) {
+export function MapPanel({ user, embeddedContext }: MapPanelProps) {
   const searchParams = useSearchParams();
   const { getStoredToken, handleRequestError } = useSession();
   const [entityType, setEntityType] = useState<EntityTypeFilter>("all");
@@ -263,17 +268,18 @@ export function MapPanel({ user }: MapPanelProps) {
         : null,
     [assetLocationDraft, assetOptions],
   );
-  const requestedFocusedEntityType = parseEntityTypeParam(
-    searchParams.get("entity_type"),
-  );
+  const requestedFocusedEntityType =
+    embeddedContext?.entityType ??
+    parseEntityTypeParam(searchParams.get("entity_type"));
   const focusedEntityType =
     requestedFocusedEntityType === "asset" && !canViewAssets
       ? null
       : requestedFocusedEntityType;
-  const focusedOrganizationId = parseNumberParam(
-    searchParams.get("organization_id"),
-  );
-  const focusedEntityId = parseNumberParam(searchParams.get("entity_id"));
+  const focusedOrganizationId =
+    embeddedContext?.organizationId ??
+    parseNumberParam(searchParams.get("organization_id"));
+  const focusedEntityId =
+    embeddedContext?.entityId ?? parseNumberParam(searchParams.get("entity_id"));
   const focusedLatitude = parseNumberParam(searchParams.get("lat"));
   const focusedLongitude = parseNumberParam(searchParams.get("lng"));
   const focusedZoom = parseNumberParam(searchParams.get("zoom"));
@@ -616,7 +622,9 @@ export function MapPanel({ user }: MapPanelProps) {
       kind,
       latitude: mapContextMenu.latitude,
       longitude: mapContextMenu.longitude,
-      organizationId: defaultOrganizationId(user),
+      organizationId: embeddedContext?.organizationId
+        ? String(embeddedContext.organizationId)
+        : defaultOrganizationId(user),
       title: "",
       description: "",
     });
@@ -668,6 +676,15 @@ export function MapPanel({ user }: MapPanelProps) {
     const organizationId = Number.parseInt(registrationDraft.organizationId, 10);
     if (!Number.isInteger(organizationId)) {
       setRegistrationError("Selecciona la organización municipal.");
+      return;
+    }
+    if (
+      embeddedContext?.organizationId !== undefined &&
+      organizationId !== embeddedContext.organizationId
+    ) {
+      setRegistrationError(
+        "La organización debe coincidir con la vista del mapa abierta.",
+      );
       return;
     }
     const title = registrationDraft.title.trim();
@@ -740,11 +757,18 @@ export function MapPanel({ user }: MapPanelProps) {
       mapAbortControllerRef.current = null;
       mapRequestSequenceRef.current += 1;
       setIsLoading(false);
-      setItems((currentItems) => [
-        mapItem,
-        ...currentItems.filter((item) => getItemKey(item) !== getItemKey(mapItem)),
-      ]);
-      setSelectedItem(mapItem);
+      const belongsToEmbeddedContext =
+        embeddedContext?.organizationId === undefined ||
+        mapItem.location.organization_id === embeddedContext.organizationId;
+      if (belongsToEmbeddedContext) {
+        setItems((currentItems) => [
+          mapItem,
+          ...currentItems.filter(
+            (item) => getItemKey(item) !== getItemKey(mapItem),
+          ),
+        ]);
+        setSelectedItem(mapItem);
+      }
       setManualFocusLocation({
         latitude: registrationDraft.latitude,
         longitude: registrationDraft.longitude,
@@ -1006,6 +1030,8 @@ export function MapPanel({ user }: MapPanelProps) {
               <Link
                 className="secondary-button map-detail-link"
                 href={normalizeDetailPath(selectedItem)}
+                rel={embeddedContext ? "noreferrer" : undefined}
+                target={embeddedContext ? "_blank" : undefined}
               >
                 {selectedItem.entity_type === "asset"
                   ? "Abrir contexto municipal"
@@ -1411,6 +1437,7 @@ export function MapPanel({ user }: MapPanelProps) {
               Organización
               <select
                 value={registrationDraft.organizationId}
+                disabled={embeddedContext?.organizationId !== undefined}
                 onChange={(event) =>
                   setRegistrationDraft({
                     ...registrationDraft,
@@ -1419,6 +1446,15 @@ export function MapPanel({ user }: MapPanelProps) {
                 }
               >
                 <option value="">Selecciona organización</option>
+                {embeddedContext?.organizationId !== undefined &&
+                !(user.organizations ?? []).some(
+                  (organization) =>
+                    organization.id === embeddedContext.organizationId,
+                ) ? (
+                  <option value={embeddedContext.organizationId}>
+                    Organización {embeddedContext.organizationId}
+                  </option>
+                ) : null}
                 {(user.organizations ?? []).map((organization) => (
                   <option key={organization.id} value={organization.id}>
                     {organization.name}

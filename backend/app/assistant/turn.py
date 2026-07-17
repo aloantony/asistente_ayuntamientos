@@ -98,6 +98,11 @@ figuran en la conversación. No anuncies nuevas consultas ni prometas seguir
 trabajando. Distingue lo comprobado de lo que quedó pendiente y explica de forma
 breve cualquier limitación o error de herramienta.
 """.strip()
+APP_VIEW_CONTEXT_NUMERIC_KEYS = {
+    "map": ("organization_id",),
+    "requirements": ("organization_id", "project_id", "requirement_id"),
+    "projects": ("organization_id", "project_id"),
+}
 STALE_MUTATING_TOOL_RESULT = (
     "No se ejecutó la herramienta porque este turno quedó desactualizado por "
     "un mensaje posterior del usuario."
@@ -316,6 +321,7 @@ def _run_agent_turn_events(
                 yield TurnEvent(
                     "tool_activity",
                     {
+                        "call_id": block.id,
                         "tool": block.name,
                         "status": "started",
                         "input": tool_input,
@@ -380,20 +386,29 @@ def _run_agent_turn_events(
                         # again later in this same turn.
                         seen_read_calls.clear()
                 action = {
+                    "call_id": block.id,
                     "tool": block.name,
                     "ok": result.ok,
                     "input": tool_input,
                     "result": result.content[:MAX_TOOL_RESULT_CHARS],
                 }
+                if result.ui_action is not None:
+                    action["ui_action"] = result.ui_action
                 actions.append(action)
                 yield TurnEvent(
                     "tool_activity",
                     {
+                        "call_id": block.id,
                         "tool": block.name,
                         "status": "finished",
                         "input": tool_input,
                         "ok": result.ok,
                         "result": action["result"],
+                        **(
+                            {"ui_action": result.ui_action}
+                            if result.ui_action is not None
+                            else {}
+                        ),
                     },
                 )
                 tool_results.append(
@@ -644,7 +659,7 @@ def _execute_tool_for_current_turn(
     context: ToolContext,
     allowed: frozenset[str],
 ) -> ToolResult:
-    if tool is None or tool.read_only:
+    if tool is None or (tool.read_only and not tool.emits_ui_action):
         return execute_tool(
             db,
             current_user,
@@ -668,10 +683,10 @@ def _execute_tool_for_current_turn(
         db.commit()
         return ToolResult(content=STALE_MUTATING_TOOL_RESULT, ok=False)
 
-    # Mutating executors commit or roll back their own transaction. Calling the
-    # executor while this row lock is held makes the latest-turn check atomic
-    # with the mutation.
-    return execute_tool(
+    # Mutating executors commit or roll back their own transaction. Calling a
+    # mutation or client UI action while this row lock is held makes the
+    # latest-turn check atomic with the observable side effect.
+    result = execute_tool(
         db,
         current_user,
         tool_name,
@@ -679,6 +694,9 @@ def _execute_tool_for_current_turn(
         context,
         allowed=allowed,
     )
+    if tool.read_only and tool.emits_ui_action:
+        db.commit()
+    return result
 
 
 def _confirmation_context_from_result(
@@ -723,9 +741,81 @@ def build_history(conversation: AssistantConversation) -> list[dict]:
         if message.content
     ]
     max_messages = max(2, settings.assistant_history_max_messages)
-    if len(messages) <= max_messages:
-        return messages
-    return messages[-max_messages:]
+    messages = messages[-max_messages:]
+    app_view_context = _latest_app_view_context(conversation)
+    if messages and app_view_context is not None:
+        serialized_context = json.dumps(
+            app_view_context,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        messages[-1] = {
+            **messages[-1],
+            "content": (
+                f"{messages[-1]['content']}\n\n"
+                "[Contexto interno de la app: la última vista abierta fue "
+                f"{serialized_context}. Conserva estos identificadores para "
+                "referencias posteriores y vuelve a comprobar permisos con "
+                "las herramientas antes de consultar o modificar datos.]"
+            ),
+        }
+    return messages
+
+
+def _latest_app_view_context(
+    conversation: AssistantConversation,
+) -> dict[str, object] | None:
+    for message in reversed(conversation.messages):
+        if not message.actions:
+            continue
+        try:
+            actions = json.loads(message.actions)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(actions, list):
+            continue
+        for action in reversed(actions):
+            if (
+                not isinstance(action, dict)
+                or action.get("tool") != "open_app_view"
+                or action.get("ok") is not True
+            ):
+                continue
+            ui_action = action.get("ui_action")
+            if not isinstance(ui_action, dict):
+                continue
+            if (
+                ui_action.get("type") != "ui.open_embedded"
+                or ui_action.get("version") != 1
+            ):
+                continue
+            surface = ui_action.get("surface")
+            if (
+                not isinstance(surface, str)
+                or surface not in APP_VIEW_CONTEXT_NUMERIC_KEYS
+            ):
+                continue
+            raw_context = ui_action.get("context")
+            if not isinstance(raw_context, dict):
+                continue
+            context: dict[str, int | str] = {}
+            for key in APP_VIEW_CONTEXT_NUMERIC_KEYS[surface]:
+                value = raw_context.get(key)
+                if type(value) is int and value > 0:
+                    context[key] = value
+            if surface == "map":
+                entity_type = raw_context.get("entity_type")
+                entity_id = raw_context.get("entity_id")
+                if (
+                    isinstance(entity_type, str)
+                    and entity_type in {"requirement", "project"}
+                    and type(entity_id) is int
+                    and entity_id > 0
+                ):
+                    context["entity_type"] = entity_type
+                    context["entity_id"] = entity_id
+            return {"surface": surface, "context": context}
+    return None
 
 
 def _assistant_response_message(response: AICompletion) -> dict:

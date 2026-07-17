@@ -1213,6 +1213,16 @@ export type AssistantAction = {
   input: Record<string, unknown>;
   result: string;
   status?: "started" | "finished";
+  ui_action?: AssistantUiAction | null;
+};
+
+export type AssistantUiAction = {
+  type: string;
+  version: number;
+  id: string;
+  surface: string;
+  title: string;
+  context: Record<string, unknown>;
 };
 
 export type AssistantMessage = {
@@ -1244,11 +1254,13 @@ export type AssistantStreamMessageStart = {
 };
 
 export type AssistantStreamToolActivity = {
+  call_id?: string;
   tool: string;
   status: "started" | "finished";
   input: Record<string, unknown>;
   ok?: boolean;
   result?: string;
+  ui_action?: AssistantUiAction | null;
 };
 
 export type AssistantStreamDone = {
