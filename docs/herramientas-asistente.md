@@ -21,9 +21,9 @@ aislados.
 | --- | --- | --- |
 | Conversación con streaming y herramientas municipales | Disponible | Motor model-first, SSE, catálogo filtrado por permisos y auditoría propia |
 | Búsqueda web | Disponible con configuración | Brave Search, DLP previo, RBAC, límites y fuentes auditadas |
-| Lectura de páginas encontradas | Oleada 1 | Solo HTTP(S), procedencia búsqueda→lectura, defensa SSRF, proceso limitado y contenido marcado como no confiable |
-| Adjuntar contenido a un turno | Oleada 1 | TXT UTF-8 acotado; imágenes como vista previa/metadatos; formatos estructurados aún no se interpretan |
-| Acciones con efectos | Oleada 1 | Política declarativa, autorización de un solo uso ligada al contenido y resultado durable e idempotente |
+| Lectura de páginas encontradas | Implementada, apagada por defecto | Solo HTTP(S), procedencia búsqueda→lectura, defensa SSRF, proceso limitado y contenido marcado como no confiable |
+| Adjuntar contenido a un turno | Implementada | TXT UTF-8 acotado; imágenes como vista previa/metadatos; formatos estructurados aún no se interpretan |
+| Acciones con efectos | Implementada | Política declarativa, autorización de un solo uso ligada al contenido y resultado durable e idempotente |
 | Voz por turnos y Realtime | Parcial | STT/TTS y Realtime bajo configuración; falta completar la experiencia multimodal de producción |
 | Memoria controlada | Parcial | Memoria municipal revisable; falta personalización más amplia y políticas de caducidad por categoría |
 | Análisis de PDF, Office y datos | Planificada, oleada 2 | Servicio aislado de extracción y sandbox de Python sin red ni secretos, con cuotas de CPU, RAM, disco y tiempo |

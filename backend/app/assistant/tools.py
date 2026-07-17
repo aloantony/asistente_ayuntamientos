@@ -931,16 +931,21 @@ def execute_tool(
     tool_context = context or ToolContext()
     if tool_context.attachment_content_seen:
         return ToolResult(content=ATTACHMENT_CONTENT_TOOL_RESULT, ok=False)
-    if tool_is_blocked_after_untrusted_content(
-        name,
-        tool_input,
-        tool_context,
-        allow_web_reader=allow_web_reader_after_taint,
-    ):
-        return ToolResult(
-            content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
-            ok=False,
+    if tool_context.untrusted_external_content_seen:
+        canonical_reader_input = canonical_untrusted_web_reader_input(
+            name,
+            tool_input,
+            tool_context,
+            allow_web_reader=allow_web_reader_after_taint,
         )
+        if canonical_reader_input is None:
+            return ToolResult(
+                content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
+                ok=False,
+            )
+        # Downstream normalization and execution receive only the reconstructed
+        # one-key input that was proven against this turn's provenance.
+        tool_input = canonical_reader_input
 
     if (
         settings.assistant_runtime == "hermes_agent"

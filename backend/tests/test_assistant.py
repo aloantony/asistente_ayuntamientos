@@ -786,6 +786,75 @@ def test_execute_tool_denies_direct_mutation_without_guard_authorization(
     assert called is False
 
 
+def test_attachment_and_web_taint_do_not_consume_one_shot_authorization(
+    db,
+    make_user,
+    make_organization,
+):
+    tool_name = "send_admin_feedback"
+    user, tool_input, _expected_effect = build_mutating_tool_probe(
+        db,
+        make_user,
+        make_organization,
+        tool_name,
+    )
+    conversation, confirmation_message, authorization = (
+        arm_confirmed_conversation_mutation(
+            db,
+            user,
+            tool_name,
+            tool_input,
+        )
+    )
+    baseline = mutation_effect_signature(db, tool_name, tool_input)
+
+    attachment_blocked = assistant_tools.execute_tool(
+        db,
+        user,
+        tool_name,
+        tool_input,
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=confirmation_message.id,
+            attachment_content_seen=True,
+        ),
+        authorization=authorization,
+    )
+    web_blocked = assistant_tools.execute_tool(
+        db,
+        user,
+        tool_name,
+        tool_input,
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=confirmation_message.id,
+            untrusted_external_content_seen=True,
+        ),
+        authorization=authorization,
+    )
+
+    assert attachment_blocked.content == (
+        assistant_tools.ATTACHMENT_CONTENT_TOOL_RESULT
+    )
+    assert web_blocked.content == assistant_tools.UNTRUSTED_EXTERNAL_TOOL_BLOCKED
+    assert mutation_effect_signature(db, tool_name, tool_input) == baseline
+
+    completed = assistant_tools.execute_tool(
+        db,
+        user,
+        tool_name,
+        tool_input,
+        assistant_tools.ToolContext(
+            conversation_id=conversation.id,
+            user_message_id=confirmation_message.id,
+        ),
+        authorization=authorization,
+    )
+
+    assert completed.ok is True
+    assert mutation_effect_signature(db, tool_name, tool_input) != baseline
+
+
 def test_text_turn_keeps_only_first_of_two_different_mutation_confirmations(
     client,
     db,

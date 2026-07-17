@@ -462,8 +462,8 @@ def test_attachment_prompt_injection_cannot_execute_semantic_search_or_persist_i
     )
     monkeypatch.setattr(
         assistant_tools,
-        "embed_text",
-        lambda _value: (_ for _ in ()).throw(
+        "embed_text_supervised",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("attachment secret must not reach embeddings")
         ),
     )
