@@ -25,7 +25,7 @@ def parse_feature_collection(
             object_pairs_hook=_unique_object,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, ValueError) as error:
+    except (RecursionError, UnicodeDecodeError, ValueError) as error:
         raise InvalidFeatureInfoError("invalid feature information") from error
     if not isinstance(value, dict) or value.get("type") != "FeatureCollection":
         raise InvalidFeatureInfoError("invalid feature collection")
