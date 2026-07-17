@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from math import isfinite
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
@@ -222,7 +223,7 @@ def identify_reference_layer(
         content=payload,
         headers={
             "Cache-Control": "private, no-store",
-            "Vary": "Authorization",
+            "Vary": "Authorization, Cookie",
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -402,7 +403,7 @@ def _binary_response(
     headers = {
         "Cache-Control": f"private, max-age={cached.fresh_for_seconds}",
         "ETag": cached.etag,
-        "Vary": "Authorization",
+        "Vary": "Authorization, Cookie",
         "X-Content-Type-Options": "nosniff",
         "X-Reference-Cache": cache_status,
     }
@@ -454,7 +455,10 @@ def _require_tile_scope(
         )
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid tile request") from None
-    bounds = _geographic_bounds(layer.bounds_json)
+    try:
+        bounds = _geographic_bounds(layer.bounds_json)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Layer cannot be rendered") from None
     if bounds is None:
         return
     west, south, east, north = bounds
@@ -468,18 +472,21 @@ def _require_tile_scope(
 
 
 def _geographic_bounds(value: object) -> tuple[float, float, float, float] | None:
-    if not isinstance(value, dict):
+    if value is None:
         return None
+    if not isinstance(value, dict):
+        raise ValueError("invalid geographic bounds")
     raw = tuple(value.get(key) for key in ("west", "south", "east", "north"))
     if any(
         isinstance(item, bool) or not isinstance(item, (int, float))
         for item in raw
     ):
-        return None
+        raise ValueError("invalid geographic bounds")
     west, south, east, north = (float(item) for item in raw)
     if not (
-        -180 <= west < east <= 180
+        all(isfinite(item) for item in (west, south, east, north))
+        and -180 <= west < east <= 180
         and -90 <= south < north <= 90
     ):
-        return None
+        raise ValueError("invalid geographic bounds")
     return west, south, east, north

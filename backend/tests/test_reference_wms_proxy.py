@@ -1,6 +1,8 @@
 import hashlib
+import io
 import json
 import os
+import ssl
 import struct
 import zlib
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 
 import app.reference_layers.wms_cache as wms_cache
+import app.reference_layers.wms_proxy as wms_proxy
 import app.reference_layers.wms_routes as wms_routes
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
@@ -192,6 +195,15 @@ def assert_cache_namespace(redis: Redis, expected_keys: set[str]) -> None:
     assert all(redis.exists(key) == 1 for key in expected_keys)
 
 
+def assert_private_auth_vary(response) -> None:
+    tokens = {
+        item.strip().casefold()
+        for item in response.headers["vary"].split(",")
+        if item.strip()
+    }
+    assert {"authorization", "cookie"} <= tokens
+
+
 @pytest.fixture
 def isolated_wms_cache_redis(monkeypatch):
     redis = Redis.from_url(
@@ -244,6 +256,15 @@ def test_tile_route_builds_a_fixed_server_side_wms_request(
     response = client.get(
         f"/organizations/{organization.id}/reference-layers/{layer.id}"
         "/tiles/0/0/0.png",
+        params={
+            "URL": "https://attacker.example/wms",
+            "BBOX": "0,0,1,1",
+            "CRS": "EPSG:4326",
+            "FORMAT": "text/xml",
+            "LAYERS": "attacker:layer",
+            "SERVICE": "WFS",
+            "REQUEST": "GetCapabilities",
+        },
         headers=headers_for(viewer),
     )
 
@@ -251,6 +272,7 @@ def test_tile_route_builds_a_fixed_server_side_wms_request(
     assert response.headers["content-type"] == "image/png"
     assert response.headers["x-reference-cache"] == "MISS"
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert_private_auth_vary(response)
     assert len(captured) == 1
     request = captured[0]
     assert request.endpoint_url == (
@@ -274,6 +296,85 @@ def test_tile_route_builds_a_fixed_server_side_wms_request(
         "VERSION": ["1.3.0"],
         "WIDTH": ["256"],
     }
+
+
+def test_wms_routes_accept_httponly_access_token_cookie_without_bearer_header(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    organization = make_organization()
+    viewer = make_user(
+        email="wms-cookie@example.com",
+        password="password-123",
+    )
+    grant_permissions(viewer, organization, ["map.view"])
+    disable_test_cache(monkeypatch)
+    feature_body = b'{"type":"FeatureCollection","features":[]}'
+    operations = []
+
+    def fake_fetch(request):
+        operations.append(request.operation)
+        if request.operation == "identify":
+            return WMSResponse(
+                body=feature_body,
+                content_type="application/json",
+                etag=f'"{hashlib.sha256(feature_body).hexdigest()}"',
+            )
+        return fake_png_response()
+
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", fake_fetch)
+    login = client.post(
+        "/auth/login",
+        json={"email": viewer.email, "password": "password-123"},
+    )
+    assert login.status_code == 200
+    assert "HttpOnly" in login.headers["set-cookie"]
+    prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
+
+    responses = (
+        client.get(f"{prefix}/tiles/0/0/0.png"),
+        client.get(f"{prefix}/legend.png"),
+        client.get(
+            f"{prefix}/identify",
+            params={"pixel_x": 1, "pixel_y": 1, "x": 0, "y": 0, "z": 0},
+        ),
+    )
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert operations == ["tile", "legend", "identify"]
+    for response in responses:
+        assert_private_auth_vary(response)
+
+
+def test_wms_vary_headers_cover_authentication_and_scoped_errors(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    path = "/organizations/1/reference-layers/1/tiles/0/0/0.png"
+    unauthenticated = client.get(path)
+    assert unauthenticated.status_code == 401
+    assert_private_auth_vary(unauthenticated)
+
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    missing = client.get(
+        f"/organizations/{organization.id}/reference-layers/999999/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+    assert missing.status_code == 404
+    assert_private_auth_vary(missing)
 
 
 def test_auth_scope_license_and_layer_capabilities_block_before_network(
@@ -371,6 +472,56 @@ def test_tile_route_respects_layer_zoom_and_geographic_bounds(
     assert outside_bounds.status_code == 404
 
 
+@pytest.mark.parametrize(
+    "malformed_bounds",
+    [
+        {},
+        {"west": -7.1, "south": 39.9, "east": -1.7},
+        {"west": "-7.1", "south": 39.9, "east": -1.7, "north": 43.3},
+        {"west": False, "south": 39.9, "east": -1.7, "north": 43.3},
+        {"west": -1.7, "south": 39.9, "east": -7.1, "north": 43.3},
+        ["-7.1", "39.9", "-1.7", "43.3"],
+    ],
+)
+def test_present_malformed_geographic_bounds_fail_closed_before_network(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+    malformed_bounds,
+) -> None:
+    layer = seed_wms_layer(db)
+    layer.bounds_json = malformed_bounds
+    db.commit()
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden_fetch(request):
+        raise AssertionError("malformed bounds must block before upstream")
+
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden_fetch)
+    prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
+    headers = headers_for(viewer)
+
+    tile = client.get(f"{prefix}/tiles/0/0/0.png", headers=headers)
+    identify = client.get(
+        f"{prefix}/identify",
+        params={"pixel_x": 1, "pixel_y": 1, "x": 0, "y": 0, "z": 0},
+        headers=headers,
+    )
+
+    assert tile.status_code == 409
+    assert tile.json() == {"detail": "Layer cannot be rendered"}
+    assert identify.status_code == 409
+    assert identify.json() == {"detail": "Layer cannot be rendered"}
+
+
 def test_cache_hit_and_conditional_request_do_not_reach_upstream(
     client,
     db,
@@ -419,6 +570,8 @@ def test_cache_hit_and_conditional_request_do_not_reach_upstream(
     assert first.headers["x-reference-cache"] == "HIT"
     assert conditional.status_code == 304
     assert conditional.content == b""
+    assert_private_auth_vary(first)
+    assert_private_auth_vary(conditional)
 
 
 def test_identify_is_typed_queryable_and_validates_feature_collection(
@@ -547,7 +700,7 @@ def test_public_contract_has_no_arbitrary_wms_or_url_parameters(client) -> None:
         "y",
         "z",
     }
-    assert not parameter_names.intersection(
+    assert not {name.casefold() for name in parameter_names}.intersection(
         {"bbox", "crs", "format", "layers", "request", "service", "url"}
     )
 
@@ -610,9 +763,12 @@ def test_siur_wms_allowlist_rejects_unsafe_endpoints(value) -> None:
 
 
 def test_dns_policy_rejects_private_and_mixed_answers() -> None:
-    assert _require_public_addresses(["8.8.8.8", "1.1.1.1"]) == (
+    assert _require_public_addresses(
+        ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"]
+    ) == (
         "8.8.8.8",
         "1.1.1.1",
+        "2606:4700:4700::1111",
     )
     with pytest.raises(UnsafeWMSEndpointError):
         _require_public_addresses(["127.0.0.1"])
@@ -620,6 +776,144 @@ def test_dns_policy_rejects_private_and_mixed_answers() -> None:
         _require_public_addresses(["8.8.8.8", "10.0.0.1"])
     with pytest.raises(WMSUpstreamUnavailableError):
         _require_public_addresses([])
+
+
+@pytest.mark.parametrize(
+    "unsafe_address",
+    [
+        "224.0.0.1",
+        "ff02::1",
+        "240.0.0.1",
+        "64:ff9b::808:808",
+        "64:ff9b:1::1",
+        "::ffff:127.0.0.1",
+        "2002:0808:0808::1",
+    ],
+)
+def test_dns_policy_rejects_non_public_unicast_and_transition_addresses(
+    unsafe_address,
+) -> None:
+    with pytest.raises(UnsafeWMSEndpointError):
+        _require_public_addresses([unsafe_address])
+    with pytest.raises(UnsafeWMSEndpointError):
+        _require_public_addresses(["8.8.8.8", unsafe_address])
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "-1", "+1", "1, 1", "１２", "9" * 21, " " * 21],
+)
+def test_content_length_parser_rejects_malformed_and_overlong_values(value) -> None:
+    with pytest.raises(WMSUpstreamUnavailableError):
+        wms_proxy._content_length(value)
+    assert wms_proxy._content_length(None) is None
+    assert wms_proxy._content_length(" 123 ") == 123
+
+
+@pytest.mark.parametrize("content_length", ["not-a-number", "9" * 100])
+def test_malformed_content_length_becomes_generic_bad_gateway(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+    content_length,
+) -> None:
+    layer = seed_wms_layer(db)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    disable_test_cache(monkeypatch)
+
+    class FakeSocket:
+        def settimeout(self, value):
+            return None
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.body = io.BytesIO(make_png(256, 256))
+
+        def getheader(self, name):
+            return {
+                "Content-Encoding": "identity",
+                "Content-Type": "image/png",
+                "Content-Length": content_length,
+            }.get(name)
+
+        def read(self, size):
+            return self.body.read(size)
+
+    class FakeConnection:
+        def __init__(self, *args, **kwargs) -> None:
+            self.sock = FakeSocket()
+            self.response = FakeResponse()
+
+        def request(self, *args, **kwargs) -> None:
+            return None
+
+        def getresponse(self):
+            return self.response
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        wms_proxy,
+        "_resolve_public_addresses",
+        lambda *args, **kwargs: ("8.8.8.8",),
+    )
+    monkeypatch.setattr(wms_proxy, "_PinnedHTTPSConnection", FakeConnection)
+
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Reference map service is unavailable"}
+    assert content_length not in response.text
+
+
+def test_pinned_https_connection_uses_validated_ip_and_tls_hostname(
+    monkeypatch,
+) -> None:
+    connection = wms_proxy._PinnedHTTPSConnection(
+        "idecyl.jcyl.es",
+        "8.8.8.8",
+        timeout=1.5,
+    )
+    assert connection._context.verify_mode == ssl.CERT_REQUIRED
+    assert connection._context.check_hostname is True
+    calls = []
+    raw_socket = object()
+    wrapped_socket = object()
+
+    class FakeContext:
+        def wrap_socket(self, value, *, server_hostname):
+            calls.append(("wrap", value, server_hostname))
+            return wrapped_socket
+
+    def fake_create_connection(address, timeout, source_address):
+        calls.append(("connect", address, timeout, source_address))
+        return raw_socket
+
+    connection._context = FakeContext()
+    monkeypatch.setattr(wms_proxy.socket, "create_connection", fake_create_connection)
+
+    connection.connect()
+
+    assert connection.sock is wrapped_socket
+    assert calls == [
+        ("connect", ("8.8.8.8", 443), 1.5, None),
+        ("wrap", raw_socket, "idecyl.jcyl.es"),
+    ]
 
 
 def test_cache_keys_are_opaque_deterministic_and_integrity_checked() -> None:

@@ -34,6 +34,12 @@ WMS_IDENTIFY_MAX_BYTES = 2 * 1024 * 1024
 PNG_CONTENT_TYPES = frozenset({"image/png"})
 JSON_CONTENT_TYPES = frozenset({"application/geo+json", "application/json"})
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_CONTENT_LENGTH_DIGITS = 20
+CONTENT_LENGTH = re.compile(rf"[0-9]{{1,{MAX_CONTENT_LENGTH_DIGITS}}}", re.ASCII)
+NON_PUBLIC_IPV6_NETWORKS = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
 
 _WMS_MISS_ADMISSION = threading.BoundedSemaphore(WMS_MAX_CONCURRENT_MISSES)
 
@@ -490,12 +496,37 @@ def _require_public_addresses(values: list[object]) -> tuple[str, ...]:
             address = ipaddress.ip_address(value)
         except ValueError as error:
             raise WMSUpstreamUnavailableError("WMS DNS failed") from error
-        if not address.is_global:
+        if not _is_public_unicast_address(address):
             raise UnsafeWMSEndpointError("WMS resolved to a non-public address")
         addresses.append(address.compressed)
     if not addresses:
         raise WMSUpstreamUnavailableError("WMS DNS returned no addresses")
     return tuple(dict.fromkeys(addresses))
+
+
+def _is_public_unicast_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    if (
+        not address.is_global
+        or address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_unspecified
+        or address.is_multicast
+        or address.is_reserved
+        or getattr(address, "is_site_local", False)
+    ):
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        if (
+            address.ipv4_mapped is not None
+            or address.sixtofour is not None
+            or address.teredo is not None
+            or any(address in network for network in NON_PUBLIC_IPV6_NETWORKS)
+        ):
+            return False
+    return True
 
 
 def _set_socket_timeout(
@@ -517,8 +548,10 @@ def _content_type(value: str | None) -> str:
 def _content_length(value: str | None) -> int | None:
     if value is None:
         return None
+    if not isinstance(value, str) or len(value) > MAX_CONTENT_LENGTH_DIGITS:
+        raise WMSUpstreamUnavailableError("invalid WMS content length")
     normalized = value.strip()
-    if not normalized.isdigit():
+    if CONTENT_LENGTH.fullmatch(normalized) is None:
         raise WMSUpstreamUnavailableError("invalid WMS content length")
     return int(normalized)
 

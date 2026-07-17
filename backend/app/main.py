@@ -24,6 +24,7 @@ from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
 from app.reference_layers.routes import router as reference_layers_router
+from app.reference_layers.wms_middleware import ReferenceWMSVaryMiddleware
 from app.telegram.routes import router as telegram_router
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Bootstrap-Admin-Token"],
     expose_headers=["X-Total-Count"],
 )
+app.add_middleware(ReferenceWMSVaryMiddleware)
 
 for app_router in (
     auth_router,
