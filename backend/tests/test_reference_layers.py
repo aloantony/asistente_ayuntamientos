@@ -184,6 +184,10 @@ def test_sync_marks_disappeared_layers_missing_without_deleting_preferences(
 
 def test_validation_blocks_duplicates_cycles_and_unsafe_service_urls(db) -> None:
     base = make_definition()
+    oversized_provider = replace(base, provider_key="a" * 65)
+    oversized_plan = build_catalog_sync_plan(db, oversized_provider)
+    assert "Invalid provider_key" in oversized_plan.blocking_issues
+
     duplicate = replace(base, layers=base.layers + (base.layers[0],))
     duplicate_plan = build_catalog_sync_plan(db, duplicate)
     assert "Duplicate layer key: group:planning" in duplicate_plan.blocking_issues
@@ -272,6 +276,15 @@ def test_snapshots_keep_raw_and_normalized_payloads_immutable(db) -> None:
     assert second.normalized_definition_json["services"][0]["title"] == (
         "Servicio adaptado sin cambiar el bruto"
     )
+    repeated, _ = apply_catalog_definition(
+        db,
+        replace(
+            adapted,
+            retrieved_at=datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc),
+        ),
+    )
+    assert repeated.id == second.id
+    assert repeated.retrieved_at == adapted.retrieved_at
 
 
 def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
@@ -382,6 +395,43 @@ def test_database_rejects_cross_provider_service_and_parent_links(db) -> None:
             ReferenceLayer.source_key == "group:planning",
         )
     )
+    other_snapshot = db.scalar(
+        select(ReferenceCatalogSnapshot).where(
+            ReferenceCatalogSnapshot.provider_key == "other",
+            ReferenceCatalogSnapshot.is_current.is_(True),
+        )
+    )
+
+    db.add(
+        ReferenceService(
+            provider_key="siur",
+            source_key="service:cross-snapshot",
+            last_seen_snapshot_id=other_snapshot.id,
+            title="Invalid cross-provider snapshot",
+            upstream_protocol="wms",
+            base_url="https://example.test/wms",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+
+    db.add(
+        ReferenceLayer(
+            provider_key="siur",
+            source_key="layer:cross-snapshot",
+            node_type="layer",
+            title="Invalid cross-provider snapshot",
+            last_seen_snapshot_id=other_snapshot.id,
+            service_id=siur_service.id,
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="proxy",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
 
     db.add(
         ReferenceLayer(
