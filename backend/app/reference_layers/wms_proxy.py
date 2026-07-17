@@ -7,7 +7,9 @@ import multiprocessing
 import re
 import socket
 import ssl
+import struct
 import threading
+import zlib
 from dataclasses import dataclass
 from math import isfinite
 from time import monotonic
@@ -26,7 +28,7 @@ TILE_SIZE = 256
 WMS_TIMEOUT_SECONDS = 8.0
 WMS_DNS_TIMEOUT_SECONDS = 2.0
 WMS_MAX_CONCURRENT_MISSES = 8
-WMS_TILE_MAX_BYTES = 4 * 1024 * 1024
+WMS_TILE_MAX_BYTES = 1024 * 1024
 WMS_LEGEND_MAX_BYTES = 1024 * 1024
 WMS_IDENTIFY_MAX_BYTES = 2 * 1024 * 1024
 PNG_CONTENT_TYPES = frozenset({"image/png"})
@@ -109,6 +111,22 @@ def tile_bbox(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     max_y = WEB_MERCATOR_HALF_WORLD - y * span
     min_y = max_y - span
     return min_x, min_y, max_x, max_y
+
+
+def tile_lonlat_bounds(
+    z: int,
+    x: int,
+    y: int,
+) -> tuple[float, float, float, float]:
+    from math import atan, degrees, pi, sinh
+
+    tile_bbox(z, x, y)
+    count = 2**z
+    west = x / count * 360.0 - 180.0
+    east = (x + 1) / count * 360.0 - 180.0
+    north = degrees(atan(sinh(pi * (1.0 - 2.0 * y / count))))
+    south = degrees(atan(sinh(pi * (1.0 - 2.0 * (y + 1) / count))))
+    return west, south, east, north
 
 
 def build_tile_request(
@@ -539,6 +557,13 @@ def _validate_response_body(
     if operation in {"tile", "legend"}:
         if content_type != "image/png" or not body.startswith(PNG_SIGNATURE):
             raise WMSUpstreamUnavailableError("invalid WMS image")
+        width, height = _png_dimensions(body)
+        if operation == "tile" and (width, height) != (TILE_SIZE, TILE_SIZE):
+            raise WMSUpstreamUnavailableError("invalid WMS tile dimensions")
+        if operation == "legend" and (
+            width > 2048 or height > 8192 or width * height > 4_000_000
+        ):
+            raise WMSUpstreamUnavailableError("invalid WMS legend dimensions")
     elif operation == "identify":
         if (
             content_type not in JSON_CONTENT_TYPES
@@ -547,3 +572,16 @@ def _validate_response_body(
             raise WMSUpstreamUnavailableError("invalid WMS feature information")
     else:
         raise WMSUpstreamUnavailableError("unsupported WMS operation")
+
+
+def _png_dimensions(body: bytes) -> tuple[int, int]:
+    if len(body) < 33 or body[8:12] != b"\x00\x00\x00\r" or body[12:16] != b"IHDR":
+        raise WMSUpstreamUnavailableError("invalid WMS PNG header")
+    ihdr = body[12:29]
+    expected_crc = struct.unpack(">I", body[29:33])[0]
+    if zlib.crc32(ihdr) & 0xFFFFFFFF != expected_crc:
+        raise WMSUpstreamUnavailableError("invalid WMS PNG header")
+    width, height = struct.unpack(">II", body[16:24])
+    if width == 0 or height == 0:
+        raise WMSUpstreamUnavailableError("invalid WMS PNG dimensions")
+    return width, height
