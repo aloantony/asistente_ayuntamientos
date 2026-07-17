@@ -19,7 +19,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0029"
+HEAD_REVISION = "20260717_0030"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -147,6 +147,85 @@ ASSISTANT_ATTACHMENT_SCHEMA = {
     "unique_constraints": {
         "uq_assistant_message_attachments_message_document",
         "uq_assistant_message_attachments_message_position",
+    },
+}
+
+CANVAS_SCHEMA = {
+    "assistant_canvas_documents": {
+        "columns": {
+            "id",
+            "conversation_id",
+            "organization_id",
+            "document_type",
+            "title",
+            "content",
+            "status",
+            "current_revision",
+            "creation_id",
+            "created_by_id",
+            "updated_by_id",
+            "source_message_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_assistant_canvas_documents_conversation_id",
+            "ix_assistant_canvas_documents_organization_id",
+            "ix_assistant_canvas_documents_status",
+            "ix_assistant_canvas_documents_created_by_id",
+            "ix_assistant_canvas_documents_updated_by_id",
+            "ix_assistant_canvas_documents_source_message_id",
+        },
+        "foreign_keys": {
+            ("conversation_id",),
+            ("organization_id",),
+            ("created_by_id",),
+            ("updated_by_id",),
+            ("source_message_id",),
+        },
+        "checks": {
+            "ck_assistant_canvas_documents_current_revision",
+            "ck_assistant_canvas_documents_status",
+            "ck_assistant_canvas_documents_type",
+        },
+        "unique_constraints": {
+            "uq_assistant_canvas_documents_conversation_creation",
+        },
+    },
+    "assistant_canvas_revisions": {
+        "columns": {
+            "id",
+            "document_id",
+            "revision_number",
+            "title",
+            "content",
+            "content_sha256",
+            "change_summary",
+            "edit_source",
+            "mutation_id",
+            "source_tool_call_id",
+            "created_by_id",
+            "source_message_id",
+            "created_at",
+        },
+        "indexes": {
+            "ix_assistant_canvas_revisions_document_id",
+            "ix_assistant_canvas_revisions_created_by_id",
+            "ix_assistant_canvas_revisions_source_message_id",
+        },
+        "foreign_keys": {
+            ("document_id",),
+            ("created_by_id",),
+            ("source_message_id",),
+        },
+        "checks": {
+            "ck_assistant_canvas_revisions_number",
+            "ck_assistant_canvas_revisions_source",
+        },
+        "unique_constraints": {
+            "uq_assistant_canvas_revisions_document_mutation",
+            "uq_assistant_canvas_revisions_document_number",
+        },
     },
 }
 
@@ -898,6 +977,30 @@ def assert_maintenance_schema(inspector: Inspector) -> None:
         } == expected["unique_constraints"]
 
 
+def assert_canvas_schema(inspector: Inspector) -> None:
+    for table_name, expected in CANVAS_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+
+
 def assert_maintenance_trigger(engine: Engine) -> None:
     with engine.connect() as connection:
         assert connection.execute(
@@ -1005,6 +1108,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert PROTOTYPE_TABLES.isdisjoint(upgraded_inspector.get_table_names())
         assert_asset_inventory_schema(upgraded_inspector)
         assert_maintenance_schema(upgraded_inspector)
+        assert_canvas_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(upgraded_inspector)
@@ -1034,6 +1138,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert set(MAINTENANCE_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert set(CANVAS_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -1048,6 +1155,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         )
         assert_asset_inventory_schema(reupgraded_inspector)
         assert_maintenance_schema(reupgraded_inspector)
+        assert_canvas_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(reupgraded_inspector)
@@ -1067,6 +1175,28 @@ def test_reconciles_deployed_revision_and_reversible_schema(
                     """
                 )
             ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_canvas_migration_from_previous_head_is_additive_and_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0029")
+    engine = create_engine(migration_database_url)
+
+    try:
+        assert set(CANVAS_SCHEMA).isdisjoint(inspect(engine).get_table_names())
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_canvas_schema(inspect(engine))
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0029")
+        assert set(CANVAS_SCHEMA).isdisjoint(inspect(engine).get_table_names())
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_canvas_schema(inspect(engine))
     finally:
         engine.dispose()
 
@@ -1715,6 +1845,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         run_alembic(migration_database_url, "upgrade", "head")
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
+        assert_canvas_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(inspect(engine))
@@ -1727,6 +1858,9 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
             downgraded_inspector.get_table_names()
         )
         assert set(MAINTENANCE_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(CANVAS_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
@@ -1743,6 +1877,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         run_alembic(migration_database_url, "check")
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
+        assert_canvas_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(inspect(engine))

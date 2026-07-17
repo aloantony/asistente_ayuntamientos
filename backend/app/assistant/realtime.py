@@ -33,6 +33,8 @@ from app.assistant.schemas import (
 from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tool_authorization import ConversationToolAuthorization
 from app.assistant.tools import (
+    CANVAS_EXTERNAL_TOOL_BLOCKED,
+    REDACTED_CANVAS_EXTERNAL_TOOL_NAME,
     REDACTED_UNTRUSTED_TOOL_NAME,
     ToolContext,
     ToolResult,
@@ -41,9 +43,13 @@ from app.assistant.tools import (
     get_available_tool_specs,
     redacted_untrusted_call_id,
     redacted_untrusted_tool_input,
+    tool_input_for_activity,
+    tool_is_blocked_after_canvas_content,
     tool_is_blocked_after_untrusted_content,
 )
 from app.assistant.turn import build_history, tool_result_for_activity
+from app.canvas.models import AssistantCanvasRevision
+from app.canvas.service import get_owned_canvas_document, serialize_revision
 from app.core.config import settings
 from app.users.models import User
 
@@ -51,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 REALTIME_STATE_KEY = "realtime_voice"
 REALTIME_UNTRUSTED_CONTENT_KEY = "untrusted_external_content_seen"
+REALTIME_CANVAS_CONTENT_KEY = "canvas_content_seen"
 MAX_RECENT_REALTIME_TURNS = 4
 MAX_REALTIME_TOOL_CALLS = 16
 MAX_REALTIME_RESPONSES = 4
@@ -311,6 +318,10 @@ def execute_realtime_tool_call(
         untrusted_external_content_seen=(
             _realtime_turn_has_untrusted_external_content(turn, calls)
         ),
+        canvas_content_seen=(
+            turn.get(REALTIME_CANVAS_CONTENT_KEY) is True
+            or _realtime_turn_has_canvas_content(turn, calls)
+        ),
     )
     post_taint_blocked = tool_is_blocked_after_untrusted_content(
         payload.name,
@@ -318,25 +329,34 @@ def execute_realtime_tool_call(
         tool_context,
         allow_web_reader=False,
     )
+    canvas_external_blocked = tool_is_blocked_after_canvas_content(
+        payload.name,
+        tool_context,
+    )
     persisted_call_id = (
         redacted_untrusted_call_id(payload.call_id)
-        if post_taint_blocked
+        if post_taint_blocked or canvas_external_blocked
         else payload.call_id
     )
     persisted_tool_name = (
-        REDACTED_UNTRUSTED_TOOL_NAME
-        if post_taint_blocked
-        else payload.name
+        REDACTED_CANVAS_EXTERNAL_TOOL_NAME
+        if canvas_external_blocked
+        else (
+            REDACTED_UNTRUSTED_TOOL_NAME
+            if post_taint_blocked
+            else payload.name
+        )
     )
     persisted_tool_input = (
         redacted_untrusted_tool_input()
-        if post_taint_blocked
-        else deepcopy(tool_input)
+        if post_taint_blocked or canvas_external_blocked
+        else tool_input_for_activity(payload.name, tool_input)
     )
+    tool_context.tool_call_id = persisted_call_id
     request_digest = _tool_call_digest(
         payload.name,
         payload.arguments,
-        keyed=post_taint_blocked,
+        keyed=post_taint_blocked or canvas_external_blocked,
     )
     recovered_expired_call = _recover_expired_realtime_tool_calls(turn)
     existing = calls.get(persisted_call_id)
@@ -354,7 +374,11 @@ def execute_realtime_tool_call(
                 "Realtime tool call is already in progress"
             )
         action = _stored_action(existing)
-        output = str(existing.get("output") or "")
+        output = _replay_realtime_model_output(
+            db,
+            current_user,
+            existing,
+        )
         confirmation_prompt = _optional_string(existing.get("confirmation_prompt"))
         db.commit()
         return action, output, user_message, confirmation_prompt, True
@@ -412,6 +436,12 @@ def execute_realtime_tool_call(
                 content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
                 ok=False,
             )
+        elif canvas_external_blocked:
+            guarded_result = None
+            result = ToolResult(
+                content=CANVAS_EXTERNAL_TOOL_BLOCKED,
+                ok=False,
+            )
         else:
             guarded_result = check_tool_confirmation(
                 db,
@@ -443,6 +473,7 @@ def execute_realtime_tool_call(
         untrusted_external_content_seen = (
             tool_context.untrusted_external_content_seen
         )
+        canvas_content_seen = tool_context.canvas_content_seen
         action = {
             "call_id": persisted_call_id,
             "tool": persisted_tool_name,
@@ -451,8 +482,11 @@ def execute_realtime_tool_call(
             "result": tool_result_for_activity(
                 persisted_tool_name,
                 result.content,
+                result.activity_content,
             ),
         }
+        if result.ui_action is not None:
+            action["ui_action"] = result.ui_action
 
         confirmation_context = _confirmation_context_from_result(guarded_result)
         locked_conversation = lock_conversation_for_confirmation(
@@ -475,6 +509,8 @@ def execute_realtime_tool_call(
 
         if untrusted_external_content_seen:
             turn[REALTIME_UNTRUSTED_CONTENT_KEY] = True
+        if canvas_content_seen:
+            turn[REALTIME_CANVAS_CONTENT_KEY] = True
 
         if confirmation_context is not None:
             turn["confirmation"] = _serialize_confirmation_reference(
@@ -486,18 +522,38 @@ def execute_realtime_tool_call(
             input_mode="voice",
             turn_user_message_id=user_message.id,
         )
-        output = tool_result_for_activity(persisted_tool_name, result.content)
+        model_output = (
+            result.content
+            if payload.name in {"get_canvas_document", "list_canvas_revisions"}
+            else tool_result_for_activity(
+                persisted_tool_name,
+                result.content,
+                result.activity_content,
+            )
+        )
+        stored_output = tool_result_for_activity(
+            persisted_tool_name,
+            result.content,
+            result.activity_content,
+        )
         if confirmation_prompt:
-            output = json.dumps(
+            model_output = json.dumps(
                 {"status": "confirmation_required"},
                 ensure_ascii=False,
             )
+            stored_output = model_output
+        model_output_ref = (
+            None
+            if confirmation_prompt
+            else _build_realtime_model_output_ref(payload.name, result.content)
+        )
 
         stored_call.update(
             {
                 "status": "finished",
                 "action": action,
-                "output": output,
+                "output": stored_output,
+                "model_output_ref": model_output_ref,
                 "confirmation_prompt": confirmation_prompt,
             }
         )
@@ -507,7 +563,7 @@ def execute_realtime_tool_call(
         db.commit()
         db.refresh(user_message)
         db.refresh(locked_conversation)
-        return action, output, user_message, confirmation_prompt, False
+        return action, model_output, user_message, confirmation_prompt, False
     except Exception:
         logger.exception(
             "Realtime tool call ended with an indeterminate result: call_id=%s",
@@ -995,6 +1051,134 @@ def _realtime_turn_has_untrusted_external_content(
     return False
 
 
+def _realtime_turn_has_canvas_content(
+    turn: dict,
+    calls: dict | None = None,
+) -> bool:
+    stored = turn.get(REALTIME_CANVAS_CONTENT_KEY)
+    if isinstance(stored, bool):
+        return stored
+    for call in (calls if calls is not None else _turn_calls(turn)).values():
+        if not isinstance(call, dict):
+            continue
+        action = call.get("action")
+        action_tool = action.get("tool") if isinstance(action, dict) else None
+        if (call.get("name") or action_tool) != "get_canvas_document":
+            continue
+        if call.get("status") == "indeterminate":
+            return True
+        if call.get("status") == "finished" and (
+            not isinstance(action, dict) or action.get("ok") is not False
+        ):
+            return True
+    return False
+
+
+def _build_realtime_model_output_ref(
+    tool_name: str,
+    content: str,
+) -> dict | None:
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if tool_name == "get_canvas_document" and isinstance(payload, dict):
+        document_id = payload.get("id")
+        revision = payload.get("current_revision")
+        if (
+            isinstance(document_id, int)
+            and not isinstance(document_id, bool)
+            and isinstance(revision, int)
+            and not isinstance(revision, bool)
+        ):
+            summary = deepcopy(payload)
+            summary.pop("content", None)
+            return {
+                "kind": "canvas_revision",
+                "document_id": document_id,
+                "revision": revision,
+                "summary": summary,
+            }
+    if tool_name == "list_canvas_revisions" and isinstance(payload, list):
+        revision_numbers = [
+            item.get("revision_number")
+            for item in payload
+            if isinstance(item, dict)
+            and isinstance(item.get("revision_number"), int)
+            and not isinstance(item.get("revision_number"), bool)
+        ]
+        document_ids = {
+            item.get("document_id")
+            for item in payload
+            if isinstance(item, dict)
+            and isinstance(item.get("document_id"), int)
+            and not isinstance(item.get("document_id"), bool)
+        }
+        if len(document_ids) == 1 and len(revision_numbers) == len(payload):
+            return {
+                "kind": "canvas_revision_list",
+                "document_id": document_ids.pop(),
+                "revision_numbers": revision_numbers,
+            }
+    return None
+
+
+def _replay_realtime_model_output(
+    db: Session,
+    current_user: User,
+    call: dict,
+) -> str:
+    reference = call.get("model_output_ref")
+    if not isinstance(reference, dict):
+        return str(call.get("output") or "")
+    document_id = reference.get("document_id")
+    if not isinstance(document_id, int) or isinstance(document_id, bool):
+        raise AssistantRealtimeConflictError("Realtime canvas reference is invalid")
+    get_owned_canvas_document(db, current_user, document_id)
+    if reference.get("kind") == "canvas_revision":
+        revision_number = reference.get("revision")
+        revision = db.scalar(
+            select(AssistantCanvasRevision).where(
+                AssistantCanvasRevision.document_id == document_id,
+                AssistantCanvasRevision.revision_number == revision_number,
+            )
+        )
+        summary = reference.get("summary")
+        if revision is None or not isinstance(summary, dict):
+            raise AssistantRealtimeConflictError(
+                "Realtime canvas revision is no longer available"
+            )
+        payload = deepcopy(summary)
+        payload["title"] = revision.title
+        payload["current_revision"] = revision.revision_number
+        payload["content"] = revision.content
+        return json.dumps(payload, ensure_ascii=False)
+    if reference.get("kind") == "canvas_revision_list":
+        revision_numbers = reference.get("revision_numbers")
+        if not isinstance(revision_numbers, list):
+            raise AssistantRealtimeConflictError(
+                "Realtime canvas revision list is invalid"
+            )
+        revisions = list(
+            db.scalars(
+                select(AssistantCanvasRevision).where(
+                    AssistantCanvasRevision.document_id == document_id,
+                    AssistantCanvasRevision.revision_number.in_(revision_numbers),
+                )
+            )
+        )
+        by_number = {revision.revision_number: revision for revision in revisions}
+        if any(number not in by_number for number in revision_numbers):
+            raise AssistantRealtimeConflictError(
+                "Realtime canvas revision list is no longer available"
+            )
+        return json.dumps(
+            [serialize_revision(by_number[number]) for number in revision_numbers],
+            ensure_ascii=False,
+        )
+    return str(call.get("output") or "")
+
+
 def _turn_responses(turn: dict) -> dict:
     responses = turn.get("responses")
     if not isinstance(responses, dict):
@@ -1205,7 +1389,13 @@ def _build_realtime_instructions(
     conversation: AssistantConversation,
     tools: list,
 ) -> str:
-    prompt = build_system_prompt(db, current_user, tools, input_mode="voice")
+    prompt = build_system_prompt(
+        db,
+        current_user,
+        tools,
+        input_mode="voice",
+        conversation=conversation,
+    )
     history = _format_history_for_realtime(conversation)
     voice_rules = (
         "Estás en una conversación hablada en tiempo real. Responde de forma "

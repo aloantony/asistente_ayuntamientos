@@ -17,6 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.canvas.models import AssistantCanvasDocument
     from app.documents.models import Document
     from app.organizations.models import Organization
     from app.requirements.models import Requirement
@@ -77,6 +78,12 @@ class AssistantConversation(TimestampMixin, Base):
         back_populates="conversation",
         cascade="all, delete-orphan",
         order_by="AssistantMessage.id",
+    )
+    canvas_documents: Mapped[list["AssistantCanvasDocument"]] = relationship(
+        "AssistantCanvasDocument",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="AssistantCanvasDocument.updated_at.desc()",
     )
 
 

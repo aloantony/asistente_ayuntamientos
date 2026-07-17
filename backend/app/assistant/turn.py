@@ -55,7 +55,9 @@ from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tool_authorization import ConversationToolAuthorization
 from app.assistant.tools import (
     ATTACHMENT_CONTENT_TOOL_RESULT,
+    CANVAS_EXTERNAL_TOOL_BLOCKED,
     MAX_ORDINANCE_TOOL_RESULT_CHARS,
+    REDACTED_CANVAS_EXTERNAL_TOOL_NAME,
     ToolContext,
     ToolResult,
     ToolSpec,
@@ -64,7 +66,10 @@ from app.assistant.tools import (
     canonical_untrusted_web_reader_input,
     execute_tool,
     get_available_tool_specs,
+    redacted_untrusted_call_id,
     redacted_untrusted_tool_input,
+    tool_input_for_activity,
+    tool_is_blocked_after_canvas_content,
     tool_is_blocked_after_untrusted_content,
 )
 from app.core.config import settings
@@ -81,7 +86,18 @@ MAX_WEB_READER_AUDIT_REDIRECTS = 6
 MAX_WEB_READER_AUDIT_URL_CHARS = 2000
 
 
-def tool_result_for_activity(tool_name: str, content: str) -> str:
+def tool_result_for_activity(
+    tool_name: str,
+    content: str,
+    activity_content: str | None = None,
+) -> str:
+    if activity_content is not None:
+        limit = (
+            MAX_ORDINANCE_TOOL_RESULT_CHARS
+            if tool_name == "semantic_search_ordinances"
+            else MAX_TOOL_RESULT_CHARS
+        )
+        return activity_content[:limit]
     if tool_name == "read_web_page":
         try:
             payload = json.loads(content)
@@ -177,7 +193,7 @@ def tool_result_for_activity(tool_name: str, content: str) -> str:
         if tool_name == "semantic_search_ordinances"
         else MAX_TOOL_RESULT_CHARS
     )
-    return content[:limit]
+    return (activity_content if activity_content is not None else content)[:limit]
 
 
 TOOL_CALL_BUDGET_RESULT = (
@@ -423,7 +439,13 @@ def _run_agent_turn_events(
         conversation_id=conversation.id,
         user_message_id=user_message.id,
     )
-    system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
+    system = build_system_prompt(
+        db,
+        current_user,
+        tools,
+        input_mode=input_mode,
+        conversation=conversation,
+    )
     messages = build_history(
         conversation,
         attachment_context_message_id=user_message.id,
@@ -517,6 +539,14 @@ def _run_agent_turn_events(
                         allow_web_reader=True,
                     )
                 )
+                canvas_external_blocked = (
+                    False
+                    if attachment_tainted
+                    else tool_is_blocked_after_canvas_content(
+                        block.name,
+                        tool_context,
+                    )
+                )
                 canonical_reader_input = (
                     None
                     if attachment_tainted
@@ -532,22 +562,44 @@ def _run_agent_turn_events(
                     if attachment_tainted
                     else (
                         redacted_untrusted_tool_input()
-                        if post_taint_blocked
+                        if post_taint_blocked or canvas_external_blocked
                         else canonical_reader_input or raw_tool_input
                     )
+                )
+                persisted_tool_input = tool_input_for_activity(
+                    block.name,
+                    persisted_tool_input,
                 )
                 persisted_tool_name = (
                     ATTACHMENT_TOOL_NAME_REDACTION
                     if attachment_tainted
                     else (
-                        REDACTED_UNTRUSTED_TOOL_NAME
-                        if post_taint_blocked
-                        else block.name
+                        REDACTED_CANVAS_EXTERNAL_TOOL_NAME
+                        if canvas_external_blocked
+                        else (
+                            REDACTED_UNTRUSTED_TOOL_NAME
+                            if post_taint_blocked
+                            else block.name
+                        )
                     )
                 )
+                persisted_call_id = (
+                    f"{ATTACHMENT_TOOL_CALL_ID_PREFIX}-{len(actions) + 1}"
+                    if attachment_tainted
+                    else (
+                        redacted_untrusted_call_id(block.id)
+                        if (
+                            tool_context.untrusted_external_content_seen
+                            or canvas_external_blocked
+                        )
+                        else block.id
+                    )
+                )
+                tool_context.tool_call_id = persisted_call_id
                 yield TurnEvent(
                     "tool_activity",
                     {
+                        "call_id": persisted_call_id,
                         "tool": persisted_tool_name,
                         "status": "started",
                         "input": persisted_tool_input,
@@ -568,6 +620,7 @@ def _run_agent_turn_events(
                         context=ToolContext(
                             conversation_id=conversation.id,
                             user_message_id=user_message.id,
+                            tool_call_id=persisted_call_id,
                             attachment_content_seen=True,
                         ),
                         allowed=tool_names,
@@ -596,6 +649,11 @@ def _run_agent_turn_events(
                 elif post_taint_blocked:
                     result = ToolResult(
                         content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
+                        ok=False,
+                    )
+                elif canvas_external_blocked:
+                    result = ToolResult(
+                        content=CANVAS_EXTERNAL_TOOL_BLOCKED,
                         ok=False,
                     )
                 else:
@@ -649,24 +707,32 @@ def _run_agent_turn_events(
                         # again later in this same turn.
                         seen_read_calls.clear()
                 action = {
+                    "call_id": persisted_call_id,
                     "tool": persisted_tool_name,
                     "ok": result.ok,
                     "input": persisted_tool_input,
                     "result": tool_result_for_activity(
                         persisted_tool_name,
                         result.content,
+                        result.activity_content,
                     ),
                 }
+                if result.ui_action is not None:
+                    action["ui_action"] = result.ui_action
                 actions.append(action)
+                finished_event = {
+                    "call_id": persisted_call_id,
+                    "tool": persisted_tool_name,
+                    "status": "finished",
+                    "input": persisted_tool_input,
+                    "ok": result.ok,
+                    "result": action["result"],
+                }
+                if result.ui_action is not None:
+                    finished_event["ui_action"] = result.ui_action
                 yield TurnEvent(
                     "tool_activity",
-                    {
-                        "tool": persisted_tool_name,
-                        "status": "finished",
-                        "input": persisted_tool_input,
-                        "ok": result.ok,
-                        "result": action["result"],
-                    },
+                    finished_event,
                 )
                 tool_results.append(
                     {

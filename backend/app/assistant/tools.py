@@ -46,6 +46,19 @@ from app.assistant.web_search import (
     normalize_web_query,
     web_search_client,
 )
+from app.canvas.models import AssistantCanvasDocument
+from app.canvas.schemas import MAX_CANVAS_CONTENT_CHARS
+from app.canvas.service import (
+    active_canvas_document_id,
+    create_canvas_document,
+    get_owned_canvas_conversation,
+    get_owned_canvas_document,
+    list_canvas_documents,
+    list_canvas_revisions,
+    restore_canvas_revision,
+    serialize_revision,
+    update_canvas_document,
+)
 from app.core.config import settings
 from app.geo.access import (
     get_visible_entity,
@@ -76,8 +89,8 @@ from app.users.models import User
 
 ToolExecutor = Callable[..., object]
 ToolInputNormalizer = Callable[[Session, User, dict, "ToolContext"], dict]
-ToolApprovalPolicy = Literal["never", "explicit"]
-ToolSideEffect = Literal["none", "database_write"]
+ToolApprovalPolicy = Literal["never", "explicit", "direct"]
+ToolSideEffect = Literal["none", "database_write", "draft_write"]
 
 VALID_PRIORITIES = {"low", "medium", "high", "urgent"}
 VALID_MEMORY_CATEGORIES = {
@@ -201,6 +214,179 @@ _TOOL_DEFINITIONS: list[dict] = [
                     "description": "Filtrar por organización (opcional)",
                 },
             },
+        },
+    },
+    {
+        "name": "list_canvas_documents",
+        "description": (
+            "Lista los documentos borrador del lienzo vinculados a esta "
+            "conversación. Devuelve identificadores, títulos, tipos y revisión "
+            "actual, pero no el contenido completo. Úsala para resolver a qué "
+            "borrador se refiere el usuario cuando haya más de uno."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_canvas_document",
+        "description": (
+            "Lee el contenido y la revisión vigente de un borrador del lienzo. "
+            "Si document_id se omite, usa el borrador que la persona tiene "
+            "abierto. Lee siempre la versión actual antes de proponer cambios."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "ID del borrador; opcional si hay uno activo",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "create_canvas_document",
+        "description": (
+            "Crea en el lienzo un documento de trabajo editable y versionado. "
+            "Úsala cuando el usuario pida redactar o desarrollar un borrador, "
+            "por ejemplo una ordenanza municipal. El resultado es siempre "
+            "BORRADOR NO OFICIAL: no lo aprueba, publica ni incorpora al corpus."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "description": "Título descriptivo del borrador",
+                },
+                "document_type": {
+                    "type": "string",
+                    "enum": [
+                        "municipal_ordinance",
+                        "regulation",
+                        "report",
+                        "letter",
+                        "minutes",
+                        "other",
+                    ],
+                    "description": "Clase de documento de trabajo",
+                },
+                "organization_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Organización municipal, si ya está identificada",
+                },
+                "content": {
+                    "type": "string",
+                    "maxLength": MAX_CANVAS_CONTENT_CHARS,
+                    "description": "Contenido completo inicial en Markdown",
+                },
+            },
+            "required": ["title", "document_type", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "update_canvas_document",
+        "description": (
+            "Guarda una nueva revisión del borrador activo o indicado. Debes "
+            "haber leído antes la revisión vigente y enviar expected_revision; "
+            "si otra persona cambió el texto, el servidor rechazará la escritura "
+            "para no sobrescribirla. Envía el contenido completo resultante."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "ID del borrador; opcional si hay uno activo",
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Revisión sobre la que se preparó el cambio",
+                },
+                "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "description": "Título completo resultante, si cambia",
+                },
+                "content": {
+                    "type": "string",
+                    "maxLength": MAX_CANVAS_CONTENT_CHARS,
+                    "description": "Contenido completo resultante en Markdown",
+                },
+                "change_summary": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "Resumen breve de lo cambiado",
+                },
+            },
+            "required": ["expected_revision"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_canvas_revisions",
+        "description": (
+            "Lista el historial inmutable de revisiones de un borrador, sin "
+            "devolver los cuerpos completos. Úsala antes de restaurar una "
+            "versión anterior."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "ID del borrador; opcional si hay uno activo",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "restore_canvas_revision",
+        "description": (
+            "Restaura el texto de una revisión anterior creando una revisión "
+            "nueva; nunca borra ni reescribe el historial. Requiere la revisión "
+            "actual esperada para evitar sobrescrituras concurrentes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "ID del borrador; opcional si hay uno activo",
+                },
+                "revision_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Revisión histórica que se quiere recuperar",
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Revisión vigente al solicitar la restauración",
+                },
+                "change_summary": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "Motivo breve de la restauración",
+                },
+            },
+            "required": ["revision_number", "expected_revision"],
+            "additionalProperties": False,
         },
     },
     {
@@ -746,6 +932,15 @@ _TOOL_DEFINITIONS: list[dict] = [
 class ToolResult:
     content: str
     ok: bool
+    ui_action: dict | None = field(default=None, kw_only=True)
+    activity_content: str | None = field(default=None, kw_only=True)
+
+
+@dataclass(frozen=True)
+class ToolExecutionOutput:
+    content: object
+    activity_content: object | None = None
+    ui_action: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -824,6 +1019,7 @@ class PreparedOrdinanceSearchEmbedding:
 class ToolContext:
     conversation_id: int | None = None
     user_message_id: int | None = None
+    tool_call_id: str | None = None
     lock_effects: bool = False
     prepared_ordinance_embedding: PreparedOrdinanceSearchEmbedding | None = None
     attachment_content_seen: bool = False
@@ -835,6 +1031,9 @@ class ToolContext:
     # Once a search snippet or page body has entered the model context, only
     # reads of URLs authorized by that initial search may continue.
     untrusted_external_content_seen: bool = False
+    # A canvas body is private internal content. Once it enters the model
+    # context, external web tools stay disabled for the remainder of the turn.
+    canvas_content_seen: bool = False
 
 
 UNTRUSTED_EXTERNAL_TOOL_BLOCKED = (
@@ -845,6 +1044,7 @@ UNTRUSTED_EXTERNAL_TOOL_BLOCKED = (
 # Backwards-compatible import for integrations that used the narrower name.
 UNTRUSTED_EXTERNAL_MUTATION_BLOCKED = UNTRUSTED_EXTERNAL_TOOL_BLOCKED
 REDACTED_UNTRUSTED_TOOL_NAME = "redacted_post_taint_tool"
+REDACTED_CANVAS_EXTERNAL_TOOL_NAME = "redacted_canvas_external_tool"
 HERMES_WEB_TOOLS_BLOCKED = (
     "La búsqueda y lectura web están desactivadas para el runtime Hermes "
     "porque su toolset nativo no forma parte de la frontera auditada."
@@ -867,6 +1067,29 @@ def tool_is_blocked_after_untrusted_content(
         context,
         allow_web_reader=allow_web_reader,
     ) is None
+
+
+def tool_is_blocked_after_canvas_content(
+    name: str,
+    context: ToolContext,
+) -> bool:
+    return context.canvas_content_seen and name in {"web_search", "read_web_page"}
+
+
+def tool_input_for_activity(name: str, tool_input: dict) -> dict:
+    """Keep canvas bodies out of SSE, message actions, and realtime state."""
+    payload = deepcopy(tool_input)
+    if name not in {"create_canvas_document", "update_canvas_document"}:
+        return payload
+    content = payload.get("content")
+    if not isinstance(content, str):
+        return payload
+    payload["content"] = {
+        "redacted": True,
+        "char_count": len(content),
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+    return payload
 
 
 def canonical_untrusted_web_reader_input(
@@ -921,6 +1144,11 @@ ATTACHMENT_CONTENT_TOOL_RESULT = (
     "aislado de todas las herramientas. Responde únicamente con el contexto "
     "del turno sin repetir argumentos de herramienta."
 )
+CANVAS_EXTERNAL_TOOL_BLOCKED = (
+    "No se ejecutó la herramienta web porque este turno ya ha leído el "
+    "contenido privado de un borrador del lienzo. Inicia un mensaje separado "
+    "sin el texto del borrador si necesitas una búsqueda externa."
+)
 
 
 def execute_tool(
@@ -938,6 +1166,8 @@ def execute_tool(
     tool_context = context or ToolContext()
     if tool_context.attachment_content_seen:
         return ToolResult(content=ATTACHMENT_CONTENT_TOOL_RESULT, ok=False)
+    if tool_context.canvas_content_seen and name in {"web_search", "read_web_page"}:
+        return ToolResult(content=CANVAS_EXTERNAL_TOOL_BLOCKED, ok=False)
     if tool_context.untrusted_external_content_seen:
         canonical_reader_input = canonical_untrusted_web_reader_input(
             name,
@@ -1044,6 +1274,25 @@ def execute_tool(
         # future external or long-running tool must use a durable workflow and
         # must not be added to this path.
         tool_context = replace(tool_context, lock_effects=True)
+    elif spec.approval_policy == "direct":
+        if (
+            tool_context.conversation_id is None
+            or tool_context.user_message_id is None
+            or not lock_conversation_tool_turn(
+                db,
+                conversation_id=tool_context.conversation_id,
+                user_message_id=tool_context.user_message_id,
+            )
+        ):
+            db.rollback()
+            return ToolResult(
+                content=(
+                    "Edición de borrador denegada: el turno fue sustituido "
+                    "por un mensaje posterior."
+                ),
+                ok=False,
+            )
+        tool_context = replace(tool_context, lock_effects=True)
 
     try:
         normalized_input = spec.normalize_input(
@@ -1072,12 +1321,14 @@ def execute_tool(
             normalized_input,
             tool_context,
         )
+        output = result if isinstance(result, ToolExecutionOutput) else None
+        result_content = output.content if output is not None else result
         if name == "web_search":
-            content = _serialize_web_search_payload(result)
+            content = _serialize_web_search_payload(result_content)
         elif name == "semantic_search_ordinances":
-            content = _serialize_ordinance_search_payload(result)
+            content = _serialize_ordinance_search_payload(result_content)
         else:
-            content = json.dumps(result, ensure_ascii=False)
+            content = json.dumps(result_content, ensure_ascii=False)
         if spec.requires_confirmation:
             if authorization is None:
                 raise ValueError("Mutating execution lost its authorization")
@@ -1089,6 +1340,8 @@ def execute_tool(
             )
             if not defer_commit:
                 db.commit()
+        elif spec.side_effect == "draft_write" and not defer_commit:
+            db.commit()
     except HTTPException as error:
         db.rollback()
         return ToolResult(
@@ -1105,7 +1358,15 @@ def execute_tool(
             ok=False,
         )
 
-    return ToolResult(content=content, ok=True)
+    activity_content = None
+    if output is not None and output.activity_content is not None:
+        activity_content = json.dumps(output.activity_content, ensure_ascii=False)
+    return ToolResult(
+        content=content,
+        ok=True,
+        ui_action=output.ui_action if output is not None else None,
+        activity_content=activity_content,
+    )
 
 
 def _serialize_requirement(requirement: Requirement, *, full: bool) -> dict:
@@ -1177,6 +1438,279 @@ def _list_projects(
         }
         for project in projects
     ]
+
+
+def _canvas_conversation(
+    db: Session,
+    current_user: User,
+    context: ToolContext,
+):
+    if context.conversation_id is None:
+        raise ValueError("la herramienta de lienzo requiere una conversación")
+    return get_owned_canvas_conversation(
+        db,
+        current_user,
+        context.conversation_id,
+    )
+
+
+def _resolve_canvas_document(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> AssistantCanvasDocument:
+    conversation = _canvas_conversation(db, current_user, context)
+    requested_id = tool_input.get("document_id")
+    document_id = (
+        _normalize_positive_identifier(requested_id, "document_id")
+        if requested_id is not None
+        else active_canvas_document_id(conversation)
+    )
+    if document_id is None:
+        raise ValueError(
+            "document_id es obligatorio cuando no hay un borrador activo"
+        )
+    document = get_owned_canvas_document(db, current_user, document_id)
+    if document.conversation_id != conversation.id:
+        raise HTTPException(status_code=404, detail="Canvas document not found")
+    return document
+
+
+def _serialize_canvas_document(
+    document: AssistantCanvasDocument,
+    *,
+    include_content: bool,
+) -> dict:
+    payload = {
+        "id": document.id,
+        "conversation_id": document.conversation_id,
+        "organization_id": document.organization_id,
+        "document_type": document.document_type,
+        "title": document.title,
+        "status": document.status,
+        "current_revision": document.current_revision,
+        "content_format": "markdown",
+        "updated_at": document.updated_at.isoformat(),
+        "official_status": "draft_not_official",
+    }
+    if include_content:
+        payload["content"] = document.content
+    return payload
+
+
+def _canvas_ui_action(
+    document: AssistantCanvasDocument,
+    context: ToolContext,
+    *,
+    operation: str,
+) -> dict:
+    action_seed = context.tool_call_id or uuid.uuid4().hex
+    action_suffix = uuid.uuid5(uuid.NAMESPACE_URL, action_seed).hex[:12]
+    return {
+        "type": "ui.open_canvas_document",
+        "version": 1,
+        "id": (
+            f"canvas:{document.id}:{document.current_revision}:"
+            f"{action_suffix}"
+        ),
+        "surface": "document_canvas",
+        "title": document.title,
+        "context": {
+            "document_id": document.id,
+            "conversation_id": document.conversation_id,
+            "revision": document.current_revision,
+            "operation": operation,
+        },
+    }
+
+
+def _canvas_mutation_id(context: ToolContext) -> str | None:
+    if context.tool_call_id is None:
+        return None
+    seed = (
+        f"{context.conversation_id or 0}:"
+        f"{context.user_message_id or 0}:"
+        f"{context.tool_call_id}"
+    )
+    return f"assistant:{hashlib.sha256(seed.encode('utf-8')).hexdigest()}"
+
+
+def _canvas_source_tool_call_id(context: ToolContext) -> str | None:
+    value = context.tool_call_id
+    if value is None or len(value) <= 255:
+        return value
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _list_canvas_documents(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> list[dict]:
+    conversation = _canvas_conversation(db, current_user, context)
+    return [
+        _serialize_canvas_document(document, include_content=False)
+        for document in list_canvas_documents(
+            db,
+            current_user,
+            conversation.id,
+        )
+    ]
+
+
+def _get_canvas_document(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> ToolExecutionOutput:
+    document = _resolve_canvas_document(db, current_user, tool_input, context)
+    context.canvas_content_seen = True
+    summary = _serialize_canvas_document(document, include_content=False)
+    return ToolExecutionOutput(
+        content=_serialize_canvas_document(document, include_content=True),
+        activity_content=summary,
+        ui_action=_canvas_ui_action(document, context, operation="opened"),
+    )
+
+
+def _create_canvas_document(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> ToolExecutionOutput:
+    conversation = _canvas_conversation(db, current_user, context)
+    document = create_canvas_document(
+        db,
+        current_user,
+        conversation_id=conversation.id,
+        title=str(tool_input["title"]),
+        document_type=str(tool_input["document_type"]),
+        content=str(tool_input["content"]),
+        organization_id=(
+            _normalize_positive_identifier(
+                tool_input["organization_id"],
+                "organization_id",
+            )
+            if tool_input.get("organization_id") is not None
+            else None
+        ),
+        edit_source="assistant",
+        source_message_id=context.user_message_id,
+        source_tool_call_id=_canvas_source_tool_call_id(context),
+        creation_id=_canvas_mutation_id(context),
+        commit=False,
+    )
+    summary = _serialize_canvas_document(document, include_content=False)
+    return ToolExecutionOutput(
+        content=summary,
+        activity_content=summary,
+        ui_action=_canvas_ui_action(document, context, operation="created"),
+    )
+
+
+def _update_canvas_document(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> ToolExecutionOutput:
+    document = _resolve_canvas_document(db, current_user, tool_input, context)
+    if "title" not in tool_input and "content" not in tool_input:
+        raise ValueError("title o content es obligatorio")
+    document = update_canvas_document(
+        db,
+        current_user,
+        document.id,
+        expected_revision=_normalize_positive_identifier(
+            tool_input["expected_revision"],
+            "expected_revision",
+        ),
+        title=(str(tool_input["title"]) if "title" in tool_input else None),
+        content=(
+            str(tool_input["content"])
+            if "content" in tool_input
+            else None
+        ),
+        change_summary=(
+            str(tool_input["change_summary"])
+            if tool_input.get("change_summary") is not None
+            else None
+        ),
+        edit_source="assistant",
+        source_message_id=context.user_message_id,
+        source_tool_call_id=_canvas_source_tool_call_id(context),
+        mutation_id=_canvas_mutation_id(context),
+        make_active=True,
+        commit=False,
+    )
+    summary = _serialize_canvas_document(document, include_content=False)
+    return ToolExecutionOutput(
+        content=summary,
+        activity_content=summary,
+        ui_action=_canvas_ui_action(document, context, operation="updated"),
+    )
+
+
+def _list_canvas_revisions(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> ToolExecutionOutput:
+    document = _resolve_canvas_document(db, current_user, tool_input, context)
+    revisions = [
+        serialize_revision(revision)
+        for revision in list_canvas_revisions(db, current_user, document.id)
+    ]
+    return ToolExecutionOutput(
+        content=revisions,
+        activity_content={
+            "document_id": document.id,
+            "revision_count": len(revisions),
+        },
+    )
+
+
+def _restore_canvas_revision(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> ToolExecutionOutput:
+    document = _resolve_canvas_document(db, current_user, tool_input, context)
+    document = restore_canvas_revision(
+        db,
+        current_user,
+        document.id,
+        _normalize_positive_identifier(
+            tool_input["revision_number"],
+            "revision_number",
+        ),
+        expected_revision=_normalize_positive_identifier(
+            tool_input["expected_revision"],
+            "expected_revision",
+        ),
+        change_summary=(
+            str(tool_input["change_summary"])
+            if tool_input.get("change_summary") is not None
+            else None
+        ),
+        source_message_id=context.user_message_id,
+        source_tool_call_id=_canvas_source_tool_call_id(context),
+        mutation_id=_canvas_mutation_id(context),
+        make_active=True,
+        commit=False,
+    )
+    summary = _serialize_canvas_document(document, include_content=False)
+    return ToolExecutionOutput(
+        content=summary,
+        activity_content=summary,
+        ui_action=_canvas_ui_action(document, context, operation="restored"),
+    )
 
 
 def _build_map_url(
@@ -2112,6 +2646,157 @@ def _identity_tool_input(
     return deepcopy(tool_input)
 
 
+def _require_canvas_tool_keys(
+    tool_input: dict,
+    *,
+    allowed: set[str],
+    required: set[str],
+) -> None:
+    unknown = set(tool_input) - allowed
+    if unknown:
+        raise ValueError(
+            "campos no admitidos: " + ", ".join(sorted(unknown))
+        )
+    missing = required - set(tool_input)
+    if missing:
+        raise ValueError(
+            "campos obligatorios: " + ", ".join(sorted(missing))
+        )
+
+
+def _normalize_canvas_title(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("title debe ser texto")
+    title = value.strip()
+    if not title:
+        raise ValueError("title no puede estar vacío")
+    if len(title) > 255:
+        raise ValueError("title no puede superar 255 caracteres")
+    return title
+
+
+def _normalize_canvas_content(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("content debe ser texto")
+    if len(value) > MAX_CANVAS_CONTENT_CHARS:
+        raise ValueError(
+            f"content no puede superar {MAX_CANVAS_CONTENT_CHARS} caracteres"
+        )
+    return value
+
+
+def _normalize_create_canvas_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    _canvas_conversation(db, current_user, context)
+    _require_canvas_tool_keys(
+        tool_input,
+        allowed={"title", "document_type", "organization_id", "content"},
+        required={"title", "document_type", "content"},
+    )
+    document_type = tool_input["document_type"]
+    if not isinstance(document_type, str) or document_type not in {
+        "municipal_ordinance",
+        "regulation",
+        "report",
+        "letter",
+        "minutes",
+        "other",
+    }:
+        raise ValueError("document_type no es válido")
+    normalized = {
+        "title": _normalize_canvas_title(tool_input["title"]),
+        "document_type": document_type,
+        "content": _normalize_canvas_content(tool_input["content"]),
+    }
+    if tool_input.get("organization_id") is not None:
+        normalized["organization_id"] = _normalize_positive_identifier(
+            tool_input["organization_id"],
+            "organization_id",
+        )
+    return normalized
+
+
+def _normalize_update_canvas_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    _require_canvas_tool_keys(
+        tool_input,
+        allowed={
+            "document_id",
+            "expected_revision",
+            "title",
+            "content",
+            "change_summary",
+        },
+        required={"expected_revision"},
+    )
+    if "title" not in tool_input and "content" not in tool_input:
+        raise ValueError("title o content es obligatorio")
+    document = _resolve_canvas_document(db, current_user, tool_input, context)
+    normalized: dict = {
+        "document_id": document.id,
+        "expected_revision": _normalize_positive_identifier(
+            tool_input["expected_revision"],
+            "expected_revision",
+        ),
+    }
+    if "title" in tool_input:
+        normalized["title"] = _normalize_canvas_title(tool_input["title"])
+    if "content" in tool_input:
+        normalized["content"] = _normalize_canvas_content(tool_input["content"])
+    if tool_input.get("change_summary") is not None:
+        summary = str(tool_input["change_summary"]).strip()
+        if len(summary) > 1000:
+            raise ValueError("change_summary no puede superar 1000 caracteres")
+        if summary:
+            normalized["change_summary"] = summary
+    return normalized
+
+
+def _normalize_restore_canvas_tool_input(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    _require_canvas_tool_keys(
+        tool_input,
+        allowed={
+            "document_id",
+            "revision_number",
+            "expected_revision",
+            "change_summary",
+        },
+        required={"revision_number", "expected_revision"},
+    )
+    document = _resolve_canvas_document(db, current_user, tool_input, context)
+    normalized: dict = {
+        "document_id": document.id,
+        "revision_number": _normalize_positive_identifier(
+            tool_input["revision_number"],
+            "revision_number",
+        ),
+        "expected_revision": _normalize_positive_identifier(
+            tool_input["expected_revision"],
+            "expected_revision",
+        ),
+    }
+    if tool_input.get("change_summary") is not None:
+        summary = str(tool_input["change_summary"]).strip()
+        if len(summary) > 1000:
+            raise ValueError("change_summary no puede superar 1000 caracteres")
+        if summary:
+            normalized["change_summary"] = summary
+    return normalized
+
+
 def _require_effect_requirement(
     db: Session,
     requirement_id: int,
@@ -2464,6 +3149,9 @@ def _normalize_transversal_acceptance_tool_input(
 
 
 _TOOL_INPUT_NORMALIZERS: dict[str, ToolInputNormalizer] = {
+    "create_canvas_document": _normalize_create_canvas_tool_input,
+    "update_canvas_document": _normalize_update_canvas_tool_input,
+    "restore_canvas_revision": _normalize_restore_canvas_tool_input,
     "create_requirement": _normalize_create_requirement_tool_input,
     "update_requirement": _normalize_update_requirement_tool_input,
     "add_requirement_message": _normalize_add_requirement_message_tool_input,
@@ -2480,6 +3168,12 @@ _TOOL_INPUT_NORMALIZERS: dict[str, ToolInputNormalizer] = {
 _EXECUTORS = {
     "list_organizations": _list_organizations,
     "list_projects": _list_projects,
+    "list_canvas_documents": _list_canvas_documents,
+    "get_canvas_document": _get_canvas_document,
+    "create_canvas_document": _create_canvas_document,
+    "update_canvas_document": _update_canvas_document,
+    "list_canvas_revisions": _list_canvas_revisions,
+    "restore_canvas_revision": _restore_canvas_revision,
     "get_map_items": _get_map_items,
     "web_search": _web_search,
     "read_web_page": _read_web_page,
@@ -2511,6 +3205,54 @@ _TOOL_METADATA: dict[str, dict] = {
         "domain": "projects",
         "side_effect": "none",
         "approval_policy": "never",
+    },
+    "list_canvas_documents": {
+        "label": "Consultar borradores del lienzo",
+        "read_only": True,
+        "domain": "canvas",
+        "side_effect": "none",
+        "approval_policy": "never",
+        "required_permission": "assistant.use",
+    },
+    "get_canvas_document": {
+        "label": "Leer borrador del lienzo",
+        "read_only": True,
+        "domain": "canvas",
+        "side_effect": "none",
+        "approval_policy": "never",
+        "required_permission": "assistant.use",
+    },
+    "create_canvas_document": {
+        "label": "Crear borrador en el lienzo",
+        "read_only": False,
+        "domain": "canvas",
+        "side_effect": "draft_write",
+        "approval_policy": "direct",
+        "required_permission": "assistant.use",
+    },
+    "update_canvas_document": {
+        "label": "Actualizar borrador del lienzo",
+        "read_only": False,
+        "domain": "canvas",
+        "side_effect": "draft_write",
+        "approval_policy": "direct",
+        "required_permission": "assistant.use",
+    },
+    "list_canvas_revisions": {
+        "label": "Consultar historial del lienzo",
+        "read_only": True,
+        "domain": "canvas",
+        "side_effect": "none",
+        "approval_policy": "never",
+        "required_permission": "assistant.use",
+    },
+    "restore_canvas_revision": {
+        "label": "Restaurar revisión del lienzo",
+        "read_only": False,
+        "domain": "canvas",
+        "side_effect": "draft_write",
+        "approval_policy": "direct",
+        "required_permission": "assistant.use",
     },
     "get_map_items": {
         "label": "Consultar mapa",
@@ -2665,11 +3407,17 @@ def _validate_tool_policy(name: str, metadata: dict) -> None:
             )
         return
     if read_only is False:
-        if side_effect != "database_write" or approval_policy != "explicit":
-            raise ValueError(
-                f"Mutating tool {name} must declare a side effect and explicit approval"
-            )
-        return
+        if side_effect == "database_write" and approval_policy == "explicit":
+            return
+        if (
+            side_effect == "draft_write"
+            and approval_policy == "direct"
+            and metadata.get("domain") == "canvas"
+        ):
+            return
+        raise ValueError(
+            f"Mutating tool {name} must declare an approved write policy"
+        )
     raise ValueError(f"Tool {name} must declare read_only as a boolean")
 
 

@@ -6,6 +6,7 @@ MODEL_MODULES = (
     "app.agent_office.models",
     "app.assistant.models",
     "app.assets.models",
+    "app.canvas.models",
     "app.documents.models",
     "app.geo.models",
     "app.maintenance.models",
