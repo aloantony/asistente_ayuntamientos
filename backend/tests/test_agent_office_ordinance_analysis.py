@@ -612,6 +612,14 @@ def test_deleted_ordinance_keeps_durable_source_identity(
     source_digest = item.source_digest
     result_json = item.result_json
 
+    chunks = db.scalars(
+        select(OrdinanceLegalChunk).where(
+            OrdinanceLegalChunk.ordinance_id == ordinances[0].id
+        )
+    ).all()
+    for chunk in chunks:
+        db.delete(chunk)
+    db.flush()
     db.delete(ordinances[0])
     db.commit()
     db.expire_all()
