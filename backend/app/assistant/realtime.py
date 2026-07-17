@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 REALTIME_STATE_KEY = "realtime_voice"
 REALTIME_UNTRUSTED_CONTENT_KEY = "untrusted_external_content_seen"
 REALTIME_CANVAS_CONTENT_KEY = "canvas_content_seen"
+REALTIME_CANVAS_READS_KEY = "canvas_document_reads"
 MAX_RECENT_REALTIME_TURNS = 4
 MAX_REALTIME_TOOL_CALLS = 16
 MAX_REALTIME_RESPONSES = 4
@@ -322,6 +323,7 @@ def execute_realtime_tool_call(
             turn.get(REALTIME_CANVAS_CONTENT_KEY) is True
             or _realtime_turn_has_canvas_content(turn, calls)
         ),
+        canvas_document_reads=_realtime_canvas_document_reads(turn, calls),
     )
     post_taint_blocked = tool_is_blocked_after_untrusted_content(
         payload.name,
@@ -474,6 +476,7 @@ def execute_realtime_tool_call(
             tool_context.untrusted_external_content_seen
         )
         canvas_content_seen = tool_context.canvas_content_seen
+        canvas_document_reads = tool_context.canvas_document_reads
         action = {
             "call_id": persisted_call_id,
             "tool": persisted_tool_name,
@@ -511,6 +514,11 @@ def execute_realtime_tool_call(
             turn[REALTIME_UNTRUSTED_CONTENT_KEY] = True
         if canvas_content_seen:
             turn[REALTIME_CANVAS_CONTENT_KEY] = True
+        if canvas_document_reads:
+            turn[REALTIME_CANVAS_READS_KEY] = [
+                {"document_id": document_id, "revision": revision}
+                for document_id, revision in sorted(canvas_document_reads)
+            ]
 
         if confirmation_context is not None:
             turn["confirmation"] = _serialize_confirmation_reference(
@@ -1056,14 +1064,19 @@ def _realtime_turn_has_canvas_content(
     calls: dict | None = None,
 ) -> bool:
     stored = turn.get(REALTIME_CANVAS_CONTENT_KEY)
-    if isinstance(stored, bool):
-        return stored
+    if stored is True:
+        return True
     for call in (calls if calls is not None else _turn_calls(turn)).values():
         if not isinstance(call, dict):
             continue
         action = call.get("action")
         action_tool = action.get("tool") if isinstance(action, dict) else None
-        if (call.get("name") or action_tool) != "get_canvas_document":
+        if (call.get("name") or action_tool) not in {
+            "create_canvas_document",
+            "get_canvas_document",
+            "list_canvas_revisions",
+            "update_canvas_document",
+        }:
             continue
         if call.get("status") == "indeterminate":
             return True
@@ -1072,6 +1085,54 @@ def _realtime_turn_has_canvas_content(
         ):
             return True
     return False
+
+
+def _realtime_canvas_document_reads(
+    turn: dict,
+    calls: dict | None = None,
+) -> set[tuple[int, int]]:
+    reads: set[tuple[int, int]] = set()
+    stored = turn.get(REALTIME_CANVAS_READS_KEY)
+    if isinstance(stored, list):
+        for item in stored:
+            if not isinstance(item, dict):
+                continue
+            document_id = item.get("document_id")
+            revision = item.get("revision")
+            if (
+                isinstance(document_id, int)
+                and not isinstance(document_id, bool)
+                and document_id > 0
+                and isinstance(revision, int)
+                and not isinstance(revision, bool)
+                and revision > 0
+            ):
+                reads.add((document_id, revision))
+
+    for call in (calls if calls is not None else _turn_calls(turn)).values():
+        if not isinstance(call, dict) or call.get("status") != "finished":
+            continue
+        action = call.get("action")
+        if not isinstance(action, dict) or action.get("ok") is not True:
+            continue
+        if (call.get("name") or action.get("tool")) != "get_canvas_document":
+            continue
+        reference = call.get("model_output_ref")
+        if (
+            not isinstance(reference, dict)
+            or reference.get("kind") != "canvas_revision"
+        ):
+            continue
+        document_id = reference.get("document_id")
+        revision = reference.get("revision")
+        if (
+            isinstance(document_id, int)
+            and not isinstance(document_id, bool)
+            and isinstance(revision, int)
+            and not isinstance(revision, bool)
+        ):
+            reads.add((document_id, revision))
+    return reads
 
 
 def _build_realtime_model_output_ref(

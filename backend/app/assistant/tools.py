@@ -1034,6 +1034,9 @@ class ToolContext:
     # A canvas body is private internal content. Once it enters the model
     # context, external web tools stay disabled for the remainder of the turn.
     canvas_content_seen: bool = False
+    # Direct canvas writes must be based on a full document read from this
+    # exact turn. Realtime persists only these non-sensitive identifiers.
+    canvas_document_reads: set[tuple[int, int]] = field(default_factory=set)
 
 
 UNTRUSTED_EXTERNAL_TOOL_BLOCKED = (
@@ -1149,6 +1152,10 @@ CANVAS_EXTERNAL_TOOL_BLOCKED = (
     "contenido privado de un borrador del lienzo. Inicia un mensaje separado "
     "sin el texto del borrador si necesitas una búsqueda externa."
 )
+CANVAS_DOCUMENT_READ_REQUIRED = (
+    "Antes de modificar o restaurar el borrador, lee su revisión actual con "
+    "get_canvas_document en este mismo turno."
+)
 
 
 def execute_tool(
@@ -1164,6 +1171,11 @@ def execute_tool(
     allow_web_reader_after_taint: bool = True,
 ) -> ToolResult:
     tool_context = context or ToolContext()
+    # The model already has the private body in its generated arguments, even
+    # if validation or persistence later fails. Taint before dataclasses.replace
+    # creates the draft-write execution context so the shared turn sees it.
+    if name in {"create_canvas_document", "update_canvas_document"}:
+        tool_context.canvas_content_seen = True
     if tool_context.attachment_content_seen:
         return ToolResult(content=ATTACHMENT_CONTENT_TOOL_RESULT, ok=False)
     if tool_context.canvas_content_seen and name in {"web_search", "read_web_page"}:
@@ -1568,6 +1580,7 @@ def _get_canvas_document(
 ) -> ToolExecutionOutput:
     document = _resolve_canvas_document(db, current_user, tool_input, context)
     context.canvas_content_seen = True
+    context.canvas_document_reads.add((document.id, document.current_revision))
     summary = _serialize_canvas_document(document, include_content=False)
     return ToolExecutionOutput(
         content=_serialize_canvas_document(document, include_content=True),
@@ -1621,14 +1634,16 @@ def _update_canvas_document(
     document = _resolve_canvas_document(db, current_user, tool_input, context)
     if "title" not in tool_input and "content" not in tool_input:
         raise ValueError("title o content es obligatorio")
+    expected_revision = _normalize_positive_identifier(
+        tool_input["expected_revision"],
+        "expected_revision",
+    )
+    _require_canvas_document_read(context, document.id, expected_revision)
     document = update_canvas_document(
         db,
         current_user,
         document.id,
-        expected_revision=_normalize_positive_identifier(
-            tool_input["expected_revision"],
-            "expected_revision",
-        ),
+        expected_revision=expected_revision,
         title=(str(tool_input["title"]) if "title" in tool_input else None),
         content=(
             str(tool_input["content"])
@@ -1666,6 +1681,7 @@ def _list_canvas_revisions(
         serialize_revision(revision)
         for revision in list_canvas_revisions(db, current_user, document.id)
     ]
+    context.canvas_content_seen = True
     return ToolExecutionOutput(
         content=revisions,
         activity_content={
@@ -1682,6 +1698,11 @@ def _restore_canvas_revision(
     context: ToolContext,
 ) -> ToolExecutionOutput:
     document = _resolve_canvas_document(db, current_user, tool_input, context)
+    expected_revision = _normalize_positive_identifier(
+        tool_input["expected_revision"],
+        "expected_revision",
+    )
+    _require_canvas_document_read(context, document.id, expected_revision)
     document = restore_canvas_revision(
         db,
         current_user,
@@ -1690,10 +1711,7 @@ def _restore_canvas_revision(
             tool_input["revision_number"],
             "revision_number",
         ),
-        expected_revision=_normalize_positive_identifier(
-            tool_input["expected_revision"],
-            "expected_revision",
-        ),
+        expected_revision=expected_revision,
         change_summary=(
             str(tool_input["change_summary"])
             if tool_input.get("change_summary") is not None
@@ -1711,6 +1729,15 @@ def _restore_canvas_revision(
         activity_content=summary,
         ui_action=_canvas_ui_action(document, context, operation="restored"),
     )
+
+
+def _require_canvas_document_read(
+    context: ToolContext,
+    document_id: int,
+    expected_revision: int,
+) -> None:
+    if (document_id, expected_revision) not in context.canvas_document_reads:
+        raise ValueError(CANVAS_DOCUMENT_READ_REQUIRED)
 
 
 def _build_map_url(

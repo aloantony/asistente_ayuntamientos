@@ -42,6 +42,7 @@ from app.assistant.routes import get_gateway
 from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.schemas import AssistantRealtimeTurnStartCreate
 from app.assistant.turn import ERROR_REPLY, build_history
+from app.canvas.models import AssistantCanvasDocument
 from app.core.config import settings
 from app.main import app
 from app.organizations.models import Organization
@@ -222,7 +223,12 @@ def assistant_user(make_user, make_organization, grant_permissions):
 MUTATING_ASSISTANT_TOOLS = tuple(
     name
     for name, spec in assistant_tools.TOOL_CATALOG.items()
-    if not spec.read_only
+    if spec.approval_policy == "explicit"
+)
+DIRECT_DRAFT_ASSISTANT_TOOLS = tuple(
+    name
+    for name, spec in assistant_tools.TOOL_CATALOG.items()
+    if spec.approval_policy == "direct"
 )
 READ_ONLY_ASSISTANT_TOOLS = tuple(
     name
@@ -751,6 +757,46 @@ def test_all_read_only_assistant_tools_skip_confirmation(
     spec = assistant_tools.TOOL_CATALOG[tool_name]
     assert spec.side_effect == "none"
     assert spec.approval_policy == "never"
+    assert result is None
+    assert "pending_confirmation" not in assistant_guards.load_conversation_state(
+        conversation
+    )
+
+
+@pytest.mark.parametrize("tool_name", DIRECT_DRAFT_ASSISTANT_TOOLS)
+def test_direct_draft_tools_are_typed_and_skip_second_confirmation(
+    db,
+    make_user,
+    tool_name,
+):
+    user = make_user()
+    conversation = AssistantConversation(
+        title=f"Política de borrador {tool_name}",
+        status="active",
+        channel="web",
+        created_by=user,
+    )
+    user_message = AssistantMessage(
+        conversation=conversation,
+        role="user",
+        content=f"Edita el borrador con {tool_name}",
+    )
+    db.add_all([conversation, user_message])
+    db.commit()
+
+    result = assistant_guards.check_tool_confirmation(
+        db,
+        conversation,
+        user_message,
+        tool_name,
+        {},
+        current_user=user,
+    )
+
+    spec = assistant_tools.TOOL_CATALOG[tool_name]
+    assert spec.read_only is False
+    assert spec.side_effect == "draft_write"
+    assert spec.approval_policy == "direct"
     assert result is None
     assert "pending_confirmation" not in assistant_guards.load_conversation_state(
         conversation
@@ -1329,6 +1375,8 @@ def test_status_exposes_single_assistant_contract_and_filtered_tools(
     assert tools_by_name["create_requirement"]["approval_policy"] == "explicit"
     assert tools_by_name["list_requirements"]["side_effect"] == "none"
     assert tools_by_name["list_requirements"]["approval_policy"] == "never"
+    assert tools_by_name["create_canvas_document"]["side_effect"] == "draft_write"
+    assert tools_by_name["create_canvas_document"]["approval_policy"] == "direct"
 
 
 def test_status_reports_openai_responses_model(
@@ -3047,6 +3095,203 @@ def test_realtime_read_tool_replays_calls_and_persists_server_actions(
     assert json.loads(stored_messages[-1].actions or "[]") == [tool_body["action"]]
 
 
+def test_realtime_canvas_redacts_state_replays_body_and_blocks_web(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    sentinel = "REALTIME-CANVAS-PRIVATE-6b33d1"
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    turn_id = str(uuid.uuid4())
+    assert post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Crea y abre una ordenanza",
+    ).status_code == 200
+
+    created = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="realtime-canvas-create",
+        name="create_canvas_document",
+        arguments={
+            "title": "Ordenanza realtime",
+            "document_type": "municipal_ordinance",
+            "organization_id": organization.id,
+            "content": sentinel,
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["action"]["ok"] is True
+    assert created.json()["action"]["input"]["content"]["redacted"] is True
+    assert sentinel not in created.text
+
+    blocked_after_create = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="canvas-web-after-create",
+        name="web_search",
+        arguments={"query": sentinel, "limit": 1},
+    )
+    assert blocked_after_create.status_code == 200
+    assert blocked_after_create.json()["action"]["ok"] is False
+    assert blocked_after_create.json()["action"]["tool"] == (
+        assistant_tools.REDACTED_CANVAS_EXTERNAL_TOOL_NAME
+    )
+    assert sentinel not in blocked_after_create.text
+
+    opened = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="realtime-canvas-open",
+        name="get_canvas_document",
+        arguments={},
+    )
+    replay = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="realtime-canvas-open",
+        name="get_canvas_document",
+        arguments={},
+    )
+    assert opened.status_code == 200
+    assert sentinel in opened.json()["output"]
+    assert sentinel not in json.dumps(opened.json()["action"], ensure_ascii=False)
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert replay.json()["output"] == opened.json()["output"]
+
+    updated = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="realtime-canvas-update",
+        name="update_canvas_document",
+        arguments={
+            "expected_revision": 1,
+            "content": f"{sentinel}\n\nArtículo 1. Objeto.",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["action"]["ok"] is True
+
+    blocked = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id=f"canvas-web-{sentinel}",
+        name="web_search",
+        arguments={"query": sentinel, "limit": 1},
+    )
+    assert blocked.status_code == 200
+    blocked_body = blocked.json()
+    assert blocked_body["action"]["ok"] is False
+    assert blocked_body["action"]["tool"] == (
+        assistant_tools.REDACTED_CANVAS_EXTERNAL_TOOL_NAME
+    )
+    assert blocked_body["action"]["call_id"].startswith("redacted-")
+    assert blocked_body["action"]["input"] == {"redacted": True}
+    assert sentinel not in blocked.text
+
+    state = get_conversation_state(db, conversation["id"])
+    serialized_state = json.dumps(state, ensure_ascii=False)
+    assert sentinel not in serialized_state
+    active_turn = state["realtime_voice"]["active_turn"]
+    assert active_turn[assistant_realtime.REALTIME_CANVAS_CONTENT_KEY] is True
+    stored_open = active_turn["calls"]["realtime-canvas-open"]
+    assert stored_open["model_output_ref"]["kind"] == "canvas_revision"
+    assert "content" not in stored_open["model_output_ref"]["summary"]
+    assert active_turn[assistant_realtime.REALTIME_CANVAS_READS_KEY] == [
+        {"document_id": stored_open["model_output_ref"]["document_id"], "revision": 1}
+    ]
+
+
+def test_realtime_canvas_revision_list_blocks_later_web_access(
+    client,
+    db,
+    assistant_user,
+):
+    user, organization = assistant_user
+    sentinel = "REALTIME-REVISION-PRIVATE-9df2a4"
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+    document = client.post(
+        f"/assistant/conversations/{conversation['id']}/canvas/documents",
+        headers=headers_for(user),
+        json={
+            "title": "Historial privado",
+            "document_type": "report",
+            "organization_id": organization.id,
+            "content": sentinel,
+        },
+    ).json()
+    turn_id = str(uuid.uuid4())
+    assert post_realtime_turn_start(
+        client,
+        user,
+        conversation["id"],
+        turn_id=turn_id,
+        user_text="Consulta el historial del borrador",
+    ).status_code == 200
+
+    listed = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="realtime-canvas-revisions",
+        name="list_canvas_revisions",
+        arguments={"document_id": document["id"]},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["action"]["ok"] is True
+    assert sentinel in listed.json()["output"]
+    assert sentinel not in json.dumps(listed.json()["action"], ensure_ascii=False)
+
+    blocked = post_realtime_tool_call(
+        client,
+        user,
+        conversation["id"],
+        turn_id,
+        call_id="realtime-web-after-revisions",
+        name="web_search",
+        arguments={"query": sentinel, "limit": 1},
+    )
+    assert blocked.status_code == 200
+    assert blocked.json()["action"]["ok"] is False
+    assert blocked.json()["action"]["tool"] == (
+        assistant_tools.REDACTED_CANVAS_EXTERNAL_TOOL_NAME
+    )
+
+    state = get_conversation_state(db, conversation["id"])
+    serialized_state = json.dumps(state, ensure_ascii=False)
+    assert sentinel not in serialized_state
+    active_turn = state["realtime_voice"]["active_turn"]
+    assert active_turn[assistant_realtime.REALTIME_CANVAS_CONTENT_KEY] is True
+    stored_list = active_turn["calls"]["realtime-canvas-revisions"]
+    assert stored_list["model_output_ref"]["kind"] == "canvas_revision_list"
+
+
 def test_realtime_tool_exception_is_cached_as_indeterminate(
     client,
     db,
@@ -3927,6 +4172,7 @@ def test_stale_normal_turn_cannot_mutate_after_realtime_user_message(
         assert mutation_calls == []
         assert json.loads(normal_reply.actions or "[]") == [
             {
+                "call_id": "stale-mutation",
                 "tool": "test_mutation",
                 "ok": False,
                 "input": {},
@@ -7580,6 +7826,116 @@ def test_sse_stream_emits_deltas_tool_activity_and_done(
     assert events[-1]["data"]["message"]["content"] == "Respuesta final."
     assert events[-1]["data"]["message"]["agent_key"] == "anacleto"
     assert len(gateway.calls) == 2
+
+
+def test_canvas_body_reaches_model_without_leaking_to_sse_or_actions(
+    client,
+    db,
+    assistant_user,
+    use_gateway,
+):
+    user, organization = assistant_user
+    sentinel = "CUERPO-PRIVADO-LIENZO-7f4c21"
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "canvas_create_1",
+                            "create_canvas_document",
+                            {
+                                "title": "Ordenanza de prueba",
+                                "document_type": "municipal_ordinance",
+                                "organization_id": organization.id,
+                                "content": sentinel,
+                            },
+                        )
+                    ],
+                ),
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "canvas_get_1",
+                            "get_canvas_document",
+                            {},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He abierto el borrador en el lienzo.")],
+                    deltas=["He abierto el borrador en el lienzo."],
+                ),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    with client.stream(
+        "POST",
+        f"/assistant/conversations/{conversation['id']}/messages/stream",
+        json={"content": "Redacta una ordenanza en el lienzo"},
+        headers=headers_for(user),
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert sentinel not in body
+    latest_tool_results = gateway.calls[2]["messages"][-1]["content"]
+    assert any(
+        item.get("type") == "tool_result" and sentinel in item.get("content", "")
+        for item in latest_tool_results
+    )
+    document = db.scalar(select(AssistantCanvasDocument))
+    assert document is not None
+    assert document.content == sentinel
+
+    events = parse_sse(body)
+    activities = [
+        event["data"]
+        for event in events
+        if event["event"] == "tool_activity"
+    ]
+    assert [activity["call_id"] for activity in activities] == [
+        "canvas_create_1",
+        "canvas_create_1",
+        "canvas_get_1",
+        "canvas_get_1",
+    ]
+    create_input = activities[0]["input"]
+    assert create_input["content"] == {
+        "redacted": True,
+        "char_count": len(sentinel),
+        "sha256": hashlib.sha256(sentinel.encode("utf-8")).hexdigest(),
+    }
+    assert activities[1]["ui_action"]["type"] == "ui.open_canvas_document"
+    assert activities[3]["ui_action"]["context"]["document_id"] == document.id
+
+    done_message = next(
+        event["data"]["message"] for event in events if event["event"] == "done"
+    )
+    assert sentinel not in json.dumps(done_message, ensure_ascii=False)
+    assert [action["call_id"] for action in done_message["actions"]] == [
+        "canvas_create_1",
+        "canvas_get_1",
+    ]
+    persisted_message = db.scalar(
+        select(AssistantMessage)
+        .where(
+            AssistantMessage.conversation_id == conversation["id"],
+            AssistantMessage.role == "assistant",
+        )
+        .order_by(AssistantMessage.id.desc())
+    )
+    assert persisted_message is not None
+    assert sentinel not in (persisted_message.actions or "")
 
 
 def test_sse_pause_turn_reconciles_partial_text_with_final_message(

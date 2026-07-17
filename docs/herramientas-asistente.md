@@ -1,6 +1,6 @@
 # Herramientas de Anacleto: alcance y hoja de ruta
 
-Estado de referencia: 2026-07-16.
+Estado de referencia: 2026-07-17.
 
 ## Objetivo
 
@@ -23,7 +23,7 @@ aislados.
 | Búsqueda web | Disponible con configuración | Brave Search, DLP previo, RBAC, límites y fuentes auditadas |
 | Lectura de páginas encontradas | Implementada, apagada por defecto | Solo HTTP(S), procedencia búsqueda→lectura, defensa SSRF, proceso limitado y contenido marcado como no confiable |
 | Adjuntar contenido a un turno | Implementada | TXT UTF-8 acotado; imágenes como vista previa/metadatos; formatos estructurados aún no se interpretan |
-| Acciones con efectos | Implementada | Política declarativa, autorización de un solo uso ligada al contenido y resultado durable e idempotente |
+| Acciones con efectos | Implementada | Política declarativa: las escrituras oficiales usan autorización de un solo uso; los borradores privados, versionados y reversibles admiten `draft_write/direct` |
 | Voz por turnos y Realtime | Parcial | STT/TTS y Realtime bajo configuración; falta completar la experiencia multimodal de producción |
 | Memoria controlada | Parcial | Memoria municipal revisable; falta personalización más amplia y políticas de caducidad por categoría |
 | Análisis de PDF, Office y datos | Planificada, oleada 2 | Servicio aislado de extracción y sandbox de Python sin red ni secretos, con cuotas de CPU, RAM, disco y tiempo |
@@ -32,7 +32,7 @@ aislados.
 | Navegación y control de ordenador | Planificada, oleada 4 | Navegador efímero aislado, allowlist de destinos, capturas auditadas y aprobación antes de efectos externos |
 | Investigación profunda | Planificada, oleada 4 | Trabajo durable en segundo plano, plan/fuentes, cancelación, checkpoints y reanudación |
 | Tareas programadas | Planificada, oleada 4 | Scheduler durable, zona horaria, idempotencia, reintentos y notificaciones configurables |
-| Canvas/artefactos editables | Planificada, oleada 4 | Documentos versionados y editables con exportación y trazabilidad |
+| Lienzo de documentos editables | Implementada, primera versión | Markdown privado por conversación, autoguardado, revisiones, restauración, conflictos optimistas y acciones del asistente; promoción oficial y exportación avanzada quedan pendientes |
 | Modo de estudio, grabación y experiencias proactivas | En evaluación | Requieren diseño de producto, consentimiento, privacidad y APIs disponibles; no son herramientas intercambiables del modelo |
 
 ## Orden de entrega
@@ -71,8 +71,9 @@ aislados.
 - Navegador/computer use en una máquina efímera sin acceso a la red interna.
 - Investigación profunda y tareas programadas mediante trabajos durables,
   observables, cancelables y reanudables.
-- Canvas/artefactos, flujos de estudio y grabación, solo después de definir su
-  consentimiento y ciclo de vida de datos.
+- Flujos de estudio y grabación, solo después de definir su consentimiento y
+  ciclo de vida de datos. El lienzo ya dispone de una primera versión acotada;
+  quedan pendientes coedición, promoción oficial y exportación avanzada.
 
 ## Reglas que no se pueden delegar al modelo
 
@@ -80,8 +81,10 @@ Toda herramienta nueva debe cumplir, como mínimo:
 
 1. permiso RBAC y aislamiento de organización aplicados en el ejecutor;
 2. esquema y límites de entrada validados en backend;
-3. confirmación de un solo uso para efectos, ligada a usuario, conversación,
-   mensaje, herramienta y payload canónico;
+3. política de aprobación proporcional al efecto: `database_write/explicit`
+   usa confirmación de un solo uso ligada a usuario, conversación, mensaje,
+   herramienta y payload canónico; `draft_write/direct` se limita a borradores
+   personales, no oficiales, versionados y reversibles;
 4. idempotencia, cancelación y resultado terminal durable;
 5. egreso de red explícito, protección SSRF y secretos fuera del prompt;
 6. contenido web, archivos y respuestas de conectores tratados como datos no
@@ -90,6 +93,9 @@ Toda herramienta nueva debe cumplir, como mínimo:
 8. pruebas de tenancy, carreras, timeout, prompt injection y recuperación;
 9. feature flag apagado por defecto hasta completar evaluación jurídica,
    privacidad, operación y observabilidad.
+
+El contrato de la primera superficie editable se documenta en
+`docs/lienzo-documentos.md`.
 
 ## Criterio de producción
 

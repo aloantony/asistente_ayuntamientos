@@ -680,7 +680,7 @@ export default function AppLayout({
           <button
             aria-label="Cerrar sesión"
             className="secondary-button app-session-logout"
-            onClick={() => logout()}
+            onClick={() => void logout()}
             title="Cerrar sesión"
             type="button"
           >

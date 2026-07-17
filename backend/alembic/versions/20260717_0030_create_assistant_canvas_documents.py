@@ -38,6 +38,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("creation_id", sa.String(length=255), nullable=True),
+        sa.Column(
+            "creation_payload_sha256",
+            sa.String(length=64),
+            nullable=True,
+        ),
         sa.Column("created_by_id", sa.Integer(), nullable=True),
         sa.Column("updated_by_id", sa.Integer(), nullable=True),
         sa.Column("source_message_id", sa.Integer(), nullable=True),
@@ -56,6 +61,13 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "current_revision >= 1",
             name="ck_assistant_canvas_documents_current_revision",
+        ),
+        sa.CheckConstraint(
+            "(creation_id is null and creation_payload_sha256 is null) or "
+            "(creation_id is not null and "
+            "creation_payload_sha256 is not null and "
+            "creation_payload_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_assistant_canvas_documents_creation_payload",
         ),
         sa.CheckConstraint(
             "status in ('draft', 'archived')",
@@ -124,6 +136,11 @@ def upgrade() -> None:
         sa.Column("change_summary", sa.Text(), nullable=True),
         sa.Column("edit_source", sa.String(length=20), nullable=False),
         sa.Column("mutation_id", sa.String(length=255), nullable=True),
+        sa.Column(
+            "mutation_payload_sha256",
+            sa.String(length=64),
+            nullable=True,
+        ),
         sa.Column("source_tool_call_id", sa.String(length=255), nullable=True),
         sa.Column("created_by_id", sa.Integer(), nullable=True),
         sa.Column("source_message_id", sa.Integer(), nullable=True),
@@ -136,6 +153,13 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "revision_number >= 1",
             name="ck_assistant_canvas_revisions_number",
+        ),
+        sa.CheckConstraint(
+            "(mutation_id is null and mutation_payload_sha256 is null) or "
+            "(mutation_id is not null and "
+            "mutation_payload_sha256 is not null and "
+            "mutation_payload_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_assistant_canvas_revisions_mutation_payload",
         ),
         sa.CheckConstraint(
             "edit_source in ('user', 'assistant', 'restore')",
@@ -176,8 +200,84 @@ def upgrade() -> None:
             unique=False,
         )
 
+    op.execute(
+        """
+        CREATE FUNCTION prevent_assistant_canvas_revision_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                IF pg_trigger_depth() > 1 THEN
+                    RETURN OLD;
+                END IF;
+                RAISE EXCEPTION
+                    'assistant canvas revisions are immutable';
+            END IF;
+            IF NEW.id IS DISTINCT FROM OLD.id
+                OR NEW.document_id IS DISTINCT FROM OLD.document_id
+                OR NEW.revision_number IS DISTINCT FROM OLD.revision_number
+                OR NEW.title IS DISTINCT FROM OLD.title
+                OR NEW.content IS DISTINCT FROM OLD.content
+                OR NEW.content_sha256 IS DISTINCT FROM OLD.content_sha256
+                OR NEW.change_summary IS DISTINCT FROM OLD.change_summary
+                OR NEW.edit_source IS DISTINCT FROM OLD.edit_source
+                OR NEW.mutation_id IS DISTINCT FROM OLD.mutation_id
+                OR NEW.mutation_payload_sha256 IS DISTINCT FROM
+                    OLD.mutation_payload_sha256
+                OR NEW.source_tool_call_id IS DISTINCT FROM
+                    OLD.source_tool_call_id
+                OR NEW.created_at IS DISTINCT FROM OLD.created_at
+            THEN
+                RAISE EXCEPTION
+                    'assistant canvas revisions are immutable';
+            END IF;
+            IF (
+                NEW.created_by_id IS DISTINCT FROM OLD.created_by_id
+                OR NEW.source_message_id IS DISTINCT FROM OLD.source_message_id
+            ) AND pg_trigger_depth() <= 1
+            THEN
+                RAISE EXCEPTION
+                    'assistant canvas revisions are immutable';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_assistant_canvas_revisions_immutable
+        BEFORE UPDATE OR DELETE ON assistant_canvas_revisions
+        FOR EACH ROW
+        EXECUTE FUNCTION prevent_assistant_canvas_revision_mutation()
+        """
+    )
+
 
 def downgrade() -> None:
+    connection = op.get_bind()
+    op.execute(
+        "LOCK TABLE assistant_canvas_documents, assistant_canvas_revisions "
+        "IN ACCESS EXCLUSIVE MODE"
+    )
+    revision_count = connection.execute(
+        sa.text("SELECT count(*) FROM assistant_canvas_revisions")
+    ).scalar_one()
+    document_count = connection.execute(
+        sa.text("SELECT count(*) FROM assistant_canvas_documents")
+    ).scalar_one()
+    if revision_count or document_count:
+        raise RuntimeError(
+            "Cannot downgrade assistant canvas migration while documents or "
+            "revisions exist; preserve or explicitly remove the draft data first"
+        )
+
+    op.execute(
+        "DROP TRIGGER trg_assistant_canvas_revisions_immutable "
+        "ON assistant_canvas_revisions"
+    )
+    op.execute("DROP FUNCTION prevent_assistant_canvas_revision_mutation()")
     for column_name in reversed(
         ("document_id", "created_by_id", "source_message_id")
     ):

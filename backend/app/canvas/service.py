@@ -172,12 +172,29 @@ def create_canvas_document(
         conversation_id,
         for_update=True,
     )
-    _require_active_conversation(conversation)
     normalized_title = _normalize_title(title)
     _validate_document_type(document_type)
     _validate_edit_source(edit_source)
     _validate_content(content or "")
     _ensure_accessible_organization(db, current_user, organization_id)
+
+    initial_content = content
+    if initial_content is None or not initial_content.strip():
+        initial_content = default_canvas_content(document_type, normalized_title)
+    creation_payload_sha256 = (
+        _canonical_payload_sha256(
+            {
+                "conversation_id": conversation.id,
+                "title": normalized_title,
+                "document_type": document_type,
+                "content": initial_content,
+                "organization_id": organization_id,
+                "edit_source": edit_source,
+            }
+        )
+        if creation_id
+        else None
+    )
 
     if creation_id:
         existing = db.scalar(
@@ -187,14 +204,17 @@ def create_canvas_document(
             )
         )
         if existing is not None:
-            if existing.status == "draft":
+            if existing.creation_payload_sha256 != creation_payload_sha256:
+                raise HTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail="Canvas creation ID was reused with a different payload",
+                )
+            if existing.status == "draft" and conversation.status == "active":
                 _set_active_canvas_state(conversation, existing.id)
             _finish_canvas_write(db, existing, commit=commit)
             return existing
 
-    initial_content = content
-    if initial_content is None or not initial_content.strip():
-        initial_content = default_canvas_content(document_type, normalized_title)
+    _require_active_conversation(conversation)
 
     document = AssistantCanvasDocument(
         conversation_id=conversation.id,
@@ -205,6 +225,7 @@ def create_canvas_document(
         status="draft",
         current_revision=1,
         creation_id=creation_id,
+        creation_payload_sha256=creation_payload_sha256,
         created_by_id=current_user.id,
         updated_by_id=current_user.id,
         source_message_id=source_message_id,
@@ -222,6 +243,7 @@ def create_canvas_document(
         source_message_id=source_message_id,
         source_tool_call_id=source_tool_call_id,
         mutation_id=creation_id,
+        mutation_payload_sha256=creation_payload_sha256,
         change_summary="Creación del borrador",
     )
     _set_active_canvas_state(conversation, document.id)
@@ -245,6 +267,8 @@ def update_canvas_document(
     mutation_id: str | None = None,
     make_active: bool = False,
     force_revision: bool = False,
+    mutation_operation: str = "update",
+    mutation_context: dict | None = None,
     commit: bool = True,
 ) -> AssistantCanvasDocument:
     initial_document = get_owned_canvas_document(
@@ -264,8 +288,63 @@ def update_canvas_document(
         document_id,
         for_update=True,
     )
-    _require_active_conversation(conversation)
     _validate_edit_source(edit_source)
+
+    normalized_title = _normalize_title(title) if title is not None else None
+    if content is not None:
+        _validate_content(content)
+    if status is not None and status not in CANVAS_DOCUMENT_STATUSES:
+        raise ValueError(f"invalid canvas document status: {status}")
+    normalized_change_summary = _normalize_change_summary(change_summary)
+    mutation_payload_sha256 = (
+        _canonical_payload_sha256(
+            {
+                "operation": mutation_operation,
+                "context": mutation_context or {},
+                "document_id": document.id,
+                "expected_revision": expected_revision,
+                "title_provided": title is not None,
+                "title": normalized_title,
+                "content_provided": content is not None,
+                "content": content,
+                "status_provided": status is not None,
+                "status": status,
+                "change_summary": normalized_change_summary,
+                "edit_source": edit_source,
+                "make_active": make_active,
+                "force_revision": force_revision,
+            }
+        )
+        if mutation_id
+        else None
+    )
+
+    if mutation_id:
+        existing_revision = db.scalar(
+            select(AssistantCanvasRevision).where(
+                AssistantCanvasRevision.document_id == document.id,
+                AssistantCanvasRevision.mutation_id == mutation_id,
+            )
+        )
+        if existing_revision is not None:
+            if (
+                existing_revision.mutation_payload_sha256
+                != mutation_payload_sha256
+            ):
+                raise HTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail="Canvas mutation ID was reused with a different payload",
+                )
+            if (
+                make_active
+                and document.status == "draft"
+                and conversation.status == "active"
+            ):
+                _set_active_canvas_state(conversation, document.id)
+            _finish_canvas_write(db, document, commit=commit)
+            return document
+
+    _require_active_conversation(conversation)
 
     if document.status == "archived" and (
         title is not None
@@ -278,30 +357,15 @@ def update_canvas_document(
             detail="Canvas document is archived",
         )
 
-    if mutation_id:
-        existing_revision = db.scalar(
-            select(AssistantCanvasRevision).where(
-                AssistantCanvasRevision.document_id == document.id,
-                AssistantCanvasRevision.mutation_id == mutation_id,
-            )
-        )
-        if existing_revision is not None:
-            if make_active and document.status == "draft":
-                _set_active_canvas_state(conversation, document.id)
-            _finish_canvas_write(db, document, commit=commit)
-            return document
-
     if document.current_revision != expected_revision:
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="Canvas document revision conflict",
         )
 
-    next_title = document.title if title is None else _normalize_title(title)
+    next_title = document.title if normalized_title is None else normalized_title
     next_content = document.content if content is None else content
     _validate_content(next_content)
-    if status is not None and status not in CANVAS_DOCUMENT_STATUSES:
-        raise ValueError(f"invalid canvas document status: {status}")
 
     content_changed = next_title != document.title or next_content != document.content
     status_changed = status is not None and status != document.status
@@ -327,7 +391,8 @@ def update_canvas_document(
             source_message_id=source_message_id,
             source_tool_call_id=source_tool_call_id,
             mutation_id=mutation_id,
-            change_summary=_normalize_change_summary(change_summary),
+            mutation_payload_sha256=mutation_payload_sha256,
+            change_summary=normalized_change_summary,
         )
 
     if status_changed:
@@ -405,6 +470,8 @@ def restore_canvas_revision(
         mutation_id=mutation_id,
         make_active=make_active,
         force_revision=True,
+        mutation_operation="restore",
+        mutation_context={"revision_number": revision_number},
         commit=commit,
     )
 
@@ -460,6 +527,7 @@ def _add_revision(
     source_message_id: int | None,
     source_tool_call_id: str | None,
     mutation_id: str | None,
+    mutation_payload_sha256: str | None,
     change_summary: str | None,
 ) -> AssistantCanvasRevision:
     revision = AssistantCanvasRevision(
@@ -471,6 +539,7 @@ def _add_revision(
         change_summary=change_summary,
         edit_source=edit_source,
         mutation_id=mutation_id,
+        mutation_payload_sha256=mutation_payload_sha256,
         source_tool_call_id=source_tool_call_id,
         created_by_id=created_by_id,
         source_message_id=source_message_id,
@@ -549,6 +618,16 @@ def _normalize_change_summary(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized[:1000] or None
+
+
+def _canonical_payload_sha256(payload: dict) -> str:
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _load_conversation_state(conversation: AssistantConversation) -> dict:

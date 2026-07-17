@@ -552,6 +552,7 @@ export function useAssistantController({
   const [includeArchivedConversations, setIncludeArchivedConversations] =
     useState(false);
   const [isLoadingAssistant, setIsLoadingAssistant] = useState(false);
+  const [isSelectingConversation, setIsSelectingConversation] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [assistantError, setAssistantError] = useState("");
   const [voiceState, setVoiceState] = useState<AssistantVoiceState>("idle");
@@ -572,6 +573,11 @@ export function useAssistantController({
   // Mirrors the selected conversation id so async callbacks can check
   // whether the user navigated away while a request was in flight.
   const selectedIdRef = useRef<number | null>(null);
+  const conversationNavigationGenerationRef = useRef(0);
+  const conversationCreationPromiseRef = useRef<
+    Promise<AssistantConversationDetail | null> | null
+  >(null);
+  const conversationSelectionAbortRef = useRef<AbortController | null>(null);
   const assistantStreamAbortRef = useRef<AbortController | null>(null);
   const speechPlayerRef = useRef<ReturnType<typeof createSpeechPlayer> | null>(
     null,
@@ -615,6 +621,22 @@ export function useAssistantController({
     }
     attachmentPreviewUrlsRef.current.clear();
     attachmentPreviewRequestsRef.current.clear();
+  }, []);
+
+  function invalidateConversationSelection() {
+    conversationNavigationGenerationRef.current += 1;
+    conversationSelectionAbortRef.current?.abort();
+    conversationSelectionAbortRef.current = null;
+    setIsSelectingConversation(false);
+    return conversationNavigationGenerationRef.current;
+  }
+
+  useEffect(() => {
+    return () => {
+      conversationNavigationGenerationRef.current += 1;
+      conversationSelectionAbortRef.current?.abort();
+      conversationSelectionAbortRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -709,6 +731,7 @@ export function useAssistantController({
   }
 
   function clearAssistantState() {
+    invalidateConversationSelection();
     assistantStreamAbortRef.current?.abort();
     assistantStreamAbortRef.current = null;
     setAssistantStatus(null);
@@ -979,6 +1002,7 @@ export function useAssistantController({
   }
 
   function deselectConversation() {
+    invalidateConversationSelection();
     if (selectedIdRef.current === null) {
       return;
     }
@@ -990,6 +1014,10 @@ export function useAssistantController({
   }
 
   async function selectConversation(conversationId: number) {
+    const generation = invalidateConversationSelection();
+    const abortController = new AbortController();
+    conversationSelectionAbortRef.current = abortController;
+    setIsSelectingConversation(true);
     setAssistantError("");
 
     try {
@@ -997,7 +1025,11 @@ export function useAssistantController({
         `/assistant/conversations/${conversationId}`,
         getStoredToken(),
         "No se pudo abrir la conversación.",
+        { signal: abortController.signal },
       );
+      if (generation !== conversationNavigationGenerationRef.current) {
+        return;
+      }
       if (selectedIdRef.current !== detail.id) {
         setDraftMessage("");
         setSelectedAttachments([]);
@@ -1005,15 +1037,27 @@ export function useAssistantController({
       }
       applySelectedConversation(detail);
     } catch (requestError) {
-      handleRequestError(
-        requestError,
-        setAssistantError,
-        "No se pudo abrir la conversación.",
-      );
+      if (
+        generation === conversationNavigationGenerationRef.current &&
+        !isAbortError(requestError)
+      ) {
+        handleRequestError(
+          requestError,
+          setAssistantError,
+          "No se pudo abrir la conversación.",
+        );
+      }
+    } finally {
+      if (generation === conversationNavigationGenerationRef.current) {
+        conversationSelectionAbortRef.current = null;
+        setIsSelectingConversation(false);
+      }
     }
   }
 
-  async function createConversation(initialDraft: string) {
+  async function performCreateConversation(initialDraft: string) {
+    const generation = invalidateConversationSelection();
+    setIsSelectingConversation(true);
     setAssistantError("");
 
     try {
@@ -1023,20 +1067,46 @@ export function useAssistantController({
         "No se pudo crear la conversación.",
         { method: "POST", body: JSON.stringify({}) },
       );
+      setConversations((existing) => [
+        toSummary(detail),
+        ...existing.filter((conversation) => conversation.id !== detail.id),
+      ]);
+      if (generation !== conversationNavigationGenerationRef.current) {
+        return detail;
+      }
       setDraftMessage(initialDraft);
       setSelectedAttachments([]);
       setAttachmentError("");
       applySelectedConversation(detail);
-      setConversations((existing) => [toSummary(detail), ...existing]);
       return detail;
     } catch (requestError) {
-      handleRequestError(
-        requestError,
-        setAssistantError,
-        "No se pudo crear la conversación.",
-      );
+      if (generation === conversationNavigationGenerationRef.current) {
+        handleRequestError(
+          requestError,
+          setAssistantError,
+          "No se pudo crear la conversación.",
+        );
+      }
       return null;
+    } finally {
+      if (generation === conversationNavigationGenerationRef.current) {
+        setIsSelectingConversation(false);
+      }
     }
+  }
+
+  function createConversation(initialDraft: string) {
+    if (conversationCreationPromiseRef.current) {
+      return conversationCreationPromiseRef.current;
+    }
+    const operation = performCreateConversation(initialDraft);
+    conversationCreationPromiseRef.current = operation;
+    void operation.finally(() => {
+      if (conversationCreationPromiseRef.current === operation) {
+        conversationCreationPromiseRef.current = null;
+      }
+    });
+    return operation;
   }
 
   function startConversation() {
@@ -1310,6 +1380,7 @@ export function useAssistantController({
       return [
         ...actions,
         {
+          call_id: event.call_id,
           tool: event.tool,
           ok: false,
           input: event.input,
@@ -1322,17 +1393,22 @@ export function useAssistantController({
     const next = [...actions];
     let pendingIndex = -1;
     for (let index = next.length - 1; index >= 0; index -= 1) {
-      if (next[index].tool === event.tool && next[index].status === "started") {
+      const sameCall = event.call_id
+        ? next[index].call_id === event.call_id
+        : next[index].tool === event.tool;
+      if (sameCall && next[index].status === "started") {
         pendingIndex = index;
         break;
       }
     }
     const finishedAction: AssistantAction = {
+      call_id: event.call_id,
       tool: event.tool,
       ok: Boolean(event.ok),
       input: event.input,
       result: event.result ?? "",
       status: "finished",
+      ui_action: event.ui_action,
     };
     if (pendingIndex >= 0) {
       next[pendingIndex] = finishedAction;
@@ -3397,6 +3473,7 @@ export function useAssistantController({
     realtimeVoiceActive,
     realtimeVoiceFallback,
     isLoadingAssistant,
+    isSelectingConversation,
     isSendingMessage: isSendingMessage || realtimeServerClosurePending,
     isSpeaking,
     assistantError,

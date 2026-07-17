@@ -162,6 +162,7 @@ CANVAS_SCHEMA = {
             "status",
             "current_revision",
             "creation_id",
+            "creation_payload_sha256",
             "created_by_id",
             "updated_by_id",
             "source_message_id",
@@ -185,6 +186,7 @@ CANVAS_SCHEMA = {
         },
         "checks": {
             "ck_assistant_canvas_documents_current_revision",
+            "ck_assistant_canvas_documents_creation_payload",
             "ck_assistant_canvas_documents_status",
             "ck_assistant_canvas_documents_type",
         },
@@ -203,6 +205,7 @@ CANVAS_SCHEMA = {
             "change_summary",
             "edit_source",
             "mutation_id",
+            "mutation_payload_sha256",
             "source_tool_call_id",
             "created_by_id",
             "source_message_id",
@@ -220,6 +223,7 @@ CANVAS_SCHEMA = {
         },
         "checks": {
             "ck_assistant_canvas_revisions_number",
+            "ck_assistant_canvas_revisions_mutation_payload",
             "ck_assistant_canvas_revisions_source",
         },
         "unique_constraints": {
@@ -1001,6 +1005,22 @@ def assert_canvas_schema(inspector: Inspector) -> None:
         } == expected["unique_constraints"]
 
 
+def assert_canvas_revision_immutability_trigger(engine: Engine) -> None:
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = 'trg_assistant_canvas_revisions_immutable'
+                      AND NOT tgisinternal
+                )
+                """
+            )
+        ).scalar_one() is True
+
+
 def assert_maintenance_trigger(engine: Engine) -> None:
     with engine.connect() as connection:
         assert connection.execute(
@@ -1190,6 +1210,7 @@ def test_canvas_migration_from_previous_head_is_additive_and_reversible(
 
         run_alembic(migration_database_url, "upgrade", "head")
         assert_canvas_schema(inspect(engine))
+        assert_canvas_revision_immutability_trigger(engine)
 
         run_alembic(migration_database_url, "downgrade", "20260717_0029")
         assert set(CANVAS_SCHEMA).isdisjoint(inspect(engine).get_table_names())
@@ -1197,6 +1218,189 @@ def test_canvas_migration_from_previous_head_is_additive_and_reversible(
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
         assert_canvas_schema(inspect(engine))
+        assert_canvas_revision_immutability_trigger(engine)
+    finally:
+        engine.dispose()
+
+
+def test_canvas_revisions_are_immutable_and_populated_downgrade_is_blocked(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "head")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    "INSERT INTO users (email, hashed_password, full_name) "
+                    "VALUES ('canvas-migration@example.test', 'hash', "
+                    "'Canvas migration') RETURNING id"
+                )
+            ).scalar_one()
+            conversation_id = connection.execute(
+                text(
+                    "INSERT INTO assistant_conversations (title, created_by_id) "
+                    "VALUES ('Canvas migration', :user_id) RETURNING id"
+                ),
+                {"user_id": user_id},
+            ).scalar_one()
+            message_id = connection.execute(
+                text(
+                    "INSERT INTO assistant_messages "
+                    "(conversation_id, role, content) "
+                    "VALUES (:conversation_id, 'user', 'Mensaje fuente') "
+                    "RETURNING id"
+                ),
+                {"conversation_id": conversation_id},
+            ).scalar_one()
+            document_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO assistant_canvas_documents (
+                        conversation_id, document_type, title, content,
+                        created_by_id, updated_by_id
+                    ) VALUES (
+                        :conversation_id, 'report', 'Informe', 'Contenido',
+                        :user_id, :user_id
+                    ) RETURNING id
+                    """
+                ),
+                {"conversation_id": conversation_id, "user_id": user_id},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO assistant_canvas_revisions (
+                        document_id, revision_number, title, content,
+                        content_sha256, edit_source, created_by_id,
+                        source_message_id
+                    ) VALUES (
+                        :document_id, 1, 'Informe', 'Contenido',
+                        :content_sha256, 'user', :user_id, :message_id
+                    )
+                    """
+                ),
+                {
+                    "document_id": document_id,
+                    "content_sha256": hashlib.sha256(b"Contenido").hexdigest(),
+                    "message_id": message_id,
+                    "user_id": user_id,
+                },
+            )
+
+        with pytest.raises(DBAPIError, match="canvas revisions are immutable"):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE assistant_canvas_revisions "
+                        "SET content = 'Alterado' WHERE document_id = :document_id"
+                    ),
+                    {"document_id": document_id},
+                )
+
+        with pytest.raises(DBAPIError, match="canvas revisions are immutable"):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE assistant_canvas_revisions "
+                        "SET created_by_id = NULL, source_message_id = NULL "
+                        "WHERE document_id = :document_id"
+                    ),
+                    {"document_id": document_id},
+                )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM assistant_messages WHERE id = :message_id"),
+                {"message_id": message_id},
+            )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT source_message_id FROM assistant_canvas_revisions "
+                    "WHERE document_id = :document_id"
+                ),
+                {"document_id": document_id},
+            ).scalar_one() is None
+
+        with pytest.raises(DBAPIError, match="canvas revisions are immutable"):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "DELETE FROM assistant_canvas_revisions "
+                        "WHERE document_id = :document_id"
+                    ),
+                    {"document_id": document_id},
+                )
+
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE assistant_canvas_documents "
+                        "SET creation_id = 'missing-digest' WHERE id = :document_id"
+                    ),
+                    {"document_id": document_id},
+                )
+
+        with pytest.raises(DBAPIError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO assistant_canvas_revisions (
+                            document_id, revision_number, title, content,
+                            content_sha256, edit_source, mutation_id,
+                            created_by_id
+                        ) VALUES (
+                            :document_id, 2, 'Informe', 'Contenido',
+                            :content_sha256, 'user', 'missing-digest',
+                            :user_id
+                        )
+                        """
+                    ),
+                    {
+                        "document_id": document_id,
+                        "content_sha256": hashlib.sha256(b"Contenido").hexdigest(),
+                        "user_id": user_id,
+                    },
+                )
+
+        blocked = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0029",
+            check=False,
+        )
+        assert blocked.returncode != 0
+        assert "Cannot downgrade assistant canvas migration" in blocked.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+            assert connection.execute(
+                text("SELECT count(*) FROM assistant_canvas_documents")
+            ).scalar_one() == 1
+            assert connection.execute(
+                text("SELECT count(*) FROM assistant_canvas_revisions")
+            ).scalar_one() == 1
+
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM users WHERE id = :user_id"),
+                {"user_id": user_id},
+            )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT count(*) FROM assistant_conversations")
+            ).scalar_one() == 0
+            assert connection.execute(
+                text("SELECT count(*) FROM assistant_canvas_documents")
+            ).scalar_one() == 0
+            assert connection.execute(
+                text("SELECT count(*) FROM assistant_canvas_revisions")
+            ).scalar_one() == 0
     finally:
         engine.dispose()
 

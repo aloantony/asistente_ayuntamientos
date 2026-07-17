@@ -2942,6 +2942,17 @@ tr:last-child td {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.assistant-agent-grid.canvas-open {
+  grid-template-columns:
+    clamp(230px, 18vw, 280px)
+    minmax(340px, 0.88fr)
+    minmax(440px, 1.12fr);
+}
+
+.assistant-agent-grid.canvas-open.conversations-collapsed {
+  grid-template-columns: minmax(340px, 0.88fr) minmax(440px, 1.12fr);
+}
+
 .assistant-conversations,
 .assistant-thread {
   min-height: 0;
@@ -3594,6 +3605,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   right: 16px;
   z-index: 3;
   display: flex;
+  gap: 7px;
   justify-content: flex-end;
   pointer-events: none;
 }
@@ -4279,6 +4291,26 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   white-space: nowrap;
 }
 
+.assistant-canvas-context {
+  max-width: min(260px, 32vw);
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  font-size: 11.5px;
+}
+
+.assistant-canvas-context:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: var(--fill);
+}
+
 .assistant-attach-button {
   width: 34px;
   height: 34px;
@@ -4551,7 +4583,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   background: var(--fill);
 }
 
-/* Acciones por respuesta del asistente (de momento, copiar). */
+/* Acciones por respuesta del asistente. */
 .assistant-message-actions {
   display: flex;
   align-items: center;
@@ -4633,6 +4665,10 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   background: var(--fill);
 }
 
+.assistant-canvas-action {
+  color: var(--accent);
+}
+
 /* ---------------------------------------------------------------------------
  * Responsive
  * ------------------------------------------------------------------------ */
@@ -4644,6 +4680,19 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .assistant-agent-grid.conversations-collapsed {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .assistant-agent-grid.canvas-open,
+  .assistant-agent-grid.canvas-open.conversations-collapsed {
+    grid-template-columns: minmax(320px, 0.82fr) minmax(400px, 1.18fr);
+  }
+
+  .assistant-agent-grid.canvas-open .assistant-conversations {
+    display: none;
+  }
+
+  .assistant-agent-grid.canvas-open .assistant-floating-actions {
+    display: none;
   }
 }
 
@@ -4663,6 +4712,21 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .assistant-agent-grid {
     min-height: 0;
+  }
+
+  .assistant-agent-grid.canvas-open,
+  .assistant-agent-grid.canvas-open.conversations-collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .assistant-agent-grid.canvas-open .assistant-thread,
+  .assistant-agent-grid.canvas-open .assistant-conversations,
+  .assistant-agent-grid.canvas-open .assistant-floating-actions {
+    display: none;
+  }
+
+  .assistant-agent-grid.canvas-open > aside[aria-label="Lienzo documental"] {
+    min-height: min(760px, calc(100vh - 72px));
   }
 
   .assistant-thread {
@@ -4685,6 +4749,10 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
   .assistant-messages {
     min-height: 360px;
+  }
+
+  .assistant-message-actions {
+    opacity: 1;
   }
 }
 

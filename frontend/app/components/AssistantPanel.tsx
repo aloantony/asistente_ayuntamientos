@@ -6,6 +6,7 @@ import {
   Database,
   ExternalLink,
   FileImage,
+  FilePenLine,
   FileText,
   Globe2,
   GripVertical,
@@ -47,6 +48,9 @@ import {
   type Project,
   type User,
 } from "./types";
+import { AssistantDocumentCanvas } from "./AssistantDocumentCanvas";
+import { getMessageCanvasActions } from "../lib/assistantCanvasActions";
+import type { AssistantCanvasController } from "../lib/useAssistantCanvasController";
 import { createBargeInDetector, createSilenceDetector } from "../lib/voice";
 
 // Ask the browser for echo cancellation / noise suppression so the mic stays
@@ -64,6 +68,7 @@ type AssistantPanelProps = {
   assistantStatus: AssistantStatus | null;
   conversations: AssistantConversation[];
   conversationFolders: AssistantConversationFolder[];
+  canvas: AssistantCanvasController;
   currentUser: User;
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
@@ -720,6 +725,7 @@ export function AssistantPanel({
   assistantStatus,
   conversations,
   conversationFolders,
+  canvas,
   currentUser,
   selectedConversation,
   draftMessage,
@@ -811,6 +817,8 @@ export function AssistantPanel({
   const [realtimeSupported, setRealtimeSupported] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
   const [isConversationListOpen, setIsConversationListOpen] = useState(true);
+  const canvasWasOpenRef = useRef(false);
+  const canvasButtonRef = useRef<HTMLButtonElement | null>(null);
   const [conversationListMode, setConversationListMode] =
     useState<ConversationListMode>("recent");
   const conversationFolderMap = useMemo(
@@ -1029,12 +1037,21 @@ export function AssistantPanel({
   }, [conversationContextMenu]);
 
   useEffect(() => {
-    if (!selectedConversation || composerDisabled) {
+    if (!selectedConversation || composerDisabled || canvas.isOpen) {
       return;
     }
 
     messageTextareaRef.current?.focus({ preventScroll: true });
-  }, [selectedConversation?.id, composerDisabled]);
+  }, [canvas.isOpen, selectedConversation?.id, composerDisabled]);
+
+  useEffect(() => {
+    if (canvas.isOpen && !canvasWasOpenRef.current) {
+      setIsConversationListOpen(false);
+    } else if (!canvas.isOpen && canvasWasOpenRef.current) {
+      canvasButtonRef.current?.focus({ preventScroll: true });
+    }
+    canvasWasOpenRef.current = canvas.isOpen;
+  }, [canvas.isOpen]);
 
   useEffect(() => {
     const canCaptureAudio =
@@ -1823,6 +1840,7 @@ export function AssistantPanel({
         className={[
           "assistant-agent-grid",
           isConversationListOpen ? "" : "conversations-collapsed",
+          canvas.isOpen ? "canvas-open" : "",
         ]
           .filter(Boolean)
           .join(" ")}
@@ -2136,6 +2154,26 @@ export function AssistantPanel({
           {selectedConversation ? (
             <>
               <div className="assistant-thread-actions">
+                <button
+                  className="secondary-button assistant-thread-icon-button"
+                  type="button"
+                  title={canvas.isOpen ? "Cerrar lienzo" : "Abrir lienzo"}
+                  aria-label={canvas.isOpen ? "Cerrar lienzo" : "Abrir lienzo"}
+                  aria-pressed={canvas.isOpen}
+                  disabled={
+                    canvas.assistantBusy || canvas.isLoading || canvas.isSaving
+                  }
+                  ref={canvasButtonRef}
+                  onClick={() => {
+                    if (canvas.isOpen) {
+                      void canvas.closeCanvas();
+                    } else {
+                      void canvas.openCanvas();
+                    }
+                  }}
+                >
+                  <FilePenLine aria-hidden size={16} />
+                </button>
                 {selectedIsArchived ? (
                   <button
                     className="secondary-button assistant-thread-icon-button"
@@ -2180,6 +2218,7 @@ export function AssistantPanel({
                 ) : null}
                 {displayedMessages.map((message) => {
                   const isAssistant = message.role === "assistant";
+                  const canvasActions = getMessageCanvasActions(message.actions);
                   return (
                     <article
                       key={message.id}
@@ -2230,22 +2269,44 @@ export function AssistantPanel({
                             toolLabels={toolLabels}
                           />
                         ) : null}
-                        {isAssistant && message.content.trim().length > 0 ? (
+                        {isAssistant &&
+                        (message.content.trim().length > 0 ||
+                          canvasActions.length > 0) ? (
                           <div className="assistant-message-actions">
-                            <button
-                              type="button"
-                              className="assistant-msg-action"
-                              onClick={() =>
-                                handleCopyMessage(message.id, message.content)
-                              }
-                            >
-                              <AssistantSymbolIcon name="copy" size={13} />
-                              <span>
-                                {copiedMessageId === message.id
-                                  ? "Copiado"
-                                  : "Copiar"}
-                              </span>
-                            </button>
+                            {message.content.trim().length > 0 ? (
+                              <button
+                                type="button"
+                                className="assistant-msg-action"
+                                onClick={() =>
+                                  handleCopyMessage(message.id, message.content)
+                                }
+                              >
+                                <AssistantSymbolIcon name="copy" size={13} />
+                                <span>
+                                  {copiedMessageId === message.id
+                                    ? "Copiado"
+                                    : "Copiar"}
+                                </span>
+                              </button>
+                            ) : null}
+                            {canvasActions.map((action) => (
+                              <button
+                                type="button"
+                                className="assistant-msg-action assistant-canvas-action"
+                                key={action.id}
+                                onClick={() => void canvas.openUiAction(action)}
+                                disabled={
+                                  canvas.assistantBusy ||
+                                  canvas.isLoading ||
+                                  canvas.isSaving
+                                }
+                                aria-label={`Abrir borrador: ${action.title}`}
+                                title={action.title}
+                              >
+                                <FilePenLine aria-hidden size={13} />
+                                <span>Abrir borrador</span>
+                              </button>
+                            ))}
                           </div>
                         ) : null}
                       </div>
@@ -2467,6 +2528,25 @@ export function AssistantPanel({
                           ? `${selectedAttachments.length}/5 · solo este turno`
                           : "Adjuntos: solo este turno"}
                       </span>
+                      {canvas.document ? (
+                        <button
+                          className="assistant-canvas-context"
+                          type="button"
+                          onClick={() => void canvas.openCanvas()}
+                          disabled={
+                            canvas.assistantBusy ||
+                            canvas.isLoading ||
+                            canvas.isSaving
+                          }
+                          title={`Abrir ${canvas.document.title}`}
+                        >
+                          <FilePenLine aria-hidden size={14} />
+                          <span>
+                            {canvas.document.title} · r
+                            {canvas.document.current_revision}
+                          </span>
+                        </button>
+                      ) : null}
                     </div>
                     <div className="assistant-composer-actions">
                       {voiceDialogueAvailable ? (
@@ -2630,6 +2710,10 @@ export function AssistantPanel({
             </div>
           )}
         </main>
+
+        {canvas.isOpen ? (
+          <AssistantDocumentCanvas canvas={canvas} currentUser={currentUser} />
+        ) : null}
 
       </div>
 

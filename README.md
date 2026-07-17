@@ -36,6 +36,7 @@ All AI egress continues through the internal gateway. Contractually approved ext
 - `Document`: uploaded file linked to an organization and a project.
 - `Requirement`: structured functional or product need linked to an organization and optionally to a project.
 - `Ordinance`: structured municipal ordinance linked to a municipality and optionally to a document.
+- `AssistantCanvasDocument`: private, non-official Markdown working draft linked to an assistant conversation, with immutable revisions. It is separate from uploaded `Document` files and official `Ordinance` records.
 - `User`, `Group`, `Role`, `Permission`: access control model used to assign capabilities to people and groups.
 
 ## 5. Implemented modules
@@ -51,6 +52,7 @@ All AI egress continues through the internal gateway. Contractually approved ext
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
 - Ordinance import and comparison: official-source import jobs run through a Redis/RQ worker, create pending-review ordinances, split legal text into reviewable/vectorized chunks and expose a thematic comparison matrix between municipalities.
 - AI Requirements Intake Assistant: Anacleto is a model-first Spanish assistant that captures stakeholder needs as draft requirements. It streams web turns over SSE, calls the configured LLM runtime only through the Privacy/AI Gateway (`app/assistant/gateway.py`) and executes tools with the calling user's RBAC permissions. Requirements are always created as drafts with `source_type=conversation`, `create_requirement` requires a later human confirmation turn, and every tool call leaves an auditable JSON trail. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected runtime is configured.
+- Assistant document canvas: Anacleto and the conversation owner can develop private, non-official Markdown drafts in a contextual editor with autosave, optimistic concurrency, immutable revision history and restore. Canvas tools use the narrowly scoped `draft_write/direct` policy; they never publish or promote content into `Document`, `Ordinance` or the legal corpus. See [docs/lienzo-documentos.md](docs/lienzo-documentos.md).
 - The capability-parity scope, security gates and phased delivery plan for web reading, attachments, code/data analysis, images, connectors, browser automation and durable agents are maintained in [docs/herramientas-asistente.md](docs/herramientas-asistente.md).
 - Web voice dialogue with Anacleto: when OpenAI Realtime is approved and enabled, the browser uses WebRTC with an ephemeral credential while every user transcript, tool call, confirmation and final turn remains server-owned and auditable. Exact safety confirmations are accepted only after their complete audio playback. The existing backend STT/TTS flow remains as a fallback: `MediaRecorder` audio is transcribed through `/assistant/audio-transcriptions` and responses are synthesized through `/assistant/speech`.
 - Controlled institutional memory: the assistant can propose organization memory, but only entries reviewed by authorized users become reusable context. Proposing, viewing and reviewing are separated by `assistant.memory.propose`, `assistant.memory.view` and `assistant.memory.review`; municipal reviewers work from `/admin/memoria` with tenant isolation and optimistic concurrency protection.
@@ -66,20 +68,20 @@ All AI egress continues through the internal gateway. Contractually approved ext
 - Imported ordinances are never approved automatically: importer output enters `pending_review`, the review agent stores a checklist and score, and a user with `ordinances.review` must approve, reject or request changes.
 - Legal chunks are stored in PostgreSQL and use pgvector when available. Development uses deterministic local hash embeddings by default; production can switch to a configured OpenAI-compatible embeddings provider.
 - Assistant voice capture and playback stay in the browser. In the fallback flow, STT/TTS run only through backend endpoints in `app/assistant/speech.py`, with no browser cloud recognition or `speechSynthesis` fallback (see ADR-021). When Realtime is explicitly enabled, browser audio is sent directly to the approved provider over WebRTC using a short-lived credential; tool execution and durable conversation state never leave the backend.
-- Uploaded documents are stored outside PostgreSQL.
-- PostgreSQL stores document metadata, ownership, status and relationships, not raw file bytes.
+- Uploaded document bytes are stored outside PostgreSQL.
+- PostgreSQL stores uploaded-document metadata plus the Markdown and immutable revisions of assistant canvas drafts; it does not store uploaded raw file bytes.
 - Uploaded files are stored in a persistent Docker volume.
 - Important business objects should avoid hard delete where archive or status fields are available.
 - A superuser bypass exists for administration, but normal users are permission-controlled.
 - Backend and frontend should remain bound to localhost in local development unless deployment is intentionally changed.
 
-## 7. Document storage
+## 7. Uploaded document storage
 
 Documents are stored on our own server in the current architecture. They are not stored in external S3/AWS storage.
 
 `DOCUMENT_STORAGE_ROOT` controls the filesystem path used by the backend to store uploaded files. In Docker Compose, the `document_storage` volume is mounted at `/var/lib/asistente_ayuntamientos/documents`, which is the default path configured in `.env.example`.
 
-The `document_storage` Docker volume persists uploaded files across container rebuilds and restarts. PostgreSQL stores metadata only, not raw file bytes.
+The `document_storage` Docker volume persists uploaded files across container rebuilds and restarts. PostgreSQL stores their metadata, not raw uploaded bytes. Canvas Markdown is intentionally different: it is structured application data and remains in PostgreSQL with its revision history.
 
 ## 8. Local development setup
 

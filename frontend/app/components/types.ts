@@ -1261,8 +1261,8 @@ export type AssistantTool = {
   label: string;
   read_only: boolean;
   domain: string;
-  side_effect: "none" | "database_write";
-  approval_policy: "never" | "explicit";
+  side_effect: "none" | "database_write" | "draft_write";
+  approval_policy: "never" | "explicit" | "direct";
   required_permission: string | null;
 };
 
@@ -1360,6 +1360,68 @@ export type AssistantAction = {
   input: Record<string, unknown>;
   result: string;
   status?: "started" | "finished";
+  ui_action?: unknown;
+};
+
+export type AssistantCanvasDocumentType =
+  | "municipal_ordinance"
+  | "regulation"
+  | "report"
+  | "letter"
+  | "minutes"
+  | "other";
+
+export type AssistantCanvasDocumentStatus = "draft" | "archived";
+
+export type AssistantCanvasDocumentSummary = {
+  id: number;
+  conversation_id: number;
+  organization_id: number | null;
+  document_type: AssistantCanvasDocumentType;
+  title: string;
+  status: AssistantCanvasDocumentStatus;
+  current_revision: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AssistantCanvasDocument = AssistantCanvasDocumentSummary & {
+  content: string;
+  content_format: "markdown";
+};
+
+export type AssistantCanvasWorkspace = {
+  documents: AssistantCanvasDocumentSummary[];
+  active_document_id: number | null;
+};
+
+export type AssistantCanvasRevision = {
+  id: number;
+  document_id: number;
+  revision_number: number;
+  title: string;
+  content_sha256: string;
+  content_excerpt: string;
+  change_summary: string | null;
+  edit_source: "user" | "assistant" | "restore";
+  created_by_id: number | null;
+  source_message_id: number | null;
+  source_tool_call_id: string | null;
+  created_at: string;
+};
+
+export type AssistantOpenCanvasUiAction = {
+  type: "ui.open_canvas_document";
+  version: 1;
+  id: string;
+  surface: "document_canvas";
+  title: string;
+  context: {
+    document_id: number;
+    conversation_id: number;
+    revision: number;
+    operation: "opened" | "created" | "updated" | "restored";
+  };
 };
 
 export type AssistantAttachmentContextStatus =
@@ -1420,11 +1482,13 @@ export type AssistantStreamMessageStart = {
 };
 
 export type AssistantStreamToolActivity = {
+  call_id?: string;
   tool: string;
   status: "started" | "finished";
   input: Record<string, unknown>;
   ok?: boolean;
   result?: string;
+  ui_action?: unknown;
 };
 
 export type AssistantStreamDone = {

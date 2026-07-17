@@ -25,6 +25,7 @@ import {
   canUseProductReview,
   PROJECT_PERMISSIONS,
 } from "./permissions";
+import { runNavigationGuards } from "./navigationGuards";
 
 export const REQUIREMENT_PERMISSIONS = [
   "requirements.view",
@@ -108,7 +109,7 @@ type SessionContextValue = {
   /** Fallo no-auth (red, 5xx) al restaurar la sesión; lo muestra el login. */
   sessionError: string;
   handleRequestError: RequestErrorHandler;
-  logout: (options?: { expired?: boolean }) => void;
+  logout: (options?: { expired?: boolean }) => Promise<void>;
   getStoredToken: () => string;
 };
 
@@ -192,7 +193,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  function logout(options: { expired?: boolean } = {}) {
+  async function logout(options: { expired?: boolean } = {}) {
+    if (!options.expired && !(await runNavigationGuards())) {
+      return;
+    }
     requestLogout();
     setUser(null);
     hasPendingLoginRedirect = true;
@@ -206,7 +210,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     fallback: string,
   ) {
     if (isAuthError(requestError)) {
-      logout({ expired: true });
+      void logout({ expired: true });
       return;
     }
 

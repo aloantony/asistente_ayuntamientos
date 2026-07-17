@@ -283,6 +283,21 @@ function translateApiDetail(detail: string, fallback: string) {
       return "La conversación está archivada.";
     case "Conversation not found":
       return "No se encontró la conversación.";
+    case "Canvas document not found":
+      return "No se encontró el borrador del lienzo.";
+    case "Canvas document revision not found":
+      return "No se encontró esa revisión del borrador.";
+    case "Canvas document revision conflict":
+      return "El borrador cambió mientras lo editabas.";
+    case "Canvas creation ID was reused with a different payload":
+      return "El identificador de creación ya se usó con otro borrador.";
+    case "Canvas mutation ID was reused with a different payload":
+      return "El identificador de guardado ya se usó con otros cambios.";
+    case "Canvas document is active in another conversation":
+    case "Canvas document is not active in this conversation":
+      return "Ese borrador no pertenece a la conversación actual.";
+    case "Canvas document is archived":
+      return "El borrador está archivado y ya no se puede editar.";
     case "Assistant conversation folder already exists":
       return "Ya existe una carpeta con ese nombre.";
     case "Conversation folder not found":

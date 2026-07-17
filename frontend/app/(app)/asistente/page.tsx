@@ -5,6 +5,7 @@ import { Suspense, useEffect, useRef } from "react";
 import { AssistantPanel } from "../../components/AssistantPanel";
 import { userHasPermission } from "../../components/types";
 import { useSession } from "../../lib/session";
+import { useAssistantCanvasController } from "../../lib/useAssistantCanvasController";
 import { useAssistantController } from "../../lib/useAssistantController";
 
 function parseConversationParam(value: string | null) {
@@ -20,6 +21,15 @@ function AsistentePageInner() {
     getStoredToken,
     handleRequestError,
   });
+  const canvas = useAssistantCanvasController({
+    conversation: assistantController.selectedConversation,
+    getStoredToken,
+    handleRequestError,
+    assistantBusy:
+      assistantController.isSendingMessage ||
+      assistantController.realtimeVoiceActive ||
+      assistantController.isSelectingConversation,
+  });
 
   const canUseAssistant = Boolean(
     user && userHasPermission(user, "assistant.use"),
@@ -34,6 +44,9 @@ function AsistentePageInner() {
   // Último id SOLICITADO (no resuelto): comparar contra él permite volver a
   // pedir la conversación anterior aunque otra petición siga en vuelo.
   const lastRequestedIdRef = useRef<number | null>(null);
+  // Los clics del propio panel guardan el lienzo antes de tocar la URL. Esta
+  // marca evita repetir ese mismo guardado cuando el efecto observa el cambio.
+  const approvedNavigationRef = useRef<string | null>(null);
 
   // El panel de inicio (y la barra superior) abren el asistente con el texto ya
   // escrito vía ?q=. Se vuelca una sola vez en el borrador y se limpia el
@@ -102,17 +115,45 @@ function AsistentePageInner() {
       return;
     }
 
-    if (urlConversationId !== null) {
-      if (urlConversationId !== lastRequestedIdRef.current) {
-        lastRequestedIdRef.current = urlConversationId;
-        void assistantController.selectConversation(urlConversationId);
-      }
-    } else {
-      lastRequestedIdRef.current = null;
-      if (selectedIdRef.current !== null) {
-        assistantController.deselectConversation();
-      }
+    const navigationKey =
+      urlConversationId === null ? "none" : `conversation:${urlConversationId}`;
+    const preapproved = approvedNavigationRef.current === navigationKey;
+    if (preapproved) {
+      approvedNavigationRef.current = null;
     }
+    let cancelled = false;
+
+    void (async () => {
+      const saved = preapproved || (await canvas.saveIfNeeded());
+      if (cancelled) {
+        return;
+      }
+      if (!saved) {
+        const currentId = selectedIdRef.current;
+        lastRequestedIdRef.current = currentId;
+        router.replace(
+          currentId === null ? "/asistente" : `/asistente?c=${currentId}`,
+          { scroll: false },
+        );
+        return;
+      }
+
+      if (urlConversationId !== null) {
+        if (urlConversationId !== lastRequestedIdRef.current) {
+          lastRequestedIdRef.current = urlConversationId;
+          await assistantController.selectConversation(urlConversationId);
+        }
+      } else {
+        lastRequestedIdRef.current = null;
+        if (selectedIdRef.current !== null) {
+          assistantController.deselectConversation();
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, urlConversationId]);
 
@@ -141,13 +182,55 @@ function AsistentePageInner() {
   // atrás/adelante recorra las conversaciones; si la URL no cambiaría
   // (re-clic), se recarga el detalle directamente.
   function handleSelectConversation(conversationId: number) {
-    if (conversationId === urlConversationId) {
-      lastRequestedIdRef.current = conversationId;
-      void assistantController.selectConversation(conversationId);
-      return;
-    }
+    void (async () => {
+      if (!(await canvas.saveIfNeeded())) {
+        return;
+      }
+      if (conversationId === urlConversationId) {
+        lastRequestedIdRef.current = conversationId;
+        await assistantController.selectConversation(conversationId);
+        return;
+      }
 
-    router.push(`/asistente?c=${conversationId}`, { scroll: false });
+      approvedNavigationRef.current = `conversation:${conversationId}`;
+      router.push(`/asistente?c=${conversationId}`, { scroll: false });
+    })();
+  }
+
+  function handleStartConversation() {
+    void (async () => {
+      if (await canvas.saveIfNeeded()) {
+        await assistantController.startConversation();
+      }
+    })();
+  }
+
+  function handleSendMessage() {
+    void (async () => {
+      if (await canvas.saveIfNeeded()) {
+        await assistantController.sendMessage();
+      }
+    })();
+  }
+
+  async function handleSendVoiceAudio(audio: Blob) {
+    if (await canvas.saveIfNeeded()) {
+      await assistantController.sendVoiceAudio(audio);
+    }
+  }
+
+  async function handleStartRealtimeVoice() {
+    if (await canvas.saveIfNeeded()) {
+      await assistantController.startRealtimeVoice();
+    }
+  }
+
+  function handleArchiveConversation(conversationId: number) {
+    void (async () => {
+      if (await canvas.saveIfNeeded()) {
+        await assistantController.archiveConversation(conversationId);
+      }
+    })();
   }
 
   if (!user || !canUseAssistant) {
@@ -166,6 +249,7 @@ function AsistentePageInner() {
     <div className="assistant-page-shell">
       <AssistantPanel
         assistantStatus={assistantController.assistantStatus}
+        canvas={canvas}
         conversations={assistantController.conversations}
         conversationFolders={assistantController.conversationFolders}
         currentUser={user}
@@ -198,15 +282,15 @@ function AsistentePageInner() {
         onOpenAttachment={assistantController.openAttachment}
         onVoiceModeChange={assistantController.setVoiceModeEnabled}
         onSelectConversation={handleSelectConversation}
-        onStartConversation={assistantController.startConversation}
-        onSendMessage={assistantController.sendMessage}
+        onStartConversation={handleStartConversation}
+        onSendMessage={handleSendMessage}
         onStopMessageGeneration={assistantController.stopMessageGeneration}
-        onSendVoiceAudio={assistantController.sendVoiceAudio}
-        onStartRealtimeVoice={assistantController.startRealtimeVoice}
+        onSendVoiceAudio={handleSendVoiceAudio}
+        onStartRealtimeVoice={handleStartRealtimeVoice}
         onStopRealtimeVoice={assistantController.stopRealtimeVoice}
         onStopSpeaking={assistantController.stopSpeaking}
         onTranscribeAudio={assistantController.transcribeAudio}
-        onArchiveConversation={assistantController.archiveConversation}
+        onArchiveConversation={handleArchiveConversation}
         onRestoreConversation={assistantController.restoreConversation}
         onRenameConversation={assistantController.renameConversation}
         onAssignConversationFolder={assistantController.assignConversationFolder}

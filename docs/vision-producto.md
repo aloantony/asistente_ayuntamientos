@@ -1,6 +1,6 @@
 # Visión de producto: Anacleto
 
-Actualizado: 2026-07-13.
+Actualizado: 2026-07-17.
 
 Estado: **fuente principal de las decisiones de producto objetivo**. Describe el
 producto que se quiere construir, no afirma que todas estas capacidades estén ya
@@ -47,6 +47,11 @@ El usuario podrá modificar esos artefactos visualmente y continuar después la
 conversación sin perder el contexto. Las vistas deben ayudar a comprender,
 comparar, aprobar o corregir; la navegación entre módulos no debe convertirse en
 el trabajo principal del usuario.
+
+El lienzo documental es la primera superficie contextual implementada: permite
+desarrollar con Anacleto un Markdown privado y versionado junto al chat. Sigue
+siendo un espacio de trabajo no oficial; aprobación, publicación o incorporación
+a un expediente requieren contratos distintos.
 
 ## 4. Un Anacleto por ayuntamiento
 

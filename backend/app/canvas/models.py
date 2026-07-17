@@ -50,6 +50,13 @@ class AssistantCanvasDocument(TimestampMixin, Base):
             "current_revision >= 1",
             name="ck_assistant_canvas_documents_current_revision",
         ),
+        CheckConstraint(
+            "(creation_id is null and creation_payload_sha256 is null) or "
+            "(creation_id is not null and "
+            "creation_payload_sha256 is not null and "
+            "creation_payload_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_assistant_canvas_documents_creation_payload",
+        ),
         UniqueConstraint(
             "conversation_id",
             "creation_id",
@@ -85,6 +92,10 @@ class AssistantCanvasDocument(TimestampMixin, Base):
         nullable=False,
     )
     creation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    creation_payload_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         index=True,
@@ -137,6 +148,13 @@ class AssistantCanvasRevision(Base):
             "edit_source in ('user', 'assistant', 'restore')",
             name="ck_assistant_canvas_revisions_source",
         ),
+        CheckConstraint(
+            "(mutation_id is null and mutation_payload_sha256 is null) or "
+            "(mutation_id is not null and "
+            "mutation_payload_sha256 is not null and "
+            "mutation_payload_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_assistant_canvas_revisions_mutation_payload",
+        ),
         UniqueConstraint(
             "document_id",
             "revision_number",
@@ -162,6 +180,10 @@ class AssistantCanvasRevision(Base):
     change_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     edit_source: Mapped[str] = mapped_column(String(20), nullable=False)
     mutation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mutation_payload_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     source_tool_call_id: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
