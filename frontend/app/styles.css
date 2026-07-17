@@ -2862,10 +2862,9 @@ tr:last-child td {
 .assistant-page-shell {
   width: 100%;
   min-width: 0;
-  height: calc(100vh - 60px);
-  height: calc(100dvh - 60px);
-  min-height: calc(100vh - 60px);
-  min-height: calc(100dvh - 60px);
+  /* El contenedor padre ya calcula el viewport y descuenta la cabecera móvil. */
+  height: 100%;
+  min-height: 100%;
   overflow: hidden;
 }
 
