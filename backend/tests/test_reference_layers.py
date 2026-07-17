@@ -9,7 +9,9 @@ from sqlalchemy.exc import IntegrityError
 
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
+    ReferenceCatalogValidationError,
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
     apply_catalog_definition,
     build_catalog_sync_plan,
@@ -18,6 +20,7 @@ from app.reference_layers.models import (
     OrganizationReferenceLayerSetting,
     ReferenceCatalogSnapshot,
     ReferenceLayer,
+    ReferenceLayerStyle,
     ReferenceService,
 )
 
@@ -48,6 +51,7 @@ def make_definition(
                 role="overlay",
                 renderer="raster_tile",
                 delivery_mode="proxy",
+                style_name="urbanismo:plau_cyl_clasificacion_color",
                 image_format="image/png",
                 supported_crs=("EPSG:25830", "EPSG:3857"),
                 bounds={
@@ -63,6 +67,27 @@ def make_definition(
                 downloadable=True,
                 legend_url="https://idecyl.jcyl.es/geoserver/urbanismo/wms",
                 metadata_url="https://idecyl.jcyl.es/geonetwork/",
+                styles=(
+                    ReferenceLayerStyleDefinition(
+                        source_key=(
+                            "urbanismo:plau_cyl_clasificacion_color"
+                        ),
+                        title="Clasificación por color",
+                        legend_url=(
+                            "https://idecyl.jcyl.es/geoserver/urbanismo/wms"
+                            "?service=WMS&request=GetLegendGraphic"
+                        ),
+                        sort_order=10,
+                        is_default=True,
+                    ),
+                    ReferenceLayerStyleDefinition(
+                        source_key=(
+                            "urbanismo:plau_cyl_clasificacion_trama"
+                        ),
+                        title="Clasificación por trama",
+                        sort_order=20,
+                    ),
+                ),
             )
         )
     return ReferenceCatalogDefinition(
@@ -113,9 +138,17 @@ def test_sync_is_dry_run_idempotent_and_preserves_stable_layer_identity(db) -> N
     assert plan.blocking_issues == ()
     assert plan.new_services == ("service:urbanismo-wms",)
     assert plan.new_layers == ("group:planning", "layer:classification")
+    assert plan.new_styles == (
+        "layer:classification|urbanismo:plau_cyl_clasificacion_color",
+        "layer:classification|urbanismo:plau_cyl_clasificacion_trama",
+    )
     assert db.scalar(select(func.count(ReferenceCatalogSnapshot.id))) == 0
 
-    snapshot, applied = apply_catalog_definition(db, definition)
+    snapshot, applied = apply_catalog_definition(
+        db,
+        definition,
+        expected_plan=plan,
+    )
     overlay = get_overlay(db)
     overlay_id = overlay.id
 
@@ -124,6 +157,14 @@ def test_sync_is_dry_run_idempotent_and_preserves_stable_layer_identity(db) -> N
     assert applied.new_layers == plan.new_layers
     assert overlay.parent.source_key == "group:planning"
     assert overlay.service.source_key == "service:urbanismo-wms"
+    assert [style.source_key for style in overlay.styles] == [
+        "urbanismo:plau_cyl_clasificacion_color",
+        "urbanismo:plau_cyl_clasificacion_trama",
+    ]
+    assert [style.is_default for style in overlay.styles] == [True, False]
+    style_updated_at = {
+        style.source_key: style.updated_at for style in overlay.styles
+    }
 
     second_plan = build_catalog_sync_plan(db, definition)
     second_snapshot, second_applied = apply_catalog_definition(db, definition)
@@ -133,10 +174,23 @@ def test_sync_is_dry_run_idempotent_and_preserves_stable_layer_identity(db) -> N
     assert second_plan.new_layers == ()
     assert second_plan.updated_layers == ()
     assert second_plan.missing_layers == ()
-    assert second_plan.unchanged_count == 3
-    assert second_applied.unchanged_count == 3
+    assert second_plan.new_styles == ()
+    assert second_plan.updated_styles == ()
+    assert second_plan.missing_styles == ()
+    assert second_plan.unchanged_count == 5
+    assert second_applied.unchanged_count == 5
     assert second_snapshot.id == snapshot.id
     assert db.scalar(select(func.count(ReferenceCatalogSnapshot.id))) == 1
+    db.expire_all()
+    assert {
+        style.source_key: style.updated_at for style in get_overlay(db).styles
+    } == style_updated_at
+
+    with pytest.raises(
+        ReferenceCatalogValidationError,
+        match="state changed",
+    ):
+        apply_catalog_definition(db, definition, expected_plan=plan)
 
     renamed = make_definition(
         layer_title="Clasificación urbanística vigente",
@@ -174,7 +228,13 @@ def test_sync_marks_disappeared_layers_missing_without_deleting_preferences(
     db.expire_all()
     persisted = db.get(ReferenceLayer, overlay.id)
     assert plan.missing_layers == ("layer:classification",)
+    assert plan.missing_styles == (
+        "layer:classification|urbanismo:plau_cyl_clasificacion_color",
+        "layer:classification|urbanismo:plau_cyl_clasificacion_trama",
+    )
     assert persisted.status == "missing"
+    assert {style.status for style in persisted.styles} == {"missing"}
+    assert not any(style.is_default for style in persisted.styles)
     assert db.scalar(
         select(func.count(OrganizationReferenceLayerSetting.id)).where(
             OrganizationReferenceLayerSetting.layer_id == overlay.id
@@ -246,12 +306,77 @@ def test_validation_blocks_duplicates_cycles_and_unsafe_service_urls(db) -> None
         scale_plan.blocking_issues
     )
 
+    duplicate_style = replace(
+        base.layers[1],
+        styles=base.layers[1].styles + (base.layers[1].styles[0],),
+    )
+    duplicate_style_plan = build_catalog_sync_plan(
+        db,
+        replace(base, layers=(base.layers[0], duplicate_style)),
+    )
+    assert any(
+        "Duplicate style key" in issue
+        for issue in duplicate_style_plan.blocking_issues
+    )
+
+    two_defaults = replace(
+        base.layers[1],
+        styles=(
+            base.layers[1].styles[0],
+            replace(base.layers[1].styles[1], is_default=True),
+        ),
+    )
+    default_plan = build_catalog_sync_plan(
+        db,
+        replace(base, layers=(base.layers[0], two_defaults)),
+    )
+    assert "Multiple default styles: layer:classification" in (
+        default_plan.blocking_issues
+    )
+
+    mismatched_default = replace(
+        base.layers[1],
+        styles=(
+            replace(base.layers[1].styles[0], is_default=False),
+            replace(base.layers[1].styles[1], is_default=True),
+        ),
+    )
+    mismatch_plan = build_catalog_sync_plan(
+        db,
+        replace(base, layers=(base.layers[0], mismatched_default)),
+    )
+    assert "Selected/default style mismatch: layer:classification" in (
+        mismatch_plan.blocking_issues
+    )
+
+    undefined_selected = replace(base.layers[1], styles=())
+    undefined_plan = build_catalog_sync_plan(
+        db,
+        replace(base, layers=(base.layers[0], undefined_selected)),
+    )
+    assert "Selected style has no definition: layer:classification" in (
+        undefined_plan.blocking_issues
+    )
+
 
 def test_snapshots_keep_raw_and_normalized_payloads_immutable(db) -> None:
     original = make_definition()
     first, _ = apply_catalog_definition(db, original)
     first_id = first.id
     first_retrieved_at = first.retrieved_at
+
+    permuted_layer = replace(
+        original.layers[1],
+        styles=tuple(reversed(original.layers[1].styles)),
+    )
+    permuted = replace(
+        original,
+        layers=(original.layers[0], permuted_layer),
+    )
+    same, same_plan = apply_catalog_definition(db, permuted)
+    assert same.id == first.id
+    assert same_plan.definition_sha256 == first.definition_sha256
+    assert same_plan.unchanged_count == 5
 
     changed_service = replace(
         original.services[0],
@@ -328,11 +453,17 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert overlay["effective_opacity"] == 0.75
     assert overlay["legend_available"] is True
     assert overlay["metadata_available"] is True
+    assert [style["source_key"] for style in body["styles"]] == [
+        "urbanismo:plau_cyl_clasificacion_color",
+        "urbanismo:plau_cyl_clasificacion_trama",
+    ]
+    assert body["styles"][0]["legend_available"] is True
     serialized = response.text
     assert "base_url" not in serialized
     assert "capabilities_url" not in serialized
     assert "license_url" not in serialized
     assert "last_error" not in serialized
+    assert "legend_url" not in serialized
     assert "options_json" not in serialized
     assert "idecyl.jcyl.es" not in serialized
 
@@ -417,6 +548,19 @@ def test_database_rejects_cross_provider_service_and_parent_links(db) -> None:
     db.rollback()
 
     db.add(
+        ReferenceLayerStyle(
+            provider_key="siur",
+            source_key="style:cross-layer",
+            title="Invalid cross-provider layer",
+            last_seen_snapshot_id=siur_snapshot.id,
+            layer_id=other_group.id,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+
+    db.add(
         ReferenceLayer(
             provider_key="siur",
             source_key="layer:cross-snapshot",
@@ -462,6 +606,31 @@ def test_database_rejects_cross_provider_service_and_parent_links(db) -> None:
             role="overlay",
             renderer="raster_tile",
             delivery_mode="proxy",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+
+
+def test_database_allows_only_one_default_style_per_layer(db) -> None:
+    apply_catalog_definition(db, make_definition())
+    overlay = get_overlay(db)
+    snapshot = db.scalar(
+        select(ReferenceCatalogSnapshot).where(
+            ReferenceCatalogSnapshot.provider_key == "siur",
+            ReferenceCatalogSnapshot.is_current.is_(True),
+        )
+    )
+
+    db.add(
+        ReferenceLayerStyle(
+            provider_key="siur",
+            source_key="urbanismo:second-default",
+            title="Invalid second default",
+            last_seen_snapshot_id=snapshot.id,
+            layer_id=overlay.id,
+            is_default=True,
         )
     )
     with pytest.raises(IntegrityError):
