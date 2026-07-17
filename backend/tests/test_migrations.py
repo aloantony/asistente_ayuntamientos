@@ -19,7 +19,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0030"
+HEAD_REVISION = "20260717_0031"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -109,6 +109,97 @@ MUNICIPALITY_GEOGRAPHY_COLUMNS = {
 _MANAGED_GEOGRAPHY_TABLES = {
     "reference_dataset_versions",
     "municipality_geography_snapshots",
+}
+REFERENCE_CATALOG_TABLES = {
+    "reference_catalog_snapshots",
+    "reference_services",
+    "reference_layers",
+    "organization_reference_layer_settings",
+}
+REFERENCE_CATALOG_COLUMNS = {
+    "reference_catalog_snapshots": {
+        "id",
+        "provider_key",
+        "source_url",
+        "content_sha256",
+        "raw_catalog_json",
+        "retrieved_at",
+        "service_count",
+        "group_count",
+        "layer_count",
+        "unresolved_count",
+        "status",
+        "is_current",
+        "created_at",
+        "updated_at",
+    },
+    "reference_services": {
+        "id",
+        "last_seen_snapshot_id",
+        "provider_key",
+        "source_key",
+        "title",
+        "upstream_protocol",
+        "base_url",
+        "capabilities_url",
+        "version",
+        "default_crs",
+        "default_format",
+        "attribution",
+        "license_name",
+        "license_url",
+        "license_status",
+        "cache_policy",
+        "capabilities_sha256",
+        "status",
+        "last_error",
+        "created_at",
+        "updated_at",
+    },
+    "reference_layers": {
+        "id",
+        "last_seen_snapshot_id",
+        "service_id",
+        "parent_id",
+        "provider_key",
+        "source_key",
+        "node_type",
+        "title",
+        "description",
+        "remote_name",
+        "role",
+        "renderer",
+        "delivery_mode",
+        "style_name",
+        "image_format",
+        "supported_crs_json",
+        "bounds_json",
+        "options_json",
+        "sort_order",
+        "default_visible",
+        "default_opacity",
+        "min_zoom",
+        "max_zoom",
+        "min_scale_denominator",
+        "max_scale_denominator",
+        "queryable",
+        "downloadable",
+        "legend_url",
+        "metadata_url",
+        "status",
+        "created_at",
+        "updated_at",
+    },
+    "organization_reference_layer_settings": {
+        "id",
+        "organization_id",
+        "layer_id",
+        "visible",
+        "opacity",
+        "updated_by_id",
+        "created_at",
+        "updated_at",
+    },
 }
 
 ASSISTANT_ATTACHMENT_SCHEMA = {
@@ -233,6 +324,47 @@ def assert_reference_geography_schema(inspector: Inspector) -> None:
             "municipality_geography_snapshots"
         )
     } == {("municipality_id",), ("dataset_version_id",)}
+
+
+def assert_reference_catalog_schema(inspector: Inspector) -> None:
+    assert REFERENCE_CATALOG_TABLES <= set(inspector.get_table_names())
+    for table_name, expected_columns in REFERENCE_CATALOG_COLUMNS.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_catalog_snapshots")
+        if not index.get("duplicates_constraint")
+    } == {"uq_reference_catalog_snapshots_current_provider"}
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_services")
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_services_snapshot",
+        "ix_reference_services_status",
+    }
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_layers")
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_layers_parent_order",
+        "ix_reference_layers_service_status",
+        "ix_reference_layers_snapshot",
+    }
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(
+            "organization_reference_layer_settings"
+        )
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_org_reference_layer_settings_layer",
+        "ix_org_reference_layer_settings_updated_by",
+    }
 
 
 def assert_assistant_attachment_schema(inspector: Inspector) -> None:
@@ -1739,6 +1871,38 @@ def test_reconciliation_upgrade_has_bounded_schema_lock_wait(
         if transaction.is_active:
             transaction.rollback()
         writer.close()
+        engine.dispose()
+
+
+def test_reference_catalog_migration_from_postgis_head_is_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0030")
+    engine = create_engine(migration_database_url)
+
+    try:
+        assert REFERENCE_CATALOG_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_catalog_schema(inspect(engine))
+        assert_spatial_extensions(engine)
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0030")
+        assert REFERENCE_CATALOG_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        assert_spatial_extensions(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0030"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_catalog_schema(inspect(engine))
+    finally:
         engine.dispose()
 
 
