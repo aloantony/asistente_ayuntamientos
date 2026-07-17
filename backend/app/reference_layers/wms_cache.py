@@ -16,6 +16,43 @@ logger = logging.getLogger(__name__)
 CACHE_PREFIX = "reference-wms:v1"
 CACHE_FORMAT = b"reference-wms-cache-v1\n"
 MAX_CACHE_HEADER_BYTES = 1024
+WMS_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
+CACHE_INDEX_KEY = f"{CACHE_PREFIX}:lru"
+CACHE_SIZES_KEY = f"{CACHE_PREFIX}:sizes"
+CACHE_TOTAL_KEY = f"{CACHE_PREFIX}:total-bytes"
+CACHE_METADATA_TTL_SECONDS = 8 * 24 * 60 * 60
+
+_STORE_WITH_BUDGET_SCRIPT = """
+if redis.call('EXISTS', KEYS[4]) == 0 then
+  redis.call('DEL', KEYS[2])
+  redis.call('DEL', KEYS[3])
+  redis.call('SET', KEYS[4], 0)
+end
+local old_size = tonumber(redis.call('HGET', KEYS[3], KEYS[1])) or 0
+local new_size = string.len(ARGV[1])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+redis.call('ZADD', KEYS[2], tonumber(ARGV[3]), KEYS[1])
+redis.call('HSET', KEYS[3], KEYS[1], new_size)
+local total = tonumber(redis.call('GET', KEYS[4])) or 0
+total = total - old_size + new_size
+redis.call('SET', KEYS[4], total)
+while total > tonumber(ARGV[4]) do
+  local oldest = redis.call('ZRANGE', KEYS[2], 0, 0)[1]
+  if not oldest then
+    break
+  end
+  redis.call('ZREM', KEYS[2], oldest)
+  local oldest_size = tonumber(redis.call('HGET', KEYS[3], oldest)) or 0
+  redis.call('HDEL', KEYS[3], oldest)
+  redis.call('DEL', oldest)
+  total = total - oldest_size
+  redis.call('SET', KEYS[4], total)
+end
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[5]))
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[5]))
+redis.call('EXPIRE', KEYS[4], tonumber(ARGV[5]))
+return total
+"""
 
 
 @dataclass(frozen=True)
@@ -45,12 +82,17 @@ def build_wms_cache_key(parts: dict[str, Any]) -> str:
 
 def get_cached_wms_response(key: str) -> CachedWMSResponse | None:
     try:
-        raw = get_redis_connection().get(key)
+        redis = get_redis_connection()
+        raw = redis.get(key)
     except RedisError:
         logger.warning("Reference WMS cache read failed", exc_info=True)
         return None
     if not isinstance(raw, bytes):
         return None
+    try:
+        redis.zadd(CACHE_INDEX_KEY, {key: int(time.time())})
+    except RedisError:
+        logger.warning("Reference WMS cache LRU update failed", exc_info=True)
     try:
         return deserialize_cached_wms_response(raw)
     except ValueError:
@@ -66,7 +108,21 @@ def store_cached_wms_response(
 ) -> None:
     try:
         payload = serialize_cached_wms_response(response)
-        get_redis_connection().setex(key, stale_ttl_seconds, payload)
+        if len(payload) > WMS_CACHE_BUDGET_BYTES:
+            raise ValueError("cache payload exceeds the WMS cache budget")
+        get_redis_connection().eval(
+            _STORE_WITH_BUDGET_SCRIPT,
+            4,
+            key,
+            CACHE_INDEX_KEY,
+            CACHE_SIZES_KEY,
+            CACHE_TOTAL_KEY,
+            payload,
+            stale_ttl_seconds,
+            int(time.time()),
+            WMS_CACHE_BUDGET_BYTES,
+            CACHE_METADATA_TTL_SECONDS,
+        )
     except (RedisError, ValueError):
         logger.warning("Reference WMS cache write failed", exc_info=True)
 
