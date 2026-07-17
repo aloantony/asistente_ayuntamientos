@@ -3049,5 +3049,3 @@ def _has_required_tool_permission(
 
 def get_tool_metadata() -> list[dict]:
     return [spec.metadata for spec in TOOL_CATALOG.values()]
-
-

@@ -127,6 +127,7 @@ def build_system_prompt(
         for organization in organizations
     )
 
+
     system_prompt = (
         f"{ANACLETO_SYSTEM_PROMPT}\n\n"
         f"{build_tool_prompt_block(tools)}\n\n"
@@ -243,5 +244,3 @@ def build_ordinance_coverage_block(db: Session) -> str:
         "oficiales. Usa get_ordinance_corpus_manifest para denominadores exactos "
         "y semantic_search_ordinances únicamente para localizar evidencia."
     )
-
-

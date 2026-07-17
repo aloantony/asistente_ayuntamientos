@@ -119,7 +119,6 @@ def search_ordinance_chunks(
         "results": returned_results,
     }
 
-
 def _validate_options(options: OrdinanceSearchOptions) -> None:
     if options.result_scope not in {"fragments", "ordinances", "municipalities"}:
         raise ValueError("result_scope no es válido")
@@ -588,5 +587,4 @@ def _serialize_result(
         "source_url": source_url,
         "score": round(score, 4),
     }
-
 

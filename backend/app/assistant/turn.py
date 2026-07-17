@@ -1312,5 +1312,3 @@ def _message_payload(message: AssistantMessage) -> dict:
         "routing": json.loads(message.routing) if message.routing else None,
         "created_at": message.created_at.isoformat(),
     }
-
-

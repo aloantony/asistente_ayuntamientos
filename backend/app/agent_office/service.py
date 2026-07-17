@@ -308,7 +308,6 @@ def get_task_for_user(db: Session, current_user: User, task_id: int) -> AgentOff
         )
     return task
 
-
 def lock_task_for_transition(
     db: Session,
     task_id: int,
@@ -1321,5 +1320,4 @@ def trigger_routine(db: Session, current_user: User, routine: AgentOfficeRoutine
     routine.last_run_at = datetime.now(timezone.utc)
     db.commit()
     return task
-
 
