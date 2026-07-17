@@ -174,7 +174,12 @@ def tool_result_for_activity(tool_name: str, content: str) -> str:
             )
     limit = (
         MAX_ORDINANCE_TOOL_RESULT_CHARS
-        if tool_name == "semantic_search_ordinances"
+        if tool_name
+        in {
+            "semantic_search_ordinances",
+            "get_ordinance_corpus_manifest",
+            "list_ordinance_catalog",
+        }
         else MAX_TOOL_RESULT_CHARS
     )
     return content[:limit]
@@ -1307,3 +1312,5 @@ def _message_payload(message: AssistantMessage) -> dict:
         "routing": json.loads(message.routing) if message.routing else None,
         "created_at": message.created_at.isoformat(),
     }
+
+

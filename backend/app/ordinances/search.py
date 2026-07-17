@@ -31,6 +31,7 @@ class OrdinanceSearchOptions:
     include_inactive: bool = False
     municipality_id: int | None = None
     municipality_name: str | None = None
+    autonomous_community: str | None = None
     province: str | None = None
     topic: str | None = None
     strict_topic: bool = False
@@ -191,6 +192,9 @@ def _base_where(
     if options.municipality_name:
         clauses.append("m.name ILIKE :municipality_name")
         params["municipality_name"] = options.municipality_name
+    if options.autonomous_community:
+        clauses.append("m.autonomous_community ILIKE :autonomous_community")
+        params["autonomous_community"] = options.autonomous_community
     if options.province:
         clauses.append("m.province ILIKE :province")
         params["province"] = options.province
@@ -319,6 +323,7 @@ def _search_with_pgvector(
             o.effective_date,
             m.name AS municipality_name,
             m.province,
+            m.autonomous_community,
             m.population,
             c.chunk_index,
             c.heading,
@@ -387,6 +392,12 @@ def _search_with_python(
         query = query.where(Ordinance.municipality_id == options.municipality_id)
     if options.municipality_name:
         query = query.where(Municipality.name.ilike(options.municipality_name))
+    if options.autonomous_community:
+        query = query.where(
+            Municipality.autonomous_community.ilike(
+                options.autonomous_community
+            )
+        )
     if options.province:
         query = query.where(Municipality.province.ilike(options.province))
     chunks = list(db.scalars(query))
@@ -480,6 +491,7 @@ def _serialize_chunk(score: float, chunk: OrdinanceLegalChunk) -> dict:
         municipality_id=ordinance.municipality_id,
         municipality_name=municipality.name,
         province=municipality.province,
+        autonomous_community=municipality.autonomous_community,
         population=municipality.population,
         topic=ordinance.topic,
         status=ordinance.status,
@@ -505,6 +517,7 @@ def _serialize_mapping(row) -> dict:
         municipality_id=row["municipality_id"],
         municipality_name=row["municipality_name"],
         province=row["province"],
+        autonomous_community=row["autonomous_community"],
         population=row["population"],
         topic=row["topic"],
         status=row["status"],
@@ -530,6 +543,7 @@ def _serialize_result(
     municipality_id: int,
     municipality_name: str,
     province: str,
+    autonomous_community: str,
     population: int | None,
     topic: str,
     status: str,
@@ -553,6 +567,7 @@ def _serialize_result(
         "municipality_id": municipality_id,
         "municipality_name": municipality_name,
         "province": province,
+        "autonomous_community": autonomous_community,
         "population": population,
         "topic": topic,
         "status": status,
@@ -573,3 +588,5 @@ def _serialize_result(
         "source_url": source_url,
         "score": round(score, 4),
     }
+
+

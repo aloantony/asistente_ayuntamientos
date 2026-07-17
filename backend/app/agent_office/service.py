@@ -115,9 +115,18 @@ OFFICE_AGENTS: dict[str, AgentOfficeAgentSpec] = {
         key="ordinances",
         name="Agente de ordenanzas",
         department="ordinances",
-        description="Busca y compara normativa municipal ya importada y aprobada.",
+        description=(
+            "Inventaría, busca y compara normativa municipal ya importada "
+            "y aprobada."
+        ),
         assistant_agent_key="consultation",
-        tool_names=frozenset({"semantic_search_ordinances"}),
+        tool_names=frozenset(
+            {
+                "get_ordinance_corpus_manifest",
+                "list_ordinance_catalog",
+                "semantic_search_ordinances",
+            }
+        ),
         mutating_actions=frozenset(),
         requires_approval_by_default=False,
     ),
@@ -185,6 +194,8 @@ DEFAULT_ACTION_BY_DEPARTMENT = {
     "daily_briefing": "daily_briefing",
 }
 ACTION_TO_DEPARTMENT = {
+    "get_ordinance_corpus_manifest": "ordinances",
+    "list_ordinance_catalog": "ordinances",
     "semantic_search_ordinances": "ordinances",
     "list_projects": "projects",
     "get_map_items": "map",
@@ -206,6 +217,8 @@ TOOL_ACTIONS = {
     "add_requirement_message",
     "propose_memory_entry",
     "send_admin_feedback",
+    "get_ordinance_corpus_manifest",
+    "list_ordinance_catalog",
     "semantic_search_ordinances",
     "get_map_items",
 }
@@ -1308,3 +1321,5 @@ def trigger_routine(db: Session, current_user: User, routine: AgentOfficeRoutine
     routine.last_run_at = datetime.now(timezone.utc)
     db.commit()
     return task
+
+
