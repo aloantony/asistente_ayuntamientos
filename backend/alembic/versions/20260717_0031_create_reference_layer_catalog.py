@@ -90,6 +90,11 @@ def upgrade() -> None:
             "definition_sha256",
             name="uq_reference_catalog_snapshots_provider_hashes",
         ),
+        sa.UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_catalog_snapshots_provider_id",
+        ),
     )
     op.create_index(
         "uq_reference_catalog_snapshots_current_provider",
@@ -148,8 +153,12 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["last_seen_snapshot_id"],
-            ["reference_catalog_snapshots.id"],
+            ["provider_key", "last_seen_snapshot_id"],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+            ],
+            name="fk_reference_services_provider_snapshot",
             ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
@@ -277,8 +286,12 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["last_seen_snapshot_id"],
-            ["reference_catalog_snapshots.id"],
+            ["provider_key", "last_seen_snapshot_id"],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+            ],
+            name="fk_reference_layers_provider_snapshot",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
