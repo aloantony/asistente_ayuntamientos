@@ -16,6 +16,7 @@ from app.reference_layers.models import (
     OrganizationReferenceLayerSetting,
     ReferenceCatalogSnapshot,
     ReferenceLayer,
+    ReferenceLayerStyle,
     ReferenceService,
 )
 from app.reference_layers.schemas import (
@@ -24,6 +25,7 @@ from app.reference_layers.schemas import (
     ReferenceLayerRead,
     ReferenceLayerSettingRead,
     ReferenceLayerSettingUpdate,
+    ReferenceLayerStyleRead,
     ReferenceServiceRead,
 )
 from app.users.models import User
@@ -77,6 +79,17 @@ def get_reference_catalog(
             )
         )
     )
+    styles = list(
+        db.scalars(
+            select(ReferenceLayerStyle)
+            .where(ReferenceLayerStyle.provider_key == snapshot.provider_key)
+            .order_by(
+                ReferenceLayerStyle.layer_id,
+                ReferenceLayerStyle.sort_order,
+                ReferenceLayerStyle.id,
+            )
+        )
+    )
     settings: dict[int, OrganizationReferenceLayerSetting] = {}
     if organization_id is not None:
         settings = {
@@ -115,6 +128,12 @@ def get_reference_catalog(
         organization_id=organization_id,
         services=[ReferenceServiceRead.model_validate(item) for item in services],
         layers=layer_reads,
+        styles=[
+            ReferenceLayerStyleRead.model_validate(item).model_copy(
+                update={"legend_available": item.legend_url is not None}
+            )
+            for item in styles
+        ],
     )
 
 
