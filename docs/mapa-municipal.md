@@ -1,6 +1,6 @@
 # Mapa municipal
 
-Actualizado: 2026-07-15.
+Actualizado: 2026-07-17.
 
 ## Propósito
 
@@ -28,7 +28,13 @@ En v1 solo se crean puntos. Cada punto guarda:
 
 `geometry_json` usa GeoJSON RFC 7946. Por tanto, las coordenadas se serializan como `[longitude, latitude]`, aunque Leaflet recibe los puntos como `[latitude, longitude]` en el frontend.
 
-PostGIS queda aplazado: la imagen actual de desarrollo usa PostgreSQL/pgvector, no PostGIS. La lógica de geometría queda aislada en `app/geo/geometry.py` para facilitar una migración posterior a columnas espaciales si el producto lo requiere.
+La plataforma de base de datos dispone de PostgreSQL 17 con pgvector y PostGIS. La revisión `20260717_0030` habilita PostGIS como capacidad compartida, pero no cambia todavía el dominio `geo_locations`: los puntos municipales siguen usando sus columnas y el GeoJSON textual actuales. La lógica de geometría permanece aislada en `app/geo/geometry.py` para que una migración posterior a columnas espaciales sea explícita y comprobable.
+
+## Base para capas territoriales
+
+PostGIS se incorpora como prerrequisito de la integración territorial centralizada. Permitirá almacenar y consultar los vectores descargables de SIUR, conservar su CRS de origen y servir después teselas optimizadas al navegador. Esta revisión no importa datos de SIUR, no crea tablas de features y no modifica el mapa visible.
+
+La tolerancia prevista cubre lentitud o indisponibilidad de SIUR mediante sincronización, espejo y caché en la infraestructura central. El ayuntamiento seguirá necesitando conexión a `asistente-ayuntamientos`; no se contempla un servidor local, paquetes offline ni funcionamiento sin Internet.
 
 ## API
 
@@ -80,7 +86,7 @@ No se implementa todavía:
 - geocodificación automática;
 - extracción de ubicaciones por el asistente;
 - integración Catastro;
-- PostGIS;
+- migración de `geo_locations` a columnas PostGIS;
 - polígonos o dibujo de áreas;
 - capas de redes, equipamientos o rutas;
 - navegación/direcciones;
