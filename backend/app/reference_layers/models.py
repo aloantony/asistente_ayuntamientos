@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -42,6 +43,10 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
             name="ck_reference_catalog_snapshots_sha256",
         ),
         CheckConstraint(
+            "definition_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_catalog_snapshots_definition_sha256",
+        ),
+        CheckConstraint(
             "service_count >= 0 and group_count >= 0 and layer_count >= 0 "
             "and unresolved_count >= 0",
             name="ck_reference_catalog_snapshots_counts",
@@ -57,7 +62,8 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
         UniqueConstraint(
             "provider_key",
             "content_sha256",
-            name="uq_reference_catalog_snapshots_provider_hash",
+            "definition_sha256",
+            name="uq_reference_catalog_snapshots_provider_hashes",
         ),
         Index(
             "uq_reference_catalog_snapshots_current_provider",
@@ -71,7 +77,12 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
     provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    definition_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     raw_catalog_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    normalized_definition_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
     retrieved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -144,6 +155,11 @@ class ReferenceService(TimestampMixin, Base):
             "source_key",
             name="uq_reference_services_provider_source",
         ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_services_provider_id",
+        ),
         Index("ix_reference_services_snapshot", "last_seen_snapshot_id"),
         Index("ix_reference_services_status", "provider_key", "status"),
     )
@@ -196,6 +212,7 @@ class ReferenceService(TimestampMixin, Base):
     layers: Mapped[list["ReferenceLayer"]] = relationship(
         "ReferenceLayer",
         back_populates="service",
+        foreign_keys="ReferenceLayer.service_id",
     )
 
 
@@ -264,6 +281,23 @@ class ReferenceLayer(TimestampMixin, Base):
             "source_key",
             name="uq_reference_layers_provider_source",
         ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_layers_provider_id",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "service_id"],
+            ["reference_services.provider_key", "reference_services.id"],
+            name="fk_reference_layers_provider_service",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "parent_id"],
+            ["reference_layers.provider_key", "reference_layers.id"],
+            name="fk_reference_layers_provider_parent",
+            ondelete="RESTRICT",
+        ),
         Index(
             "ix_reference_layers_parent_order",
             "parent_id",
@@ -280,11 +314,9 @@ class ReferenceLayer(TimestampMixin, Base):
         nullable=False,
     )
     service_id: Mapped[int | None] = mapped_column(
-        ForeignKey("reference_services.id", ondelete="RESTRICT"),
         nullable=True,
     )
     parent_id: Mapped[int | None] = mapped_column(
-        ForeignKey("reference_layers.id", ondelete="RESTRICT"),
         nullable=True,
     )
     provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -360,15 +392,18 @@ class ReferenceLayer(TimestampMixin, Base):
     service: Mapped[ReferenceService | None] = relationship(
         "ReferenceService",
         back_populates="layers",
+        foreign_keys=[service_id],
     )
     parent: Mapped["ReferenceLayer | None"] = relationship(
         "ReferenceLayer",
         remote_side="ReferenceLayer.id",
         back_populates="children",
+        foreign_keys=[parent_id],
     )
     children: Mapped[list["ReferenceLayer"]] = relationship(
         "ReferenceLayer",
         back_populates="parent",
+        foreign_keys=[parent_id],
     )
     organization_settings: Mapped[list["OrganizationReferenceLayerSetting"]] = (
         relationship(
