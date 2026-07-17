@@ -2,8 +2,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
 from conftest import headers_for
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
@@ -83,8 +85,11 @@ def make_definition(
                 default_crs="EPSG:25830",
                 default_format="image/png",
                 attribution="Junta de Castilla y León",
+                license_name="Datos abiertos de Castilla y León",
+                license_url="https://datosabiertos.jcyl.es/web/jcyl/RISP/",
                 license_status="pending",
                 cache_policy="on_demand",
+                last_error="upstream https://internal.invalid/token=secret",
             ),
         ),
         layers=tuple(layers),
@@ -205,12 +210,67 @@ def test_validation_blocks_duplicates_cycles_and_unsafe_service_urls(db) -> None
 
     unsafe_service = replace(
         base.services[0],
-        base_url="http://user:secret@127.0.0.1/internal",
+        base_url="http://127.0.0.1/internal",
     )
     unsafe = replace(base, services=(unsafe_service,))
     unsafe_plan = build_catalog_sync_plan(db, unsafe)
     assert "Invalid service URL: service:urbanismo-wms" in (
         unsafe_plan.blocking_issues
+    )
+
+    private_service = replace(
+        base.services[0],
+        base_url="https://[::1]/internal",
+    )
+    private_plan = build_catalog_sync_plan(
+        db,
+        replace(base, services=(private_service,)),
+    )
+    assert "Invalid service URL: service:urbanismo-wms" in (
+        private_plan.blocking_issues
+    )
+
+    invalid_scale = replace(
+        base.layers[1],
+        min_scale_denominator=Decimal("0"),
+    )
+    scale_plan = build_catalog_sync_plan(
+        db,
+        replace(base, layers=(base.layers[0], invalid_scale)),
+    )
+    assert "Invalid scale denominator: layer:classification" in (
+        scale_plan.blocking_issues
+    )
+
+
+def test_snapshots_keep_raw_and_normalized_payloads_immutable(db) -> None:
+    original = make_definition()
+    first, _ = apply_catalog_definition(db, original)
+    first_id = first.id
+    first_retrieved_at = first.retrieved_at
+
+    changed_service = replace(
+        original.services[0],
+        title="Servicio adaptado sin cambiar el bruto",
+    )
+    adapted = replace(
+        original,
+        services=(changed_service,),
+        retrieved_at=datetime(2026, 7, 17, 13, 0, tzinfo=timezone.utc),
+    )
+    second, _ = apply_catalog_definition(db, adapted)
+
+    db.expire_all()
+    persisted_first = db.get(ReferenceCatalogSnapshot, first_id)
+    assert second.id != first_id
+    assert second.content_sha256 == persisted_first.content_sha256
+    assert second.definition_sha256 != persisted_first.definition_sha256
+    assert persisted_first.retrieved_at == first_retrieved_at
+    assert persisted_first.normalized_definition_json["services"][0]["title"] == (
+        "Urbanismo de Castilla y León"
+    )
+    assert second.normalized_definition_json["services"][0]["title"] == (
+        "Servicio adaptado sin cambiar el bruto"
     )
 
 
@@ -225,21 +285,21 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     viewer = make_user()
 
     denied = client.get(
-        f"/reference-layers/catalog?organization_id={organization.id}",
+        f"/reference-layers/catalog?provider_key=siur&organization_id={organization.id}",
         headers=headers_for(viewer),
     )
     assert denied.status_code == 403
 
     grant_permissions(viewer, organization, ["map.view"])
     unavailable = client.get(
-        f"/reference-layers/catalog?organization_id={organization.id}",
+        f"/reference-layers/catalog?provider_key=siur&organization_id={organization.id}",
         headers=headers_for(viewer),
     )
     assert unavailable.status_code == 503
 
     apply_catalog_definition(db, make_definition())
     response = client.get(
-        f"/reference-layers/catalog?organization_id={organization.id}",
+        f"/reference-layers/catalog?provider_key=siur&organization_id={organization.id}",
         headers=headers_for(viewer),
     )
 
@@ -258,8 +318,105 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     serialized = response.text
     assert "base_url" not in serialized
     assert "capabilities_url" not in serialized
+    assert "license_url" not in serialized
+    assert "last_error" not in serialized
     assert "options_json" not in serialized
     assert "idecyl.jcyl.es" not in serialized
+
+
+def test_catalog_requires_an_explicit_provider_and_keeps_providers_isolated(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    organization = make_organization()
+    viewer = make_user()
+    grant_permissions(viewer, organization, ["map.view"])
+    apply_catalog_definition(db, make_definition())
+    other = replace(
+        make_definition(layer_title="Otra clasificación", version=4),
+        provider_key="other",
+    )
+    apply_catalog_definition(db, other)
+
+    missing_provider = client.get(
+        f"/reference-layers/catalog?organization_id={organization.id}",
+        headers=headers_for(viewer),
+    )
+    assert missing_provider.status_code == 422
+
+    response = client.get(
+        f"/reference-layers/catalog?provider_key=other&organization_id={organization.id}",
+        headers=headers_for(viewer),
+    )
+    assert response.status_code == 200
+    assert response.json()["snapshot"]["provider_key"] == "other"
+    assert {item["title"] for item in response.json()["layers"]} >= {
+        "Otra clasificación"
+    }
+
+
+def test_database_rejects_cross_provider_service_and_parent_links(db) -> None:
+    apply_catalog_definition(db, make_definition())
+    apply_catalog_definition(
+        db,
+        replace(make_definition(version=5), provider_key="other"),
+    )
+    siur_snapshot = db.scalar(
+        select(ReferenceCatalogSnapshot).where(
+            ReferenceCatalogSnapshot.provider_key == "siur",
+            ReferenceCatalogSnapshot.is_current.is_(True),
+        )
+    )
+    siur_service = db.scalar(
+        select(ReferenceService).where(ReferenceService.provider_key == "siur")
+    )
+    other_service = db.scalar(
+        select(ReferenceService).where(ReferenceService.provider_key == "other")
+    )
+    other_group = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == "other",
+            ReferenceLayer.source_key == "group:planning",
+        )
+    )
+
+    db.add(
+        ReferenceLayer(
+            provider_key="siur",
+            source_key="layer:cross-service",
+            node_type="layer",
+            title="Invalid cross-provider service",
+            last_seen_snapshot_id=siur_snapshot.id,
+            service_id=other_service.id,
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="proxy",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+
+    db.add(
+        ReferenceLayer(
+            provider_key="siur",
+            source_key="layer:cross-parent",
+            node_type="layer",
+            title="Invalid cross-provider parent",
+            last_seen_snapshot_id=siur_snapshot.id,
+            service_id=siur_service.id,
+            parent_id=other_group.id,
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="proxy",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
 
 
 def test_organization_settings_require_manage_and_restore_catalog_defaults(
@@ -298,7 +455,7 @@ def test_organization_settings_require_manage_and_restore_catalog_defaults(
     assert updated.json()["updated_by_id"] == manager.id
 
     catalog = client.get(
-        f"/reference-layers/catalog?organization_id={first_org.id}",
+        f"/reference-layers/catalog?provider_key=siur&organization_id={first_org.id}",
         headers=headers_for(manager),
     ).json()
     effective = next(
@@ -320,7 +477,7 @@ def test_organization_settings_require_manage_and_restore_catalog_defaults(
     deleted = client.delete(path, headers=headers_for(manager))
     assert deleted.status_code == 204
     reset_catalog = client.get(
-        f"/reference-layers/catalog?organization_id={first_org.id}",
+        f"/reference-layers/catalog?provider_key=siur&organization_id={first_org.id}",
         headers=headers_for(manager),
     ).json()
     reset = next(
