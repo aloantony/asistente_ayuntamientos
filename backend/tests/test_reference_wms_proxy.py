@@ -492,6 +492,7 @@ def test_public_contract_has_no_arbitrary_wms_or_url_parameters(client) -> None:
         for parameter in operation.get("parameters", [])
     }
     assert parameter_names <= {
+        "access_token",
         "feature_count",
         "layer_id",
         "organization_id",
