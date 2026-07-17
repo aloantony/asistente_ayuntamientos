@@ -893,7 +893,12 @@ def _complete_forced_synthesis(
     turn_deadline: float,
     safety_identifier: str,
 ) -> Generator[TurnEvent, None, str]:
-    """Complete once without tools and only publish a valid final answer."""
+    """Complete once without tools and only publish a valid final answer.
+
+    Forced synthesis receives a small tool-free grace period beyond the normal
+    turn deadline. Otherwise a tool loop can consume the entire work budget and
+    leave no time to explain the results it already obtained.
+    """
     logger.warning(
         "Assistant tool loop forced final synthesis (conversation=%s reason=%s)",
         conversation_id,
@@ -905,7 +910,9 @@ def _complete_forced_synthesis(
         system=final_system,
         messages=messages,
         tools=[],
-        timeout_seconds=_remaining_gateway_timeout(turn_deadline),
+        timeout_seconds=_remaining_gateway_timeout(
+            turn_deadline + settings.assistant_final_synthesis_grace_seconds
+        ),
         safety_identifier=safety_identifier,
     )
     buffered_events: list[TurnEvent] = []

@@ -5539,6 +5539,69 @@ def test_tool_round_limit_forces_tool_free_completion_instead_of_fallback(
     assert gateway.calls[-1]["tools"] == []
 
 
+def test_forced_synthesis_has_grace_after_turn_work_budget_is_spent(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    monkeypatch.setattr(settings, "assistant_max_tool_iterations", 1)
+    monkeypatch.setattr(settings, "assistant_max_tool_calls", 8)
+    monkeypatch.setattr(settings, "assistant_turn_timeout_seconds", 10.0)
+    monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 10.0)
+    monkeypatch.setattr(settings, "assistant_final_synthesis_grace_seconds", 4.0)
+    clock = [100.0]
+
+    class BudgetSpendingGateway(FakeGateway):
+        def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                clock[0] += 9.0
+            return self.responses.pop(0)
+
+    gateway = use_gateway(
+        BudgetSpendingGateway(
+            [
+                fake_response(
+                    "tool_use",
+                    [
+                        tool_use_block(
+                            "call_1",
+                            "list_requirements",
+                            {"organization_id": organization.id},
+                        )
+                    ],
+                ),
+                fake_response(
+                    "end_turn",
+                    [text_block("He completado la consulta y no hay resultados.")],
+                ),
+            ]
+        )
+    )
+    monkeypatch.setattr(assistant_turn, "monotonic", lambda: clock[0])
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Consulta las necesidades"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][-1]["content"] == (
+        "He completado la consulta y no hay resultados."
+    )
+    assert len(gateway.calls) == 2
+    assert gateway.calls[-1]["tools"] == []
+    assert gateway.calls[-1]["timeout_seconds"] == pytest.approx(5.0)
+
+
 def test_invalid_forced_synthesis_uses_explicit_loop_limit_reply(
     client,
     assistant_user,
