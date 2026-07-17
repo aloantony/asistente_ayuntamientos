@@ -553,6 +553,15 @@ def test_feature_collection_parser_rejects_duplicates_constants_and_limits() -> 
             b'"features":[]}',
             max_features=1,
         )
+    deeply_nested = (
+        b'{"type":"FeatureCollection","features":[],"nested":'
+        + b"[" * 1100
+        + b"0"
+        + b"]" * 1100
+        + b"}"
+    )
+    with pytest.raises(InvalidFeatureInfoError):
+        parse_feature_collection(deeply_nested, max_features=1)
     with pytest.raises(InvalidFeatureInfoError):
         parse_feature_collection(
             b'{"type":"FeatureCollection","features":[],"value":NaN}',
