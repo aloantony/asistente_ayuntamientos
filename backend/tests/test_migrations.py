@@ -19,7 +19,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0029"
+HEAD_REVISION = "20260717_0030"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -149,6 +149,37 @@ ASSISTANT_ATTACHMENT_SCHEMA = {
         "uq_assistant_message_attachments_message_position",
     },
 }
+ORDINANCE_ANALYSIS_SCHEMA = {
+    "columns": {
+        "id",
+        "task_id",
+        "ordinance_id",
+        "source_ordinance_id",
+        "source_updated_at",
+        "source_hash",
+        "source_digest",
+        "status",
+        "attempts",
+        "error_message",
+        "result_json",
+        "started_at",
+        "completed_at",
+        "created_at",
+        "updated_at",
+    },
+    "indexes": {
+        "ix_agent_office_ordinance_analysis_items_ordinance_id",
+        "ix_agent_office_ord_analysis_task_status_source",
+    },
+    "checks": {
+        "ck_agent_office_ord_analysis_items_status",
+        "ck_agent_office_ord_analysis_items_attempts",
+        "ck_agent_office_ord_analysis_items_source_identity",
+    },
+    "unique_constraints": {
+        "uq_agent_office_ord_analysis_task_ordinance",
+    },
+}
 
 
 def assert_pgvector_extension(engine: Engine) -> None:
@@ -221,6 +252,38 @@ def assert_assistant_attachment_schema(inspector: Inspector) -> None:
         constraint["name"]
         for constraint in inspector.get_unique_constraints(table_name)
     } == ASSISTANT_ATTACHMENT_SCHEMA["unique_constraints"]
+
+
+def assert_ordinance_analysis_schema(inspector: Inspector) -> None:
+    table_name = "agent_office_ordinance_analysis_items"
+    assert table_name in inspector.get_table_names()
+    assert {
+        column["name"] for column in inspector.get_columns(table_name)
+    } == ORDINANCE_ANALYSIS_SCHEMA["columns"]
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(table_name)
+        if not index.get("duplicates_constraint")
+    } == ORDINANCE_ANALYSIS_SCHEMA["indexes"]
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(table_name)
+    } == ORDINANCE_ANALYSIS_SCHEMA["checks"]
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(table_name)
+    } == ORDINANCE_ANALYSIS_SCHEMA["unique_constraints"]
+    foreign_keys = {
+        tuple(foreign_key["constrained_columns"]): (
+            tuple(foreign_key["referred_columns"]),
+            foreign_key.get("options", {}).get("ondelete"),
+        )
+        for foreign_key in inspector.get_foreign_keys(table_name)
+    }
+    assert foreign_keys == {
+        ("task_id",): (("id",), "CASCADE"),
+        ("ordinance_id",): (("id",), "SET NULL"),
+    }
 
 
 def assert_document_project_scope_is_composite(inspector: Inspector) -> None:
@@ -1009,6 +1072,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(upgraded_inspector)
         assert_assistant_attachment_schema(upgraded_inspector)
+        assert_ordinance_analysis_schema(upgraded_inspector)
         assert_document_project_scope_is_composite(upgraded_inspector)
 
         with engine.connect() as connection:
@@ -1038,6 +1102,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
         )
+        assert "agent_office_ordinance_analysis_items" not in (
+            downgraded_inspector.get_table_names()
+        )
         assert_document_project_scope_is_simple(downgraded_inspector)
 
         run_alembic(migration_database_url, "upgrade", "head")
@@ -1052,6 +1119,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(reupgraded_inspector)
         assert_assistant_attachment_schema(reupgraded_inspector)
+        assert_ordinance_analysis_schema(reupgraded_inspector)
         assert_document_project_scope_is_composite(reupgraded_inspector)
 
         with engine.connect() as connection:
@@ -1298,6 +1366,7 @@ def test_reconciles_applied_legacy_geography_without_losing_data(
         run_alembic(migration_database_url, "check")
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
+        assert_ordinance_analysis_schema(inspect(engine))
         assert_document_project_scope_is_composite(inspect(engine))
 
         with engine.begin() as connection:
@@ -1719,6 +1788,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
+        assert_ordinance_analysis_schema(inspect(engine))
         assert_document_project_scope_is_composite(inspect(engine))
 
         run_alembic(migration_database_url, "downgrade", "20260713_0021")
@@ -1731,6 +1801,9 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
+            downgraded_inspector.get_table_names()
+        )
+        assert "agent_office_ordinance_analysis_items" not in (
             downgraded_inspector.get_table_names()
         )
         assert_document_project_scope_is_simple(downgraded_inspector)
@@ -1747,6 +1820,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_pgvector_extension(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
+        assert_ordinance_analysis_schema(inspect(engine))
         assert_document_project_scope_is_composite(inspect(engine))
     finally:
         engine.dispose()

@@ -22,7 +22,7 @@ services:
       - .env
     network_mode: host
     command:
-      ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
+      ["sh", "-c", "rq worker --with-scheduler --url \"$REDIS_URL\" default"]
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
     depends_on:

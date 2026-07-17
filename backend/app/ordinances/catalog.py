@@ -544,6 +544,14 @@ def _validate_filters(filters: OrdinanceCorpusFilters) -> None:
         raise ValueError("population_gte debe ser menor que population_lt")
 
 
+def validate_ordinance_corpus_filters(
+    filters: OrdinanceCorpusFilters,
+) -> None:
+    """Validate filters for callers that persist work before catalog access."""
+
+    _validate_filters(filters)
+
+
 def _validate_embedding_model(embedding_model: str) -> None:
     if (
         not isinstance(embedding_model, str)
