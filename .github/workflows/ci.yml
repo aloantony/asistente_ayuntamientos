@@ -84,7 +84,12 @@ jobs:
 
       - name: Show PostgreSQL logs
         if: ${{ always() }}
-        run: docker compose -f ../docker-compose.yml logs --no-color postgres
+        run: |
+          container_id="$(docker ps --quiet \
+            --filter label=com.docker.compose.service=postgres)"
+          if [ -n "${container_id}" ]; then
+            docker logs "${container_id}"
+          fi
 
   frontend:
     name: Frontend
