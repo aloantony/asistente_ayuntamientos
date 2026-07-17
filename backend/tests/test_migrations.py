@@ -1,3 +1,5 @@
+import hashlib
+import importlib.util
 import os
 import subprocess
 import sys
@@ -7,6 +9,8 @@ from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.engine import Connection, Engine
@@ -15,7 +19,17 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260716_0028"
+HEAD_REVISION = "20260717_0029"
+LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
+LEGACY_GEOGRAPHY_PATH = (
+    BACKEND_ROOT
+    / "alembic"
+    / "legacy"
+    / "20260716_0026_add_municipality_reference_geography.py"
+)
+LEGACY_GEOGRAPHY_SHA256 = (
+    "78b7dd5d0ff1b5c11f0516ad9154c922ea192157fe9267760d166d030a4ac474"
+)
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -91,6 +105,10 @@ MUNICIPALITY_GEOGRAPHY_COLUMNS = {
     "crs",
     "created_at",
     "updated_at",
+}
+_MANAGED_GEOGRAPHY_TABLES = {
+    "reference_dataset_versions",
+    "municipality_geography_snapshots",
 }
 
 ASSISTANT_ATTACHMENT_SCHEMA = {
@@ -587,6 +605,30 @@ def run_alembic(
     )
 
 
+def install_legacy_geography_revision(engine: Engine) -> None:
+    """Apply and stamp the geography migration that historically used 0026."""
+
+    assert hashlib.sha256(LEGACY_GEOGRAPHY_PATH.read_bytes()).hexdigest() == (
+        LEGACY_GEOGRAPHY_SHA256
+    )
+    spec = importlib.util.spec_from_file_location(
+        "test_legacy_20260716_0026_geography",
+        LEGACY_GEOGRAPHY_PATH,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with engine.begin() as connection:
+        module.op = Operations(MigrationContext.configure(connection))
+        module.upgrade()
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :revision"),
+            {"revision": LEGACY_GEOGRAPHY_REVISION},
+        )
+
+
 def start_alembic(
     database_url: str,
     *arguments: str,
@@ -1026,6 +1068,641 @@ def test_reconciles_deployed_revision_and_reversible_schema(
                 )
             ).scalar_one() == 1
     finally:
+        engine.dispose()
+
+
+def test_ordinance_review_default_changes_without_reclassifying_existing_rows(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name,
+                        province,
+                        autonomous_community
+                    ) VALUES (
+                        'Municipio migración de ordenanzas',
+                        'Burgos',
+                        'Castilla y León'
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+            previous_status = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id,
+                        title,
+                        topic,
+                        ordinance_type
+                    ) VALUES (
+                        :municipality_id,
+                        'Ordenanza anterior a revisión segura',
+                        'migración',
+                        'ordinance'
+                    ) RETURNING curation_status
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            assert previous_status == "approved"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        with engine.begin() as connection:
+            assert connection.execute(
+                text(
+                    """
+                    SELECT curation_status
+                    FROM ordinances
+                    WHERE title = 'Ordenanza anterior a revisión segura'
+                    """
+                )
+            ).scalar_one() == "approved"
+            new_status = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id,
+                        title,
+                        topic,
+                        ordinance_type
+                    ) VALUES (
+                        :municipality_id,
+                        'Ordenanza posterior pendiente',
+                        'migración',
+                        'ordinance'
+                    ) RETURNING curation_status
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            assert new_status == "pending_review"
+
+        run_alembic(migration_database_url, "downgrade", "20260716_0025")
+        with engine.begin() as connection:
+            downgraded_status = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id,
+                        title,
+                        topic,
+                        ordinance_type
+                    ) VALUES (
+                        :municipality_id,
+                        'Ordenanza tras downgrade',
+                        'migración',
+                        'ordinance'
+                    ) RETURNING curation_status
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            assert downgraded_status == "approved"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "legacy_head",
+    ["20260716_0026", "20260716_0027", "20260716_0028"],
+)
+def test_reconciles_applied_legacy_geography_without_losing_data(
+    migration_database_url: str,
+    legacy_head: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        install_legacy_geography_revision(engine)
+        if legacy_head != LEGACY_GEOGRAPHY_REVISION:
+            run_alembic(migration_database_url, "upgrade", legacy_head)
+
+        with engine.begin() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == legacy_head
+            default_before = connection.execute(
+                text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'ordinances' "
+                    "AND column_name = 'curation_status'"
+                )
+            ).scalar_one()
+            assert default_before.startswith("'approved'")
+
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community, ine_code,
+                        population, ine_check_digit,
+                        directory_reference_date, directory_source_url,
+                        directory_source_sha256
+                    ) VALUES (
+                        :name, 'Burgos', 'Castilla y León', '09001', 100,
+                        '7', DATE '2026-01-01',
+                        'https://www.ine.es/daco/daco42/codmun/diccionario26.xlsx',
+                        :directory_sha
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "name": f"Legacy geography {legacy_head}",
+                    "directory_sha": "1" * 64,
+                },
+            ).scalar_one()
+            ordinance = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id, title, topic, ordinance_type
+                    ) VALUES (
+                        :municipality_id, :title, 'migración', 'ordinance'
+                    ) RETURNING id, curation_status
+                    """
+                ),
+                {
+                    "municipality_id": municipality_id,
+                    "title": f"Ordenanza histórica {legacy_head}",
+                },
+            ).mappings().one()
+            assert ordinance["curation_status"] == "approved"
+            dataset_version_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_dataset_versions (
+                        dataset_key, title, version_label, reference_date,
+                        catalog_url, download_url, member_name,
+                        archive_sha256, content_sha256, license_name,
+                        license_url, attribution, retrieved_at,
+                        national_row_count, target_row_count
+                    ) VALUES (
+                        'legacy_geography', 'Legacy geography', :version_label,
+                        DATE '2026-03-31', 'https://example.test/catalog',
+                        'https://example.test/download', 'MUNICIPIOS.csv',
+                        :archive_sha, :content_sha, 'CC BY 4.0',
+                        'https://creativecommons.org/licenses/by/4.0/',
+                        'IGN', TIMESTAMPTZ '2026-07-16 20:00:00+00',
+                        8132, 2248
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "version_label": f"Legacy {legacy_head}",
+                    "archive_sha": "2" * 64,
+                    "content_sha": "3" * 64,
+                },
+            ).scalar_one()
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipality_geography_snapshots (
+                        municipality_id, dataset_version_id,
+                        source_municipality_code, relationship_id,
+                        geographic_code, source_province_code,
+                        source_province_name, source_municipality_name,
+                        source_population, surface_km2, perimeter_m,
+                        capital_ine_code, capital_name, capital_population,
+                        mtn25_sheet, longitude, latitude, coordinate_origin,
+                        altitude_m, altitude_origin
+                    ) VALUES (
+                        :municipality_id, :dataset_version_id,
+                        '09001000000', 1090017, '09001', '09', 'Burgos',
+                        'Abajas', 100, 35.07, 25000,
+                        '09001000101', 'Abajas', 100, '0167-1',
+                        -3.580000000, 42.620000000,
+                        'Detección automática', 840, 'MDT'
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "municipality_id": municipality_id,
+                    "dataset_version_id": dataset_version_id,
+                },
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_geography_schema(inspect(engine))
+        assert_assistant_attachment_schema(inspect(engine))
+        assert_document_project_scope_is_composite(inspect(engine))
+
+        with engine.begin() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM reference_dataset_versions "
+                    "WHERE id = :dataset_version_id"
+                ),
+                {"dataset_version_id": dataset_version_id},
+            ).scalar_one() == 1
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM municipality_geography_snapshots "
+                    "WHERE id = :snapshot_id AND municipality_id = :municipality_id"
+                ),
+                {
+                    "snapshot_id": snapshot_id,
+                    "municipality_id": municipality_id,
+                },
+            ).scalar_one() == 1
+            assert connection.execute(
+                text("SELECT curation_status FROM ordinances WHERE id = :id"),
+                {"id": ordinance["id"]},
+            ).scalar_one() == "approved"
+            new_status = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id, title, topic, ordinance_type
+                    ) VALUES (
+                        :municipality_id, :title, 'migración', 'ordinance'
+                    ) RETURNING curation_status
+                    """
+                ),
+                {
+                    "municipality_id": municipality_id,
+                    "title": f"Ordenanza reconciliada {legacy_head}",
+                },
+            ).scalar_one()
+            assert new_status == "pending_review"
+
+        blocked_downgrade = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260716_0028",
+            check=False,
+        )
+        assert blocked_downgrade.returncode != 0
+        assert "geography schema predates this revision" in (
+            blocked_downgrade.stderr
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM municipality_geography_snapshots "
+                    "WHERE id = :snapshot_id"
+                ),
+                {"snapshot_id": snapshot_id},
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_legacy_geography_must_reconcile_before_downgrade_or_stamp(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        install_legacy_geography_revision(engine)
+
+        for arguments in (
+            ("downgrade", "20260716_0025"),
+            ("stamp", "head"),
+        ):
+            result = run_alembic(
+                migration_database_url,
+                *arguments,
+                check=False,
+            )
+            assert result.returncode != 0
+            assert "first mutating operation must be" in result.stderr
+            with engine.connect() as connection:
+                assert connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one() == LEGACY_GEOGRAPHY_REVISION
+            assert_reference_geography_schema(inspect(engine))
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO alembic_version (version_num) "
+                    "VALUES ('20260716_0025')"
+                )
+            )
+        multiple_result = run_alembic(
+            migration_database_url,
+            "stamp",
+            "head",
+            check=False,
+        )
+        assert multiple_result.returncode != 0
+        assert "missing, empty, or contains multiple revisions" in (
+            multiple_result.stderr
+        )
+
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM alembic_version"))
+        empty_result = run_alembic(
+            migration_database_url,
+            "upgrade",
+            "head",
+            check=False,
+        )
+        assert empty_result.returncode != 0
+        assert "missing, empty, or contains multiple revisions" in (
+            empty_result.stderr
+        )
+        assert_reference_geography_schema(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_legacy_geography_downgrade_rejects_without_waiting_for_writer(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+    writer: Connection | None = None
+    transaction = None
+    migration_process: subprocess.Popen[str] | None = None
+
+    try:
+        install_legacy_geography_revision(engine)
+        run_alembic(migration_database_url, "upgrade", "head")
+        with engine.begin() as connection:
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community
+                    ) VALUES (
+                        'Legacy lock check', 'Burgos', 'Castilla y León'
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+
+        writer = engine.connect()
+        transaction = writer.begin()
+        writer.execute(
+            text(
+                "UPDATE municipalities SET name = name "
+                "WHERE id = :municipality_id"
+            ),
+            {"municipality_id": municipality_id},
+        )
+
+        migration_process = start_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260716_0028",
+        )
+        stdout, stderr = migration_process.communicate(timeout=15)
+
+        assert migration_process.returncode != 0, stdout
+        assert "geography schema predates this revision" in stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+    finally:
+        if migration_process is not None and migration_process.poll() is None:
+            migration_process.kill()
+            migration_process.communicate()
+        if transaction is not None and transaction.is_active:
+            transaction.rollback()
+        if writer is not None:
+            writer.close()
+        engine.dispose()
+
+
+def test_reconciliation_rejects_partial_geography_schema(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0028")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE municipalities "
+                    "ADD COLUMN ine_check_digit varchar(1)"
+                )
+            )
+
+        result = run_alembic(
+            migration_database_url,
+            "upgrade",
+            "head",
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "partial or incompatible municipality reference geography" in (
+            result.stderr
+        )
+        inspector = inspect(engine)
+        assert _MANAGED_GEOGRAPHY_TABLES.isdisjoint(inspector.get_table_names())
+        assert "ine_check_digit" in {
+            column["name"] for column in inspector.get_columns("municipalities")
+        }
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260716_0028"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        (
+            "ALTER SEQUENCE reference_dataset_versions_id_seq OWNED BY NONE",
+            "sequence ownership differs",
+        ),
+        (
+            "ALTER TABLE reference_dataset_versions "
+            "ENABLE ROW LEVEL SECURITY",
+            "managed table RLS flags",
+        ),
+        (
+            "ALTER TABLE reference_dataset_versions ALTER COLUMN id "
+            "SET DEFAULT (nextval("
+            "'reference_dataset_versions_id_seq'::regclass) + 1)",
+            "reference_dataset_versions columns 'id' differs",
+        ),
+    ],
+)
+def test_reconciliation_rejects_tampered_legacy_geography_fingerprint(
+    migration_database_url: str,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0025")
+    engine = create_engine(migration_database_url)
+
+    try:
+        install_legacy_geography_revision(engine)
+        run_alembic(migration_database_url, "upgrade", "20260716_0028")
+        with engine.begin() as connection:
+            dataset_version_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_dataset_versions (
+                        dataset_key, title, version_label, reference_date,
+                        catalog_url, download_url, member_name,
+                        archive_sha256, content_sha256, license_name,
+                        license_url, attribution, retrieved_at,
+                        national_row_count, target_row_count
+                    ) VALUES (
+                        'tampered_legacy', 'Tampered legacy', '2026',
+                        DATE '2026-03-31', 'https://example.test/catalog',
+                        'https://example.test/download', 'MUNICIPIOS.csv',
+                        :archive_sha, :content_sha, 'CC BY 4.0',
+                        'https://creativecommons.org/licenses/by/4.0/',
+                        'IGN', TIMESTAMPTZ '2026-07-16 20:00:00+00',
+                        8132, 2248
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "archive_sha": "4" * 64,
+                    "content_sha": "5" * 64,
+                },
+            ).scalar_one()
+            connection.execute(text(mutation))
+
+        result = run_alembic(
+            migration_database_url,
+            "upgrade",
+            "head",
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260716_0028"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM reference_dataset_versions "
+                    "WHERE id = :dataset_version_id"
+                ),
+                {"dataset_version_id": dataset_version_id},
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_reconciliation_rejects_unknown_ordinance_default_before_ddl(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0028")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE ordinances ALTER COLUMN curation_status "
+                    "SET DEFAULT 'manual_review'"
+                )
+            )
+
+        result = run_alembic(
+            migration_database_url,
+            "upgrade",
+            "head",
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "unexpected server default for ordinances.curation_status" in (
+            result.stderr
+        )
+        assert _MANAGED_GEOGRAPHY_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260716_0028"
+    finally:
+        engine.dispose()
+
+
+def test_reconciliation_upgrade_has_bounded_schema_lock_wait(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260716_0028")
+    engine = create_engine(migration_database_url)
+    writer = engine.connect()
+    transaction = writer.begin()
+    migration_process: subprocess.Popen[str] | None = None
+
+    try:
+        municipality_id = writer.execute(
+            text(
+                """
+                INSERT INTO municipalities (
+                    name, province, autonomous_community
+                ) VALUES (
+                    'Upgrade lock check', 'Burgos', 'Castilla y León'
+                ) RETURNING id
+                """
+            )
+        ).scalar_one()
+        writer.execute(
+            text(
+                "UPDATE municipalities SET name = name "
+                "WHERE id = :municipality_id"
+            ),
+            {"municipality_id": municipality_id},
+        )
+
+        migration_process = start_alembic(
+            migration_database_url,
+            "upgrade",
+            "head",
+        )
+        stdout, stderr = migration_process.communicate(timeout=15)
+
+        assert migration_process.returncode != 0, stdout
+        assert "lock timeout" in stderr.lower()
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260716_0028"
+        inspector = inspect(engine)
+        assert _MANAGED_GEOGRAPHY_TABLES.isdisjoint(inspector.get_table_names())
+        assert DIRECTORY_PROVENANCE_COLUMNS.isdisjoint(
+            {
+                column["name"]
+                for column in inspector.get_columns("municipalities")
+            }
+        )
+    finally:
+        if migration_process is not None and migration_process.poll() is None:
+            migration_process.kill()
+            migration_process.communicate()
+        if transaction.is_active:
+            transaction.rollback()
+        writer.close()
         engine.dispose()
 
 
@@ -1735,6 +2412,48 @@ def test_reference_geography_migration_from_0025_is_constrained_and_reversible(
                         "dataset_version_id": second_dataset_id,
                     },
                 )
+
+        blocked_downgrade = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260716_0028",
+            check=False,
+        )
+        assert blocked_downgrade.returncode != 0
+        assert "municipality reference geography contains data" in (
+            blocked_downgrade.stderr
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM municipality_geography_snapshots "
+                    "WHERE municipality_id = :municipality_id"
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one() == 1
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM municipality_geography_snapshots "
+                    "WHERE municipality_id = :municipality_id"
+                ),
+                {"municipality_id": municipality_id},
+            )
+            connection.execute(text("DELETE FROM reference_dataset_versions"))
+            connection.execute(
+                text(
+                    "UPDATE municipalities SET ine_check_digit = NULL, "
+                    "directory_reference_date = NULL, "
+                    "directory_source_url = NULL, "
+                    "directory_source_sha256 = NULL "
+                    "WHERE id = :municipality_id"
+                ),
+                {"municipality_id": municipality_id},
+            )
 
         run_alembic(migration_database_url, "downgrade", "20260716_0025")
         downgraded = inspect(engine)

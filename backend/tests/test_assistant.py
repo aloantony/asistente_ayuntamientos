@@ -1406,6 +1406,7 @@ def test_web_search_is_available_with_permission_and_complete_runtime_config(
     monkeypatch.setattr(settings, "web_search_provider", "brave")
     monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
     monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    monkeypatch.setattr(settings, "assistant_web_reader_enabled", False)
 
     specs = assistant_tools.get_available_tool_specs(db, user)
     response = client.get("/assistant/status", headers=headers_for(user))
@@ -1640,6 +1641,12 @@ def test_web_personal_data_guard_recognizes_formatted_identifiers(query):
 def test_web_personal_data_guard_allows_benign_public_query():
     assert not assistant_tools.PERSONAL_DATA_PATTERN.search(
         "Ordenanza de terrazas publicada en julio de 2026"
+    )
+
+
+def test_web_personal_data_guard_allows_hexadecimal_correlation_ids():
+    assert not assistant_tools.PERSONAL_DATA_PATTERN.search(
+        "Incidencia concurrente 22ec949969994a1aadff8c6ac9ad15d2"
     )
 
 

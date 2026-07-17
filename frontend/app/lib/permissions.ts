@@ -34,6 +34,20 @@ export const ORDINANCE_PERMISSIONS = [
   "ordinances.manage",
 ];
 
+export function canViewOrdinanceLibrary(user: User) {
+  return (
+    userHasPermission(user, "ordinances.view") ||
+    userHasPermission(user, "ordinances.manage")
+  );
+}
+
+export function canCompareOrdinances(user: User) {
+  return (
+    userHasPermission(user, "ordinances.compare") ||
+    userHasPermission(user, "ordinances.manage")
+  );
+}
+
 export const PROJECT_PERMISSIONS = [
   "projects.view_all",
   "projects.create",

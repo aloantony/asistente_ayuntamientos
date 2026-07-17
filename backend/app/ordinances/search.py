@@ -2,6 +2,7 @@
 
 from collections.abc import Hashable
 from dataclasses import dataclass
+from datetime import date
 from typing import Literal
 
 from sqlalchemy import select, text
@@ -15,12 +16,19 @@ OrdinanceResultScope = Literal["fragments", "ordinances", "municipalities"]
 
 TOPIC_PREFERENCE_BOOST = 0.05
 MAX_RESULT_TEXT_CHARS = 900
+DEFINITIVELY_INACTIVE_STATUSES = ("repealed", "superseded", "archived")
 _PGVECTOR_SESSION_KEY = "ordinance_search_pgvector_available"
+_SQL_TOPIC_LITERAL_MATCH = (
+    "(STRPOS(LOWER(COALESCE(o.topic, '')), LOWER(:topic_literal)) > 0 "
+    "OR STRPOS(LOWER(COALESCE(o.subtopic, '')), LOWER(:topic_literal)) > 0 "
+    "OR STRPOS(LOWER(COALESCE(o.title, '')), LOWER(:topic_literal)) > 0)"
+)
 
 
 @dataclass(frozen=True)
 class OrdinanceSearchOptions:
     include_pending: bool = False
+    include_inactive: bool = False
     municipality_id: int | None = None
     municipality_name: str | None = None
     province: str | None = None
@@ -82,6 +90,14 @@ def search_ordinance_chunks(
             if options.topic
             else "none"
         ),
+        "legal_status_filter": {
+            "include_inactive": options.include_inactive,
+            "excluded_statuses": (
+                []
+                if options.include_inactive
+                else list(DEFINITIVELY_INACTIVE_STATUSES)
+            ),
+        },
         "population_filter": {
             "applied": population_filter_applied,
             "gte": options.population_gte,
@@ -167,6 +183,8 @@ def _base_where(
                 "c.review_status = 'approved'",
             ]
         )
+    if not options.include_inactive:
+        clauses.append("o.status NOT IN ('repealed', 'superseded', 'archived')")
     if options.municipality_id is not None:
         clauses.append("o.municipality_id = :municipality_id")
         params["municipality_id"] = options.municipality_id
@@ -177,13 +195,9 @@ def _base_where(
         clauses.append("m.province ILIKE :province")
         params["province"] = options.province
     if options.topic:
-        params["topic_pattern"] = f"%{options.topic}%"
+        params["topic_literal"] = options.topic
         if options.strict_topic:
-            clauses.append(
-                "(o.topic ILIKE :topic_pattern "
-                "OR o.subtopic ILIKE :topic_pattern "
-                "OR o.title ILIKE :topic_pattern)"
-            )
+            clauses.append(_SQL_TOPIC_LITERAL_MATCH)
     if include_population:
         if options.population_gte is not None:
             clauses.append("m.population >= :population_gte")
@@ -245,9 +259,7 @@ def _search_with_pgvector(
     topic_boost = "0.0"
     if options.topic and not options.strict_topic:
         topic_boost = (
-            "CASE WHEN (o.topic ILIKE :topic_pattern "
-            "OR o.subtopic ILIKE :topic_pattern "
-            "OR o.title ILIKE :topic_pattern) "
+            f"CASE WHEN {_SQL_TOPIC_LITERAL_MATCH} "
             "THEN :topic_boost ELSE 0.0 END"
         )
     partition_column = {
@@ -300,11 +312,18 @@ def _search_with_pgvector(
             page.*,
             o.title,
             o.topic,
+            o.status,
             o.curation_status,
+            o.approval_date,
+            o.publication_date,
+            o.effective_date,
             m.name AS municipality_name,
             m.province,
             m.population,
+            c.chunk_index,
+            c.heading,
             c.citation,
+            c.source_locator,
             c.text,
             COALESCE(c.source_url, o.source_url) AS source_url
         FROM page
@@ -360,21 +379,21 @@ def _search_with_python(
             Ordinance.curation_status == "approved",
             OrdinanceLegalChunk.review_status == "approved",
         )
+    if not options.include_inactive:
+        query = query.where(
+            Ordinance.status.not_in(DEFINITIVELY_INACTIVE_STATUSES)
+        )
     if options.municipality_id is not None:
         query = query.where(Ordinance.municipality_id == options.municipality_id)
     if options.municipality_name:
         query = query.where(Municipality.name.ilike(options.municipality_name))
     if options.province:
         query = query.where(Municipality.province.ilike(options.province))
-    if options.topic and options.strict_topic:
-        topic_pattern = f"%{options.topic}%"
-        query = query.where(
-            (Ordinance.topic.ilike(topic_pattern))
-            | (Ordinance.subtopic.ilike(topic_pattern))
-            | (Ordinance.title.ilike(topic_pattern))
-        )
-
     chunks = list(db.scalars(query))
+    if options.topic and options.strict_topic:
+        chunks = [
+            chunk for chunk in chunks if _python_topic_matches(chunk, options.topic)
+        ]
     population_filtered = [
         chunk for chunk in chunks if _population_matches(chunk, options)
     ]
@@ -422,14 +441,18 @@ def _python_topic_boost(
 ) -> float:
     if not options.topic or options.strict_topic:
         return 0.0
-    topic = options.topic.casefold()
-    ordinance = chunk.ordinance
-    values = (ordinance.topic, ordinance.subtopic, ordinance.title)
     return (
         TOPIC_PREFERENCE_BOOST
-        if any(topic in (value or "").casefold() for value in values)
+        if _python_topic_matches(chunk, options.topic)
         else 0.0
     )
+
+
+def _python_topic_matches(chunk: OrdinanceLegalChunk, topic: str) -> bool:
+    topic_literal = topic.casefold()
+    ordinance = chunk.ordinance
+    values = (ordinance.topic, ordinance.subtopic, ordinance.title)
+    return any(topic_literal in (value or "").casefold() for value in values)
 
 
 def _scope_id(
@@ -459,8 +482,15 @@ def _serialize_chunk(score: float, chunk: OrdinanceLegalChunk) -> dict:
         province=municipality.province,
         population=municipality.population,
         topic=ordinance.topic,
+        status=ordinance.status,
         curation_status=ordinance.curation_status,
+        approval_date=ordinance.approval_date,
+        publication_date=ordinance.publication_date,
+        effective_date=ordinance.effective_date,
+        chunk_index=chunk.chunk_index,
+        heading=chunk.heading,
         citation=chunk.citation,
+        source_locator=chunk.source_locator,
         chunk_text=chunk.text,
         source_url=chunk.source_url or ordinance.source_url,
         score=score,
@@ -477,8 +507,15 @@ def _serialize_mapping(row) -> dict:
         province=row["province"],
         population=row["population"],
         topic=row["topic"],
+        status=row["status"],
         curation_status=row["curation_status"],
+        approval_date=row["approval_date"],
+        publication_date=row["publication_date"],
+        effective_date=row["effective_date"],
+        chunk_index=row["chunk_index"],
+        heading=row["heading"],
         citation=row["citation"],
+        source_locator=row["source_locator"],
         chunk_text=row["text"],
         source_url=row["source_url"],
         score=float(row["score"]),
@@ -495,8 +532,15 @@ def _serialize_result(
     province: str,
     population: int | None,
     topic: str,
+    status: str,
     curation_status: str,
+    approval_date: date | None,
+    publication_date: date | None,
+    effective_date: date | None,
+    chunk_index: int,
+    heading: str | None,
     citation: str | None,
+    source_locator: str | None,
     chunk_text: str,
     source_url: str | None,
     score: float,
@@ -511,8 +555,15 @@ def _serialize_result(
         "province": province,
         "population": population,
         "topic": topic,
+        "status": status,
         "curation_status": curation_status,
+        "approval_date": approval_date,
+        "publication_date": publication_date,
+        "effective_date": effective_date,
+        "chunk_index": chunk_index,
+        "heading": heading,
         "citation": citation,
+        "source_locator": source_locator,
         "text": (
             f"{chunk_text[:MAX_RESULT_TEXT_CHARS].rstrip()}…"
             if text_truncated

@@ -20,6 +20,7 @@ import {
 } from "./api";
 import {
   ADMIN_PANEL_PERMISSIONS,
+  canViewOrdinanceLibrary,
   canUseMemoryReview,
   canUseProductReview,
   PROJECT_PERMISSIONS,
@@ -67,6 +68,9 @@ export function getDefaultRouteForUser(user: User) {
   }
   if (shouldShowProjectsPanel(user)) {
     return "/proyectos";
+  }
+  if (canViewOrdinanceLibrary(user)) {
+    return "/ordenanzas";
   }
   return "/cuenta";
 }

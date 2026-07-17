@@ -11,7 +11,10 @@ import {
 } from "react";
 import { userHasPermission, type User } from "../components/types";
 import { fetchRequirementsTotal } from "../lib/fetchers";
-import { canViewMunicipalHub } from "../lib/permissions";
+import {
+  canViewMunicipalHub,
+  canViewOrdinanceLibrary,
+} from "../lib/permissions";
 import {
   consumePendingLoginRedirect,
   shouldShowAdminPanel,
@@ -53,6 +56,7 @@ function getMunicipalBrandName(user: User) {
 type NavIconName =
   | "home"
   | "townhall"
+  | "ordinances"
   | "needs"
   | "inventory"
   | "maintenance"
@@ -89,6 +93,13 @@ function NavIcon({ name }: { name: NavIconName }) {
         <svg {...common}>
           <path d="m3 10 9-6 9 6" />
           <path d="M5 10h14M6 20h12M8 10v10M12 10v10M16 10v10" />
+        </svg>
+      );
+    case "ordinances":
+      return (
+        <svg {...common}>
+          <path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v17H7.5A2.5 2.5 0 0 0 5 21.5v-17Z" />
+          <path d="M5 4.5v17M9 7h7M9 11h7M9 15h4" />
         </svg>
       );
     case "needs":
@@ -346,6 +357,7 @@ export default function AppLayout({
 
   const canUseAssistant = userHasPermission(user, "assistant.use");
   const canViewProjects = shouldShowProjectsPanel(user);
+  const canViewOrdinances = canViewOrdinanceLibrary(user);
   const canViewMap =
     userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
   const canViewInventory =
@@ -399,6 +411,15 @@ export default function AppLayout({
                 href: "/ayuntamiento",
                 label: "Ayuntamiento",
                 icon: "townhall" as const,
+              },
+            ]
+          : []),
+        ...(canViewOrdinances
+          ? [
+              {
+                href: "/ordenanzas",
+                label: "Ordenanzas",
+                icon: "ordinances" as const,
               },
             ]
           : []),

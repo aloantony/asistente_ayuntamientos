@@ -23,7 +23,7 @@ def test_bootstrap_burgos_demo_ordinances_imports_and_approves_real_source_metad
     db,
     monkeypatch,
 ):
-    def fake_fetch(url):
+    def fake_fetch(url, _sources):
         source = next(
             source for source in DEMO_ORDINANCE_SOURCES if source.source_url == url
         )

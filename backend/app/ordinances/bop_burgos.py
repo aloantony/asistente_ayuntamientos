@@ -8,11 +8,11 @@ search page, parses official announcement links, and reports local DB coverage.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
 from urllib import parse as urlparse
-from urllib import request as urlrequest
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -46,6 +46,7 @@ class BopBurgosAnnouncement:
 def search_bop_burgos_announcements(
     query: str,
     *,
+    fetch_content: Callable[[str], bytes],
     year: int | None = None,
     limit: int = 20,
 ) -> list[BopBurgosAnnouncement]:
@@ -53,7 +54,10 @@ def search_bop_burgos_announcements(
 
     The endpoint is a Drupal exposed form. The stable GET parameters currently
     accepted by BOPBUR are `keys` and `field_bop_anio_numero[value][date]`.
-    Network failures are intentionally surfaced to the caller so import jobs can
+    Network access is deliberately injected by the import service. Production
+    callers must use the same bounded, redirect-aware and SSRF-hardened fetcher
+    as document imports; this connector only builds the official URL and parses
+    its response. Fetch failures are intentionally surfaced so import jobs can
     mark the attempt as failed instead of silently falling back to non-official
     sources.
     """
@@ -62,13 +66,7 @@ def search_bop_burgos_announcements(
     if year is not None:
         params["field_bop_anio_numero[value][date]"] = str(year)
     url = f"{BOP_BURGOS_BASE_URL}{BOP_BURGOS_SEARCH_PATH}?{urlparse.urlencode(params)}"
-    request = urlrequest.Request(
-        url,
-        headers={"User-Agent": "AsistenteAyuntamientos/0.1 bopbur-connector"},
-        method="GET",
-    )
-    with urlrequest.urlopen(request, timeout=30) as response:
-        html = response.read().decode("utf-8", errors="ignore")
+    html = fetch_content(url).decode("utf-8", errors="ignore")
     return parse_bop_burgos_search_results(html, limit=limit)
 
 
