@@ -24,7 +24,7 @@ export class ApiRequestError extends Error {
   }
 }
 
-const CONFIGURED_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+const CONFIGURED_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
 
 function isLoopbackHostname(hostname: string) {
   return (
@@ -54,10 +54,10 @@ function normalizeApiBaseUrl(value: string) {
   // tunnel would then call its *own* localhost and fail with "Failed to fetch".
   // In a loopback browser, keep the hostname aligned with the page so the
   // httpOnly session cookie is stored and sent to the same site.
-  // In a public-origin case, fall back to same-origin relative API routes.
+  // In a public-origin case, use the fixed same-origin Next.js API rewrite.
   if (typeof window !== "undefined" && isLoopbackApiBaseUrl(trimmed)) {
     if (!isLoopbackHostname(window.location.hostname)) {
-      return "";
+      return "/api";
     }
 
     const apiUrl = new URL(trimmed);
