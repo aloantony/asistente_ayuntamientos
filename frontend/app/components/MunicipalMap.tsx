@@ -14,6 +14,12 @@ import type {
   Rectangle,
   TileLayer,
 } from "leaflet";
+import {
+  selectTopIdentifyLayer,
+  tileCoordinatesForProjectedPoint,
+  type SiurIdentifyPoint,
+  type SiurMapLayer,
+} from "../lib/referenceLayers";
 import type { GeoMapItem } from "./types";
 
 export type MapBounds = {
@@ -40,8 +46,10 @@ type MunicipalMapProps = {
   locateRequest?: number;
   areaSelectionEnabled?: boolean;
   areaBounds?: MapBounds | null;
+  siurLayers?: SiurMapLayer[];
   onAreaSelectionChange?: (bounds: MapBounds | null) => void;
   onLocationError?: (message: string) => void;
+  onSiurIdentify?: (point: SiurIdentifyPoint) => void;
   onSelectItem: (item: GeoMapItem) => void;
   onMapContextMenu?: (payload: {
     latitude: number;
@@ -59,6 +67,12 @@ type MarkerRecord = {
   marker: Marker;
 };
 
+type SiurTileLayerRecord = {
+  layer: TileLayer;
+  signature: string;
+  url: string;
+};
+
 type AreaDragState = {
   startLatLng: LatLng;
   startX: number;
@@ -70,7 +84,7 @@ type AreaDragState = {
 const FALLBACK_CENTER: [number, number] = [42.3439, -3.6969];
 const FALLBACK_ZOOM = 12;
 const SINGLE_ITEM_ZOOM = 16;
-const MAX_MAP_ZOOM = 19;
+const MAX_MAP_ZOOM = 24;
 const AREA_DRAG_THRESHOLD = 4;
 
 const BASE_LAYERS: Record<
@@ -382,15 +396,18 @@ export function MunicipalMap({
   locateRequest,
   markerColors,
   selectedItemId,
+  siurLayers = [],
   onAreaSelectionChange,
   onLocationError,
   onMapContextMenu,
   onSelectItem,
+  onSiurIdentify,
 }: MunicipalMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<LeafletModule | null>(null);
   const tileLayerRef = useRef<TileLayer | null>(null);
+  const siurTileLayersRef = useRef<Map<number, SiurTileLayerRecord>>(new Map());
   const markerRecordsRef = useRef<Map<string, MarkerRecord>>(new Map());
   const markerBoundsRef = useRef<LatLngBounds | null>(null);
   const focusMarkerRef = useRef<CircleMarker | null>(null);
@@ -415,6 +432,8 @@ export function MunicipalMap({
   const onLocationErrorRef = useRef(onLocationError);
   const onMapContextMenuRef = useRef(onMapContextMenu);
   const onSelectItemRef = useRef(onSelectItem);
+  const onSiurIdentifyRef = useRef(onSiurIdentify);
+  const siurLayersRef = useRef(siurLayers);
 
   focusLocationRef.current = focusLocation;
   initialZoomRef.current = initialZoom;
@@ -426,6 +445,8 @@ export function MunicipalMap({
   onLocationErrorRef.current = onLocationError;
   onMapContextMenuRef.current = onMapContextMenu;
   onSelectItemRef.current = onSelectItem;
+  onSiurIdentifyRef.current = onSiurIdentify;
+  siurLayersRef.current = siurLayers;
 
   const focusLatitude = focusLocation?.latitude;
   const focusLongitude = focusLocation?.longitude;
@@ -441,6 +462,7 @@ export function MunicipalMap({
     let resizeObserver: ResizeObserver | null = null;
     let resizeFrame: number | null = null;
     const markerRecords = markerRecordsRef.current;
+    const siurTileLayers = siurTileLayersRef.current;
 
     async function initializeMap() {
       const L = await import("leaflet");
@@ -461,6 +483,10 @@ export function MunicipalMap({
       mapRef.current = map;
       markerBoundsRef.current = L.latLngBounds([]);
 
+      const siurPane = map.createPane("siurPane");
+      siurPane.style.zIndex = "250";
+      siurPane.style.pointerEvents = "none";
+
       L.control.zoom({ position: "bottomleft" }).addTo(map);
 
       const handleContextMenu = (event: LeafletMouseEvent) => {
@@ -471,6 +497,45 @@ export function MunicipalMap({
           zoom: map.getZoom(),
           x: originalEvent.clientX,
           y: originalEvent.clientY,
+        });
+      };
+
+      const handleMapClick = (event: LeafletMouseEvent) => {
+        const originalTarget = (event.originalEvent as MouseEvent).target;
+        if (
+          areaSelectionEnabledRef.current ||
+          areaDragStateRef.current ||
+          (originalTarget instanceof Element &&
+            originalTarget.closest(
+              ".leaflet-control, .leaflet-marker-icon, .leaflet-popup",
+            ))
+        ) {
+          return;
+        }
+        const zoom = map.getZoom();
+        const latlng = map.wrapLatLng(event.latlng);
+        const layer = selectTopIdentifyLayer(
+          siurLayersRef.current,
+          zoom,
+          latlng.lat,
+          latlng.lng,
+        );
+        if (!layer) {
+          return;
+        }
+        const projected = map.project(latlng, zoom);
+        const coordinates = tileCoordinatesForProjectedPoint(
+          projected.x,
+          projected.y,
+          zoom,
+        );
+        onSiurIdentifyRef.current?.({
+          layer,
+          z: zoom,
+          x: coordinates.x,
+          y: coordinates.y,
+          pixelX: coordinates.pixelX,
+          pixelY: coordinates.pixelY,
         });
       };
 
@@ -611,6 +676,7 @@ export function MunicipalMap({
       };
 
       cancelAreaDragRef.current = () => finishAreaDrag(false);
+      map.on("click", handleMapClick);
       map.on("contextmenu", handleContextMenu);
       map.on("mousedown", handleAreaMouseDown);
 
@@ -651,6 +717,7 @@ export function MunicipalMap({
       mapRef.current = null;
       leafletRef.current = null;
       tileLayerRef.current = null;
+      siurTileLayers.clear();
       markerRecords.clear();
       markerBoundsRef.current = null;
       focusMarkerRef.current = null;
@@ -676,6 +743,71 @@ export function MunicipalMap({
     }).addTo(map);
     tileLayerRef.current.setZIndex(0);
   }, [baseLayer, mapReady]);
+
+  useEffect(() => {
+    const L = leafletRef.current;
+    const map = mapRef.current;
+    if (!mapReady || !L || !map) {
+      return;
+    }
+
+    const desiredIds = new Set(siurLayers.map((layer) => layer.layerId));
+    for (const [layerId, record] of siurTileLayersRef.current) {
+      if (!desiredIds.has(layerId)) {
+        record.layer.remove();
+        siurTileLayersRef.current.delete(layerId);
+      }
+    }
+
+    for (const descriptor of siurLayers) {
+      const signature = JSON.stringify([
+        descriptor.attribution,
+        descriptor.minZoom,
+        descriptor.maxZoom,
+        descriptor.bounds,
+      ]);
+      let record = siurTileLayersRef.current.get(descriptor.layerId);
+      if (record && record.signature !== signature) {
+        record.layer.remove();
+        siurTileLayersRef.current.delete(descriptor.layerId);
+        record = undefined;
+      }
+      if (!record) {
+        const bounds = descriptor.bounds
+          ? L.latLngBounds(
+              [descriptor.bounds.south, descriptor.bounds.west],
+              [descriptor.bounds.north, descriptor.bounds.east],
+            )
+          : undefined;
+        record = {
+          layer: L.tileLayer(descriptor.tileUrl, {
+            attribution: descriptor.attribution ?? undefined,
+            bounds,
+            maxZoom: descriptor.maxZoom ?? MAX_MAP_ZOOM,
+            minZoom: descriptor.minZoom ?? 0,
+            opacity: descriptor.opacity,
+            pane: "siurPane",
+          }),
+          signature,
+          url: descriptor.tileUrl,
+        };
+        siurTileLayersRef.current.set(descriptor.layerId, record);
+      } else if (record.url !== descriptor.tileUrl) {
+        record.layer.setUrl(descriptor.tileUrl);
+        record.url = descriptor.tileUrl;
+      }
+
+      record.layer.setOpacity(descriptor.opacity);
+      record.layer.setZIndex(descriptor.zIndex);
+      if (descriptor.visible) {
+        if (!map.hasLayer(record.layer)) {
+          record.layer.addTo(map);
+        }
+      } else if (map.hasLayer(record.layer)) {
+        record.layer.remove();
+      }
+    }
+  }, [mapReady, siurLayers]);
 
   useEffect(() => {
     const L = leafletRef.current;

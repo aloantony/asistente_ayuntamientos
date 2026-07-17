@@ -97,7 +97,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000
+      API_PROXY_TARGET: http://127.0.0.1:8000
+      NEXT_PUBLIC_API_BASE_URL: /api
       NEXT_TELEMETRY_DISABLED: "1"
     defaults:
       run:
@@ -120,6 +121,9 @@ jobs:
 
       - name: Type-check frontend
         run: npm run typecheck
+
+      - name: Test frontend
+        run: npm test
 
       - name: Lint frontend
         run: npm run lint
