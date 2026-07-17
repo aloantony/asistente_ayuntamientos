@@ -34,6 +34,7 @@ from app.reference_layers.wms_proxy import (
     build_legend_request,
     build_tile_request,
     fetch_wms_response,
+    tile_lonlat_bounds,
 )
 from app.reference_layers.wms_schemas import (
     InvalidFeatureInfoError,
@@ -51,7 +52,7 @@ TILE_STALE_SECONDS = 24 * 60 * 60
 LEGEND_FRESH_SECONDS = 24 * 60 * 60
 LEGEND_STALE_SECONDS = 7 * 24 * 60 * 60
 
-_tile_rate_limiter = SlidingWindowRateLimiter(600, 60)
+_tile_rate_limiter = SlidingWindowRateLimiter(240, 60)
 _legend_rate_limiter = SlidingWindowRateLimiter(60, 60)
 _identify_rate_limiter = SlidingWindowRateLimiter(60, 60)
 
@@ -91,6 +92,7 @@ def get_reference_layer_tile(
         style_id=style_id,
     )
     _require_rate_limit(_tile_rate_limiter, "tile", current_user.id)
+    _require_tile_scope(context.layer, z=z, x=x, y=y)
     try:
         wms_request = build_tile_request(
             endpoint_url=context.service.base_url,
@@ -181,6 +183,7 @@ def identify_reference_layer(
         require_queryable=True,
     )
     _require_rate_limit(_identify_rate_limiter, "identify", current_user.id)
+    _require_tile_scope(context.layer, z=z, x=x, y=y)
     try:
         wms_request = build_identify_request(
             endpoint_url=context.service.base_url,
@@ -430,3 +433,53 @@ def _require_rate_limit(
         detail="Reference map request limit exceeded",
         headers={"Retry-After": "60"},
     )
+
+
+def _require_tile_scope(
+    layer: ReferenceLayer,
+    *,
+    z: int,
+    x: int,
+    y: int,
+) -> None:
+    if layer.min_zoom is not None and z < layer.min_zoom:
+        raise HTTPException(status_code=404, detail="Layer is not available at zoom")
+    if layer.max_zoom is not None and z > layer.max_zoom:
+        raise HTTPException(status_code=404, detail="Layer is not available at zoom")
+    try:
+        tile_west, tile_south, tile_east, tile_north = tile_lonlat_bounds(
+            z,
+            x,
+            y,
+        )
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid tile request") from None
+    bounds = _geographic_bounds(layer.bounds_json)
+    if bounds is None:
+        return
+    west, south, east, north = bounds
+    if (
+        tile_east <= west
+        or tile_west >= east
+        or tile_north <= south
+        or tile_south >= north
+    ):
+        raise HTTPException(status_code=404, detail="Layer is not available for tile")
+
+
+def _geographic_bounds(value: object) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, dict):
+        return None
+    raw = tuple(value.get(key) for key in ("west", "south", "east", "north"))
+    if any(
+        isinstance(item, bool) or not isinstance(item, (int, float))
+        for item in raw
+    ):
+        return None
+    west, south, east, north = (float(item) for item in raw)
+    if not (
+        -180 <= west < east <= 180
+        and -90 <= south < north <= 90
+    ):
+        return None
+    return west, south, east, north
