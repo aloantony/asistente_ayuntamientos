@@ -26,11 +26,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     assistant_model: str = "claude-opus-4-8"
     assistant_max_tokens: int = 16000
-    assistant_max_tool_iterations: int = 8
-    assistant_max_tool_calls: int = 8
-    assistant_turn_timeout_seconds: float = 120.0
-    assistant_gateway_timeout_seconds: float = 30.0
-    assistant_final_synthesis_grace_seconds: float = 30.0
+    assistant_max_tool_iterations: int = 16
+    assistant_max_tool_calls: int = 24
+    assistant_turn_timeout_seconds: float = 900.0
+    assistant_gateway_timeout_seconds: float = 60.0
+    assistant_final_synthesis_grace_seconds: float = 90.0
     assistant_history_max_messages: int = 40
     assistant_max_attachments_per_message: int = 5
     assistant_attachment_max_context_chars: int = 6000
