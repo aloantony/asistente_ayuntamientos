@@ -307,7 +307,6 @@ def get_task_for_user(db: Session, current_user: User, task_id: int) -> AgentOff
             detail="Agent office task not found",
         )
     return task
-
 def lock_task_for_transition(
     db: Session,
     task_id: int,
@@ -619,7 +618,12 @@ def mark_task_queue_failed(
 
 def _tool_input_for_task(task: AgentOfficeTask) -> dict:
     tool_input = dict(task.input)
-    tool_input["organization_id"] = task.organization_id
+    if task.requested_action not in {
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+    }:
+        tool_input["organization_id"] = task.organization_id
     if task.requested_action == "semantic_search_ordinances":
         tool_input.setdefault("query", task.description)
     if task.requested_action == "send_admin_feedback":
@@ -1320,4 +1324,3 @@ def trigger_routine(db: Session, current_user: User, routine: AgentOfficeRoutine
     routine.last_run_at = datetime.now(timezone.utc)
     db.commit()
     return task
-

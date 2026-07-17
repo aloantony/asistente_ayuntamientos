@@ -11,8 +11,10 @@ import hashlib
 import hmac
 import json
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
+from functools import wraps
 from typing import Any
 
 from app.core.config import settings
@@ -23,12 +25,23 @@ from app.ordinances.models import (
     OrdinanceLegalChunk,
 )
 from app.ordinances.search import DEFINITIVELY_INACTIVE_STATUSES
-from sqlalchemy import case, distinct, func, select
+from sqlalchemy import case, distinct, func, select, text
 from sqlalchemy.orm import Session, selectinload
 
 MAX_CATALOG_PAGE_SIZE = 100
 MAX_CATALOG_CURSOR_CHARS = 4096
-CORPUS_SNAPSHOT_SCHEMA_VERSION = 1
+MAX_CATALOG_TEXT_FILTER_CHARS = 255
+CORPUS_SNAPSHOT_SCHEMA_VERSION = 2
+
+_POSTGRES_CORPUS_READ_LOCK = """
+LOCK TABLE
+    municipalities,
+    ordinances,
+    ordinance_import_items,
+    ordinance_legal_chunks
+IN SHARE MODE
+"""
+_POSTGRES_CORPUS_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
 
 
 @dataclass(frozen=True)
@@ -54,6 +67,38 @@ class InvalidOrdinanceCatalogCursor(ValueError):
     """Raised when a catalogue cursor is malformed, forged or obsolete."""
 
 
+def _coherent_corpus_read(
+    operation: Callable[..., dict[str, Any]],
+) -> Callable[..., dict[str, Any]]:
+    """Run a multi-query corpus read against one stable PostgreSQL state.
+
+    Assistant sessions have normally executed authorization queries before a
+    tool runs, so PostgreSQL no longer permits raising the outer transaction's
+    isolation level to REPEATABLE READ.  A SHARE lock prevents concurrent
+    INSERT/UPDATE/DELETE operations while the inventory queries run.  The lock
+    is acquired after a savepoint and the savepoint is rolled back afterwards,
+    which releases the table locks without rolling back or extending the
+    caller's outer transaction.
+    """
+
+    @wraps(operation)
+    def wrapped(db: Session, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if db.get_bind().dialect.name != "postgresql":
+            return operation(db, *args, **kwargs)
+
+        savepoint = db.begin_nested()
+        try:
+            db.execute(text(_POSTGRES_CORPUS_LOCK_TIMEOUT))
+            db.execute(text(_POSTGRES_CORPUS_READ_LOCK))
+            return operation(db, *args, **kwargs)
+        finally:
+            if savepoint.is_active:
+                savepoint.rollback()
+
+    return wrapped
+
+
+@_coherent_corpus_read
 def build_ordinance_corpus_manifest(
     db: Session,
     *,
@@ -62,12 +107,21 @@ def build_ordinance_corpus_manifest(
 ) -> dict[str, Any]:
     """Return exact denominators for one filtered internal-corpus snapshot."""
 
+    _validate_embedding_model(embedding_model)
     _validate_filters(filters)
-    snapshot_id = _corpus_snapshot_id(db, filters)
+    snapshot_id = _corpus_snapshot_id(db, filters, embedding_model)
     population = _population_coverage(db, filters)
     ordinance_counts = _ordinance_counts(db, filters)
     chunk_counts = _chunk_counts(db, filters, embedding_model)
-    import_counts = _import_counts(db, filters)
+    pipeline = (
+        _pipeline_counts(db, filters)
+        if filters.include_pending
+        else {
+            "available": False,
+            "scope": None,
+            "reason": "requires_include_pending",
+        }
+    )
     by_province = _province_coverage(db, filters, embedding_model)
 
     catalog_ordinances = ordinance_counts["catalog_ordinances"]
@@ -79,7 +133,7 @@ def build_ordinance_corpus_manifest(
         or population["municipalities_without_population"] == 0
     )
     municipality_identity_complete = population["municipalities_without_ine_code"] == 0
-    final_snapshot_id = _corpus_snapshot_id(db, filters)
+    final_snapshot_id = _corpus_snapshot_id(db, filters, embedding_model)
     if final_snapshot_id != snapshot_id:
         raise ValueError(
             "El corpus cambió mientras se preparaba el manifiesto; vuelve a intentarlo"
@@ -91,6 +145,7 @@ def build_ordinance_corpus_manifest(
         "filters": _serialize_filters(filters),
         "catalog_cursor": encode_ordinance_catalog_cursor(
             filters=filters,
+            embedding_model=embedding_model,
             snapshot_id=snapshot_id,
             total=ordinance_counts["catalog_ordinances"],
             after_id=0,
@@ -116,10 +171,10 @@ def build_ordinance_corpus_manifest(
             "coverage_complete": population_coverage_complete,
         },
         "layers": {
-            **import_counts,
             **ordinance_counts,
             **chunk_counts,
         },
+        "pipeline": pipeline,
         "by_province": by_province,
         "reconciliation": {
             "catalog_ordinances": catalog_ordinances,
@@ -169,6 +224,11 @@ def list_ordinance_catalog_from_cursor(
     """Read a page using an opaque cursor issued by the corpus manifest."""
 
     cursor_data = decode_ordinance_catalog_cursor(cursor)
+    if cursor_data["embedding_model"] != embedding_model:
+        raise InvalidOrdinanceCatalogCursor(
+            "el cursor pertenece a otro modelo de embeddings; solicita un "
+            "manifiesto nuevo"
+        )
     filters = OrdinanceCorpusFilters(**cursor_data["filters"])
     page = list_ordinance_catalog(
         db,
@@ -187,6 +247,7 @@ def list_ordinance_catalog_from_cursor(
     if page["has_more"] and page["results"]:
         next_cursor = encode_ordinance_catalog_cursor(
             filters=filters,
+            embedding_model=embedding_model,
             snapshot_id=cursor_data["snapshot_id"],
             total=cursor_data["total"],
             after_id=page["results"][-1]["ordinance_id"],
@@ -205,14 +266,18 @@ def list_ordinance_catalog_from_cursor(
 def encode_ordinance_catalog_cursor(
     *,
     filters: OrdinanceCorpusFilters,
+    embedding_model: str,
     snapshot_id: str,
     total: int,
     after_id: int,
     consumed: int,
 ) -> str:
+    _validate_embedding_model(embedding_model)
+    _validate_filters(filters)
     payload = {
         "v": CORPUS_SNAPSHOT_SCHEMA_VERSION,
         "filters": _serialize_filters(filters),
+        "embedding_model": embedding_model,
         "snapshot_id": snapshot_id,
         "total": total,
         "after_id": after_id,
@@ -228,14 +293,17 @@ def encode_ordinance_catalog_cursor(
     ).rstrip(b"=")
     signature = hmac.new(
         settings.secret_key.encode("utf-8"),
-        b"ordinance-catalog-v1\0" + body,
+        b"ordinance-catalog-v2\0" + body,
         hashlib.sha256,
     ).digest()
-    return (
+    cursor = (
         body.decode("ascii")
         + "."
         + urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
     )
+    if len(cursor) > MAX_CATALOG_CURSOR_CHARS:
+        raise ValueError("los filtros generan un cursor que supera el tamaño máximo")
+    return cursor
 
 
 def decode_ordinance_catalog_cursor(cursor: str) -> dict[str, Any]:
@@ -249,7 +317,7 @@ def decode_ordinance_catalog_cursor(cursor: str) -> dict[str, Any]:
         signature = _decode_base64(encoded_signature)
         expected = hmac.new(
             settings.secret_key.encode("utf-8"),
-            b"ordinance-catalog-v1\0" + body,
+            b"ordinance-catalog-v2\0" + body,
             hashlib.sha256,
         ).digest()
         if not hmac.compare_digest(signature, expected):
@@ -266,6 +334,7 @@ def decode_ordinance_catalog_cursor(cursor: str) -> dict[str, Any]:
     required = {
         "v",
         "filters",
+        "embedding_model",
         "snapshot_id",
         "total",
         "after_id",
@@ -276,6 +345,7 @@ def decode_ordinance_catalog_cursor(cursor: str) -> dict[str, Any]:
     try:
         filters = OrdinanceCorpusFilters(**payload["filters"])
         _validate_filters(filters)
+        embedding_model = payload["embedding_model"]
         snapshot_id = str(payload["snapshot_id"])
         total = int(payload["total"])
         after_id = int(payload["after_id"])
@@ -283,7 +353,11 @@ def decode_ordinance_catalog_cursor(cursor: str) -> dict[str, Any]:
     except (TypeError, ValueError) as error:
         raise InvalidOrdinanceCatalogCursor("contenido de cursor no válido") from error
     if (
-        len(snapshot_id) != 64
+        not isinstance(embedding_model, str)
+        or not embedding_model
+        or len(embedding_model) > 255
+        or "\x00" in embedding_model
+        or len(snapshot_id) != 64
         or any(character not in "0123456789abcdef" for character in snapshot_id)
         or min(total, after_id, consumed) < 0
         or consumed > total
@@ -291,6 +365,7 @@ def decode_ordinance_catalog_cursor(cursor: str) -> dict[str, Any]:
         raise InvalidOrdinanceCatalogCursor("contenido de cursor no válido")
     return {
         "filters": asdict(filters),
+        "embedding_model": embedding_model,
         "snapshot_id": snapshot_id,
         "total": total,
         "after_id": after_id,
@@ -307,6 +382,7 @@ def advance_ordinance_catalog_cursor(
     data = decode_ordinance_catalog_cursor(cursor)
     return encode_ordinance_catalog_cursor(
         filters=OrdinanceCorpusFilters(**data["filters"]),
+        embedding_model=data["embedding_model"],
         snapshot_id=data["snapshot_id"],
         total=data["total"],
         after_id=after_id,
@@ -319,6 +395,7 @@ def _decode_base64(value: str) -> bytes:
     return urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4))
 
 
+@_coherent_corpus_read
 def list_ordinance_catalog(
     db: Session,
     *,
@@ -327,16 +404,18 @@ def list_ordinance_catalog(
 ) -> dict[str, Any]:
     """Enumerate one row per ordinance using a stable primary-key cursor."""
 
+    _validate_embedding_model(embedding_model)
     _validate_filters(options)
     if options.limit < 1 or options.limit > MAX_CATALOG_PAGE_SIZE:
         raise ValueError(f"limit debe estar entre 1 y {MAX_CATALOG_PAGE_SIZE}")
     if options.after_id is not None and options.after_id < 0:
         raise ValueError("after_id debe ser mayor o igual que 0")
 
-    snapshot_id = _corpus_snapshot_id(db, options)
+    snapshot_id = _corpus_snapshot_id(db, options, embedding_model)
     if options.snapshot_id is not None and options.snapshot_id != snapshot_id:
         raise ValueError(
-            "El corpus cambió desde la página anterior; reinicia el catálogo sin cursor"
+            "El corpus cambió desde la página anterior; reinicia el catálogo "
+            "sin cursor"
         )
 
     conditions = _ordinance_conditions(options)
@@ -366,6 +445,7 @@ def list_ordinance_catalog(
         db,
         [ordinance.id for ordinance in ordinances],
         embedding_model,
+        options,
     )
     results = [
         _serialize_catalog_ordinance(
@@ -374,7 +454,7 @@ def list_ordinance_catalog(
         )
         for ordinance in ordinances
     ]
-    if _corpus_snapshot_id(db, options) != snapshot_id:
+    if _corpus_snapshot_id(db, options, embedding_model) != snapshot_id:
         raise ValueError(
             "El corpus cambió durante la lectura de la página; solicita un "
             "manifiesto nuevo"
@@ -396,6 +476,23 @@ def list_ordinance_catalog(
 
 def _validate_filters(filters: OrdinanceCorpusFilters) -> None:
     for value, label in (
+        (filters.autonomous_community, "autonomous_community"),
+        (filters.province, "province"),
+        (filters.municipality_name, "municipality_name"),
+    ):
+        if value is None:
+            continue
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > MAX_CATALOG_TEXT_FILTER_CHARS
+            or "\x00" in value
+        ):
+            raise ValueError(
+                f"{label} debe ser texto no vacío de hasta "
+                f"{MAX_CATALOG_TEXT_FILTER_CHARS} caracteres"
+            )
+    for value, label in (
         (filters.municipality_id, "municipality_id"),
         (filters.population_gte, "population_gte"),
         (filters.population_lt, "population_lt"),
@@ -410,6 +507,16 @@ def _validate_filters(filters: OrdinanceCorpusFilters) -> None:
         and filters.population_gte >= filters.population_lt
     ):
         raise ValueError("population_gte debe ser menor que population_lt")
+
+
+def _validate_embedding_model(embedding_model: str) -> None:
+    if (
+        not isinstance(embedding_model, str)
+        or not embedding_model
+        or len(embedding_model) > 255
+        or "\x00" in embedding_model
+    ):
+        raise ValueError("embedding_model no válido")
 
 
 def _municipality_conditions(
@@ -455,6 +562,14 @@ def _ordinance_conditions(filters: OrdinanceCorpusFilters) -> list[Any]:
     return conditions
 
 
+def _chunk_visibility_conditions(
+    filters: OrdinanceCorpusFilters,
+) -> list[Any]:
+    if filters.include_pending:
+        return []
+    return [OrdinanceLegalChunk.review_status == "approved"]
+
+
 def _serialize_filters(filters: OrdinanceCorpusFilters) -> dict[str, Any]:
     values = asdict(filters)
     values.pop("limit", None)
@@ -466,6 +581,7 @@ def _serialize_filters(filters: OrdinanceCorpusFilters) -> dict[str, Any]:
 def _corpus_snapshot_id(
     db: Session,
     filters: OrdinanceCorpusFilters,
+    embedding_model: str,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(
@@ -473,16 +589,19 @@ def _corpus_snapshot_id(
             {
                 "schema": CORPUS_SNAPSHOT_SCHEMA_VERSION,
                 "filters": _serialize_filters(filters),
+                "embedding_model": embedding_model,
             },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     )
+    digest.update(b"\0municipalities\0")
     for row in db.execute(
         select(
             Municipality.id,
             Municipality.updated_at,
+            Municipality.name,
             Municipality.status,
             Municipality.municipality_type,
             Municipality.ine_code,
@@ -490,47 +609,101 @@ def _corpus_snapshot_id(
             Municipality.autonomous_community,
             Municipality.population,
             Municipality.population_reference_year,
+            Municipality.population_source_url,
+            Municipality.population_source_sha256,
+            Municipality.directory_reference_date,
+            Municipality.directory_source_url,
+            Municipality.directory_source_sha256,
         )
         .where(*_municipality_conditions(filters, include_population=False))
         .order_by(Municipality.id)
     ):
         _update_digest(digest, row)
-    conditions = _ordinance_conditions(filters)
-    ordinance_rows = db.execute(
+
+    digest.update(b"\0ordinances\0")
+    snapshot_ordinance_conditions = (
+        _municipality_conditions(filters, include_population=True)
+        if filters.include_pending
+        else _ordinance_conditions(filters)
+    )
+    for row in db.execute(
         select(
             Ordinance.id,
             Ordinance.updated_at,
             Ordinance.municipality_id,
+            Ordinance.document_id,
+            Ordinance.title,
+            Ordinance.topic,
+            Ordinance.subtopic,
+            Ordinance.ordinance_type,
             Ordinance.curation_status,
             Ordinance.status,
-            Municipality.updated_at,
-            Municipality.population,
+            Ordinance.approval_date,
+            Ordinance.publication_date,
+            Ordinance.effective_date,
+            Ordinance.official_bulletin,
+            Ordinance.bulletin_number,
+            Ordinance.source_url,
+            Ordinance.source_hash,
+            Ordinance.extraction_status,
+            Ordinance.text_content.is_not(None),
         )
         .join(Ordinance.municipality)
-        .where(*conditions)
+        .where(*snapshot_ordinance_conditions)
         .order_by(Ordinance.id)
-    ).all()
-    ordinance_ids: list[int] = []
-    for row in ordinance_rows:
-        ordinance_ids.append(int(row[0]))
+    ):
         _update_digest(digest, row)
-    if ordinance_ids:
+
+    digest.update(b"\0import_items\0")
+    if filters.include_pending:
         for row in db.execute(
             select(
-                OrdinanceLegalChunk.id,
-                OrdinanceLegalChunk.ordinance_id,
-                OrdinanceLegalChunk.updated_at,
-                OrdinanceLegalChunk.review_status,
-                OrdinanceLegalChunk.embedding_status,
-                OrdinanceLegalChunk.embedding_model,
+                OrdinanceImportItem.id,
+                OrdinanceImportItem.updated_at,
+                OrdinanceImportItem.municipality_id,
+                OrdinanceImportItem.ordinance_id,
+                OrdinanceImportItem.status,
+                case(
+                    (
+                        func.length(func.trim(OrdinanceImportItem.raw_text)) > 0,
+                        True,
+                    ),
+                    else_=False,
+                ),
             )
-            .where(OrdinanceLegalChunk.ordinance_id.in_(ordinance_ids))
-            .order_by(
-                OrdinanceLegalChunk.ordinance_id,
-                OrdinanceLegalChunk.id,
+            .join(
+                Municipality,
+                Municipality.id == OrdinanceImportItem.municipality_id,
             )
+            .where(*_municipality_conditions(filters, include_population=True))
+            .order_by(OrdinanceImportItem.id)
         ):
             _update_digest(digest, row)
+
+    digest.update(b"\0legal_chunks\0")
+    for row in db.execute(
+        select(
+            OrdinanceLegalChunk.id,
+            OrdinanceLegalChunk.ordinance_id,
+            OrdinanceLegalChunk.updated_at,
+            OrdinanceLegalChunk.review_status,
+            OrdinanceLegalChunk.embedding_status,
+            OrdinanceLegalChunk.embedding_model,
+            OrdinanceLegalChunk.embedding.is_not(None),
+            func.length(func.trim(OrdinanceLegalChunk.text)) == 0,
+        )
+        .join(Ordinance)
+        .join(Ordinance.municipality)
+        .where(
+            *_ordinance_conditions(filters),
+            *_chunk_visibility_conditions(filters),
+        )
+        .order_by(
+            OrdinanceLegalChunk.ordinance_id,
+            OrdinanceLegalChunk.id,
+        )
+    ):
+        _update_digest(digest, row)
     return digest.hexdigest()
 
 
@@ -612,19 +785,6 @@ def _ordinance_counts(
     filters: OrdinanceCorpusFilters,
 ) -> dict[str, Any]:
     conditions = _ordinance_conditions(filters)
-    all_conditions = _municipality_conditions(
-        filters,
-        include_population=True,
-    )
-    ordinance_records = int(
-        db.scalar(
-            select(func.count(Ordinance.id))
-            .select_from(Ordinance)
-            .join(Ordinance.municipality)
-            .where(*all_conditions)
-        )
-        or 0
-    )
     row = db.execute(
         select(
             func.count(Ordinance.id),
@@ -638,9 +798,10 @@ def _ordinance_counts(
         .join(Ordinance.municipality)
         .where(*conditions)
     ).one()
+    catalog_ordinances = int(row[0] or 0)
     return {
-        "ordinance_records": ordinance_records,
-        "catalog_ordinances": int(row[0] or 0),
+        "ordinance_records": catalog_ordinances,
+        "catalog_ordinances": catalog_ordinances,
         "catalog_municipalities": int(row[1] or 0),
         "ordinances_with_document": int(row[2] or 0),
         "ordinances_with_source_url": int(row[3] or 0),
@@ -648,12 +809,12 @@ def _ordinance_counts(
         "ordinances_with_full_text": int(row[5] or 0),
         "curation_statuses": _grouped_ordinance_counts(
             db,
-            all_conditions,
+            conditions,
             Ordinance.curation_status,
         ),
         "legal_statuses": _grouped_ordinance_counts(
             db,
-            all_conditions,
+            conditions,
             Ordinance.status,
         ),
         "catalog_curation_statuses": _grouped_ordinance_counts(
@@ -666,6 +827,40 @@ def _ordinance_counts(
             conditions,
             Ordinance.status,
         ),
+    }
+
+
+def _pipeline_counts(
+    db: Session,
+    filters: OrdinanceCorpusFilters,
+) -> dict[str, Any]:
+    """Return review-only pipeline metrics with an explicit data scope."""
+
+    conditions = _municipality_conditions(filters, include_population=True)
+    ordinance_records = int(
+        db.scalar(
+            select(func.count(Ordinance.id))
+            .select_from(Ordinance)
+            .join(Ordinance.municipality)
+            .where(*conditions)
+        )
+        or 0
+    )
+    return {
+        "available": True,
+        "scope": "all_pipeline_records_linked_to_filtered_municipalities",
+        "ordinance_records": ordinance_records,
+        "curation_statuses": _grouped_ordinance_counts(
+            db,
+            conditions,
+            Ordinance.curation_status,
+        ),
+        "legal_statuses": _grouped_ordinance_counts(
+            db,
+            conditions,
+            Ordinance.status,
+        ),
+        **_import_counts(db, filters),
     }
 
 
@@ -734,7 +929,10 @@ def _chunk_counts(
         .select_from(OrdinanceLegalChunk)
         .join(Ordinance)
         .join(Ordinance.municipality)
-        .where(*conditions)
+        .where(
+            *conditions,
+            *_chunk_visibility_conditions(filters),
+        )
     ).one()
     catalog_ordinances = int(
         db.scalar(
@@ -872,7 +1070,10 @@ def _province_coverage(
         .select_from(OrdinanceLegalChunk)
         .join(Ordinance)
         .join(Ordinance.municipality)
-        .where(*ordinance_conditions)
+        .where(
+            *ordinance_conditions,
+            *_chunk_visibility_conditions(filters),
+        )
         .group_by(Municipality.province)
     ):
         data = provinces.setdefault(str(province), {"province": str(province)})
@@ -885,6 +1086,7 @@ def _page_chunk_counts(
     db: Session,
     ordinance_ids: list[int],
     embedding_model: str,
+    filters: OrdinanceCorpusFilters,
 ) -> dict[int, dict[str, int]]:
     if not ordinance_ids:
         return {}
@@ -906,7 +1108,10 @@ def _page_chunk_counts(
                 case((OrdinanceLegalChunk.embedding_status == "failed", 1), else_=0)
             ),
         )
-        .where(OrdinanceLegalChunk.ordinance_id.in_(ordinance_ids))
+        .where(
+            OrdinanceLegalChunk.ordinance_id.in_(ordinance_ids),
+            *_chunk_visibility_conditions(filters),
+        )
         .group_by(OrdinanceLegalChunk.ordinance_id)
     ).all()
     return {

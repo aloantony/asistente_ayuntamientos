@@ -655,6 +655,7 @@ def semantic_search_ordinances(
     q: str,
     municipality_id: int | None = None,
     municipality_name: str | None = None,
+    autonomous_community: str | None = None,
     topic: str | None = None,
     include_pending: bool = False,
     include_inactive: bool = False,
@@ -673,6 +674,7 @@ def semantic_search_ordinances(
         options=OrdinanceSearchOptions(
             municipality_id=municipality_id,
             municipality_name=(municipality_name or "").strip() or None,
+            autonomous_community=(autonomous_community or "").strip() or None,
             topic=(topic or "").strip() or None,
             strict_topic=bool(topic),
             include_pending=include_pending,
@@ -1033,7 +1035,6 @@ def get_existing_ordinance(db: Session, ordinance_id: int) -> Ordinance:
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Ordinance not found",
         )
-
     return ordinance
 
 

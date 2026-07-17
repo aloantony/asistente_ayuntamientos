@@ -559,7 +559,13 @@ def _run_agent_turn_events(
                     },
                 )
                 signature = tool_call_signature(block.name, audited_tool_input)
-                track_repetition = tool is None or tool.read_only
+                # A catalogue page can report snapshot drift after the first
+                # manifest. Regenerating that read with the same filters is the
+                # only safe recovery path; the global call/round budgets still
+                # prevent loops.
+                track_repetition = (tool is None or tool.read_only) and (
+                    block.name != "get_ordinance_corpus_manifest"
+                )
                 if attachment_tainted:
                     # The provider receives no tool definitions for attachment
                     # turns, but a hallucinated tool block must still fail

@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 from app.agent_office import service as agent_office_service
@@ -6,6 +7,7 @@ from app.assistant import tools as assistant_tools
 from app.assistant.prompts import ANACLETO_SYSTEM_PROMPT
 from app.core.config import settings
 from app.municipalities.models import Municipality
+from app.ordinances import catalog as ordinance_catalog
 from app.ordinances.catalog import (
     InvalidOrdinanceCatalogCursor,
     OrdinanceCorpusFilters,
@@ -14,8 +16,16 @@ from app.ordinances.catalog import (
     encode_ordinance_catalog_cursor,
     list_ordinance_catalog_from_cursor,
 )
-from app.ordinances.models import Ordinance, OrdinanceLegalChunk
+from app.ordinances.models import (
+    Ordinance,
+    OrdinanceImportItem,
+    OrdinanceImportJob,
+    OrdinanceLegalChunk,
+)
 from app.ordinances.search import OrdinanceSearchOptions, search_ordinance_chunks
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
 
 
 def _municipality(
@@ -131,6 +141,22 @@ def test_manifest_distinguishes_population_catalog_and_retrieval_layers(db):
         embedding=None,
         embedding_status="failed",
     )
+    _chunk(
+        db,
+        searchable,
+        index=2,
+        embedding=None,
+        embedding_status="pending",
+        review_status="pending_review",
+    )
+    _chunk(
+        db,
+        searchable,
+        index=3,
+        embedding=None,
+        embedding_status="disabled",
+        review_status="rejected",
+    )
     _ordinance(db, no_chunks, title="Ordenanza sin fragmentos")
     _ordinance(
         db,
@@ -164,7 +190,7 @@ def test_manifest_distinguishes_population_catalog_and_retrieval_layers(db):
         "coverage_complete": False,
     }
     layers = manifest["layers"]
-    assert layers["ordinance_records"] == 4
+    assert layers["ordinance_records"] == 2
     assert layers["catalog_ordinances"] == 2
     assert layers["catalog_municipalities"] == 2
     assert layers["total_chunks"] == 2
@@ -172,11 +198,16 @@ def test_manifest_distinguishes_population_catalog_and_retrieval_layers(db):
     assert layers["ordinances_without_chunks"] == 1
     assert layers["searchable_chunks"] == 1
     assert layers["failed_embedding_chunks"] == 1
-    assert layers["curation_statuses"] == {
-        "approved": 3,
-        "pending_review": 1,
-    }
+    assert layers["pending_review_chunks"] == 0
+    assert layers["rejected_chunks"] == 0
+    assert layers["curation_statuses"] == {"approved": 2}
     assert layers["catalog_curation_statuses"] == {"approved": 2}
+    assert "import_items" not in layers
+    assert manifest["pipeline"] == {
+        "available": False,
+        "scope": None,
+        "reason": "requires_include_pending",
+    }
     assert manifest["reconciliation"]["ordinance_partition_balanced"] is True
     assert manifest["completeness"]["catalog_snapshot_complete"] is False
     assert manifest["completeness"]["complete_against_official_sources"] is False
@@ -191,6 +222,23 @@ def test_manifest_distinguishes_population_catalog_and_retrieval_layers(db):
     assert cursor["snapshot_id"] == manifest["snapshot_id"]
     assert cursor["total"] == 2
     assert cursor["consumed"] == 0
+    assert cursor["embedding_model"] == settings.embeddings_model
+
+    page = list_ordinance_catalog_from_cursor(
+        db,
+        embedding_model=settings.embeddings_model,
+        cursor=manifest["catalog_cursor"],
+        limit=10,
+    )
+    searchable_result = next(
+        item for item in page["results"] if item["ordinance_id"] == searchable.id
+    )
+    assert searchable_result["chunk_counts"] == {
+        "total": 2,
+        "approved": 2,
+        "searchable": 1,
+        "embedding_failed": 1,
+    }
 
 
 def test_signed_cursor_enumerates_each_ordinance_once(db):
@@ -259,6 +307,207 @@ def test_cursor_rejects_tampering_and_snapshot_drift(db):
             cursor=cursor,
             limit=10,
         )
+
+
+def test_snapshot_covers_excluded_ordinances_and_import_layers(db):
+    municipality = _municipality(
+        db,
+        name="Capas del snapshot",
+        ine_code="09021",
+        population=1200,
+    )
+    _ordinance(db, municipality, title="Ordenanza visible")
+    db.flush()
+    initial = build_ordinance_corpus_manifest(
+        db,
+        embedding_model=settings.embeddings_model,
+        filters=OrdinanceCorpusFilters(
+            province="Burgos",
+            include_pending=True,
+        ),
+    )
+
+    _ordinance(
+        db,
+        municipality,
+        title="Ordenanza rechazada fuera del catálogo",
+        curation_status="rejected",
+    )
+    job = OrdinanceImportJob(
+        title="Importación para snapshot",
+        municipality_ids_json=f"[{municipality.id}]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Revisión de consistencia",
+        status="draft",
+    )
+    db.add(job)
+    db.flush()
+    db.add(
+        OrdinanceImportItem(
+            job_id=job.id,
+            municipality_id=municipality.id,
+            source_url="https://example.test/import/snapshot",
+            status="discovered",
+            raw_text="Texto importado",
+        )
+    )
+    db.flush()
+
+    changed = build_ordinance_corpus_manifest(
+        db,
+        embedding_model=settings.embeddings_model,
+        filters=OrdinanceCorpusFilters(
+            province="Burgos",
+            include_pending=True,
+        ),
+    )
+
+    assert changed["snapshot_id"] != initial["snapshot_id"]
+    assert changed["layers"]["catalog_ordinances"] == (
+        initial["layers"]["catalog_ordinances"]
+    )
+    assert changed["pipeline"]["scope"] == (
+        "all_pipeline_records_linked_to_filtered_municipalities"
+    )
+    assert changed["pipeline"]["ordinance_records"] == (
+        initial["pipeline"]["ordinance_records"] + 1
+    )
+    assert changed["pipeline"]["curation_statuses"]["rejected"] == 1
+    assert changed["pipeline"]["import_items"] == (
+        initial["pipeline"]["import_items"] + 1
+    )
+    assert changed["pipeline"]["import_items_with_raw_text"] == (
+        initial["pipeline"]["import_items_with_raw_text"] + 1
+    )
+
+
+def test_cursor_is_bound_to_embedding_model(db):
+    municipality = _municipality(
+        db,
+        name="Modelo del cursor",
+        ine_code="09022",
+        population=800,
+    )
+    ordinance = _ordinance(db, municipality, title="Ordenanza vectorizada")
+    _chunk(db, ordinance, index=0)
+    db.flush()
+    manifest = build_ordinance_corpus_manifest(
+        db,
+        embedding_model=settings.embeddings_model,
+        filters=OrdinanceCorpusFilters(municipality_id=municipality.id),
+    )
+
+    decoded = decode_ordinance_catalog_cursor(manifest["catalog_cursor"])
+    assert decoded["embedding_model"] == settings.embeddings_model
+    with pytest.raises(InvalidOrdinanceCatalogCursor, match="otro modelo"):
+        list_ordinance_catalog_from_cursor(
+            db,
+            embedding_model="replacement-model",
+            cursor=manifest["catalog_cursor"],
+            limit=10,
+        )
+
+    replacement_manifest = build_ordinance_corpus_manifest(
+        db,
+        embedding_model="replacement-model",
+        filters=OrdinanceCorpusFilters(municipality_id=municipality.id),
+    )
+    assert replacement_manifest["snapshot_id"] != manifest["snapshot_id"]
+
+
+def test_text_filters_and_encoded_cursor_are_bounded():
+    with pytest.raises(ValueError, match="province.*255"):
+        encode_ordinance_catalog_cursor(
+            filters=OrdinanceCorpusFilters(province="x" * 256),
+            embedding_model=settings.embeddings_model,
+            snapshot_id="a" * 64,
+            total=0,
+            after_id=0,
+            consumed=0,
+        )
+
+    oversized_utf8_filters = OrdinanceCorpusFilters(
+        autonomous_community="😀" * 255,
+        province="😀" * 255,
+        municipality_name="😀" * 255,
+    )
+    with pytest.raises(ValueError, match="cursor.*tamaño máximo"):
+        encode_ordinance_catalog_cursor(
+            filters=oversized_utf8_filters,
+            embedding_model=settings.embeddings_model,
+            snapshot_id="a" * 64,
+            total=0,
+            after_id=0,
+            consumed=0,
+        )
+
+
+def test_manifest_locks_corpus_only_for_the_read_savepoint(engine, monkeypatch):
+    read_locked = threading.Event()
+    continue_read = threading.Event()
+    read_finished = threading.Event()
+    close_reader = threading.Event()
+    errors: list[BaseException] = []
+    original_population_coverage = ordinance_catalog._population_coverage
+
+    def paused_population_coverage(db, filters):
+        read_locked.set()
+        if not continue_read.wait(timeout=5):
+            raise AssertionError("timeout waiting to continue the corpus read")
+        return original_population_coverage(db, filters)
+
+    monkeypatch.setattr(
+        ordinance_catalog,
+        "_population_coverage",
+        paused_population_coverage,
+    )
+
+    def read_manifest() -> None:
+        try:
+            with Session(engine) as reader:
+                build_ordinance_corpus_manifest(
+                    reader,
+                    embedding_model=settings.embeddings_model,
+                    filters=OrdinanceCorpusFilters(
+                        province="__catalog_lock_regression__"
+                    ),
+                )
+                read_finished.set()
+                if not close_reader.wait(timeout=5):
+                    raise AssertionError("timeout waiting to close reader session")
+        except BaseException as error:  # pragma: no cover - reported below
+            errors.append(error)
+            read_locked.set()
+            read_finished.set()
+
+    reader_thread = threading.Thread(target=read_manifest, daemon=True)
+    reader_thread.start()
+    assert read_locked.wait(timeout=5)
+    try:
+        with engine.connect() as writer:
+            transaction = writer.begin()
+            writer.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            with pytest.raises(DBAPIError):
+                writer.execute(text("LOCK TABLE municipalities IN ROW EXCLUSIVE MODE"))
+            transaction.rollback()
+    finally:
+        continue_read.set()
+
+    assert read_finished.wait(timeout=5)
+    assert not errors
+    # The outer reader transaction is deliberately still open here.  This
+    # succeeds only if rolling back the read savepoint released the SHARE lock.
+    with engine.connect() as writer:
+        transaction = writer.begin()
+        writer.execute(text("SET LOCAL lock_timeout = '500ms'"))
+        writer.execute(text("LOCK TABLE municipalities IN ROW EXCLUSIVE MODE"))
+        transaction.rollback()
+
+    close_reader.set()
+    reader_thread.join(timeout=5)
+    assert not reader_thread.is_alive()
+    assert not errors
 
 
 def test_catalog_tools_are_local_read_only_and_gate_pending(
@@ -363,6 +612,7 @@ def test_catalog_payload_compaction_preserves_signed_continuation():
     filters = OrdinanceCorpusFilters(province="Burgos")
     cursor = encode_ordinance_catalog_cursor(
         filters=filters,
+        embedding_model=settings.embeddings_model,
         snapshot_id="a" * 64,
         total=20,
         after_id=0,

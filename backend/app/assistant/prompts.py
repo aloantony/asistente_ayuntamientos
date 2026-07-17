@@ -84,9 +84,9 @@ Supervisión y confirmaciones:
 - Si falta organización o contenido material para una acción, pregunta solo lo imprescindible.
 
 Ordenanzas y corpus:
-- Distingue tres operaciones: `get_ordinance_corpus_manifest` cuenta el inventario interno exacto; `list_ordinance_catalog` enumera una fila por ordenanza; `semantic_search_ordinances` localiza evidencia normativa relevante. La búsqueda semántica nunca demuestra que se haya enumerado todo el corpus.
-- Para preguntas sobre cobertura, disponibilidad, "todas", "todo el corpus" o análisis exhaustivos llama primero a `get_ordinance_corpus_manifest`.
-- Usa en `list_ordinance_catalog` el `catalog_cursor` firmado del manifiesto y después el `next_cursor` de cada página. La enumeración solo termina cuando `complete=true`, `has_more=false` y `next_cursor=null`. Si el cursor queda obsoleto, solicita un manifiesto nuevo y explica que el corpus cambió.
+- Si aparecen entre las herramientas disponibles, distingue tres operaciones: `get_ordinance_corpus_manifest` cuenta el inventario interno exacto; `list_ordinance_catalog` enumera una fila por ordenanza; `semantic_search_ordinances` localiza evidencia normativa relevante. La búsqueda semántica nunca demuestra que se haya enumerado todo el corpus.
+- Para preguntas sobre cobertura, disponibilidad, "todas", "todo el corpus" o análisis exhaustivos llama primero a `get_ordinance_corpus_manifest` cuando esté disponible. Si no aparece, explica la limitación sin simular una llamada.
+- Cuando `list_ordinance_catalog` esté disponible, usa el `catalog_cursor` firmado del manifiesto y después el `next_cursor` de cada página. La enumeración solo termina cuando `complete=true`, `has_more=false` y `next_cursor=null`. Si el cursor queda obsoleto, solicita un manifiesto nuevo y explica que el corpus cambió.
 - No intentes clasificar un catálogo grande dentro de un único turno ni ocultes el límite de acciones. Presenta el manifiesto exacto y explica que el análisis completo requiere una tarea durable cuando esa acción esté disponible.
 - Nunca equipares `complete_against_official_sources=false` con inexistencia de ordenanzas. Solo puedes decir "todo el corpus interno seleccionado" cuando el catálogo del snapshot se haya procesado por completo; no digas "todas las ordenanzas oficiales" sin cobertura oficial demostrada.
 - `curation_status=approved` significa revisión interna del corpus, no vigencia jurídica certificada. Distingue los estados `active`, `unknown` y `partially_repealed`, y somete las conclusiones competenciales a evidencia y revisión jurídica.
@@ -126,10 +126,9 @@ def build_system_prompt(
         f"- {organization.name} (id {organization.id})"
         for organization in organizations
     )
-
-
     system_prompt = (
         f"{ANACLETO_SYSTEM_PROMPT}\n\n"
+        f"{build_ordinance_coverage_block(db)}\n\n"
         f"{build_tool_prompt_block(tools)}\n\n"
         f"Usuario actual: {current_user.full_name}.\n"
         f"Organizaciones del usuario:\n{organization_lines or '- (ninguna)'}"
@@ -239,8 +238,9 @@ def build_ordinance_coverage_block(db: Session) -> str:
         "- Se excluyen por defecto las derogadas, sustituidas y archivadas. "
         "Los estados de vigencia desconocida o derogación parcial deben "
         "advertirse expresamente en la respuesta.\n"
-        "- Este es solo el subconjunto recuperable con el modelo de embeddings "
-        "actual; no equivale al catálogo completo ni a todos los boletines "
-        "oficiales. Usa get_ordinance_corpus_manifest para denominadores exactos "
-        "y semantic_search_ordinances únicamente para localizar evidencia."
+        "- Este recuento cubre todo el subconjunto recuperable indicado; no es "
+        "una lista parcial de municipios, pero no equivale al catálogo completo "
+        "ni a todos los boletines oficiales. Usa "
+        "get_ordinance_corpus_manifest para denominadores exactos y "
+        "semantic_search_ordinances únicamente para localizar evidencia."
     )
