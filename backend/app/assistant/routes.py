@@ -18,11 +18,18 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.assistant.attachments import (
+    attachment_payload,
+    ensure_attachment_runtime_supported,
+    prepare_attachments,
+)
 from app.assistant.gateway import AIGateway, AssistantUnavailableError, gateway
 from app.assistant.models import (
     AssistantAdminFeedback,
     AssistantConversation,
     AssistantConversationFolder,
+    AssistantMessage,
+    AssistantMessageAttachment,
     AssistantMemoryEntry,
     AssistantTransversalFeature,
     AssistantTransversalFeatureAdoption,
@@ -81,7 +88,9 @@ from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
+from app.documents.models import Document
 from app.organizations.access import get_accessible_organizations_query
+from app.projects.access import user_can_access_project
 from app.rbac.permissions import has_permission
 from app.users.models import User
 
@@ -135,6 +144,7 @@ def get_assistant_status(
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
 ) -> AssistantStatusRead:
     require_assistant_use(db, current_user)
+    available_tools = get_available_tool_specs(db, current_user)
     return AssistantStatusRead(
         enabled=agent_gateway.enabled,
         runtime=settings.assistant_runtime,
@@ -149,7 +159,13 @@ def get_assistant_status(
         realtime_voice_model=(
             settings.assistant_realtime_model if realtime_voice_enabled() else None
         ),
-        tools=[tool.metadata for tool in get_available_tool_specs(db, current_user)],
+        web_page_reader_enabled=any(
+            tool.name == "read_web_page" for tool in available_tools
+        ),
+        # Full page bodies are deliberately excluded from Realtime state. Web
+        # search snippets remain available in voice sessions.
+        realtime_web_page_reader_enabled=False,
+        tools=[tool.metadata for tool in available_tools],
     )
 
 
@@ -663,7 +679,7 @@ def create_conversation(
     payload: AssistantConversationCreate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
 
     conversation = AssistantConversation(
@@ -672,7 +688,11 @@ def create_conversation(
     )
     db.add(conversation)
     db.commit()
-    return get_own_conversation(db, current_user, conversation.id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation.id),
+    )
 
 
 @router.get(
@@ -683,9 +703,13 @@ def get_conversation(
     conversation_id: int,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
-    return get_own_conversation(db, current_user, conversation_id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation_id),
+    )
 
 
 @router.patch(
@@ -697,7 +721,7 @@ def update_conversation(
     payload: AssistantConversationUpdate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
     conversation = get_own_conversation(db, current_user, conversation_id)
 
@@ -715,7 +739,11 @@ def update_conversation(
             conversation.folder_id = folder.id
 
     db.commit()
-    return get_own_conversation(db, current_user, conversation_id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation_id),
+    )
 
 
 @router.post(
@@ -728,7 +756,7 @@ def send_message(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
-) -> AssistantConversation:
+) -> AssistantConversationDetail:
     require_assistant_use(db, current_user)
     conversation = get_own_conversation(db, current_user, conversation_id)
 
@@ -743,6 +771,13 @@ def send_message(
             detail="Assistant is not configured",
         )
 
+    ensure_attachment_runtime_supported(bool(payload.attachment_ids))
+    prepared_attachments = prepare_attachments(
+        db,
+        current_user,
+        payload.attachment_ids,
+    )
+
     try:
         run_agent_turn(
             db,
@@ -751,6 +786,7 @@ def send_message(
             payload.content,
             agent_gateway,
             input_mode=payload.input_mode,
+            prepared_attachments=prepared_attachments,
         )
     except AssistantRealtimeConflictError as error:
         raise HTTPException(
@@ -763,7 +799,11 @@ def send_message(
             detail="Assistant request failed",
         ) from None
 
-    return get_own_conversation(db, current_user, conversation_id)
+    return serialize_conversation_detail(
+        db,
+        current_user,
+        get_own_conversation(db, current_user, conversation_id),
+    )
 
 
 @router.post("/conversations/{conversation_id}/messages/stream")
@@ -788,6 +828,13 @@ def send_message_stream(
             detail="Assistant is not configured",
         )
 
+    ensure_attachment_runtime_supported(bool(payload.attachment_ids))
+    prepared_attachments = prepare_attachments(
+        db,
+        current_user,
+        payload.attachment_ids,
+    )
+
     def event_stream():
         try:
             for event in run_agent_turn_events(
@@ -797,6 +844,7 @@ def send_message_stream(
                 payload.content,
                 agent_gateway,
                 input_mode=payload.input_mode,
+                prepared_attachments=prepared_attachments,
             ):
                 yield format_sse_event(event)
         except AssistantUnavailableError:
@@ -1003,7 +1051,7 @@ def execute_realtime_voice_tool_call(
             detail=str(error),
         ) from None
     return {
-        "call_id": payload.call_id,
+        "call_id": action["call_id"],
         "ok": action["ok"],
         "output": output,
         "action": action,
@@ -1096,6 +1144,72 @@ def recover_unexpected_stream_error(
     return TurnEvent("error", {"detail": "Assistant request failed"})
 
 
+def serialize_conversation_detail(
+    db: Session,
+    current_user: User,
+    conversation: AssistantConversation,
+) -> AssistantConversationDetail:
+    """Serialize current attachment visibility without changing history rows."""
+
+    project_visibility: dict[tuple[int, int], bool] = {}
+    messages: list[dict] = []
+    for message in conversation.messages:
+        visible_attachments: list[dict] = []
+        for attachment in message.attachments:
+            document = attachment.document
+            project = document.project
+            if project.organization_id != document.organization_id:
+                continue
+            cache_key = (project.id, project.organization_id)
+            if cache_key not in project_visibility:
+                visible = True
+                if not current_user.is_superuser:
+                    can_manage = has_permission(
+                        current_user,
+                        "documents.manage",
+                        db,
+                        organization_id=project.organization_id,
+                    )
+                    can_view = can_manage or has_permission(
+                        current_user,
+                        "documents.view",
+                        db,
+                        organization_id=project.organization_id,
+                    )
+                    visible = can_view and (
+                        can_manage
+                        or user_can_access_project(db, current_user, project)
+                    )
+                project_visibility[cache_key] = visible
+            if project_visibility[cache_key]:
+                visible_attachments.append(attachment_payload(attachment))
+
+        messages.append(
+            {
+                "id": message.id,
+                "role": message.role,
+                "content": message.content,
+                "actions": message.actions,
+                "attachments": visible_attachments,
+                "agent_key": message.agent_key,
+                "routing": message.routing,
+                "created_at": message.created_at,
+            }
+        )
+
+    return AssistantConversationDetail.model_validate(
+        {
+            "id": conversation.id,
+            "title": conversation.title,
+            "status": conversation.status,
+            "folder_id": conversation.folder_id,
+            "created_at": conversation.created_at,
+            "updated_at": conversation.updated_at,
+            "messages": messages,
+        }
+    )
+
+
 def get_own_conversation(
     db: Session,
     current_user: User,
@@ -1103,7 +1217,12 @@ def get_own_conversation(
 ) -> AssistantConversation:
     conversation = db.scalar(
         select(AssistantConversation)
-        .options(selectinload(AssistantConversation.messages))
+        .options(
+            selectinload(AssistantConversation.messages)
+            .selectinload(AssistantMessage.attachments)
+            .selectinload(AssistantMessageAttachment.document)
+            .selectinload(Document.project)
+        )
         .where(AssistantConversation.id == conversation_id)
         # The conversation is usually already in the identity map when this
         # runs after a commit; repopulate so the response includes the

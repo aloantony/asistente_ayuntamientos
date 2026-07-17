@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -26,6 +26,51 @@ class MunicipalitySummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ReferenceDatasetVersionRead(BaseModel):
+    dataset_key: str
+    title: str
+    version_label: str
+    reference_date: date
+    catalog_url: str
+    download_url: str
+    member_name: str
+    archive_sha256: str
+    content_sha256: str
+    license_name: str
+    license_url: str
+    attribution: str
+    retrieved_at: datetime
+    national_row_count: int
+    target_row_count: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MunicipalityOfficialGeographyRead(BaseModel):
+    source_municipality_code: str
+    relationship_id: int
+    geographic_code: str
+    source_province_code: str
+    source_province_name: str
+    source_municipality_name: str
+    source_population: int
+    surface_km2: float
+    perimeter_m: float
+    capital_ine_code: str
+    capital_name: str
+    capital_population: int
+    mtn25_sheet: str
+    longitude: float
+    latitude: float
+    coordinate_origin: str
+    altitude_m: float
+    altitude_origin: str
+    crs: str
+    dataset_version: ReferenceDatasetVersionRead
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MunicipalityRead(BaseModel):
     id: int
     name: str
@@ -33,6 +78,10 @@ class MunicipalityRead(BaseModel):
     autonomous_community: str
     country: str
     ine_code: str | None
+    ine_check_digit: str | None
+    directory_reference_date: date | None
+    directory_source_url: str | None
+    directory_source_sha256: str | None
     population: int | None
     population_reference_year: int | None
     population_source_url: str | None
@@ -47,6 +96,7 @@ class MunicipalityRead(BaseModel):
     geographic_notes: str | None
     administrative_notes: str | None
     status: MunicipalityStatus
+    official_geography: MunicipalityOfficialGeographyRead | None
     created_at: datetime
     updated_at: datetime
 

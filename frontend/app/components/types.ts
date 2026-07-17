@@ -90,9 +90,54 @@ export type MunicipalitySummary = {
   autonomous_community: string;
 };
 
+export type ReferenceDatasetVersion = {
+  dataset_key: string;
+  title: string;
+  version_label: string;
+  reference_date: string;
+  catalog_url: string;
+  download_url: string;
+  member_name: string;
+  archive_sha256: string;
+  content_sha256: string;
+  license_name: string;
+  license_url: string;
+  attribution: string;
+  retrieved_at: string;
+  national_row_count: number;
+  target_row_count: number;
+};
+
+export type MunicipalityOfficialGeography = {
+  source_municipality_code: string;
+  relationship_id: number;
+  geographic_code: string;
+  source_province_code: string;
+  source_province_name: string;
+  source_municipality_name: string;
+  source_population: number;
+  surface_km2: number;
+  perimeter_m: number;
+  capital_ine_code: string;
+  capital_name: string;
+  capital_population: number;
+  mtn25_sheet: string;
+  longitude: number;
+  latitude: number;
+  coordinate_origin: string;
+  altitude_m: number;
+  altitude_origin: string;
+  crs: string;
+  dataset_version: ReferenceDatasetVersion;
+};
+
 export type Municipality = MunicipalitySummary & {
   country: string;
   ine_code: string | null;
+  ine_check_digit: string | null;
+  directory_reference_date: string | null;
+  directory_source_url: string | null;
+  directory_source_sha256: string | null;
   population: number | null;
   population_reference_year: number | null;
   population_source_url: string | null;
@@ -107,6 +152,7 @@ export type Municipality = MunicipalitySummary & {
   geographic_notes: string | null;
   administrative_notes: string | null;
   status: MunicipalityStatus;
+  official_geography?: MunicipalityOfficialGeography | null;
   created_at: string;
   updated_at: string;
 };
@@ -390,6 +436,11 @@ export type GeoMapItem = {
   entity_type: GeoEntityType;
   entity_id: number;
   role: GeoLocationRole;
+  layer_key: string;
+  layer_label: string;
+  layer_color: string;
+  item_type: string | null;
+  condition_status: AssetConditionStatus | null;
   title: string;
   subtitle: string | null;
   status: string;
@@ -1200,6 +1251,8 @@ export type AssistantStatus = {
   realtime_voice_enabled: boolean;
   realtime_voice_provider: "openai" | null;
   realtime_voice_model: string | null;
+  web_page_reader_enabled: boolean;
+  realtime_web_page_reader_enabled: boolean;
   tools: AssistantTool[];
 };
 
@@ -1208,6 +1261,8 @@ export type AssistantTool = {
   label: string;
   read_only: boolean;
   domain: string;
+  side_effect: "none" | "database_write";
+  approval_policy: "never" | "explicit";
   required_permission: string | null;
 };
 
@@ -1307,11 +1362,39 @@ export type AssistantAction = {
   status?: "started" | "finished";
 };
 
+export type AssistantAttachmentContextStatus =
+  | "pending"
+  | "ready"
+  | "empty"
+  | "unsupported"
+  | "vision_unavailable"
+  | "too_large"
+  | "unavailable"
+  | "failed";
+
+export type AssistantMessageAttachment = {
+  id: number;
+  document_id: number;
+  project_id: number;
+  project_name: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  context_status: AssistantAttachmentContextStatus;
+  context_char_count: number;
+};
+
+export type AssistantAttachmentCandidate = {
+  document: Document;
+  project: Project;
+};
+
 export type AssistantMessage = {
   id: number;
   role: "user" | "assistant";
   content: string;
   actions: AssistantAction[];
+  attachments: AssistantMessageAttachment[];
   agent_key: string | null;
   routing: Record<string, unknown> | null;
   created_at: string;
@@ -1333,6 +1416,7 @@ export type AssistantConversationDetail = AssistantConversation & {
 export type AssistantStreamMessageStart = {
   conversation_id: number;
   user_message_id: number;
+  user_message?: AssistantMessage;
 };
 
 export type AssistantStreamToolActivity = {
@@ -1345,6 +1429,7 @@ export type AssistantStreamToolActivity = {
 
 export type AssistantStreamDone = {
   message: AssistantMessage;
+  user_message?: AssistantMessage;
   conversation: AssistantConversation;
 };
 
@@ -1449,6 +1534,7 @@ export const ASSISTANT_TOOL_LABELS: Record<string, string> = {
   list_available_transversal_features: "Consultar funcionalidades disponibles",
   record_transversal_feature_acceptance: "Registrar activación transversal",
   web_search: "Buscar en web",
+  read_web_page: "Leer fuente web",
 };
 
 export function formatAssistantTool(

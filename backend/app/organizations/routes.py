@@ -19,6 +19,7 @@ from app.organizations.schemas import (
     OrganizationUpdate,
 )
 from app.projects.models import Project, project_users
+from app.rbac.locking import lock_authorization_graph
 from app.rbac.models import Group, user_groups
 from app.rbac.permissions import has_permission
 from app.users.models import User
@@ -58,6 +59,7 @@ def create_organization(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Superuser privileges required",
         )
+    lock_authorization_graph(db)
     ensure_municipality_can_be_linked(db, payload.municipality_id)
 
     organization = Organization(
@@ -145,6 +147,7 @@ def add_user_to_organization(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> OrganizationMembershipResponse:
+    lock_authorization_graph(db)
     ensure_organization_and_user_exist(
         db,
         organization_id=organization_id,
@@ -184,6 +187,7 @@ def remove_user_from_organization(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> OrganizationMembershipResponse:
+    lock_authorization_graph(db)
     organization, target_user = ensure_organization_and_user_exist(
         db,
         organization_id=organization_id,

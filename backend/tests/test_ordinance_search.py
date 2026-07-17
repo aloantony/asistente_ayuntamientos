@@ -640,8 +640,8 @@ def test_assistant_ordinance_tool_accepts_manage_and_propagates_sensitive_flags(
     captured_options = []
     monkeypatch.setattr(
         assistant_tools,
-        "embed_text",
-        lambda _query: ("[1,0]", "test-model", "ready"),
+        "embed_text_supervised",
+        lambda _query, **_kwargs: ("[1,0]", "test-model", "ready"),
     )
 
     def fake_search(
@@ -701,12 +701,16 @@ def test_assistant_ordinance_tool_rejects_pending_without_review_before_embeddin
     grant_permissions(comparer, make_organization(), ["ordinances.compare"])
     embedding_called = False
 
-    def unexpected_embedding(_query):
+    def unexpected_embedding(_query, **_kwargs):
         nonlocal embedding_called
         embedding_called = True
         raise AssertionError("No debe generar embeddings sin permiso de revisión")
 
-    monkeypatch.setattr(assistant_tools, "embed_text", unexpected_embedding)
+    monkeypatch.setattr(
+        assistant_tools,
+        "embed_text_supervised",
+        unexpected_embedding,
+    )
 
     result = assistant_tools.execute_tool(
         db,

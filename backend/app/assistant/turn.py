@@ -1,5 +1,6 @@
 """Model-first turn engine for the municipal assistant."""
 
+import hashlib
 import json
 import logging
 import re
@@ -8,9 +9,19 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from time import monotonic
 
-from sqlalchemy import func, select
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.assistant.attachments import (
+    PreparedAttachment,
+    authorize_attachments_for_commit,
+    attachment_payload,
+    build_turn_attachment_context,
+    ensure_attachment_preparation_within_deadline,
+    ensure_attachment_runtime_supported,
+    extract_attachment_contexts,
+    persist_message_attachments,
+)
 from app.assistant.gateway import (
     AICompletion,
     AITextDelta,
@@ -21,13 +32,16 @@ from app.assistant.gateway import (
     AssistantUnavailableError,
 )
 from app.assistant.guards import (
-    CONFIRMATION_REQUIRED_TOOLS,
     ConfirmationReference,
     ConfirmationToolResult,
     build_confirmation_prompt,
     check_tool_confirmation,
+    confirmation_safe_history_content,
     finalize_confirmation_turn,
+    load_conversation_state,
     lock_conversation_for_confirmation,
+    message_has_confirmation_suffix_metadata,
+    message_is_confirmation_response,
     process_pending_confirmation_response,
 )
 from app.assistant.models import AssistantConversation, AssistantMessage
@@ -38,23 +52,126 @@ from app.assistant.prompts import (
     build_system_prompt,
 )
 from app.assistant.safety import build_assistant_safety_identifier
+from app.assistant.tool_authorization import ConversationToolAuthorization
 from app.assistant.tools import (
+    ATTACHMENT_CONTENT_TOOL_RESULT,
     MAX_ORDINANCE_TOOL_RESULT_CHARS,
     ToolContext,
     ToolResult,
     ToolSpec,
+    REDACTED_UNTRUSTED_TOOL_NAME,
+    UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
+    canonical_untrusted_web_reader_input,
     execute_tool,
     get_available_tool_specs,
+    redacted_untrusted_tool_input,
+    tool_is_blocked_after_untrusted_content,
 )
 from app.core.config import settings
+from app.rbac.locking import lock_authorization_graph
 from app.users.models import User
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 4000
+ATTACHMENT_TOOL_INPUT_REDACTION = {"redacted": True}
+ATTACHMENT_TOOL_NAME_REDACTION = "attachment_tool_redacted"
+ATTACHMENT_TOOL_CALL_ID_PREFIX = "attachment-tool-call-redacted"
+MAX_WEB_READER_AUDIT_REDIRECTS = 6
+MAX_WEB_READER_AUDIT_URL_CHARS = 2000
 
 
 def tool_result_for_activity(tool_name: str, content: str) -> str:
+    if tool_name == "read_web_page":
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return content[:MAX_TOOL_RESULT_CHARS]
+        if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+            text = payload["text"]
+            redirect_chain = payload.get("redirect_chain")
+            if not isinstance(redirect_chain, list):
+                redirect_chain = []
+            redirect_chain = [
+                str(url)[:MAX_WEB_READER_AUDIT_URL_CHARS]
+                for url in redirect_chain[:MAX_WEB_READER_AUDIT_REDIRECTS]
+            ]
+            activity_payload = {
+                "source_url": str(payload.get("source_url") or "")[
+                    :MAX_WEB_READER_AUDIT_URL_CHARS
+                ],
+                "final_url": str(payload.get("final_url") or "")[
+                    :MAX_WEB_READER_AUDIT_URL_CHARS
+                ],
+                "title": str(payload.get("title") or "")[:300],
+                "query": str(payload.get("query") or "")[:400],
+                "provider": str(payload.get("provider") or "")[:100],
+                "rank": payload.get("rank"),
+                "content_type": str(payload.get("content_type") or "")[:100],
+                "content_length_bytes": payload.get("content_length_bytes"),
+                "text_char_count": payload.get("text_char_count", len(text)),
+                "text_sha256": payload.get("text_sha256")
+                or hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "text_truncated": payload.get("text_truncated") is True,
+                "redirects": payload.get("redirects"),
+                "redirect_chain": redirect_chain,
+                "untrusted_content": True,
+            }
+            compact = json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(compact) < MAX_TOOL_RESULT_CHARS:
+                return compact
+
+            chain_bytes = json.dumps(
+                redirect_chain,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            activity_payload["redirect_chain"] = {
+                "count": len(redirect_chain),
+                "sha256": hashlib.sha256(chain_bytes).hexdigest(),
+                "summarized": True,
+            }
+            compact = json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(compact) < MAX_TOOL_RESULT_CHARS:
+                return compact
+
+            source_url = activity_payload["source_url"]
+            activity_payload["source_url"] = source_url[:256]
+            activity_payload["source_url_sha256"] = hashlib.sha256(
+                source_url.encode("utf-8")
+            ).hexdigest()
+            activity_payload["source_url_truncated"] = len(source_url) > 256
+            activity_payload["title"] = activity_payload["title"][:100]
+            compact = json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(compact) < MAX_TOOL_RESULT_CHARS:
+                return compact
+
+            # Keep the exact final URL used for citation. The remaining
+            # high-variance display fields have hashes or bounded prefixes.
+            query = activity_payload["query"]
+            activity_payload["query"] = query[:128]
+            activity_payload["query_sha256"] = hashlib.sha256(
+                query.encode("utf-8")
+            ).hexdigest()
+            activity_payload["query_truncated"] = len(query) > 128
+            activity_payload["title"] = ""
+            return json.dumps(
+                activity_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
     limit = (
         MAX_ORDINANCE_TOOL_RESULT_CHARS
         if tool_name == "semantic_search_ordinances"
@@ -110,10 +227,6 @@ figuran en la conversación. No anuncies nuevas consultas ni prometas seguir
 trabajando. Distingue lo comprobado de lo que quedó pendiente y explica de forma
 breve cualquier limitación o error de herramienta.
 """.strip()
-STALE_MUTATING_TOOL_RESULT = (
-    "No se ejecutó la herramienta porque este turno quedó desactualizado por "
-    "un mensaje posterior del usuario."
-)
 TOKEN_PATTERN = re.compile(r"[a-záéíóúüñ0-9]+", re.IGNORECASE)
 TOOL_INTENT_STOPWORDS = {
     "a",
@@ -173,6 +286,7 @@ def run_agent_turn_events(
     gateway: AIGateway,
     *,
     input_mode: str = "text",
+    prepared_attachments: list[PreparedAttachment] | None = None,
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Stream a turn and reconcile speculative text before its terminal event."""
     streamed_text: list[str] = []
@@ -183,6 +297,7 @@ def run_agent_turn_events(
         user_text,
         gateway,
         input_mode=input_mode,
+        prepared_attachments=prepared_attachments,
     )
     try:
         while True:
@@ -210,12 +325,36 @@ def _run_agent_turn_events(
     gateway: AIGateway,
     *,
     input_mode: str = "text",
+    prepared_attachments: list[PreparedAttachment] | None = None,
 ) -> Generator[TurnEvent, None, AssistantMessage]:
     """Persist the user message, run the tool loop and stream turn events."""
     turn_deadline = monotonic() + settings.assistant_turn_timeout_seconds
+    conversation_id = conversation.id
+    current_user_id = current_user.id
+    current_attachments = prepared_attachments or []
+    ensure_attachment_runtime_supported(bool(current_attachments))
+    if current_attachments and input_mode != "text":
+        raise ValueError("Assistant attachments are supported only for text input")
+    authorization_graph_lock = None
+    if current_attachments:
+        # PreparedAttachment contains only an immutable identity snapshot. A
+        # rollback, rather than a commit, both releases preflight locks and
+        # discards ORM *and Core* DML accidentally left by a caller. No ORM
+        # attribute is touched again until rows are reloaded after extraction.
+        db.rollback()
+    current_attachments = extract_attachment_contexts(
+        current_attachments,
+        turn_deadline=turn_deadline,
+    )
+    if current_attachments:
+        # Canonical order is RBAC graph -> conversation -> user -> document ->
+        # project. In particular, user deletion also takes the graph lock
+        # first and can cascade to conversations without creating an inversion.
+        authorization_graph_lock = lock_authorization_graph(db)
+
     # Lock before inserting the message: concurrent FK inserts followed by a
     # row-lock upgrade can deadlock. The first commit releases this short lock.
-    conversation = lock_conversation_for_confirmation(db, conversation.id)
+    conversation = lock_conversation_for_confirmation(db, conversation_id)
     # Imported lazily because realtime orchestration reuses this module's
     # history and tool-loop helpers.
     from app.assistant.realtime import seal_active_realtime_turn
@@ -230,13 +369,39 @@ def _run_agent_turn_events(
     if conversation.title == "Conversación":
         conversation.title = user_text[:255]
     conversation.updated_at = func.now()
-    db.flush()
-    confirmation_context = process_pending_confirmation_response(
-        db,
-        conversation,
-        user_message,
-    )
-    db.commit()
+    try:
+        db.flush()
+        confirmation_context = process_pending_confirmation_response(
+            db,
+            conversation,
+            user_message,
+        )
+        # This is the linear authorization boundary for attachment turns.
+        # Authorization evidence and document identity remain locked until the
+        # message+relation commit below, then no lock crosses provider I/O.
+        if current_attachments:
+            if authorization_graph_lock is None:
+                raise RuntimeError("Attachment authorization lock is missing")
+            current_attachments = authorize_attachments_for_commit(
+                db,
+                current_user_id,
+                current_attachments,
+                turn_deadline=turn_deadline,
+                authorization_lock=authorization_graph_lock,
+            )
+        persist_message_attachments(
+            db,
+            user_message,
+            current_attachments,
+            authorized_by_id=current_user_id,
+        )
+        db.flush()
+        if current_attachments:
+            ensure_attachment_preparation_within_deadline(turn_deadline)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(user_message)
     db.refresh(conversation)
 
@@ -245,15 +410,25 @@ def _run_agent_turn_events(
         {
             "conversation_id": conversation.id,
             "user_message_id": user_message.id,
+            "user_message": _message_payload(user_message),
         },
     )
 
-    tools = get_available_tool_specs(db, current_user)
+    attachment_tainted = bool(current_attachments)
+    tools = [] if attachment_tainted else get_available_tool_specs(db, current_user)
     tools_by_name = {tool.name: tool for tool in tools}
     tool_definitions = [tool.definition for tool in tools]
     tool_names = frozenset(tool.name for tool in tools)
+    tool_context = ToolContext(
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+    )
     system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
-    messages = build_history(conversation)
+    messages = build_history(
+        conversation,
+        attachment_context_message_id=user_message.id,
+        attachment_context=build_turn_attachment_context(current_attachments),
+    )
     safety_identifier = build_assistant_safety_identifier(current_user.id)
 
     actions: list[dict] = []
@@ -274,6 +449,8 @@ def _run_agent_turn_events(
         )
 
         while True:
+            if attachment_tainted:
+                response = _redact_attachment_tool_completion(gateway, response)
             response = recover_textual_read_tool_call(response, tools, messages)
 
             if response.stop_reason == "refusal":
@@ -323,19 +500,81 @@ def _run_agent_turn_events(
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                tool_input = dict(block.input)
+                raw_tool_input = dict(block.input)
+                audited_tool_input = (
+                    dict(ATTACHMENT_TOOL_INPUT_REDACTION)
+                    if attachment_tainted
+                    else raw_tool_input
+                )
                 tool = tools_by_name.get(block.name)
+                post_taint_blocked = (
+                    False
+                    if attachment_tainted
+                    else tool_is_blocked_after_untrusted_content(
+                        block.name,
+                        raw_tool_input,
+                        tool_context,
+                        allow_web_reader=True,
+                    )
+                )
+                canonical_reader_input = (
+                    None
+                    if attachment_tainted
+                    else canonical_untrusted_web_reader_input(
+                        block.name,
+                        raw_tool_input,
+                        tool_context,
+                        allow_web_reader=True,
+                    )
+                )
+                persisted_tool_input = (
+                    dict(ATTACHMENT_TOOL_INPUT_REDACTION)
+                    if attachment_tainted
+                    else (
+                        redacted_untrusted_tool_input()
+                        if post_taint_blocked
+                        else canonical_reader_input or raw_tool_input
+                    )
+                )
+                persisted_tool_name = (
+                    ATTACHMENT_TOOL_NAME_REDACTION
+                    if attachment_tainted
+                    else (
+                        REDACTED_UNTRUSTED_TOOL_NAME
+                        if post_taint_blocked
+                        else block.name
+                    )
+                )
                 yield TurnEvent(
                     "tool_activity",
                     {
-                        "tool": block.name,
+                        "tool": persisted_tool_name,
                         "status": "started",
-                        "input": tool_input,
+                        "input": persisted_tool_input,
                     },
                 )
-                signature = tool_call_signature(block.name, tool_input)
+                signature = tool_call_signature(block.name, audited_tool_input)
                 track_repetition = tool is None or tool.read_only
-                if _turn_timed_out(turn_deadline):
+                if attachment_tainted:
+                    # The provider receives no tool definitions for attachment
+                    # turns, but a hallucinated tool block must still fail
+                    # closed if it reaches this code path. Never pass its
+                    # untrusted arguments to confirmations or executors.
+                    result = _execute_tool_for_current_turn(
+                        db=db,
+                        current_user=current_user,
+                        tool_name=block.name,
+                        tool_input={},
+                        context=ToolContext(
+                            conversation_id=conversation.id,
+                            user_message_id=user_message.id,
+                            attachment_content_seen=True,
+                        ),
+                        allowed=tool_names,
+                        attachment_tainted=True,
+                    )
+                    force_synthesis_reason = "attachment_tools_disabled"
+                elif _turn_timed_out(turn_deadline):
                     result = ToolResult(content=TURN_TIMEOUT_TOOL_RESULT, ok=False)
                     force_synthesis_reason = "turn_timeout"
                 elif not execute_round:
@@ -354,35 +593,53 @@ def _run_agent_turn_events(
                 elif tool_calls_used >= tool_call_budget:
                     result = ToolResult(content=TOOL_CALL_BUDGET_RESULT, ok=False)
                     force_synthesis_reason = "tool_call_budget"
+                elif post_taint_blocked:
+                    result = ToolResult(
+                        content=UNTRUSTED_EXTERNAL_TOOL_BLOCKED,
+                        ok=False,
+                    )
                 else:
                     tool_calls_used += 1
-                    guarded_result = check_tool_confirmation(
-                        db,
-                        conversation,
-                        user_message,
-                        block.name,
-                        tool_input,
-                    )
-                    if block.name in CONFIRMATION_REQUIRED_TOOLS:
+                    guarded_result = None
+                    # A provider must not be able to arm confirmation state for
+                    # a tool omitted from this turn's code-level allowlist.
+                    if tool is not None:
+                        guarded_result = check_tool_confirmation(
+                            db,
+                            conversation,
+                            user_message,
+                            block.name,
+                            raw_tool_input,
+                            current_user=current_user,
+                            tool_spec=tool,
+                        )
+                    if tool is not None:
                         required_confirmation = _confirmation_context_from_result(
                             guarded_result
                         )
                         if required_confirmation is not None:
                             confirmation_context = required_confirmation
-                    result = guarded_result or _execute_tool_for_current_turn(
-                        db=db,
-                        current_user=current_user,
-                        conversation=conversation,
-                        user_message=user_message,
-                        tool=tool,
-                        tool_name=block.name,
-                        tool_input=tool_input,
-                        context=ToolContext(
-                            conversation_id=conversation.id,
-                            user_message_id=user_message.id,
-                        ),
-                        allowed=tool_names,
-                    )
+                    if isinstance(guarded_result, ConfirmationToolResult):
+                        result = guarded_result
+                    else:
+                        authorization = (
+                            guarded_result
+                            if isinstance(
+                                guarded_result,
+                                ConversationToolAuthorization,
+                            )
+                            else None
+                        )
+                        result = _execute_tool_for_current_turn(
+                            db=db,
+                            current_user=current_user,
+                            tool_name=block.name,
+                            tool_input=raw_tool_input,
+                            context=tool_context,
+                            allowed=tool_names,
+                            authorization=authorization,
+                            attachment_tainted=False,
+                        )
                     if track_repetition:
                         seen_read_calls.add(signature)
                         if _is_non_retryable_tool_failure(result):
@@ -392,18 +649,21 @@ def _run_agent_turn_events(
                         # again later in this same turn.
                         seen_read_calls.clear()
                 action = {
-                    "tool": block.name,
+                    "tool": persisted_tool_name,
                     "ok": result.ok,
-                    "input": tool_input,
-                    "result": tool_result_for_activity(block.name, result.content),
+                    "input": persisted_tool_input,
+                    "result": tool_result_for_activity(
+                        persisted_tool_name,
+                        result.content,
+                    ),
                 }
                 actions.append(action)
                 yield TurnEvent(
                     "tool_activity",
                     {
-                        "tool": block.name,
+                        "tool": persisted_tool_name,
                         "status": "finished",
-                        "input": tool_input,
+                        "input": persisted_tool_input,
                         "ok": result.ok,
                         "result": action["result"],
                     },
@@ -523,6 +783,7 @@ def _run_agent_turn_events(
         "done",
         {
             "message": _message_payload(assistant_message),
+            "user_message": _message_payload(user_message),
             "conversation": {
                 "id": conversation.id,
                 "title": conversation.title,
@@ -540,6 +801,44 @@ def tool_call_signature(tool_name: str, tool_input: dict) -> str:
     """Return a stable signature for superficially equivalent tool inputs."""
     normalized = _normalize_tool_call_value(tool_input)
     return f"{tool_name}:{json.dumps(normalized, sort_keys=True, separators=(',', ':'))}"
+
+
+def _redact_attachment_tool_completion(
+    gateway: AIGateway,
+    response: AICompletion,
+) -> AICompletion:
+    """Remove model-controlled tool/provider fields before local reuse or audit."""
+
+    provider_state = getattr(response, "provider_state", ())
+    discard_provider_state = getattr(gateway, "discard_provider_state", None)
+    if provider_state and callable(discard_provider_state):
+        try:
+            discard_provider_state([{"provider_state": provider_state}])
+        except Exception:
+            logger.warning("Attachment provider state cleanup failed")
+
+    redacted_content = []
+    tool_index = 0
+    for block in response.content:
+        if block.type != "tool_use":
+            redacted_content.append(block)
+            continue
+        tool_index += 1
+        redacted_content.append(
+            AIToolUseBlock(
+                id=f"{ATTACHMENT_TOOL_CALL_ID_PREFIX}-{tool_index}",
+                name=ATTACHMENT_TOOL_NAME_REDACTION,
+                input=dict(ATTACHMENT_TOOL_INPUT_REDACTION),
+            )
+        )
+
+    return AICompletion(
+        model=response.model,
+        stop_reason=response.stop_reason,
+        content=redacted_content,
+        usage=response.usage,
+        provider_state=(),
+    )
 
 
 def _remaining_gateway_timeout(turn_deadline: float) -> float:
@@ -648,15 +947,16 @@ def _execute_tool_for_current_turn(
     *,
     db: Session,
     current_user: User,
-    conversation: AssistantConversation,
-    user_message: AssistantMessage,
-    tool: ToolSpec | None,
     tool_name: str,
     tool_input: dict,
     context: ToolContext,
     allowed: frozenset[str],
+    authorization: ConversationToolAuthorization | None = None,
+    attachment_tainted: bool = False,
 ) -> ToolResult:
-    if tool is None or tool.read_only:
+    if attachment_tainted:
+        if not context.attachment_content_seen:
+            return ToolResult(content=ATTACHMENT_CONTENT_TOOL_RESULT, ok=False)
         return execute_tool(
             db,
             current_user,
@@ -666,30 +966,16 @@ def _execute_tool_for_current_turn(
             allowed=allowed,
         )
 
-    lock_conversation_for_confirmation(db, conversation.id)
-    latest_user_message_id = db.scalar(
-        select(AssistantMessage.id)
-        .where(
-            AssistantMessage.conversation_id == conversation.id,
-            AssistantMessage.role == "user",
-        )
-        .order_by(AssistantMessage.id.desc())
-        .limit(1)
-    )
-    if latest_user_message_id != user_message.id:
-        db.commit()
-        return ToolResult(content=STALE_MUTATING_TOOL_RESULT, ok=False)
-
-    # Mutating executors commit or roll back their own transaction. Calling the
-    # executor while this row lock is held makes the latest-turn check atomic
-    # with the mutation.
+    execution_kwargs = {"allowed": allowed}
+    if authorization is not None:
+        execution_kwargs["authorization"] = authorization
     return execute_tool(
         db,
         current_user,
         tool_name,
         tool_input,
         context,
-        allowed=allowed,
+        **execution_kwargs,
     )
 
 
@@ -712,6 +998,7 @@ def run_agent_turn(
     gateway: AIGateway,
     *,
     input_mode: str = "text",
+    prepared_attachments: list[PreparedAttachment] | None = None,
 ) -> AssistantMessage:
     events = run_agent_turn_events(
         db,
@@ -720,6 +1007,7 @@ def run_agent_turn(
         user_text,
         gateway,
         input_mode=input_mode,
+        prepared_attachments=prepared_attachments,
     )
     while True:
         try:
@@ -728,12 +1016,66 @@ def run_agent_turn(
             return stop.value
 
 
-def build_history(conversation: AssistantConversation) -> list[dict]:
-    messages = [
-        {"role": message.role, "content": message.content}
-        for message in conversation.messages
-        if message.content
-    ]
+def build_history(
+    conversation: AssistantConversation,
+    *,
+    attachment_context_message_id: int | None = None,
+    attachment_context: str = "",
+) -> list[dict]:
+    state = load_conversation_state(conversation)
+    legacy_prompt_message_ids: set[int] = set()
+    confirmation_response_message_ids: set[int] = set()
+    exchanges = state.get("finalized_confirmation_exchanges")
+    if isinstance(exchanges, list):
+        for exchange in exchanges:
+            if not isinstance(exchange, dict):
+                continue
+            prompt_message_id = int(
+                exchange.get("prompted_at_assistant_message_id") or 0
+            )
+            if prompt_message_id:
+                legacy_prompt_message_ids.add(prompt_message_id)
+            response_message_id = int(exchange.get("response_user_message_id") or 0)
+            if response_message_id:
+                confirmation_response_message_ids.add(response_message_id)
+    # Backward compatibility for confirmations finalized before the bounded
+    # exchange list existed.
+    for key in ("last_consumed_confirmation", "last_cancelled_confirmation"):
+        confirmation = state.get(key)
+        if not isinstance(confirmation, dict):
+            continue
+        message_id = int(confirmation.get("prompted_at_assistant_message_id") or 0)
+        if message_id:
+            legacy_prompt_message_ids.add(message_id)
+        response_message_id = int(
+            confirmation.get("confirmed_at_user_message_id")
+            or confirmation.get("cancelled_at_user_message_id")
+            or 0
+        )
+        if response_message_id:
+            confirmation_response_message_ids.add(response_message_id)
+    messages: list[dict] = []
+    for message in conversation.messages:
+        if not message.content:
+            continue
+        if (
+            message.id in confirmation_response_message_ids
+            or message_is_confirmation_response(message)
+        ):
+            continue
+        content = confirmation_safe_history_content(message)
+        if (
+            message.id in legacy_prompt_message_ids
+            and not message_has_confirmation_suffix_metadata(message)
+        ):
+            continue
+        if content:
+            if (
+                message.id == attachment_context_message_id
+                and attachment_context
+            ):
+                content = f"{content}\n\n{attachment_context}"
+            messages.append({"role": message.role, "content": content})
     max_messages = max(2, settings.assistant_history_max_messages)
     if len(messages) <= max_messages:
         return messages
@@ -958,6 +1300,9 @@ def _message_payload(message: AssistantMessage) -> dict:
         "role": message.role,
         "content": message.content,
         "actions": json.loads(message.actions) if message.actions else [],
+        "attachments": [
+            attachment_payload(attachment) for attachment in message.attachments
+        ],
         "agent_key": message.agent_key,
         "routing": json.loads(message.routing) if message.routing else None,
         "created_at": message.created_at.isoformat(),

@@ -108,6 +108,11 @@ def test_create_requirement_location_then_map_items_returns_visible_marker(
     assert created["entity_type"] == "requirement"
     assert created["entity_id"] == requirement.id
     assert created["role"] == "primary"
+    assert created["layer_key"] == "requirements"
+    assert created["layer_label"] == "Necesidades"
+    assert created["layer_color"] == "#c0603a"
+    assert created["item_type"] is None
+    assert created["condition_status"] is None
     assert created["detail_path"] == f"/requisitos?id={requirement.id}"
     assert json.loads(created["location"]["geometry_json"])["coordinates"] == [-3.7, 42.34]
 
@@ -117,6 +122,9 @@ def test_create_requirement_location_then_map_items_returns_visible_marker(
     items = map_response.json()
     assert len(items) == 1
     assert items[0]["role"] == "primary"
+    assert items[0]["layer_key"] == "requirements"
+    assert items[0]["layer_label"] == "Necesidades"
+    assert items[0]["layer_color"] == "#c0603a"
     assert items[0]["title"] == requirement.title
     assert items[0]["location"]["latitude"] == 42.34
     assert items[0]["location"]["longitude"] == -3.7
@@ -346,16 +354,25 @@ def test_map_items_entity_type_filter(
         json=location_payload("requirement", requirement.id),
         headers=auth,
     ).status_code == 201
-    assert client.post(
+    create_project = client.post(
         "/geo/entity-locations",
         json=location_payload("project", project.id, latitude=42.4),
         headers=auth,
-    ).status_code == 201
+    )
+    assert create_project.status_code == 201
+    assert create_project.json()["layer_key"] == "projects"
+    assert create_project.json()["layer_label"] == "Proyectos"
+    assert create_project.json()["layer_color"] == "#2f74d0"
+    assert create_project.json()["item_type"] is None
+    assert create_project.json()["condition_status"] is None
 
     response = client.get("/geo/map-items?entity_type=project", headers=auth)
 
     assert response.status_code == 200
     assert [item["entity_type"] for item in response.json()] == ["project"]
+    assert response.json()[0]["layer_key"] == "projects"
+    assert response.json()[0]["layer_label"] == "Proyectos"
+    assert response.json()[0]["layer_color"] == "#2f74d0"
 
 
 def test_superuser_can_view_map_items(client, db, superuser, make_user, make_organization, grant_permissions):
@@ -383,6 +400,7 @@ def make_asset_context(
     municipality_status="active",
     asset_status="active",
     condition_status="good",
+    category_color="#d97706",
     description=None,
     with_location=True,
 ):
@@ -405,6 +423,7 @@ def make_asset_context(
         organization_id=organization.id,
         code=f"lighting-{suffix}",
         name="Alumbrado",
+        color=category_color,
     )
     db.add(category)
     db.flush()
@@ -573,10 +592,46 @@ def test_asset_map_items_require_both_permissions_and_are_tenant_scoped(
     item = response.json()[0]
     assert item["entity_id"] == visible_context["asset"].id
     assert item["entity_type"] == "asset"
+    assert item["layer_key"] == (
+        f"asset-category-{visible_context['category'].id}"
+    )
+    assert item["layer_label"] == "Alumbrado"
+    assert item["layer_color"] == "#d97706"
+    assert item["item_type"] == "Farola"
+    assert item["condition_status"] == "fair"
     assert item["title"] == visible_context["asset"].name
     assert item["subtitle"] == "Farola · fair"
     assert item["priority"] is None
     assert item["detail_path"] == "/ayuntamiento"
+
+
+def test_asset_map_uses_fallback_color_for_category_without_color(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    context = make_asset_context(
+        db,
+        make_organization,
+        category_color=None,
+    )
+    viewer = make_user()
+    grant_permissions(
+        viewer,
+        context["organization"],
+        ["map.view", "assets.view"],
+    )
+
+    response = client.get(
+        "/geo/map-items",
+        params={"entity_type": "asset"},
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["layer_color"] == "#3caf8c"
 
 
 def test_asset_map_filters_archives_and_global_limit(
@@ -633,6 +688,17 @@ def test_asset_map_filters_archives_and_global_limit(
         params={"entity_type": "asset", "include_archived": True, "limit": 1},
         headers=auth,
     )
+    second_page = client.get(
+        "/geo/map-items",
+        params={
+            "entity_type": "asset",
+            "include_archived": True,
+            "limit": 1,
+            "offset": 1,
+        },
+        headers=auth,
+    )
+    invalid_offset = client.get("/geo/map-items?offset=-1", headers=auth)
     wrong_organization = client.get(
         "/geo/map-items",
         params={"entity_type": "asset", "organization_id": 999999},
@@ -653,6 +719,9 @@ def test_asset_map_filters_archives_and_global_limit(
         item["entity_id"] for item in with_archived.json()
     }
     assert len(limited.json()) == 1
+    assert len(second_page.json()) == 1
+    assert second_page.json()[0]["entity_id"] != limited.json()[0]["entity_id"]
+    assert invalid_offset.status_code == 422
     assert wrong_organization.status_code == 200
     assert wrong_organization.json() == []
     assert missing_type.status_code == 422
@@ -807,6 +876,13 @@ def test_asset_location_is_copy_on_write_and_never_creates_entity_location(
         headers=auth,
     )
     assert first.status_code == 201
+    assert first.json()["layer_key"] == (
+        f"asset-category-{context['category'].id}"
+    )
+    assert first.json()["layer_label"] == "Alumbrado"
+    assert first.json()["layer_color"] == "#d97706"
+    assert first.json()["item_type"] == "Farola"
+    assert first.json()["condition_status"] == "good"
     first_location_id = first.json()["location"]["id"]
     shared_asset = add_context_asset(
         db,

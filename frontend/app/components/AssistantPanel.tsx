@@ -4,6 +4,8 @@ import {
   CircleAlert,
   Clock3,
   Database,
+  ExternalLink,
+  FileImage,
   FileText,
   Globe2,
   GripVertical,
@@ -11,9 +13,12 @@ import {
   Inbox,
   Loader2,
   MapPin,
+  Paperclip,
   PanelLeftClose,
   PanelLeftOpen,
   Square,
+  Upload,
+  X,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -32,11 +37,14 @@ import {
 import {
   formatAssistantTool,
   type AssistantAction,
+  type AssistantAttachmentCandidate,
   type AssistantConversation,
   type AssistantConversationDetail,
   type AssistantConversationFolder,
+  type AssistantMessageAttachment,
   type AssistantStatus,
   type AssistantVoiceState,
+  type Project,
   type User,
 } from "./types";
 import { createBargeInDetector, createSilenceDetector } from "../lib/voice";
@@ -59,6 +67,12 @@ type AssistantPanelProps = {
   currentUser: User;
   selectedConversation: AssistantConversationDetail | null;
   draftMessage: string;
+  attachmentProjects: Project[];
+  availableAttachments: AssistantAttachmentCandidate[];
+  selectedAttachments: AssistantAttachmentCandidate[];
+  isLoadingAttachments: boolean;
+  isUploadingAttachment: boolean;
+  attachmentError: string;
   voiceModeEnabled: boolean;
   handsFreeEnabled: boolean;
   voiceState: AssistantVoiceState;
@@ -70,6 +84,12 @@ type AssistantPanelProps = {
   assistantError: string;
   includeArchivedConversations: boolean;
   onDraftMessageChange: (value: string) => void;
+  onLoadAttachmentLibrary: () => Promise<void>;
+  onToggleAttachment: (attachment: AssistantAttachmentCandidate) => void;
+  onRemoveAttachment: (documentId: number) => void;
+  onUploadAttachment: (projectId: number, file: File) => Promise<void>;
+  onLoadAttachmentPreview: (documentId: number) => Promise<string>;
+  onOpenAttachment: (documentId: number) => Promise<void>;
   onVoiceModeChange: (enabled: boolean) => void;
   onSelectConversation: (conversationId: number) => void;
   onStartConversation: () => void;
@@ -305,7 +325,7 @@ function getActionIcon(tool: string): LucideIcon {
   if (tool === "get_map_items") {
     return MapPin;
   }
-  if (tool === "web_search") {
+  if (tool === "web_search" || tool === "read_web_page") {
     return Globe2;
   }
   if (tool === "propose_memory_entry") {
@@ -354,14 +374,38 @@ function getActionSummary(action: AssistantAction) {
 }
 
 function getWebResults(action: AssistantAction) {
-  if (action.tool !== "web_search" || !action.ok) {
+  if (
+    !["web_search", "read_web_page"].includes(action.tool) ||
+    !action.ok
+  ) {
     return [];
   }
 
   const parsed = parseActionResult(action.result);
+  if (!parsed.data || typeof parsed.data !== "object") {
+    return [];
+  }
+
+  if (action.tool === "read_web_page") {
+    const page = parsed.data as Record<string, unknown>;
+    if (!page.final_url || !page.source_url) {
+      return [];
+    }
+    const textChars = Number(page.text_char_count ?? 0);
+    const sourceUrl = String(page.source_url);
+    return [
+      {
+        title: String(page.title ?? page.final_url),
+        url: String(page.final_url),
+        snippet: Number.isFinite(textChars)
+          ? `${textChars.toLocaleString("es-ES")} caracteres extraídos. Origen localizado: ${sourceUrl}`
+          : `Fuente leída. Origen localizado: ${sourceUrl}`,
+        publishedAt: "",
+      },
+    ];
+  }
+
   if (
-    !parsed.data ||
-    typeof parsed.data !== "object" ||
     !("results" in parsed.data) ||
     !Array.isArray((parsed.data as { results?: unknown }).results)
   ) {
@@ -567,6 +611,111 @@ function AssistantMarkdown({ content }: { content: string }) {
   );
 }
 
+const ATTACHMENT_STATUS_LABELS: Record<
+  AssistantMessageAttachment["context_status"],
+  string
+> = {
+  pending: "Preparando",
+  ready: "Texto usado solo en este turno",
+  empty: "Sin texto extraíble",
+  unsupported: "Formato adjunto, pero no analizado",
+  vision_unavailable: "Imagen adjunta · visión no disponible",
+  too_large: "Demasiado grande para lectura automática",
+  unavailable: "Archivo no disponible",
+  failed: "No se pudo leer",
+};
+
+function formatAttachmentSize(sizeBytes: number) {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${Math.ceil(sizeBytes / 1024)} KB`;
+  }
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function MessageAttachmentCard({
+  attachment,
+  onLoadPreview,
+  onOpen,
+}: {
+  attachment: AssistantMessageAttachment;
+  onLoadPreview: (documentId: number) => Promise<string>;
+  onOpen: (documentId: number) => Promise<void>;
+}) {
+  const isImage = attachment.content_type.startsWith("image/");
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [previewState, setPreviewState] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
+
+  async function handleLoadPreview() {
+    if (!isImage || previewState === "loading") {
+      return;
+    }
+    setPreviewState("loading");
+    try {
+      const url = await onLoadPreview(attachment.document_id);
+      if (url) {
+        setPreviewUrl(url);
+      }
+      setPreviewState("idle");
+    } catch {
+      setPreviewState("error");
+    }
+  }
+
+  return (
+    <div className="assistant-message-attachment">
+      <div className="assistant-message-attachment-preview">
+        {previewUrl ? (
+          // The URL is an authenticated local blob, never a remote source.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img alt={`Vista previa de ${attachment.filename}`} src={previewUrl} />
+        ) : isImage ? (
+          <button
+            aria-label={`Cargar vista previa de ${attachment.filename}`}
+            disabled={previewState === "loading"}
+            onClick={() => void handleLoadPreview()}
+            title={
+              previewState === "error"
+                ? "Reintentar vista previa"
+                : "Cargar vista previa"
+            }
+            type="button"
+          >
+            {previewState === "loading" ? (
+              <Loader2 aria-hidden className="spinning-icon" size={18} />
+            ) : previewState === "error" ? (
+              <CircleAlert aria-hidden size={18} />
+            ) : (
+              <FileImage aria-hidden size={20} />
+            )}
+          </button>
+        ) : (
+          <FileText aria-hidden size={20} />
+        )}
+      </div>
+      <div className="assistant-message-attachment-copy">
+        <strong title={attachment.filename}>{attachment.filename}</strong>
+        <small>
+          {formatAttachmentSize(attachment.size_bytes)} ·{" "}
+          {ATTACHMENT_STATUS_LABELS[attachment.context_status]}
+        </small>
+      </div>
+      <button
+        aria-label={`Abrir ${attachment.filename}`}
+        onClick={() => void onOpen(attachment.document_id)}
+        title="Abrir archivo"
+        type="button"
+      >
+        <ExternalLink aria-hidden size={15} />
+      </button>
+    </div>
+  );
+}
+
 export function AssistantPanel({
   assistantStatus,
   conversations,
@@ -574,6 +723,12 @@ export function AssistantPanel({
   currentUser,
   selectedConversation,
   draftMessage,
+  attachmentProjects,
+  availableAttachments,
+  selectedAttachments,
+  isLoadingAttachments,
+  isUploadingAttachment,
+  attachmentError,
   voiceModeEnabled,
   handsFreeEnabled,
   voiceState,
@@ -585,6 +740,12 @@ export function AssistantPanel({
   assistantError,
   includeArchivedConversations,
   onDraftMessageChange,
+  onLoadAttachmentLibrary,
+  onToggleAttachment,
+  onRemoveAttachment,
+  onUploadAttachment,
+  onLoadAttachmentPreview,
+  onOpenAttachment,
   onVoiceModeChange,
   onSelectConversation,
   onStartConversation,
@@ -676,6 +837,10 @@ export function AssistantPanel({
     null,
   );
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [isAttachmentPickerOpen, setIsAttachmentPickerOpen] = useState(false);
+  const [attachmentProjectId, setAttachmentProjectId] = useState<number | null>(
+    null,
+  );
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const silenceDetectorRef = useRef<ReturnType<typeof createSilenceDetector> | null>(
@@ -703,6 +868,7 @@ export function AssistantPanel({
   const audioChunksRef = useRef<Blob[]>([]);
   const draftMessageRef = useRef(draftMessage);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const speechTranscriptionEnabled = Boolean(
     assistantStatus?.speech_transcription_enabled,
@@ -718,6 +884,19 @@ export function AssistantPanel({
       speechSupported);
   const voiceCaptureAvailable = realtimeVoiceAvailable || speechTranscriptionEnabled;
   const useRealtimeVoice = voiceModeEnabled && realtimeVoiceAvailable;
+  const attachmentsBlockedByVoice =
+    voiceModeEnabled ||
+    realtimeVoiceActive ||
+    isListening ||
+    isTranscribingVoice ||
+    !["idle", "done", "interrupted", "error"].includes(voiceState);
+  const attachmentSendBlocked =
+    attachmentsBlockedByVoice && selectedAttachments.length > 0;
+  const showRealtimeWebReaderNotice =
+    voiceModeEnabled &&
+    realtimeVoiceAvailable &&
+    Boolean(assistantStatus?.web_page_reader_enabled) &&
+    !assistantStatus?.realtime_web_page_reader_enabled;
   const voiceStatus = (() => {
     if (voiceState === "connecting") {
       return "Conectando voz…";
@@ -759,6 +938,33 @@ export function AssistantPanel({
     );
   }, [conversationFilter, conversations]);
 
+  const projectAttachments = useMemo(
+    () =>
+      availableAttachments.filter(
+        (attachment) => attachment.project.id === attachmentProjectId,
+      ),
+    [attachmentProjectId, availableAttachments],
+  );
+
+  useEffect(() => {
+    if (
+      attachmentProjectId === null ||
+      !attachmentProjects.some((project) => project.id === attachmentProjectId)
+    ) {
+      setAttachmentProjectId(attachmentProjects[0]?.id ?? null);
+    }
+  }, [attachmentProjectId, attachmentProjects]);
+
+  useEffect(() => {
+    setIsAttachmentPickerOpen(false);
+  }, [selectedConversation?.id]);
+
+  useEffect(() => {
+    if (attachmentsBlockedByVoice) {
+      setIsAttachmentPickerOpen(false);
+    }
+  }, [attachmentsBlockedByVoice]);
+
   const conversationGroups = useMemo(() => {
     if (conversationListMode === "folders") {
       return buildFolderConversationGroups(
@@ -780,17 +986,17 @@ export function AssistantPanel({
     draftMessageRef.current = draftMessage;
   }, [draftMessage]);
 
+  const messageScrollSignature = selectedConversation?.messages
+    .map(
+      (message) =>
+        `${message.id}:${message.content.length}:${message.actions.length}:` +
+        message.attachments.length,
+    )
+    .join("|");
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [
-    selectedConversation?.messages
-      .map(
-        (message) =>
-          `${message.id}:${message.content.length}:${message.actions.length}`,
-      )
-      .join("|"),
-    isSendingMessage,
-  ]);
+  }, [messageScrollSignature, isSendingMessage]);
 
   useEffect(() => {
     if (!conversationContextMenu) {
@@ -1198,7 +1404,11 @@ export function AssistantPanel({
     }
 
     event.preventDefault();
-    if (composerDisabled || draftMessage.trim().length === 0) {
+    if (
+      composerDisabled ||
+      attachmentSendBlocked ||
+      draftMessage.trim().length === 0
+    ) {
       return;
     }
 
@@ -1209,9 +1419,34 @@ export function AssistantPanel({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (attachmentSendBlocked) {
+      return;
+    }
     stopListening({ discardAudio: true });
     onStopRealtimeVoice({ interrupted: true });
     onSendMessage();
+  }
+
+  function toggleAttachmentPicker() {
+    if (attachmentsBlockedByVoice) {
+      return;
+    }
+    const opening = !isAttachmentPickerOpen;
+    setIsAttachmentPickerOpen(opening);
+    if (opening && attachmentProjects.length === 0 && !isLoadingAttachments) {
+      void onLoadAttachmentLibrary();
+    }
+  }
+
+  function handleAttachmentUpload(file: File | undefined) {
+    if (!file || attachmentProjectId === null) {
+      return;
+    }
+    void onUploadAttachment(attachmentProjectId, file).then(() => {
+      if (attachmentInputRef.current) {
+        attachmentInputRef.current.value = "";
+      }
+    });
   }
 
   async function handleConversationFolderChange(
@@ -1973,6 +2208,21 @@ export function AssistantPanel({
                             </p>
                           )}
                         </div>
+                        {message.attachments.length > 0 ? (
+                          <div
+                            className="assistant-message-attachments"
+                            aria-label="Archivos adjuntos"
+                          >
+                            {message.attachments.map((attachment) => (
+                              <MessageAttachmentCard
+                                attachment={attachment}
+                                key={attachment.id}
+                                onLoadPreview={onLoadAttachmentPreview}
+                                onOpen={onOpenAttachment}
+                              />
+                            ))}
+                          </div>
+                        ) : null}
                         <AssistantMapActions actions={message.actions} />
                         {message.actions.length > 0 ? (
                           <ActionTimeline
@@ -2059,7 +2309,127 @@ export function AssistantPanel({
                   </div>
                 ) : null}
 
+                {isAttachmentPickerOpen && !attachmentsBlockedByVoice ? (
+                  <div className="assistant-attachment-picker">
+                    <div className="assistant-attachment-picker-head">
+                      <label>
+                        <span>Proyecto</span>
+                        <select
+                          disabled={
+                            isLoadingAttachments || attachmentsBlockedByVoice
+                          }
+                          onChange={(event) =>
+                            setAttachmentProjectId(Number(event.target.value))
+                          }
+                          value={attachmentProjectId ?? ""}
+                        >
+                          {attachmentProjects.map((project) => (
+                            <option key={project.id} value={project.id}>
+                              {project.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <input
+                        accept=".pdf,.txt,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
+                        className="assistant-attachment-input"
+                        disabled={attachmentsBlockedByVoice}
+                        onChange={(event) =>
+                          handleAttachmentUpload(event.target.files?.[0])
+                        }
+                        ref={attachmentInputRef}
+                        type="file"
+                      />
+                      <button
+                        className="secondary-button"
+                        disabled={
+                          attachmentProjectId === null ||
+                          isUploadingAttachment ||
+                          selectedAttachments.length >= 5 ||
+                          attachmentsBlockedByVoice
+                        }
+                        onClick={() => attachmentInputRef.current?.click()}
+                        type="button"
+                      >
+                        {isUploadingAttachment ? (
+                          <Loader2 aria-hidden className="spinning-icon" size={15} />
+                        ) : (
+                          <Upload aria-hidden size={15} />
+                        )}
+                        Subir
+                      </button>
+                    </div>
+                    <p>
+                      Solo se lee texto .txt UTF-8 y únicamente en este turno.
+                      PDF, Word y Excel se adjuntan sin analizar; las imágenes se
+                      previsualizan solo cuando lo pides.
+                    </p>
+                    <div className="assistant-attachment-options">
+                      {isLoadingAttachments ? (
+                        <span className="muted">Cargando archivos…</span>
+                      ) : projectAttachments.length === 0 ? (
+                        <span className="muted">
+                          No hay archivos disponibles en este proyecto.
+                        </span>
+                      ) : (
+                        projectAttachments.map((attachment) => {
+                          const isSelected = selectedAttachments.some(
+                            (selected) =>
+                              selected.document.id === attachment.document.id,
+                          );
+                          return (
+                            <button
+                              aria-pressed={isSelected}
+                              className={isSelected ? "selected" : ""}
+                              disabled={attachmentsBlockedByVoice}
+                              key={attachment.document.id}
+                              onClick={() => onToggleAttachment(attachment)}
+                              type="button"
+                            >
+                              {attachment.document.content_type.startsWith(
+                                "image/",
+                              ) ? (
+                                <FileImage aria-hidden size={16} />
+                              ) : (
+                                <FileText aria-hidden size={16} />
+                              )}
+                              <span>{attachment.document.original_filename}</span>
+                              <small>
+                                {formatAttachmentSize(
+                                  attachment.document.size_bytes,
+                                )}
+                              </small>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
                 <form className="assistant-composer" onSubmit={handleSubmit}>
+                  {selectedAttachments.length > 0 ? (
+                    <div
+                      className="assistant-selected-attachments"
+                      aria-label="Adjuntos seleccionados"
+                    >
+                      {selectedAttachments.map((attachment) => (
+                        <span key={attachment.document.id}>
+                          <Paperclip aria-hidden size={13} />
+                          <strong>{attachment.document.original_filename}</strong>
+                          <button
+                            aria-label={`Quitar ${attachment.document.original_filename}`}
+                            onClick={() =>
+                              onRemoveAttachment(attachment.document.id)
+                            }
+                            type="button"
+                          >
+                            <X aria-hidden size={13} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   <textarea
                     ref={messageTextareaRef}
                     value={draftMessage}
@@ -2070,7 +2440,34 @@ export function AssistantPanel({
                     disabled={composerDisabled}
                   />
                   <div className="assistant-composer-foot">
-                    <div className="assistant-composer-context" aria-hidden="true" />
+                    <div className="assistant-composer-context">
+                      <button
+                        aria-expanded={isAttachmentPickerOpen}
+                        aria-label="Adjuntar archivo"
+                        className={
+                          isAttachmentPickerOpen
+                            ? "assistant-attach-button active"
+                            : "assistant-attach-button"
+                        }
+                        disabled={composerDisabled || attachmentsBlockedByVoice}
+                        onClick={toggleAttachmentPicker}
+                        title={
+                          attachmentsBlockedByVoice
+                            ? "Los adjuntos solo están disponibles en modo texto"
+                            : "Adjuntar archivo"
+                        }
+                        type="button"
+                      >
+                        <Paperclip aria-hidden size={17} />
+                      </button>
+                      <span>
+                        {attachmentsBlockedByVoice
+                          ? "Adjuntos no disponibles durante la voz"
+                          : selectedAttachments.length > 0
+                          ? `${selectedAttachments.length}/5 · solo este turno`
+                          : "Adjuntos: solo este turno"}
+                      </span>
+                    </div>
                     <div className="assistant-composer-actions">
                       {voiceDialogueAvailable ? (
                         <button
@@ -2147,7 +2544,9 @@ export function AssistantPanel({
                         <button
                           type="submit"
                           disabled={
-                            composerDisabled || draftMessage.trim().length === 0
+                            composerDisabled ||
+                            attachmentSendBlocked ||
+                            draftMessage.trim().length === 0
                           }
                         >
                           <AssistantSymbolIcon name="send" size={17} />
@@ -2157,6 +2556,19 @@ export function AssistantPanel({
                     </div>
                   </div>
                 </form>
+
+                {attachmentsBlockedByVoice ? (
+                  <p className="muted assistant-attachment-error" role="status">
+                    Los adjuntos solo se pueden seleccionar y enviar en modo
+                    texto. Desactiva la voz para usarlos.
+                  </p>
+                ) : null}
+
+                {attachmentError ? (
+                  <p className="error-message assistant-attachment-error">
+                    {attachmentError}
+                  </p>
+                ) : null}
 
                 {voiceStatus ? (
                   <div className="voice-status" role="status">
@@ -2177,6 +2589,13 @@ export function AssistantPanel({
                       </button>
                     ) : null}
                   </div>
+                ) : null}
+
+                {showRealtimeWebReaderNotice ? (
+                  <p className="muted assistant-realtime-web-note">
+                    En voz realtime la búsqueda web muestra snippets. La lectura
+                    completa de páginas está disponible solo en el chat escrito.
+                  </p>
                 ) : null}
 
                 {voiceError ? (

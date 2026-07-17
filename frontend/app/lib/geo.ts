@@ -5,6 +5,8 @@ import type {
 } from "../components/types";
 import { adminRequest, adminRequestWithTotal } from "./api";
 
+const MAP_PAGE_SIZE = 500;
+
 export function fetchGeoMapItems(params: URLSearchParams, signal?: AbortSignal) {
   const suffix = params.toString();
   return adminRequest<GeoMapItem[]>(
@@ -13,6 +15,45 @@ export function fetchGeoMapItems(params: URLSearchParams, signal?: AbortSignal) 
     "No se pudieron cargar los elementos del mapa.",
     { signal },
   );
+}
+
+export async function fetchAllGeoMapItems(
+  params: URLSearchParams,
+  signal?: AbortSignal,
+) {
+  const items: GeoMapItem[] = [];
+  const seenItemKeys = new Set<string>();
+  let offset = 0;
+
+  while (true) {
+    const pageParams = new URLSearchParams(params);
+    pageParams.set("limit", String(MAP_PAGE_SIZE));
+    pageParams.set("offset", String(offset));
+    const page = await fetchGeoMapItems(pageParams, signal);
+    let addedItems = 0;
+
+    for (const item of page) {
+      const itemKey = [
+        item.entity_type,
+        item.entity_id,
+        item.role,
+        item.location.id,
+      ].join(":");
+      if (!seenItemKeys.has(itemKey)) {
+        seenItemKeys.add(itemKey);
+        items.push(item);
+        addedItems += 1;
+      }
+    }
+
+    if (page.length < MAP_PAGE_SIZE) {
+      return items;
+    }
+    if (addedItems === 0) {
+      throw new Error("El servidor no pudo paginar los elementos del mapa.");
+    }
+    offset += page.length;
+  }
 }
 
 export function fetchMunicipalAssets(

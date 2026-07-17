@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.assets.access import get_asset_organization_for_write
-from app.assets.models import MunicipalAsset
+from app.assets.models import MunicipalAsset, MunicipalAssetType
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
 from app.geo.access import (
@@ -42,6 +42,9 @@ LOCATION_UPDATE_CONFLICT = "Location update conflicts with existing data"
 ASSET_LOCATION_UPDATE_CONFLICT = (
     "Asset location update conflicts with existing data"
 )
+REQUIREMENT_LAYER_COLOR = "#c0603a"
+PROJECT_LAYER_COLOR = "#2f74d0"
+ASSET_LAYER_FALLBACK_COLOR = "#3caf8c"
 
 
 @router.get("/map-items", response_model=list[GeoMapItem])
@@ -54,6 +57,7 @@ def list_map_items(
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     include_archived: bool = False,
     limit: Annotated[int, Query(ge=1, le=500)] = 500,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[GeoMapItem]:
     if entity_id is not None and entity_type is None:
         raise HTTPException(
@@ -87,6 +91,7 @@ def list_map_items(
         status_filter=status_filter,
         include_archived=include_archived,
         limit=limit,
+        offset=offset,
         map_organization_ids=map_organization_ids,
         asset_organization_ids=asset_organization_ids,
     )
@@ -201,10 +206,27 @@ def create_entity_location(
         ) from None
     db.refresh(location)
 
+    layer_key = (
+        "requirements" if payload.entity_type == "requirement" else "projects"
+    )
+    layer_label = (
+        "Necesidades" if payload.entity_type == "requirement" else "Proyectos"
+    )
+    layer_color = (
+        REQUIREMENT_LAYER_COLOR
+        if payload.entity_type == "requirement"
+        else PROJECT_LAYER_COLOR
+    )
+
     return GeoMapItem(
         entity_type=visible.entity_type,  # type: ignore[arg-type]
         entity_id=payload.entity_id,
         role=payload.role,
+        layer_key=layer_key,
+        layer_label=layer_label,
+        layer_color=layer_color,
+        item_type=None,
+        condition_status=None,
         title=visible.title,
         subtitle=visible.subtitle,
         status=visible.status,
@@ -269,6 +291,7 @@ def list_visible_map_items(
     status_filter: str | None,
     include_archived: bool,
     limit: int,
+    offset: int,
     map_organization_ids: list[int] | None,
     asset_organization_ids: list[int] | None,
 ) -> list[GeoMapItem]:
@@ -330,6 +353,7 @@ def list_visible_map_items(
             candidates.c.entity_id.desc(),
             candidates.c.role.asc(),
         )
+        .offset(offset)
         .limit(limit)
     ).all()
     return hydrate_map_candidates(db, rows)
@@ -533,7 +557,11 @@ def hydrate_map_candidates(db: Session, rows) -> list[GeoMapItem]:
         asset_rows = db.execute(
             select(MunicipalAsset, Organization.name)
             .join(Organization, MunicipalAsset.organization_id == Organization.id)
-            .options(selectinload(MunicipalAsset.asset_type))
+            .options(
+                selectinload(MunicipalAsset.asset_type).selectinload(
+                    MunicipalAssetType.category
+                )
+            )
             .where(MunicipalAsset.id.in_(asset_ids))
         )
         assets = {asset.id: (asset, name) for asset, name in asset_rows}
@@ -552,6 +580,11 @@ def hydrate_map_candidates(db: Session, rows) -> list[GeoMapItem]:
                     entity_type="requirement",
                     entity_id=requirement.id,
                     role=row.role,
+                    layer_key="requirements",
+                    layer_label="Necesidades",
+                    layer_color=REQUIREMENT_LAYER_COLOR,
+                    item_type=None,
+                    condition_status=None,
                     title=requirement.title,
                     subtitle=requirement.summary,
                     status=requirement.status,
@@ -571,6 +604,11 @@ def hydrate_map_candidates(db: Session, rows) -> list[GeoMapItem]:
                     entity_type="project",
                     entity_id=project.id,
                     role=row.role,
+                    layer_key="projects",
+                    layer_label="Proyectos",
+                    layer_color=PROJECT_LAYER_COLOR,
+                    item_type=None,
+                    condition_status=None,
                     title=project.name,
                     subtitle=project.description,
                     status=project.status,
@@ -591,6 +629,14 @@ def hydrate_map_candidates(db: Session, rows) -> list[GeoMapItem]:
                     entity_type="asset",
                     entity_id=asset.id,
                     role="primary",
+                    layer_key=f"asset-category-{asset.asset_type.category.id}",
+                    layer_label=asset.asset_type.category.name,
+                    layer_color=(
+                        asset.asset_type.category.color
+                        or ASSET_LAYER_FALLBACK_COLOR
+                    ),
+                    item_type=asset.asset_type.name,
+                    condition_status=asset.condition_status,
                     title=asset.name,
                     subtitle=build_asset_subtitle(asset),
                     status=asset.status,
@@ -617,7 +663,11 @@ def upsert_asset_location(
 
     asset = db.scalar(
         select(MunicipalAsset)
-        .options(selectinload(MunicipalAsset.asset_type))
+        .options(
+            selectinload(MunicipalAsset.asset_type).selectinload(
+                MunicipalAssetType.category
+            )
+        )
         .where(MunicipalAsset.id == payload.entity_id)
     )
     if asset is None:
@@ -642,7 +692,11 @@ def upsert_asset_location(
 
     asset = db.scalar(
         select(MunicipalAsset)
-        .options(selectinload(MunicipalAsset.asset_type))
+        .options(
+            selectinload(MunicipalAsset.asset_type).selectinload(
+                MunicipalAssetType.category
+            )
+        )
         .where(MunicipalAsset.id == payload.entity_id)
         .with_for_update()
         .execution_options(populate_existing=True)
@@ -698,6 +752,13 @@ def upsert_asset_location(
         entity_type="asset",
         entity_id=asset.id,
         role="primary",
+        layer_key=f"asset-category-{asset.asset_type.category.id}",
+        layer_label=asset.asset_type.category.name,
+        layer_color=(
+            asset.asset_type.category.color or ASSET_LAYER_FALLBACK_COLOR
+        ),
+        item_type=asset.asset_type.name,
+        condition_status=asset.condition_status,
         title=asset.name,
         subtitle=build_asset_subtitle(asset),
         status=asset.status,

@@ -936,7 +936,7 @@ def test_send_admin_feedback_rejects_requirement_specific_confirmation(
     assert "Sí, envíalo" in attempted.json()["messages"][-1]["content"]
 
 
-def test_send_admin_feedback_changed_payload_requires_new_confirmation(
+def test_send_admin_feedback_changed_payload_keeps_active_confirmation(
     client,
     feedback_assistant_user,
     db,
@@ -985,11 +985,15 @@ def test_send_admin_feedback_changed_payload_requires_new_confirmation(
         headers=headers_for(user),
     ).json()
 
-    client.post(
+    proposed = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "Envía este error al equipo"},
         headers=headers_for(user),
     )
+    assert proposed.status_code == 200
+    original_pending = json.loads(
+        db.get(AssistantConversation, conversation["id"]).state or "{}"
+    )["pending_confirmation"]
     changed = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
         json={"content": "Confirmo"},
@@ -1007,7 +1011,8 @@ def test_send_admin_feedback_changed_payload_requires_new_confirmation(
     )
     pending = state["pending_confirmation"]
     assert pending["tool"] == "send_admin_feedback"
-    assert pending["input"]["description"] == changed_input["description"]
+    assert pending["confirmation_id"] == original_pending["confirmation_id"]
+    assert pending["input"]["description"] == proposed_input["description"]
 
 
 def test_send_admin_feedback_cancellation_phrase_is_unambiguous():

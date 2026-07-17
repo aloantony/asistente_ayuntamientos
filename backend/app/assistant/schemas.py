@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.organizations.schemas import OrganizationSummary
 
@@ -69,6 +69,8 @@ class AssistantStatusRead(BaseModel):
     realtime_voice_enabled: bool = False
     realtime_voice_provider: Literal["openai"] | None = None
     realtime_voice_model: str | None = None
+    web_page_reader_enabled: bool = False
+    realtime_web_page_reader_enabled: bool = False
     tools: list["AssistantToolRead"] = []
 
 
@@ -87,6 +89,8 @@ class AssistantToolRead(BaseModel):
     label: str
     read_only: bool
     domain: str
+    side_effect: Literal["none", "database_write"]
+    approval_policy: Literal["never", "explicit"]
     required_permission: str | None = None
 
 
@@ -98,11 +102,34 @@ class AssistantActionRead(BaseModel):
     result: str
 
 
+class AssistantMessageAttachmentRead(BaseModel):
+    id: int
+    document_id: int
+    project_id: int
+    project_name: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    context_status: Literal[
+        "ready",
+        "empty",
+        "unsupported",
+        "vision_unavailable",
+        "too_large",
+        "unavailable",
+        "failed",
+    ]
+    context_char_count: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AssistantMessageRead(BaseModel):
     id: int
     role: Literal["user", "assistant"]
     content: str
-    actions: list[AssistantActionRead] = []
+    actions: list[AssistantActionRead] = Field(default_factory=list)
+    attachments: list[AssistantMessageAttachmentRead] = Field(default_factory=list)
     agent_key: str | None = None
     routing: dict | None = None
     created_at: datetime
@@ -242,8 +269,24 @@ class AssistantConversationFolderUpdate(BaseModel):
 class AssistantUserMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=20000)
     input_mode: Literal["text", "voice"] = "text"
+    attachment_ids: list[int] = Field(default_factory=list, max_length=10)
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def validate_attachment_ids(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("attachment_ids must be unique")
+        if any(document_id < 1 for document_id in value):
+            raise ValueError("attachment_ids must contain positive integers")
+        return value
+
+    @model_validator(mode="after")
+    def validate_attachments_are_text_only(self):
+        if self.attachment_ids and self.input_mode != "text":
+            raise ValueError("attachments are supported only for text input")
+        return self
 
 
 class AssistantMemoryUserSummary(BaseModel):

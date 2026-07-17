@@ -1,6 +1,6 @@
 # Runtime local con suscripción Codex
 
-Actualizado: 2026-07-16.
+Actualizado: 2026-07-17.
 
 ## Alcance
 
@@ -35,6 +35,10 @@ La API `dynamicTools` es experimental y requiere
 `capabilities.experimentalApi=true`. Este bridge se ha implementado y validado
 contra `codex-cli 0.144.4`; no actualices el CLI sin volver a ejecutar las
 pruebas de protocolo y los flujos completos del asistente.
+
+En el entorno local del 2026-07-17, `codex-cli 0.144.5` superó el health check y
+una finalización real mínima mediante `app-server`; esto acredita el smoke test,
+no sustituye la suite de protocolo completa fijada todavía a `0.144.4`.
 
 ## Preparación local
 
@@ -91,9 +95,9 @@ El binario y el `CODEX_SUBSCRIPTION_HOME` deben existir dentro del mismo entorno
 de ejecución que el backend. La imagen Docker estándar no incluye Codex ni debe
 montar el `~/.codex` personal. El sidecar/socket descrito como posible evolución
 todavía **no está implementado** y `app-server` no debe exponerse por una
-interfaz de red pública. Para la evaluación actual, arranca solo PostgreSQL y
-Redis en Docker y ejecuta el backend en el host aislado donde existen el CLI y
-el hogar dedicado.
+interfaz de red pública. Se puede ejecutar el backend en el host o añadir el
+override local y explícito descrito más abajo; el Compose base continúa sin
+credenciales ni binarios del host.
 
 ### Arranque ejecutable con backend en el host
 
@@ -129,8 +133,53 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000 \
   npm --prefix frontend run dev -- --hostname 127.0.0.1 --port 3000
 ```
 
-No uses `docker compose up --build` para esta modalidad: el backend del
-contenedor estándar no ve ni el binario ni el hogar Codex del host.
+No uses únicamente `docker compose up --build` para esta modalidad: el backend
+del contenedor estándar no ve ni el binario ni el hogar Codex del host.
+
+### Alternativa local con Docker Compose
+
+El override `docker-compose.codex-subscription.yml` monta exclusivamente la
+distribución nativa de Codex y el hogar dedicado; nunca monta `~/.codex`. Ejecuta
+backend y worker con el mismo UID/GID propietario de ese hogar, porque el bridge
+rechaza credenciales que pertenezcan a otro usuario. Configura además:
+
+```dotenv
+CODEX_SUBSCRIPTION_COMMAND=/opt/codex/bin/codex
+CODEX_SUBSCRIPTION_HOME=/home/usuario/.codex-asistente-ayuntamientos
+CODEX_SUBSCRIPTION_HOST_VENDOR_PATH=/ruta/a/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl
+CODEX_SUBSCRIPTION_CONTAINER_UID=1000
+CODEX_SUBSCRIPTION_CONTAINER_GID=1000
+```
+
+La ruta vendor debe proceder de la misma instalación de Codex que se verificó
+en el host y contener `bin/codex`, `codex-path` y `codex-resources`. Antes del
+primer arranque, entrega el volumen documental al UID/GID configurado:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.codex-subscription.yml \
+  run --rm -T --no-deps --user 0:0 backend \
+  chown -R 1000:1000 /var/lib/asistente_ayuntamientos/documents
+```
+
+Después reconstruye, migra y arranca siempre con ambos archivos:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.codex-subscription.yml build backend worker frontend
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.codex-subscription.yml run --rm -T --no-deps backend \
+  alembic -c alembic.ini upgrade head
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.codex-subscription.yml up -d backend worker frontend
+```
+
+El override es solo para desarrollo local. En producción no deben montarse
+tokens OAuth ni usarse credenciales de una suscripción personal.
 
 Comprueba el estado con un usuario que tenga `assistant.use`:
 

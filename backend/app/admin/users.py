@@ -23,6 +23,7 @@ from app.maintenance.guards import (
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import organization_users
 from app.projects.models import project_users
+from app.rbac.locking import lock_authorization_graph
 from app.rbac.models import Group, user_groups
 from app.api.routes.auth import set_session_cookie
 from app.core.security import create_access_token, hash_password
@@ -233,6 +234,7 @@ def delete_admin_user(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AdminUserDeleteResponse:
+    lock_authorization_graph(db)
     require_users_manage(db, current_user)
     # Maintenance assignment and audit writers take this advisory lock before
     # locking User rows. Keep the same order to avoid a User/advisory deadlock.

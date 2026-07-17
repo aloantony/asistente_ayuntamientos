@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.documents.models import Document
 from app.documents.schemas import DocumentRead, DocumentUpdate
+from app.documents.service import document_from_stored_upload
 from app.documents.storage import (
     DocumentTooLargeError,
     EmptyDocumentError,
@@ -114,17 +115,9 @@ def upload_project_document(
             detail="Invalid document storage key",
         ) from None
 
-    document = Document(
-        organization_id=project.organization_id,
-        project_id=project.id,
-        original_filename=stored_upload.original_filename,
-        stored_filename=stored_upload.stored_filename,
-        storage_backend=stored_upload.storage_backend,
-        storage_key=stored_upload.storage_key,
-        content_type=stored_upload.content_type,
-        size_bytes=stored_upload.size_bytes,
-        checksum_sha256=stored_upload.checksum_sha256,
-        status="active",
+    document = document_from_stored_upload(
+        project=project,
+        stored_upload=stored_upload,
         uploaded_by_id=current_user.id,
     )
     db.add(document)

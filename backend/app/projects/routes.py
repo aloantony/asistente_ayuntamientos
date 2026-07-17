@@ -18,6 +18,7 @@ from app.projects.access import (
 )
 from app.projects.models import Project, project_groups, project_users
 from app.projects.schemas import ProjectCreate, ProjectRead, ProjectUpdate
+from app.rbac.locking import lock_authorization_graph
 from app.rbac.models import Group
 from app.rbac.permissions import has_permission
 from app.users.models import User
@@ -168,6 +169,7 @@ def assign_user_to_project(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Project:
+    lock_authorization_graph(db)
     project, user = ensure_project_and_user_exist(
         db,
         project_id=project_id,
@@ -205,6 +207,7 @@ def remove_user_from_project(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Project:
+    lock_authorization_graph(db)
     project, _ = ensure_project_and_user_exist(
         db,
         project_id=project_id,
@@ -241,6 +244,7 @@ def assign_group_to_project(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Project:
+    lock_authorization_graph(db)
     project, group = ensure_project_and_group_exist(
         db,
         project_id=project_id,
@@ -278,6 +282,7 @@ def remove_group_from_project(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Project:
+    lock_authorization_graph(db)
     project, _ = ensure_project_and_group_exist(
         db,
         project_id=project_id,

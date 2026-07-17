@@ -1,0 +1,22 @@
+services:
+  backend:
+    user: "${CODEX_SUBSCRIPTION_CONTAINER_UID:-1000}:${CODEX_SUBSCRIPTION_CONTAINER_GID:-1000}"
+    volumes:
+      - type: bind
+        source: ${CODEX_SUBSCRIPTION_HOST_VENDOR_PATH:?Set CODEX_SUBSCRIPTION_HOST_VENDOR_PATH to the Codex platform vendor directory}
+        target: /opt/codex
+        read_only: true
+      - type: bind
+        source: ${CODEX_SUBSCRIPTION_HOME:?Set CODEX_SUBSCRIPTION_HOME to the dedicated Codex home}
+        target: ${CODEX_SUBSCRIPTION_HOME:?Set CODEX_SUBSCRIPTION_HOME to the dedicated Codex home}
+
+  worker:
+    user: "${CODEX_SUBSCRIPTION_CONTAINER_UID:-1000}:${CODEX_SUBSCRIPTION_CONTAINER_GID:-1000}"
+    volumes:
+      - type: bind
+        source: ${CODEX_SUBSCRIPTION_HOST_VENDOR_PATH:?Set CODEX_SUBSCRIPTION_HOST_VENDOR_PATH to the Codex platform vendor directory}
+        target: /opt/codex
+        read_only: true
+      - type: bind
+        source: ${CODEX_SUBSCRIPTION_HOME:?Set CODEX_SUBSCRIPTION_HOME to the dedicated Codex home}
+        target: ${CODEX_SUBSCRIPTION_HOME:?Set CODEX_SUBSCRIPTION_HOME to the dedicated Codex home}
