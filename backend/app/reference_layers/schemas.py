@@ -74,11 +74,27 @@ class ReferenceLayerRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ReferenceLayerStyleRead(BaseModel):
+    id: int
+    layer_id: int
+    source_key: str
+    title: str
+    description: str | None
+    sort_order: int
+    is_default: bool
+    legend_available: bool = False
+    status: str
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ReferenceCatalogRead(BaseModel):
     snapshot: ReferenceCatalogSnapshotRead
     organization_id: int | None
     services: list[ReferenceServiceRead]
     layers: list[ReferenceLayerRead]
+    styles: list[ReferenceLayerStyleRead]
 
 
 class ReferenceLayerSettingUpdate(BaseModel):
@@ -112,6 +128,7 @@ class ReferenceCatalogSyncPlanRead(BaseModel):
     service_count: int
     group_count: int
     layer_count: int
+    style_count: int
     unresolved_count: int
     new_services: list[str]
     updated_services: list[str]
@@ -119,5 +136,8 @@ class ReferenceCatalogSyncPlanRead(BaseModel):
     new_layers: list[str]
     updated_layers: list[str]
     missing_layers: list[str]
+    new_styles: list[str]
+    updated_styles: list[str]
+    missing_styles: list[str]
     unchanged_count: int
     blocking_issues: list[str]
