@@ -54,6 +54,10 @@ from app.ordinances.embeddings import (
     EmbeddingWorkerCleanupError,
     supervised_embedding_cleanup_margin_seconds,
 )
+from app.ordinances.catalog import (
+    OrdinanceCorpusFilters,
+    decode_ordinance_catalog_cursor,
+)
 from app.rbac.permissions import has_permission
 from app.requirements.models import Requirement
 from app.users.models import User
@@ -231,6 +235,14 @@ ACTION_TO_DEPARTMENT = {
 WORKFLOW_ACTIONS = frozenset(
     {ANALYZE_ORDINANCE_CORPUS_ACTION}
 )
+ORDINANCE_TASK_ACTIONS = frozenset(
+    {
+        ANALYZE_ORDINANCE_CORPUS_ACTION,
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+    }
+)
 ORDINANCE_ANALYSIS_RQ_JOB_TIMEOUT_SECONDS = 15 * 60
 ORDINANCE_ANALYSIS_RQ_RETRY_INTERVALS = [10, 30, 120]
 ORDINANCE_ANALYSIS_ACTIVE_LEASE_SECONDS = (
@@ -335,16 +347,56 @@ def require_task_result_access(
 ) -> None:
     """Apply capability-specific checks before returning persisted results."""
 
-    if task.requested_action != ANALYZE_ORDINANCE_CORPUS_ACTION:
+    if task.requested_action not in ORDINANCE_TASK_ACTIONS:
         return
     try:
-        filters = ordinance_analysis_filters_from_task(task)
+        include_pending = _ordinance_task_includes_pending(task)
     except ValueError as error:
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=str(error),
         ) from error
-    require_ordinance_analysis_access(db, current_user, filters)
+    require_ordinance_analysis_access(
+        db,
+        current_user,
+        OrdinanceCorpusFilters(include_pending=include_pending),
+    )
+
+
+def _ordinance_task_includes_pending(task: AgentOfficeTask) -> bool:
+    if task.requested_action == ANALYZE_ORDINANCE_CORPUS_ACTION:
+        return ordinance_analysis_filters_from_task(task).include_pending
+    task_input = task.input
+    include_pending = task_input.get("include_pending", False)
+    if not isinstance(include_pending, bool):
+        raise ValueError("include_pending debe ser booleano")
+    cursor = task_input.get("cursor")
+    if cursor is not None:
+        if task.requested_action != "list_ordinance_catalog":
+            raise ValueError("cursor no está permitido para esta acción")
+        if not isinstance(cursor, str):
+            raise ValueError("cursor debe ser texto")
+        cursor_payload = decode_ordinance_catalog_cursor(cursor)
+        cursor_filters = cursor_payload.get("filters")
+        if not isinstance(cursor_filters, dict):
+            raise ValueError("el cursor no contiene filtros válidos")
+        cursor_include_pending = cursor_filters.get(
+            "include_pending",
+            False,
+        )
+        if not isinstance(cursor_include_pending, bool):
+            raise ValueError("el cursor contiene filtros no válidos")
+        include_pending = include_pending or cursor_include_pending
+    result_filters = task.result.get("filters")
+    if isinstance(result_filters, dict):
+        result_include_pending = result_filters.get(
+            "include_pending",
+            False,
+        )
+        if not isinstance(result_include_pending, bool):
+            raise ValueError("el resultado contiene filtros no válidos")
+        include_pending = include_pending or result_include_pending
+    return include_pending
 
 
 def _visible_task_results(
@@ -353,7 +405,7 @@ def _visible_task_results(
     tasks: list[AgentOfficeTask],
 ) -> list[AgentOfficeTask]:
     if not any(
-        task.requested_action == ANALYZE_ORDINANCE_CORPUS_ACTION
+        task.requested_action in ORDINANCE_TASK_ACTIONS
         for task in tasks
     ):
         return tasks
@@ -374,14 +426,14 @@ def _visible_task_results(
     )
     visible: list[AgentOfficeTask] = []
     for task in tasks:
-        if task.requested_action != ANALYZE_ORDINANCE_CORPUS_ACTION:
+        if task.requested_action not in ORDINANCE_TASK_ACTIONS:
             visible.append(task)
             continue
         try:
-            filters = ordinance_analysis_filters_from_task(task)
+            include_pending = _ordinance_task_includes_pending(task)
         except ValueError:
             continue
-        if can_compare and (not filters.include_pending or can_review):
+        if can_compare and (not include_pending or can_review):
             visible.append(task)
     return visible
 
@@ -641,15 +693,8 @@ def create_task(
         source_message_id=source_message_id,
         requested_by_id=current_user.id,
     )
-    if action == ANALYZE_ORDINANCE_CORPUS_ACTION:
-        try:
-            filters = ordinance_analysis_filters_from_task(task)
-        except ValueError as error:
-            raise HTTPException(
-                status_code=http_status.HTTP_400_BAD_REQUEST,
-                detail=str(error),
-            ) from error
-        require_ordinance_analysis_access(db, current_user, filters)
+    if action in ORDINANCE_TASK_ACTIONS:
+        require_task_result_access(db, current_user, task)
     db.add(task)
     db.flush()
     add_task_event(
@@ -875,12 +920,7 @@ def mark_task_queue_failed(
 
 def _tool_input_for_task(task: AgentOfficeTask) -> dict:
     tool_input = dict(task.input)
-    if task.requested_action in {
-        ANALYZE_ORDINANCE_CORPUS_ACTION,
-        "get_ordinance_corpus_manifest",
-        "list_ordinance_catalog",
-        "semantic_search_ordinances",
-    }:
+    if task.requested_action in ORDINANCE_TASK_ACTIONS:
         tool_input.pop("organization_id", None)
     else:
         tool_input["organization_id"] = task.organization_id

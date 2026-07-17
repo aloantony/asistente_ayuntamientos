@@ -32,6 +32,10 @@ from app.ordinances.models import (
     Ordinance,
     OrdinanceLegalChunk,
 )
+from app.ordinances.catalog import (
+    OrdinanceCorpusFilters,
+    encode_ordinance_catalog_cursor,
+)
 
 
 def _seed_analysis_task(
@@ -178,6 +182,49 @@ def test_ordinance_analysis_requires_corpus_permission_when_created(
     assert db.scalar(select(AgentOfficeTask.id)) is None
 
 
+def test_existing_ordinance_task_results_require_compare_permission(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    suffix = uuid.uuid4().hex
+    organization = make_organization(f"Manifest result {suffix}")
+    owner = make_user(full_name=f"Manifest owner {suffix}")
+    viewer = make_user(full_name=f"Manifest viewer {suffix}")
+    grant_permissions(
+        owner,
+        organization,
+        [
+            "agent_office.create",
+            "agent_office.view",
+            "ordinances.compare",
+        ],
+    )
+    grant_permissions(
+        viewer,
+        organization,
+        ["agent_office.view"],
+    )
+    task = create_task(
+        db,
+        owner,
+        organization_id=organization.id,
+        title="Corpus manifest",
+        description="Prepare the internal corpus manifest.",
+        requested_action="get_ordinance_corpus_manifest",
+        approval_policy="never",
+        requires_human_approval=False,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        get_task_for_user(db, viewer, task.id)
+    assert caught.value.status_code == 403
+    assert task.id not in {
+        visible.id for visible in list_tasks_for_user(db, viewer)
+    }
+
+
 def test_pending_analysis_results_require_review_permission(
     db,
     make_user,
@@ -228,6 +275,29 @@ def test_pending_analysis_results_require_review_permission(
             task_id=task.id,
         )
     assert items_error.value.status_code == 403
+
+    pending_cursor = encode_ordinance_catalog_cursor(
+        filters=OrdinanceCorpusFilters(include_pending=True),
+        embedding_model=settings.embeddings_model,
+        snapshot_id="a" * 64,
+        total=0,
+        after_id=0,
+        consumed=0,
+    )
+    catalog_task = create_task(
+        db,
+        owner,
+        organization_id=organization.id,
+        title="Pending catalog page",
+        description="Read a signed page of the review catalog.",
+        requested_action="list_ordinance_catalog",
+        approval_policy="never",
+        requires_human_approval=False,
+        input_payload={"cursor": pending_cursor},
+    )
+    with pytest.raises(HTTPException) as cursor_error:
+        get_task_for_user(db, viewer, catalog_task.id)
+    assert cursor_error.value.status_code == 403
 
 
 def test_ordinance_analysis_rejects_unbounded_inline_execution(
