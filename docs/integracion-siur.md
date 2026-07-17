@@ -113,14 +113,49 @@ Antes de considerar completa la integración se mantendrá una matriz versionada
 
 El sincronizador comparará el catálogo vivo con el último snapshot. Altas, cambios, bajas y elementos no resueltos bloquearán una promoción automática hasta ser revisados; nunca se aceptará como “completo” el subconjunto de once capas del WMC.
 
+## Entrega cartográfica central
+
+La primera entrega WMS expone únicamente tres operaciones tipadas por
+organización e identificador interno de capa:
+
+- teselas PNG `z/x/y` de 256 píxeles en `EPSG:3857`;
+- leyenda PNG del estilo autorizado;
+- identificación en un píxel, limitada a una colección GeoJSON pequeña.
+
+El navegador no puede indicar una URL, un host, un nombre WMS, un `bbox`, un
+CRS, un formato ni parámetros OGC libres. El backend obtiene servicio, capa y
+estilo del snapshot vigente, comprueba `map.view`, pertenencia a la
+organización, estado, capacidad de consulta, compatibilidad con `EPSG:3857` y
+licencia aprobada. Una licencia `pending` o `restricted` no se sirve.
+
+En esta primera política el único origen permitido es HTTPS en
+`idecyl.jcyl.es:443` y las rutas WMS/OWS de sus espacios GeoServer. Cada fallo
+de caché vuelve a resolver DNS, rechaza la respuesta completa si contiene una
+IP no pública y conecta al IP validado conservando TLS/SNI para el host. No se
+siguen redirecciones, no se acepta compresión y se limitan tiempo, concurrencia,
+tipo y bytes. Los errores remotos se convierten en un `502` genérico, sin
+devolver cuerpos, cabeceras, URL ni mensajes del proveedor.
+
+Teselas y leyendas usan Redis como caché central solo si la política del
+servicio es `on_demand` o `mirror`. La clave es un SHA-256 opaco de la versión
+normalizada del catálogo y de identificadores internos; no contiene la URL ni
+los nombres remotos. Se conserva una ventana obsoleta acotada para poder servir
+la última imagen válida cuando SIUR falle temporalmente. Las respuestas llevan
+ETag, caché privada y `nosniff`. La identificación no se almacena.
+
+Esto no es un modo sin Internet municipal: el ayuntamiento sigue necesitando
+conexión con nuestra aplicación. La caché evita que el navegador dependa de una
+segunda conexión directa con SIUR y reduce el impacto de una caída puntual del
+proveedor central.
+
 ## Entregas apiladas
 
 1. Capacidad PostGIS junto a pgvector.
 2. Catálogo genérico, versionado y preferencias por organización.
 3. Adaptador SIUR, fixtures revisados, dry-run y promoción explícita.
-4. Espejo PostGIS de todos los vectores técnica y jurídicamente descargables.
-5. Proxy/caché central para WMS, WMTS y ráster permitidos.
-6. Teselas, leyendas, metadatos, identificación, búsquedas y descargas.
+4. Proxy/caché central WMS para teselas, leyendas e identificación permitidas.
+5. Espejo PostGIS de todos los vectores técnica y jurídicamente descargables.
+6. WMTS, metadatos, búsquedas y descargas.
 7. Árbol completo en Leaflet, más capas municipales y herramientas del asistente.
 8. Detección continua de deriva y pruebas de paridad funcional.
 
