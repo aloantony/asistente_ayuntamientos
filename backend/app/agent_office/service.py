@@ -618,11 +618,13 @@ def mark_task_queue_failed(
 
 def _tool_input_for_task(task: AgentOfficeTask) -> dict:
     tool_input = dict(task.input)
-    if task.requested_action not in {
+    if task.requested_action in {
         "get_ordinance_corpus_manifest",
         "list_ordinance_catalog",
         "semantic_search_ordinances",
     }:
+        tool_input.pop("organization_id", None)
+    else:
         tool_input["organization_id"] = task.organization_id
     if task.requested_action == "semantic_search_ordinances":
         tool_input.setdefault("query", task.description)
