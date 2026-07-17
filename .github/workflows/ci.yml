@@ -119,6 +119,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Run frontend test suite
+        run: npm run test
+
       - name: Type-check frontend
         run: npm run typecheck
 

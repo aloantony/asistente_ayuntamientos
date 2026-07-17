@@ -21,6 +21,7 @@ import {
   completeAssistantRealtimeTurn,
   createAssistantRealtimeSession,
   fetchAssistantAttachmentBlob,
+  isAuthError,
   sendAssistantRealtimeToolCall,
   startAssistantRealtimeTurn,
   streamAssistantMessage,
@@ -538,7 +539,7 @@ export function useAssistantController({
   >([]);
   const [selectedConversation, setSelectedConversation] =
     useState<AssistantConversationDetail | null>(null);
-  const [draftMessage, setDraftMessage] = useState("");
+  const [draftMessage, setDraftMessageState] = useState("");
   const [attachmentProjects, setAttachmentProjects] = useState<Project[]>([]);
   const [availableAttachments, setAvailableAttachments] = useState<
     AssistantAttachmentCandidate[]
@@ -572,6 +573,9 @@ export function useAssistantController({
   // Mirrors the selected conversation id so async callbacks can check
   // whether the user navigated away while a request was in flight.
   const selectedIdRef = useRef<number | null>(null);
+  const selectionGenerationRef = useRef(0);
+  const controllerMountedRef = useRef(true);
+  const draftMessageRef = useRef("");
   const assistantStreamAbortRef = useRef<AbortController | null>(null);
   const speechPlayerRef = useRef<ReturnType<typeof createSpeechPlayer> | null>(
     null,
@@ -607,6 +611,11 @@ export function useAssistantController({
     new Map<number, Promise<string>>(),
   );
   const attachmentPreviewGenerationRef = useRef(0);
+
+  const setDraftMessage = useCallback((value: string) => {
+    draftMessageRef.current = value;
+    setDraftMessageState(value);
+  }, []);
 
   const revokeAttachmentPreviewUrls = useCallback(() => {
     attachmentPreviewGenerationRef.current += 1;
@@ -650,13 +659,14 @@ export function useAssistantController({
     cancelRealtimeDraftsForSession(realtimeSession);
   };
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    controllerMountedRef.current = true;
+    return () => {
+      controllerMountedRef.current = false;
       assistantStreamAbortRef.current?.abort();
       realtimeUnmountCleanupRef.current();
-    },
-    [],
-  );
+    };
+  }, []);
 
   function applySelectedConversation(
     detail: AssistantConversationDetail | null,
@@ -709,6 +719,7 @@ export function useAssistantController({
   }
 
   function clearAssistantState() {
+    selectionGenerationRef.current += 1;
     assistantStreamAbortRef.current?.abort();
     assistantStreamAbortRef.current = null;
     setAssistantStatus(null);
@@ -979,6 +990,7 @@ export function useAssistantController({
   }
 
   function deselectConversation() {
+    selectionGenerationRef.current += 1;
     if (selectedIdRef.current === null) {
       return;
     }
@@ -989,7 +1001,12 @@ export function useAssistantController({
     setAttachmentError("");
   }
 
+  function cancelPendingConversationSelection() {
+    selectionGenerationRef.current += 1;
+  }
+
   async function selectConversation(conversationId: number) {
+    const selectionGeneration = ++selectionGenerationRef.current;
     setAssistantError("");
 
     try {
@@ -998,22 +1015,40 @@ export function useAssistantController({
         getStoredToken(),
         "No se pudo abrir la conversación.",
       );
+      if (
+        !controllerMountedRef.current ||
+        selectionGeneration !== selectionGenerationRef.current
+      ) {
+        return { status: "ignored" } as const;
+      }
       if (selectedIdRef.current !== detail.id) {
         setDraftMessage("");
         setSelectedAttachments([]);
         setAttachmentError("");
       }
       applySelectedConversation(detail);
+      return { status: "selected", conversation: detail } as const;
     } catch (requestError) {
+      if (
+        !controllerMountedRef.current ||
+        selectionGeneration !== selectionGenerationRef.current
+      ) {
+        return { status: "ignored" } as const;
+      }
+      const authenticationFailed = isAuthError(requestError);
       handleRequestError(
         requestError,
         setAssistantError,
         "No se pudo abrir la conversación.",
       );
+      return authenticationFailed
+        ? ({ status: "ignored" } as const)
+        : ({ status: "failed" } as const);
     }
   }
 
   async function createConversation(initialDraft: string) {
+    const selectionGeneration = ++selectionGenerationRef.current;
     setAssistantError("");
 
     try {
@@ -1023,13 +1058,28 @@ export function useAssistantController({
         "No se pudo crear la conversación.",
         { method: "POST", body: JSON.stringify({}) },
       );
+      if (!controllerMountedRef.current) {
+        return detail;
+      }
+      setConversations((existing) => [
+        toSummary(detail),
+        ...existing.filter((conversation) => conversation.id !== detail.id),
+      ]);
+      if (selectionGeneration !== selectionGenerationRef.current) {
+        return detail;
+      }
       setDraftMessage(initialDraft);
       setSelectedAttachments([]);
       setAttachmentError("");
       applySelectedConversation(detail);
-      setConversations((existing) => [toSummary(detail), ...existing]);
       return detail;
     } catch (requestError) {
+      if (
+        !controllerMountedRef.current ||
+        selectionGeneration !== selectionGenerationRef.current
+      ) {
+        return null;
+      }
       handleRequestError(
         requestError,
         setAssistantError,
@@ -1077,6 +1127,7 @@ export function useAssistantController({
       return;
     }
     const conversationId = selectedConversation.id;
+    const selectionGenerationAtTurnStart = selectionGenerationRef.current;
     const abortController = new AbortController();
     assistantStreamAbortRef.current = abortController;
 
@@ -1258,47 +1309,59 @@ export function useAssistantController({
     } catch (requestError) {
       const requestWasAborted =
         abortController.signal.aborted || isAbortError(requestError);
-      // Drop the optimistic echo from this conversation only; the backend
-      // may have persisted the user message, so a reload shows it again.
-      setSelectedConversation((current) =>
-        current && current.id === conversationId
-          ? {
-              ...current,
-              messages: current.messages.filter(
-                (message) => message.id !== -1 && message.id !== -2,
-              ),
-            }
-          : current,
-      );
-      if (selectedIdRef.current === conversationId) {
-        if (usesDraft && !requestWasAborted) {
-          setDraftMessage(content);
-          setSelectedAttachments((current) => {
-            const selectedIds = new Set(
-              current.map((attachment) => attachment.document.id),
-            );
-            return [
-              ...current,
-              ...attachmentsForTurn.filter(
-                (attachment) => !selectedIds.has(attachment.document.id),
-              ),
-            ];
-          });
-        }
-        void selectConversation(conversationId);
-      }
-      if (!requestWasAborted) {
-        handleRequestError(
-          requestError,
-          setAssistantError,
-          "El asistente no ha podido responder.",
+      if (controllerMountedRef.current) {
+        // Drop the optimistic echo from this conversation only; the backend
+        // may have persisted the user message, so a reload shows it again.
+        setSelectedConversation((current) =>
+          current && current.id === conversationId
+            ? {
+                ...current,
+                messages: current.messages.filter(
+                  (message) => message.id !== -1 && message.id !== -2,
+                ),
+              }
+            : current,
         );
+        if (selectedIdRef.current === conversationId) {
+          if (
+            usesDraft &&
+            !requestWasAborted &&
+            draftMessageRef.current.trim().length === 0
+          ) {
+            setDraftMessage(content);
+            setSelectedAttachments((current) => {
+              const selectedIds = new Set(
+                current.map((attachment) => attachment.document.id),
+              );
+              return [
+                ...current,
+                ...attachmentsForTurn.filter(
+                  (attachment) => !selectedIds.has(attachment.document.id),
+                ),
+              ];
+            });
+          }
+          if (
+            selectionGenerationAtTurnStart === selectionGenerationRef.current
+          ) {
+            void selectConversation(conversationId);
+          }
+        }
+        if (!requestWasAborted) {
+          handleRequestError(
+            requestError,
+            setAssistantError,
+            "El asistente no ha podido responder.",
+          );
+        }
       }
     } finally {
       if (assistantStreamAbortRef.current === abortController) {
         assistantStreamAbortRef.current = null;
       }
-      setIsSendingMessage(false);
+      if (controllerMountedRef.current) {
+        setIsSendingMessage(false);
+      }
     }
   }
 
@@ -1364,6 +1427,7 @@ export function useAssistantController({
       return;
     }
     const conversationId = selectedConversation.id;
+    const selectionGenerationAtTurnStart = selectionGenerationRef.current;
     const abortController = new AbortController();
     assistantStreamAbortRef.current = abortController;
 
@@ -1543,35 +1607,43 @@ export function useAssistantController({
     } catch (requestError) {
       const requestWasAborted =
         abortController.signal.aborted || isAbortError(requestError);
-      if (!requestWasAborted) {
-        setVoiceState("error");
-      }
-      setSelectedConversation((current) =>
-        current && current.id === conversationId
-          ? {
-              ...current,
-              messages: current.messages.filter(
-                (message) => message.id !== -1 && message.id !== -2,
-              ),
-            }
-          : current,
-      );
-      if (selectedIdRef.current === conversationId && transcriptReceived) {
-        void selectConversation(conversationId);
-      }
-      if (!requestWasAborted) {
-        handleRequestError(
-          requestError,
-          setAssistantError,
-          "El asistente no ha podido responder.",
+      if (controllerMountedRef.current) {
+        if (!requestWasAborted) {
+          setVoiceState("error");
+        }
+        setSelectedConversation((current) =>
+          current && current.id === conversationId
+            ? {
+                ...current,
+                messages: current.messages.filter(
+                  (message) => message.id !== -1 && message.id !== -2,
+                ),
+              }
+            : current,
         );
+        if (
+          selectedIdRef.current === conversationId &&
+          transcriptReceived &&
+          selectionGenerationAtTurnStart === selectionGenerationRef.current
+        ) {
+          void selectConversation(conversationId);
+        }
+        if (!requestWasAborted) {
+          handleRequestError(
+            requestError,
+            setAssistantError,
+            "El asistente no ha podido responder.",
+          );
+        }
       }
     } finally {
       if (assistantStreamAbortRef.current === abortController) {
         assistantStreamAbortRef.current = null;
       }
-      setIsSendingMessage(false);
-      setVoiceState((current) => (current === "error" ? "error" : "idle"));
+      if (controllerMountedRef.current) {
+        setIsSendingMessage(false);
+        setVoiceState((current) => (current === "error" ? "error" : "idle"));
+      }
     }
   }
 
@@ -3195,6 +3267,7 @@ export function useAssistantController({
         existing.filter((conversation) => conversation.id !== conversationId),
       );
       if (selectedIdRef.current === conversationId) {
+        selectionGenerationRef.current += 1;
         applySelectedConversation(null);
         setDraftMessage("");
       }
@@ -3411,6 +3484,7 @@ export function useAssistantController({
     openAttachment,
     toggleIncludeArchivedConversations,
     selectConversation,
+    cancelPendingConversationSelection,
     deselectConversation,
     startConversation,
     startConversationWithDraft,

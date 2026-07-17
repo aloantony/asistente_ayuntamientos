@@ -770,11 +770,12 @@ export function AssistantPanel({
     assistantStatus?.runtime_healthy === false &&
     assistantStatus.enabled;
   const selectedIsArchived = selectedConversation?.status === "archived";
-  const composerDisabled =
-    isSendingMessage ||
+  const hasSelectedConversation = selectedConversation !== null;
+  const composerInputDisabled =
     assistantDisabled ||
     runtimeHealthFailed ||
     Boolean(selectedIsArchived);
+  const messageSendBlocked = composerInputDisabled || isSendingMessage;
   const emptyThreadMessage = useMemo(
     () =>
       EMPTY_THREAD_MESSAGES[
@@ -853,6 +854,7 @@ export function AssistantPanel({
   );
   const bargeInStreamRef = useRef<MediaStream | null>(null);
   const discardNextAudioRef = useRef(false);
+  const panelMountedRef = useRef(true);
   const wasSpeakingRef = useRef(false);
   // Held synchronously across the getUserMedia await so a concurrent
   // startListening (e.g. tap-to-interrupt firing alongside the isSpeaking
@@ -867,6 +869,8 @@ export function AssistantPanel({
   );
   const audioChunksRef = useRef<Blob[]>([]);
   const draftMessageRef = useRef(draftMessage);
+  const onStopRealtimeVoiceRef = useRef(onStopRealtimeVoice);
+  const onStopSpeakingRef = useRef(onStopSpeaking);
   const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -1029,12 +1033,16 @@ export function AssistantPanel({
   }, [conversationContextMenu]);
 
   useEffect(() => {
-    if (!selectedConversation || composerDisabled) {
+    if (!hasSelectedConversation || composerInputDisabled) {
       return;
     }
 
     messageTextareaRef.current?.focus({ preventScroll: true });
-  }, [selectedConversation?.id, composerDisabled]);
+  }, [
+    composerInputDisabled,
+    hasSelectedConversation,
+    selectedConversation?.id,
+  ]);
 
   useEffect(() => {
     const canCaptureAudio =
@@ -1088,15 +1096,26 @@ export function AssistantPanel({
   }
 
   useEffect(() => {
+    panelMountedRef.current = true;
     return () => {
+      panelMountedRef.current = false;
+      discardNextAudioRef.current = true;
+      audioChunksRef.current = [];
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== "inactive") {
         recorder.stop();
       }
       releaseAudioStream();
       stopBargeInMonitoring();
+      onStopRealtimeVoiceRef.current({ interrupted: true });
+      onStopSpeakingRef.current();
     };
   }, []);
+
+  useEffect(() => {
+    onStopRealtimeVoiceRef.current = onStopRealtimeVoice;
+    onStopSpeakingRef.current = onStopSpeaking;
+  }, [onStopRealtimeVoice, onStopSpeaking]);
 
   useEffect(() => {
     if (!voiceModeEnabled || assistantError) {
@@ -1126,7 +1145,7 @@ export function AssistantPanel({
       !isSpeaking &&
       !realtimeVoiceActive &&
       !isSendingMessage &&
-      !composerDisabled &&
+      !composerInputDisabled &&
       document.visibilityState !== "hidden"
     ) {
       if (useRealtimeVoice) {
@@ -1136,7 +1155,7 @@ export function AssistantPanel({
       }
     }
   }, [
-    composerDisabled,
+    composerInputDisabled,
     handsFreeEnabled,
     isListening,
     isSendingMessage,
@@ -1194,13 +1213,13 @@ export function AssistantPanel({
       !isListening &&
       !isTranscribingVoice &&
       !isSendingMessage &&
-      !composerDisabled &&
+      !composerInputDisabled &&
       document.visibilityState !== "hidden"
     ) {
       void startListening({ force: true, loop: true });
     }
   }, [
-    composerDisabled,
+    composerInputDisabled,
     handsFreeEnabled,
     isListening,
     isSendingMessage,
@@ -1215,9 +1234,9 @@ export function AssistantPanel({
   // mic open and, the moment the user talks over it, cut the playback and start
   // listening — the same outcome as tapping the mic, but hands-free.
   useEffect(() => {
-    // Note: intentionally NOT gated on composerDisabled — the assistant starts
-    // speaking while the response is still streaming (isSendingMessage true),
-    // which is exactly when the user needs to be able to cut in.
+    // Note: intentionally NOT gated on composerInputDisabled — the assistant
+    // starts speaking while the response is still streaming (isSendingMessage
+    // true), which is exactly when the user needs to be able to cut in.
     if (
       !isSpeaking ||
       !voiceModeEnabled ||
@@ -1280,6 +1299,9 @@ export function AssistantPanel({
     setIsTranscribingVoice(true);
     try {
       const transcript = (await onTranscribeAudio(audio)).trim();
+      if (!panelMountedRef.current) {
+        return;
+      }
       if (!transcript) {
         setVoiceError(
           "No he detectado texto en el audio. Prueba con una nota un poco más clara.",
@@ -1292,14 +1314,18 @@ export function AssistantPanel({
       );
       messageTextareaRef.current?.focus({ preventScroll: true });
     } catch (error) {
-      setVoiceLoopActive(false);
-      setVoiceError(
-        error instanceof Error
-          ? error.message
-          : "No se pudo transcribir el audio. Inténtalo de nuevo.",
-      );
+      if (panelMountedRef.current) {
+        setVoiceLoopActive(false);
+        setVoiceError(
+          error instanceof Error
+            ? error.message
+            : "No se pudo transcribir el audio. Inténtalo de nuevo.",
+        );
+      }
     } finally {
-      setIsTranscribingVoice(false);
+      if (panelMountedRef.current) {
+        setIsTranscribingVoice(false);
+      }
     }
   }
 
@@ -1325,6 +1351,10 @@ export function AssistantPanel({
       const stream = await navigator.mediaDevices.getUserMedia(
         AUDIO_CAPTURE_CONSTRAINTS,
       );
+      if (!panelMountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       const recorder = new MediaRecorder(stream);
       mediaStreamRef.current = stream;
       audioChunksRef.current = [];
@@ -1342,8 +1372,10 @@ export function AssistantPanel({
         audioChunksRef.current = [];
         mediaRecorderRef.current = null;
         releaseAudioStream();
-        setIsListening(false);
-        if (!shouldDiscardAudio) {
+        if (panelMountedRef.current) {
+          setIsListening(false);
+        }
+        if (!shouldDiscardAudio && panelMountedRef.current) {
           void appendTranscribedAudio(audio);
         }
       };
@@ -1364,11 +1396,13 @@ export function AssistantPanel({
     } catch {
       releaseAudioStream();
       mediaRecorderRef.current = null;
-      setIsListening(false);
-      setVoiceLoopActive(false);
-      setVoiceError(
-        "No se pudo usar el microfono. Revisa los permisos del navegador.",
-      );
+      if (panelMountedRef.current) {
+        setIsListening(false);
+        setVoiceLoopActive(false);
+        setVoiceError(
+          "No se pudo usar el microfono. Revisa los permisos del navegador.",
+        );
+      }
     } finally {
       isArmingMicRef.current = false;
     }
@@ -1405,7 +1439,7 @@ export function AssistantPanel({
 
     event.preventDefault();
     if (
-      composerDisabled ||
+      messageSendBlocked ||
       attachmentSendBlocked ||
       draftMessage.trim().length === 0
     ) {
@@ -1419,7 +1453,7 @@ export function AssistantPanel({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (attachmentSendBlocked) {
+    if (messageSendBlocked || attachmentSendBlocked) {
       return;
     }
     stopListening({ discardAudio: true });
@@ -2289,7 +2323,7 @@ export function AssistantPanel({
               ) : null}
 
               <div className="assistant-composer-stack">
-                {!composerDisabled ? (
+                {!composerInputDisabled ? (
                   <div className="assistant-chips">
                     {SUGGESTED_PROMPTS.map((prompt) => (
                       <button
@@ -2437,7 +2471,7 @@ export function AssistantPanel({
                     onKeyDown={handleComposerKeyDown}
                     placeholder="Escribe tu consulta o pide un borrador…"
                     rows={3}
-                    disabled={composerDisabled}
+                    disabled={composerInputDisabled}
                   />
                   <div className="assistant-composer-foot">
                     <div className="assistant-composer-context">
@@ -2449,7 +2483,9 @@ export function AssistantPanel({
                             ? "assistant-attach-button active"
                             : "assistant-attach-button"
                         }
-                        disabled={composerDisabled || attachmentsBlockedByVoice}
+                        disabled={
+                          messageSendBlocked || attachmentsBlockedByVoice
+                        }
                         onClick={toggleAttachmentPicker}
                         title={
                           attachmentsBlockedByVoice
@@ -2479,7 +2515,7 @@ export function AssistantPanel({
                           }
                           aria-pressed={voiceModeEnabled}
                           onClick={() => onVoiceModeChange(!voiceModeEnabled)}
-                          disabled={composerDisabled}
+                          disabled={messageSendBlocked}
                         >
                           {voiceModeEnabled
                             ? realtimeVoiceAvailable
@@ -2509,7 +2545,7 @@ export function AssistantPanel({
                             (useRealtimeVoice
                               ? !realtimeSupported
                               : !speechSupported) ||
-                            composerDisabled ||
+                            messageSendBlocked ||
                             isTranscribingVoice ||
                             (isSpeaking && !(voiceModeEnabled && handsFreeEnabled))
                           }
@@ -2544,7 +2580,7 @@ export function AssistantPanel({
                         <button
                           type="submit"
                           disabled={
-                            composerDisabled ||
+                            messageSendBlocked ||
                             attachmentSendBlocked ||
                             draftMessage.trim().length === 0
                           }

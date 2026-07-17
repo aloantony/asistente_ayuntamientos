@@ -22,6 +22,7 @@ import {
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
+import { AssistantControllerProvider } from "../lib/AssistantControllerContext";
 
 const ONBOARDING_STORAGE_PREFIX = "anacleto:onboarding:v1";
 const SIDEBAR_STORAGE_KEY = "anacleto:sidebar:v1";
@@ -208,7 +209,7 @@ function getOnboardingStorageKey(userId: number) {
   return `${ONBOARDING_STORAGE_PREFIX}:${userId}`;
 }
 
-export default function AppLayout({
+function AppLayoutContent({
   children,
 }: Readonly<{
   children: ReactNode;
@@ -760,5 +761,17 @@ export default function AppLayout({
         </main>
       </div>
     </div>
+  );
+}
+
+export default function AppLayout({
+  children,
+}: Readonly<{
+  children: ReactNode;
+}>) {
+  return (
+    <AssistantControllerProvider>
+      <AppLayoutContent>{children}</AppLayoutContent>
+    </AssistantControllerProvider>
   );
 }

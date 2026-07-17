@@ -5,7 +5,7 @@ import { Suspense, useEffect, useRef } from "react";
 import { AssistantPanel } from "../../components/AssistantPanel";
 import { userHasPermission } from "../../components/types";
 import { useSession } from "../../lib/session";
-import { useAssistantController } from "../../lib/useAssistantController";
+import { useAssistantControllerContext } from "../../lib/AssistantControllerContext";
 
 function parseConversationParam(value: string | null) {
   const parsed = value ? Number.parseInt(value, 10) : Number.NaN;
@@ -13,18 +13,17 @@ function parseConversationParam(value: string | null) {
 }
 
 function AsistentePageInner() {
-  const { user, getStoredToken, handleRequestError } = useSession();
+  const { user } = useSession();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const assistantController = useAssistantController({
-    getStoredToken,
-    handleRequestError,
-  });
+  const assistantController = useAssistantControllerContext();
 
   const canUseAssistant = Boolean(
     user && userHasPermission(user, "assistant.use"),
   );
-  // La URL (?c=N) es la única fuente de verdad de la conversación abierta.
+  // La URL (?c=N) es la fuente de verdad de la conversación abierta. Al volver
+  // desde otra sección se admite una única excepción: recuperar la selección
+  // que sigue viva en el layout persistente y volver a reflejarla en la URL.
   const urlConversationId = parseConversationParam(searchParams.get("c"));
   const selectedId = assistantController.selectedConversation?.id ?? null;
   // Espejo de la selección para que el efecto de la URL no tenga que volver a
@@ -32,14 +31,36 @@ function AsistentePageInner() {
   const selectedIdRef = useRef<number | null>(null);
   selectedIdRef.current = selectedId;
   // Último id SOLICITADO (no resuelto): comparar contra él permite volver a
-  // pedir la conversación anterior aunque otra petición siga en vuelo.
-  const lastRequestedIdRef = useRef<number | null>(null);
+  // pedir la conversación anterior aunque otra petición siga en vuelo. Si el
+  // layout ya conserva exactamente el chat de la URL, se considera resuelto
+  // para no sustituir un stream activo por un detalle GET potencialmente viejo.
+  const lastRequestedIdRef = useRef<number | null>(
+    urlConversationId !== null && urlConversationId === selectedId
+      ? urlConversationId
+      : null,
+  );
+  const restorePersistedSelectionRef = useRef(
+    urlConversationId === null &&
+      selectedId !== null &&
+      !searchParams.get("q")?.trim(),
+  );
+  const pendingUrlConversationIdRef = useRef<number | null>(null);
+  const pageMountedRef = useRef(true);
+
+  useEffect(() => {
+    pageMountedRef.current = true;
+    return () => {
+      pageMountedRef.current = false;
+    };
+  }, []);
 
   // El panel de inicio (y la barra superior) abren el asistente con el texto ya
   // escrito vía ?q=. Se vuelca una sola vez en el borrador y se limpia el
   // parámetro de la URL para que no reaparezca al navegar atrás/adelante.
   const seededQueryRef = useRef<string | null>(null);
   const seededConversationStartedRef = useRef(false);
+  const seededPreviousConversationIdRef = useRef<number | null>(null);
+  const seededNavigationPendingRef = useRef(false);
   useEffect(() => {
     if (seededQueryRef.current !== null) {
       return;
@@ -49,6 +70,11 @@ function AsistentePageInner() {
       return;
     }
     seededQueryRef.current = seededQuery;
+    seededPreviousConversationIdRef.current = selectedIdRef.current;
+    seededNavigationPendingRef.current = true;
+    if (selectedIdRef.current !== null) {
+      assistantController.deselectConversation();
+    }
     assistantController.setDraftMessage(seededQuery);
     const params = new URLSearchParams(searchParams.toString());
     params.delete("q");
@@ -78,7 +104,14 @@ function AsistentePageInner() {
     }
 
     seededConversationStartedRef.current = true;
-    void assistantController.startConversationWithDraft(seededQuery);
+    void assistantController
+      .startConversationWithDraft(seededQuery)
+      .then((conversation) => {
+        if (!conversation) {
+          seededNavigationPendingRef.current = false;
+          seededPreviousConversationIdRef.current = null;
+        }
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     assistantController.assistantStatus,
@@ -103,11 +136,52 @@ function AsistentePageInner() {
     }
 
     if (urlConversationId !== null) {
-      if (urlConversationId !== lastRequestedIdRef.current) {
+      if (urlConversationId === selectedIdRef.current) {
+        if (
+          pendingUrlConversationIdRef.current !== null &&
+          pendingUrlConversationIdRef.current !== urlConversationId
+        ) {
+          assistantController.cancelPendingConversationSelection();
+        }
         lastRequestedIdRef.current = urlConversationId;
-        void assistantController.selectConversation(urlConversationId);
+        pendingUrlConversationIdRef.current = null;
+      } else if (urlConversationId !== lastRequestedIdRef.current) {
+        lastRequestedIdRef.current = urlConversationId;
+        pendingUrlConversationIdRef.current = urlConversationId;
+        void assistantController
+          .selectConversation(urlConversationId)
+          .then((selection) => {
+            if (
+              !pageMountedRef.current ||
+              pendingUrlConversationIdRef.current !== urlConversationId ||
+              selection.status !== "failed"
+            ) {
+              return;
+            }
+
+            pendingUrlConversationIdRef.current = null;
+            lastRequestedIdRef.current = null;
+            const fallbackId = selectedIdRef.current;
+            router.replace(
+              fallbackId === null
+                ? "/asistente"
+                : `/asistente?c=${fallbackId}`,
+              { scroll: false },
+            );
+          });
       }
     } else {
+      if (seededNavigationPendingRef.current) {
+        return;
+      }
+      if (
+        restorePersistedSelectionRef.current &&
+        selectedIdRef.current !== null
+      ) {
+        restorePersistedSelectionRef.current = false;
+        return;
+      }
+      pendingUrlConversationIdRef.current = null;
       lastRequestedIdRef.current = null;
       if (selectedIdRef.current !== null) {
         assistantController.deselectConversation();
@@ -122,6 +196,24 @@ function AsistentePageInner() {
   useEffect(() => {
     const previousSelectedId = previousSelectedIdRef.current;
     previousSelectedIdRef.current = selectedId;
+
+    if (seededNavigationPendingRef.current) {
+      if (
+        selectedId === null ||
+        selectedId === seededPreviousConversationIdRef.current
+      ) {
+        return;
+      }
+      seededNavigationPendingRef.current = false;
+      seededPreviousConversationIdRef.current = null;
+    }
+
+    if (pendingUrlConversationIdRef.current !== null) {
+      if (selectedId === pendingUrlConversationIdRef.current) {
+        pendingUrlConversationIdRef.current = null;
+      }
+      return;
+    }
 
     if (selectedId !== null) {
       if (selectedId !== urlConversationId) {
@@ -157,6 +249,20 @@ function AsistentePageInner() {
           <p className="eyebrow">Asistente</p>
           <h2>Acceso restringido</h2>
           <p className="muted">No tienes permisos para usar el asistente.</p>
+        </section>
+      </div>
+    );
+  }
+
+  if (urlConversationId !== null && selectedId !== urlConversationId) {
+    return (
+      <div className="workspace">
+        <section className="panel">
+          <p className="eyebrow">Asistente</p>
+          <h2>Abriendo conversación…</h2>
+          <p className="muted">
+            Espera un momento mientras recuperamos el historial.
+          </p>
         </section>
       </div>
     );
