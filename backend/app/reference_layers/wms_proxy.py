@@ -106,7 +106,7 @@ def tile_bbox(z: int, x: int, y: int) -> tuple[float, float, float, float]:
         or isinstance(x, bool)
         or isinstance(y, bool)
         or not all(isinstance(value, int) for value in (z, x, y))
-        or not 0 <= z <= 22
+        or not 0 <= z <= 24
         or not 0 <= x < 2**z
         or not 0 <= y < 2**z
     ):

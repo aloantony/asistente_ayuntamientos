@@ -479,6 +479,42 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert "idecyl.jcyl.es" not in serialized
 
 
+def test_catalog_excludes_historical_rows_missing_from_current_snapshot(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    organization = make_organization()
+    viewer = make_user()
+    grant_permissions(viewer, organization, ["map.view"])
+    apply_catalog_definition(db, make_definition())
+    current_snapshot, _ = apply_catalog_definition(
+        db,
+        replace(
+            make_definition(include_overlay=False, version=3),
+            services=(),
+        ),
+    )
+
+    response = client.get(
+        f"/reference-layers/catalog?provider_key=siur&organization_id={organization.id}",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["snapshot"]["id"] == current_snapshot.id
+    assert body["snapshot"]["service_count"] == len(body["services"]) == 0
+    assert body["snapshot"]["group_count"] == 1
+    assert body["snapshot"]["layer_count"] == 0
+    assert [item["source_key"] for item in body["layers"]] == [
+        "group:planning"
+    ]
+    assert body["styles"] == []
+
+
 def test_catalog_requires_an_explicit_provider_and_keeps_providers_isolated(
     client,
     db,

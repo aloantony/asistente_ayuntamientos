@@ -84,7 +84,7 @@ def get_reference_layer_tile(
     request: Request,
     organization_id: Annotated[int, Path(ge=1)],
     layer_id: Annotated[int, Path(ge=1)],
-    z: Annotated[int, Path(ge=0, le=22)],
+    z: Annotated[int, Path(ge=0, le=24)],
     x: Annotated[int, Path(ge=0)],
     y: Annotated[int, Path(ge=0)],
     db: Annotated[Session, Depends(get_db)],
@@ -173,7 +173,7 @@ def get_reference_layer_legend(
 def identify_reference_layer(
     organization_id: Annotated[int, Path(ge=1)],
     layer_id: Annotated[int, Path(ge=1)],
-    z: Annotated[int, Query(ge=0, le=22)],
+    z: Annotated[int, Query(ge=0, le=24)],
     x: Annotated[int, Query(ge=0)],
     y: Annotated[int, Query(ge=0)],
     pixel_x: Annotated[int, Query(ge=0, le=255)],

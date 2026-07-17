@@ -67,14 +67,20 @@ def get_reference_catalog(
     services = list(
         db.scalars(
             select(ReferenceService)
-            .where(ReferenceService.provider_key == snapshot.provider_key)
+            .where(
+                ReferenceService.provider_key == snapshot.provider_key,
+                ReferenceService.last_seen_snapshot_id == snapshot.id,
+            )
             .order_by(ReferenceService.title, ReferenceService.id)
         )
     )
     layers = list(
         db.scalars(
             select(ReferenceLayer)
-            .where(ReferenceLayer.provider_key == snapshot.provider_key)
+            .where(
+                ReferenceLayer.provider_key == snapshot.provider_key,
+                ReferenceLayer.last_seen_snapshot_id == snapshot.id,
+            )
             .order_by(
                 ReferenceLayer.parent_id.asc().nulls_first(),
                 ReferenceLayer.sort_order,
@@ -85,7 +91,10 @@ def get_reference_catalog(
     styles = list(
         db.scalars(
             select(ReferenceLayerStyle)
-            .where(ReferenceLayerStyle.provider_key == snapshot.provider_key)
+            .where(
+                ReferenceLayerStyle.provider_key == snapshot.provider_key,
+                ReferenceLayerStyle.last_seen_snapshot_id == snapshot.id,
+            )
             .order_by(
                 ReferenceLayerStyle.layer_id,
                 ReferenceLayerStyle.sort_order,
