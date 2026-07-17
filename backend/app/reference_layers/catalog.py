@@ -1,7 +1,8 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
+import ipaddress
 import json
 import re
 from typing import Any
@@ -100,6 +101,7 @@ class ReferenceCatalogDefinition:
 class ReferenceCatalogSyncPlan:
     definition: ReferenceCatalogDefinition
     content_sha256: str
+    definition_sha256: str
     new_services: tuple[str, ...]
     updated_services: tuple[str, ...]
     missing_services: tuple[str, ...]
@@ -125,11 +127,45 @@ class ReferenceCatalogSyncPlan:
 def canonical_catalog_sha256(raw_catalog: dict[str, Any]) -> str:
     encoded = json.dumps(
         raw_catalog,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def canonical_definition_sha256(
+    definition: ReferenceCatalogDefinition,
+) -> str:
+    payload = normalized_catalog_definition(definition)
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def normalized_catalog_definition(
+    definition: ReferenceCatalogDefinition,
+) -> dict[str, Any]:
+    payload = {
+        "provider_key": definition.provider_key,
+        "source_url": definition.source_url,
+        "unresolved_count": definition.unresolved_count,
+        "services": sorted(
+            (asdict(service) for service in definition.services),
+            key=lambda service: service["source_key"],
+        ),
+        "layers": sorted(
+            (asdict(layer) for layer in definition.layers),
+            key=lambda layer: layer["source_key"],
+        ),
+    }
+    return _canonical_json_value(payload)
 
 
 def build_catalog_sync_plan(
@@ -142,10 +178,16 @@ def build_catalog_sync_plan(
     except (TypeError, ValueError):
         content_sha256 = "0" * 64
         issues.append("raw_catalog must contain only JSON-compatible values")
+    try:
+        definition_sha256 = canonical_definition_sha256(definition)
+    except (TypeError, ValueError):
+        definition_sha256 = "0" * 64
+        issues.append("catalog definition must contain only JSON-compatible values")
     if issues:
         return ReferenceCatalogSyncPlan(
             definition=definition,
             content_sha256=content_sha256,
+            definition_sha256=definition_sha256,
             new_services=(),
             updated_services=(),
             missing_services=(),
@@ -223,6 +265,7 @@ def build_catalog_sync_plan(
     return ReferenceCatalogSyncPlan(
         definition=definition,
         content_sha256=content_sha256,
+        definition_sha256=definition_sha256,
         new_services=tuple(sorted(new_services)),
         updated_services=tuple(sorted(updated_services)),
         missing_services=tuple(sorted(missing_services)),
@@ -247,6 +290,8 @@ def apply_catalog_definition(
             select(ReferenceCatalogSnapshot).where(
                 ReferenceCatalogSnapshot.provider_key == definition.provider_key,
                 ReferenceCatalogSnapshot.content_sha256 == plan.content_sha256,
+                ReferenceCatalogSnapshot.definition_sha256
+                == plan.definition_sha256,
             )
         )
         if snapshot is None:
@@ -254,7 +299,11 @@ def apply_catalog_definition(
                 provider_key=definition.provider_key,
                 source_url=definition.source_url,
                 content_sha256=plan.content_sha256,
+                definition_sha256=plan.definition_sha256,
                 raw_catalog_json=definition.raw_catalog,
+                normalized_definition_json=normalized_catalog_definition(
+                    definition
+                ),
                 retrieved_at=definition.retrieved_at,
                 service_count=plan.service_count,
                 group_count=plan.group_count,
@@ -265,14 +314,6 @@ def apply_catalog_definition(
             )
             db.add(snapshot)
             db.flush()
-        else:
-            snapshot.source_url = definition.source_url
-            snapshot.raw_catalog_json = definition.raw_catalog
-            snapshot.retrieved_at = definition.retrieved_at
-            snapshot.service_count = plan.service_count
-            snapshot.group_count = plan.group_count
-            snapshot.layer_count = plan.layer_count
-            snapshot.unresolved_count = definition.unresolved_count
 
         services = {
             service.source_key: service
@@ -324,10 +365,10 @@ def apply_catalog_definition(
                 )
                 db.add(layer)
                 layers[item.source_key] = layer
-                db.flush()
             parent = layers.get(item.parent_key) if item.parent_key else None
             service = services.get(item.service_key) if item.service_key else None
             _apply_layer_definition(layer, item, snapshot.id, parent, service)
+            db.flush()
 
         current_snapshots = list(
             db.scalars(
@@ -462,15 +503,43 @@ def validate_catalog_definition(
 
 
 def _safe_http_url(value: str, *, require_https: bool = False) -> bool:
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
     allowed_schemes = {"https"} if require_https else {"http", "https"}
-    return bool(
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if not (
         parsed.scheme in allowed_schemes
-        and parsed.hostname
+        and hostname
         and parsed.username is None
         and parsed.password is None
         and parsed.fragment == ""
-    )
+    ):
+        return False
+    if port is not None and port != {"http": 80, "https": 443}[parsed.scheme]:
+        return False
+    if hostname in {"localhost", "local"} or hostname.endswith(
+        (".localhost", ".local", ".internal")
+    ):
+        return False
+    try:
+        return ipaddress.ip_address(hostname).is_global
+    except ValueError:
+        return True
+
+
+def _canonical_json_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return format(value.normalize(), "f")
+    if isinstance(value, dict):
+        return {str(key): _canonical_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_json_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(f"Unsupported catalog value: {type(value).__name__}")
 
 
 def _valid_zoom_range(min_zoom: int | None, max_zoom: int | None) -> bool:
