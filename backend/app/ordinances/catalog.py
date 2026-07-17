@@ -32,8 +32,16 @@ MAX_CATALOG_PAGE_SIZE = 100
 MAX_CATALOG_CURSOR_CHARS = 4096
 MAX_CATALOG_TEXT_FILTER_CHARS = 255
 CORPUS_SNAPSHOT_SCHEMA_VERSION = 2
+MAX_CATALOG_CURSOR_INTEGER = 9_223_372_036_854_775_807
 
-_POSTGRES_CORPUS_READ_LOCK = """
+_POSTGRES_CATALOG_READ_LOCK = """
+LOCK TABLE
+    municipalities,
+    ordinances,
+    ordinance_legal_chunks
+IN SHARE MODE
+"""
+_POSTGRES_PIPELINE_READ_LOCK = """
 LOCK TABLE
     municipalities,
     ordinances,
@@ -42,6 +50,7 @@ LOCK TABLE
 IN SHARE MODE
 """
 _POSTGRES_CORPUS_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
+_POSTGRES_CORPUS_STATEMENT_TIMEOUT = "SET LOCAL statement_timeout = '10s'"
 
 
 @dataclass(frozen=True)
@@ -89,7 +98,14 @@ def _coherent_corpus_read(
         savepoint = db.begin_nested()
         try:
             db.execute(text(_POSTGRES_CORPUS_LOCK_TIMEOUT))
-            db.execute(text(_POSTGRES_CORPUS_READ_LOCK))
+            db.execute(text(_POSTGRES_CORPUS_STATEMENT_TIMEOUT))
+            filters = kwargs.get("filters") or kwargs.get("options")
+            lock_statement = (
+                _POSTGRES_PIPELINE_READ_LOCK
+                if filters is not None and filters.include_pending
+                else _POSTGRES_CATALOG_READ_LOCK
+            )
+            db.execute(text(lock_statement))
             return operation(db, *args, **kwargs)
         finally:
             if savepoint.is_active:
@@ -263,26 +279,7 @@ def list_ordinance_catalog_from_cursor(
     }
 
 
-def encode_ordinance_catalog_cursor(
-    *,
-    filters: OrdinanceCorpusFilters,
-    embedding_model: str,
-    snapshot_id: str,
-    total: int,
-    after_id: int,
-    consumed: int,
-) -> str:
-    _validate_embedding_model(embedding_model)
-    _validate_filters(filters)
-    payload = {
-        "v": CORPUS_SNAPSHOT_SCHEMA_VERSION,
-        "filters": _serialize_filters(filters),
-        "embedding_model": embedding_model,
-        "snapshot_id": snapshot_id,
-        "total": total,
-        "after_id": after_id,
-        "consumed": consumed,
-    }
+def _encode_ordinance_catalog_cursor_payload(payload: dict[str, Any]) -> str:
     body = urlsafe_b64encode(
         json.dumps(
             payload,
@@ -296,14 +293,57 @@ def encode_ordinance_catalog_cursor(
         b"ordinance-catalog-v2\0" + body,
         hashlib.sha256,
     ).digest()
-    cursor = (
+    return (
         body.decode("ascii")
         + "."
         + urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
     )
-    if len(cursor) > MAX_CATALOG_CURSOR_CHARS:
+
+
+def encode_ordinance_catalog_cursor(
+    *,
+    filters: OrdinanceCorpusFilters,
+    embedding_model: str,
+    snapshot_id: str,
+    total: int,
+    after_id: int,
+    consumed: int,
+) -> str:
+    _validate_embedding_model(embedding_model)
+    _validate_filters(filters)
+    if len(snapshot_id) != 64 or any(
+        character not in "0123456789abcdef" for character in snapshot_id
+    ):
+        raise ValueError("snapshot_id no válido")
+    for value, label in (
+        (total, "total"),
+        (after_id, "after_id"),
+        (consumed, "consumed"),
+    ):
+        if type(value) is not int or value < 0 or value > MAX_CATALOG_CURSOR_INTEGER:
+            raise ValueError(f"{label} no válido")
+    if consumed > total:
+        raise ValueError("consumed no puede superar total")
+    payload = {
+        "v": CORPUS_SNAPSHOT_SCHEMA_VERSION,
+        "filters": _serialize_filters(filters),
+        "embedding_model": embedding_model,
+        "snapshot_id": snapshot_id,
+        "total": total,
+        "after_id": after_id,
+        "consumed": consumed,
+    }
+    largest_page_payload = {
+        **payload,
+        "total": MAX_CATALOG_CURSOR_INTEGER,
+        "after_id": MAX_CATALOG_CURSOR_INTEGER,
+        "consumed": MAX_CATALOG_CURSOR_INTEGER,
+    }
+    if len(_encode_ordinance_catalog_cursor_payload(largest_page_payload)) > (
+        MAX_CATALOG_CURSOR_CHARS
+    ):
         raise ValueError("los filtros generan un cursor que supera el tamaño máximo")
-    return cursor
+    return _encode_ordinance_catalog_cursor_payload(payload)
 
 
 def decode_ordinance_catalog_cursor(cursor: str) -> dict[str, Any]:
@@ -454,11 +494,6 @@ def list_ordinance_catalog(
         )
         for ordinance in ordinances
     ]
-    if _corpus_snapshot_id(db, options, embedding_model) != snapshot_id:
-        raise ValueError(
-            "El corpus cambió durante la lectura de la página; solicita un "
-            "manifiesto nuevo"
-        )
     next_cursor = ordinances[-1].id if has_more and ordinances else None
     return {
         "snapshot_id": snapshot_id,

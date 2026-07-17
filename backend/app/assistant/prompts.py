@@ -126,9 +126,20 @@ def build_system_prompt(
         f"- {organization.name} (id {organization.id})"
         for organization in organizations
     )
+    tool_names = {tool.name for tool in tools}
+    ordinance_coverage = (
+        f"{build_ordinance_coverage_block(db)}\n\n"
+        if tool_names
+        & {
+            "get_ordinance_corpus_manifest",
+            "list_ordinance_catalog",
+            "semantic_search_ordinances",
+        }
+        else ""
+    )
     system_prompt = (
         f"{ANACLETO_SYSTEM_PROMPT}\n\n"
-        f"{build_ordinance_coverage_block(db)}\n\n"
+        f"{ordinance_coverage}"
         f"{build_tool_prompt_block(tools)}\n\n"
         f"Usuario actual: {current_user.full_name}.\n"
         f"Organizaciones del usuario:\n{organization_lines or '- (ninguna)'}"

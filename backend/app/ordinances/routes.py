@@ -652,11 +652,11 @@ def compare_ordinances(
 def semantic_search_ordinances(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-    q: str,
-    municipality_id: int | None = None,
-    municipality_name: str | None = None,
-    autonomous_community: str | None = None,
-    topic: str | None = None,
+    q: Annotated[str, Query(min_length=1, max_length=400)],
+    municipality_id: Annotated[int | None, Query(ge=1)] = None,
+    municipality_name: Annotated[str | None, Query(max_length=255)] = None,
+    autonomous_community: Annotated[str | None, Query(max_length=255)] = None,
+    topic: Annotated[str | None, Query(max_length=255)] = None,
     include_pending: bool = False,
     include_inactive: bool = False,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
@@ -664,7 +664,13 @@ def semantic_search_ordinances(
     require_ordinance_permission(db, current_user, "ordinances.compare")
     if include_pending:
         require_ordinance_permission(db, current_user, "ordinances.review")
-    query_vector, embedding_model, status = embed_text(q)
+    normalized_query = q.strip()
+    if not normalized_query:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="q cannot be empty",
+        )
+    query_vector, embedding_model, status = embed_text(normalized_query)
     if status != "ready" or query_vector is None:
         return []
     page = search_ordinance_chunks(

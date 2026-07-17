@@ -1,5 +1,7 @@
+import pytest
 from app.ordinances import routes as ordinance_routes
 from app.ordinances.schemas import OrdinanceSemanticSearchResult
+from fastapi import HTTPException
 
 
 def test_semantic_search_route_forwards_autonomous_community(
@@ -13,11 +15,12 @@ def test_semantic_search_route_forwards_autonomous_community(
         "require_ordinance_permission",
         lambda *args, **kwargs: None,
     )
-    monkeypatch.setattr(
-        ordinance_routes,
-        "embed_text",
-        lambda query: ("[0.1,0.2]", "test-model", "ready"),
-    )
+
+    def fake_embed(query):
+        captured["query"] = query
+        return "[0.1,0.2]", "test-model", "ready"
+
+    monkeypatch.setattr(ordinance_routes, "embed_text", fake_embed)
 
     def fake_search(
         db_session,
@@ -41,7 +44,7 @@ def test_semantic_search_route_forwards_autonomous_community(
     response = ordinance_routes.semantic_search_ordinances(
         db=db,
         current_user=object(),
-        q="ordenanzas de agua",
+        q="  ordenanzas de agua  ",
         municipality_id=None,
         municipality_name=None,
         autonomous_community="  Castilla y León  ",
@@ -54,6 +57,7 @@ def test_semantic_search_route_forwards_autonomous_community(
     assert response == []
     assert captured["db"] is db
     assert captured["query_vector"] == "[0.1,0.2]"
+    assert captured["query"] == "ordenanzas de agua"
     assert captured["embedding_model"] == "test-model"
     assert captured["options"].autonomous_community == "Castilla y León"
 
@@ -88,3 +92,32 @@ def test_semantic_search_response_schema_exposes_autonomous_community():
 
     assert result.autonomous_community == "Castilla y León"
     assert result.model_dump()["autonomous_community"] == "Castilla y León"
+
+
+def test_semantic_search_rejects_whitespace_query_before_embedding(db, monkeypatch):
+    monkeypatch.setattr(
+        ordinance_routes,
+        "require_ordinance_permission",
+        lambda *args, **kwargs: None,
+    )
+
+    def forbidden_embedding(query):
+        raise AssertionError("blank query must not reach embeddings")
+
+    monkeypatch.setattr(ordinance_routes, "embed_text", forbidden_embedding)
+
+    with pytest.raises(HTTPException) as raised:
+        ordinance_routes.semantic_search_ordinances(
+            db=db,
+            current_user=object(),
+            q="   ",
+            municipality_id=None,
+            municipality_name=None,
+            autonomous_community=None,
+            topic=None,
+            include_pending=False,
+            include_inactive=False,
+            limit=10,
+        )
+
+    assert raised.value.status_code == 422

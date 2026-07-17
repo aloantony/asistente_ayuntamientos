@@ -501,9 +501,12 @@ _TOOL_DEFINITIONS: list[dict] = [
         ),
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "query": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_ORDINANCE_QUERY_CHARS,
                     "description": "Pregunta o texto breve a buscar en el corpus interno de ordenanzas",
                 },
                 "municipality_id": {
@@ -513,18 +516,22 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
                 "municipality_name": {
                     "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
                     "description": "Nombre del municipio cuando el usuario lo indique y no se conozca su ID",
                 },
                 "autonomous_community": {
                     "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
                     "description": "Filtrar por comunidad autónoma, sin distinguir mayúsculas",
                 },
                 "province": {
                     "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
                     "description": "Filtrar por provincia, sin distinguir mayúsculas",
                 },
                 "topic": {
                     "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
                     "description": (
                         "Preferencia temática que mejora el orden sin excluir otras "
                         "coincidencias. En búsquedas exploratorias, usa la materia en "
@@ -1797,6 +1804,83 @@ def _validate_ordinance_catalog_tool_input(tool_input: dict) -> None:
             raise ValueError("limit debe ser un entero entre 1 y 10")
 
 
+def _validate_ordinance_search_tool_input(tool_input: dict) -> None:
+    allowed = {
+        "query",
+        "municipality_id",
+        "municipality_name",
+        "autonomous_community",
+        "province",
+        "topic",
+        "strict_topic",
+        "population_gte",
+        "population_lt",
+        "result_scope",
+        "include_pending",
+        "include_inactive",
+        "limit",
+        "offset",
+    }
+    unexpected = sorted(set(tool_input) - allowed)
+    if unexpected:
+        raise ValueError(f"campos no permitidos: {', '.join(unexpected)}")
+    query = tool_input.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query es obligatorio y debe ser texto no vacío")
+    if len(query.strip()) > MAX_ORDINANCE_QUERY_CHARS:
+        raise ValueError(
+            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
+        )
+    for name in (
+        "municipality_name",
+        "autonomous_community",
+        "province",
+        "topic",
+    ):
+        if name not in tool_input:
+            continue
+        value = tool_input[name]
+        if not isinstance(value, str):
+            raise ValueError(f"{name} debe ser texto")
+        if len(value) > MAX_ORDINANCE_FILTER_CHARS:
+            raise ValueError(
+                f"{name} no puede superar {MAX_ORDINANCE_FILTER_CHARS} caracteres"
+            )
+    for name, minimum, maximum in (
+        ("municipality_id", 1, None),
+        ("population_gte", 0, None),
+        ("population_lt", 0, None),
+        ("limit", 1, MAX_ORDINANCE_RESULTS),
+        ("offset", 0, MAX_ORDINANCE_OFFSET),
+    ):
+        if name not in tool_input:
+            continue
+        value = tool_input[name]
+        if type(value) is not int or value < minimum or (
+            maximum is not None and value > maximum
+        ):
+            range_description = (
+                f"entre {minimum} y {maximum}"
+                if maximum is not None
+                else f"mayor o igual que {minimum}"
+            )
+            raise ValueError(f"{name} debe ser un entero {range_description}")
+    for name in ("strict_topic", "include_pending", "include_inactive"):
+        if name in tool_input and not isinstance(tool_input[name], bool):
+            raise ValueError(f"{name} debe ser booleano")
+    result_scope = tool_input.get("result_scope", "fragments")
+    if result_scope not in {"fragments", "ordinances", "municipalities"}:
+        raise ValueError("result_scope no válido")
+    population_gte = tool_input.get("population_gte")
+    population_lt = tool_input.get("population_lt")
+    if (
+        population_gte is not None
+        and population_lt is not None
+        and population_gte >= population_lt
+    ):
+        raise ValueError("population_gte debe ser menor que population_lt")
+
+
 def _require_ordinance_catalog_access(
     db: Session,
     current_user: User,
@@ -1872,6 +1956,7 @@ def _semantic_search_ordinances(
             status_code=403,
             detail="Permission required: ordinances.compare",
         )
+    _validate_ordinance_search_tool_input(tool_input)
     include_pending = _optional_boolean(tool_input, "include_pending")
     include_inactive = _optional_boolean(tool_input, "include_inactive")
     if include_pending and not _has_ordinance_tool_permission(
@@ -1884,31 +1969,14 @@ def _semantic_search_ordinances(
             detail="Permission required: ordinances.review",
         )
 
-    query_text = str(tool_input["query"]).strip()
-    if not query_text:
-        raise ValueError("query no puede estar vacío")
-    if len(query_text) > MAX_ORDINANCE_QUERY_CHARS:
-        raise ValueError(
-            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
-        )
+    query_text = tool_input["query"].strip()
 
-    limit = int(tool_input.get("limit") or DEFAULT_ORDINANCE_RESULTS)
-    if limit < 1:
-        raise ValueError("limit debe ser mayor o igual que 1")
-    limit = min(limit, MAX_ORDINANCE_RESULTS)
-    offset = int(tool_input.get("offset") or 0)
-    if offset < 0:
-        raise ValueError("offset debe ser mayor o igual que 0")
-    if offset > MAX_ORDINANCE_OFFSET:
-        raise ValueError(f"offset no puede superar {MAX_ORDINANCE_OFFSET}")
+    limit = tool_input.get("limit", DEFAULT_ORDINANCE_RESULTS)
+    offset = tool_input.get("offset", 0)
 
     population_gte = tool_input.get("population_gte")
-    if population_gte is not None:
-        population_gte = int(population_gte)
     population_lt = tool_input.get("population_lt")
-    if population_lt is not None:
-        population_lt = int(population_lt)
-    result_scope = str(tool_input.get("result_scope") or "fragments").strip()
+    result_scope = tool_input.get("result_scope", "fragments")
 
     prepared_embedding = context.prepared_ordinance_embedding
     if prepared_embedding is not None:
@@ -1938,12 +2006,12 @@ def _semantic_search_ordinances(
         }
 
     municipality_id = tool_input.get("municipality_id")
-    municipality_name = str(tool_input.get("municipality_name") or "").strip()
-    autonomous_community = str(
+    municipality_name = (tool_input.get("municipality_name") or "").strip()
+    autonomous_community = (
         tool_input.get("autonomous_community") or ""
     ).strip()
-    province = str(tool_input.get("province") or "").strip()
-    topic = str(tool_input.get("topic") or "").strip()
+    province = (tool_input.get("province") or "").strip()
+    topic = (tool_input.get("topic") or "").strip()
     search_page = search_ordinance_chunks(
         db,
         query_vector=query_vector,
@@ -1951,9 +2019,7 @@ def _semantic_search_ordinances(
         options=OrdinanceSearchOptions(
             include_pending=include_pending,
             include_inactive=include_inactive,
-            municipality_id=(
-                int(municipality_id) if municipality_id is not None else None
-            ),
+            municipality_id=municipality_id,
             municipality_name=municipality_name or None,
             autonomous_community=autonomous_community or None,
             province=province or None,
@@ -1990,15 +2056,8 @@ def prepare_ordinance_search_embedding(
     querying the local corpus.
     """
 
-    if "query" not in tool_input:
-        raise ValueError("query es obligatorio")
-    query_text = str(tool_input["query"]).strip()
-    if not query_text:
-        raise ValueError("query no puede estar vacío")
-    if len(query_text) > MAX_ORDINANCE_QUERY_CHARS:
-        raise ValueError(
-            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
-        )
+    _validate_ordinance_search_tool_input(tool_input)
+    query_text = tool_input["query"].strip()
     query_vector, embedding_model, embedding_status = embed_text_supervised(
         query_text,
         provider_deadline_at=provider_deadline_at,

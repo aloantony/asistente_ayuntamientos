@@ -442,6 +442,20 @@ def test_text_filters_and_encoded_cursor_are_bounded():
             consumed=0,
         )
 
+    largest_page_cursor = encode_ordinance_catalog_cursor(
+        filters=OrdinanceCorpusFilters(
+            autonomous_community="a" * 255,
+            province="p" * 255,
+            municipality_name="m" * 255,
+        ),
+        embedding_model=settings.embeddings_model,
+        snapshot_id="a" * 64,
+        total=9_223_372_036_854_775_807,
+        after_id=9_223_372_036_854_775_807,
+        consumed=9_223_372_036_854_775_807,
+    )
+    assert len(largest_page_cursor) <= 4096
+
 
 def test_manifest_locks_corpus_only_for_the_read_savepoint(engine, monkeypatch):
     read_locked = threading.Event()
