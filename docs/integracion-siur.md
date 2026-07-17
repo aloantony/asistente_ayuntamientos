@@ -136,12 +136,21 @@ siguen redirecciones, no se acepta compresión y se limitan tiempo, concurrencia
 tipo y bytes. Los errores remotos se convierten en un `502` genérico, sin
 devolver cuerpos, cabeceras, URL ni mensajes del proveedor.
 
+La ruta rechaza teselas fuera del intervalo de zoom o de la extensión
+geográfica declarada por la capa. Una respuesta PNG solo se acepta si su
+cabecera e integridad IHDR son válidas; las teselas deben medir exactamente
+256×256 y las leyendas tienen límites de dimensiones y píxeles.
+
 Teselas y leyendas usan Redis como caché central solo si la política del
 servicio es `on_demand` o `mirror`. La clave es un SHA-256 opaco de la versión
 normalizada del catálogo y de identificadores internos; no contiene la URL ni
 los nombres remotos. Se conserva una ventana obsoleta acotada para poder servir
 la última imagen válida cuando SIUR falle temporalmente. Las respuestas llevan
 ETag, caché privada y `nosniff`. La identificación no se almacena.
+El espacio WMS mantiene además un presupuesto atómico propio de 128 MiB con
+evicción LRU, aunque comparta la instancia Redis con otros dominios. Así una
+secuencia de coordenadas distintas no puede consumir sin límite la memoria
+reservada para colas y estado de la aplicación.
 
 Esto no es un modo sin Internet municipal: el ayuntamiento sigue necesitando
 conexión con nuestra aplicación. La caché evita que el navegador dependa de una
