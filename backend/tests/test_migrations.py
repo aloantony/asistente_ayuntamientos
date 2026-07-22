@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0033"
+HEAD_REVISION = "20260717_0034"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -176,6 +176,160 @@ REFERENCE_DELIVERY_EVIDENCE_COLUMNS = {
         "previous_attestation_sha256",
         "attestation_sha256",
         "created_at",
+    },
+}
+REFERENCE_MIRROR_TABLES = {
+    "reference_layer_sources",
+    "reference_sync_runs",
+    "reference_source_artifacts",
+    "reference_sync_run_artifacts",
+    "reference_delivery_versions",
+    "reference_delivery_version_artifacts",
+    "reference_delivery_assets",
+    "reference_delivery_promotions",
+    "reference_layer_delivery_state",
+}
+REFERENCE_MIRROR_COLUMNS = {
+    "reference_layer_sources": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "source_key",
+        "protocol",
+        "target_kind",
+        "endpoint_url",
+        "remote_name",
+        "source_format",
+        "sync_strategy",
+        "config_json",
+        "definition_sha256",
+        "enabled",
+        "is_primary",
+        "priority",
+        "check_interval_seconds",
+        "full_refresh_interval_seconds",
+        "next_check_at",
+        "created_at",
+        "updated_at",
+    },
+    "reference_sync_runs": {
+        "id",
+        "source_id",
+        "requested_by_id",
+        "source_definition_json",
+        "source_definition_sha256",
+        "trigger_kind",
+        "check_mode",
+        "status",
+        "attempt_no",
+        "expected_active_generation",
+        "lease_token",
+        "lease_expires_at",
+        "heartbeat_at",
+        "queued_at",
+        "started_at",
+        "finished_at",
+        "observed_etag",
+        "observed_last_modified",
+        "observed_version",
+        "observed_manifest_sha256",
+        "error_code",
+        "error_summary",
+        "stats_json",
+        "created_at",
+        "updated_at",
+    },
+    "reference_source_artifacts": {
+        "id",
+        "source_id",
+        "artifact_kind",
+        "source_url",
+        "final_url",
+        "source_version",
+        "upstream_etag",
+        "upstream_last_modified",
+        "media_type",
+        "storage_backend",
+        "storage_key",
+        "size_bytes",
+        "sha256",
+        "metadata_json",
+        "retrieved_at",
+        "created_at",
+    },
+    "reference_sync_run_artifacts": {
+        "source_id",
+        "run_id",
+        "artifact_id",
+        "role",
+        "created_at",
+    },
+    "reference_delivery_versions": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "source_id",
+        "sync_run_id",
+        "catalog_snapshot_id",
+        "catalog_definition_sha256",
+        "sequence_number",
+        "delivery_kind",
+        "source_version",
+        "content_sha256",
+        "manifest_sha256",
+        "validation_sha256",
+        "reference_at",
+        "crs",
+        "bounds_json",
+        "feature_count",
+        "validation_json",
+        "created_at",
+    },
+    "reference_delivery_version_artifacts": {
+        "source_id",
+        "version_id",
+        "artifact_id",
+        "role",
+        "created_at",
+    },
+    "reference_delivery_assets": {
+        "id",
+        "version_id",
+        "asset_key",
+        "asset_kind",
+        "is_primary",
+        "storage_backend",
+        "storage_key",
+        "media_type",
+        "sha256",
+        "size_bytes",
+        "metadata_json",
+        "created_at",
+    },
+    "reference_delivery_promotions": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "sequence_number",
+        "action",
+        "from_version_id",
+        "to_version_id",
+        "run_id",
+        "actor_id",
+        "reason",
+        "previous_event_id",
+        "previous_event_sha256",
+        "event_sha256",
+        "created_at",
+    },
+    "reference_layer_delivery_state": {
+        "provider_key",
+        "layer_id",
+        "status",
+        "active_version_id",
+        "generation",
+        "last_promotion_id",
+        "updated_at",
     },
 }
 REFERENCE_CATALOG_COLUMNS = {
@@ -729,6 +883,135 @@ def assert_reference_delivery_evidence_schema(inspector: Inspector) -> None:
         ("provider_key", "service_id"),
         ("provider_key", "service_id", "supersedes_review_sha256"),
     }
+
+
+def assert_reference_mirror_schema(inspector: Inspector) -> None:
+    assert REFERENCE_MIRROR_TABLES <= set(inspector.get_table_names())
+    for table_name, expected_columns in REFERENCE_MIRROR_COLUMNS.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+
+    expected_indexes = {
+        "reference_layer_sources": {
+            "ix_reference_layer_sources_due",
+            "ix_reference_layer_sources_layer_priority",
+            "uq_reference_layer_sources_primary",
+        },
+        "reference_sync_runs": {
+            "ix_reference_sync_runs_queued",
+            "ix_reference_sync_runs_requested_by",
+            "ix_reference_sync_runs_running_lease",
+            "ix_reference_sync_runs_source_history",
+            "uq_reference_sync_runs_open_source",
+        },
+        "reference_source_artifacts": {
+            "ix_reference_source_artifacts_source_history",
+        },
+        "reference_sync_run_artifacts": {
+            "ix_reference_sync_run_artifacts_artifact",
+        },
+        "reference_delivery_versions": {
+            "ix_reference_delivery_versions_catalog_snapshot",
+            "ix_reference_delivery_versions_source_history",
+        },
+        "reference_delivery_version_artifacts": {
+            "ix_reference_delivery_version_artifacts_artifact",
+        },
+        "reference_delivery_assets": {
+            "ix_reference_delivery_assets_storage",
+            "uq_reference_delivery_assets_primary",
+        },
+        "reference_delivery_promotions": {
+            "ix_reference_delivery_promotions_actor",
+            "ix_reference_delivery_promotions_current_lookup",
+            "ix_reference_delivery_promotions_from_version",
+            "ix_reference_delivery_promotions_run",
+            "ix_reference_delivery_promotions_to_version",
+            "uq_reference_delivery_promotions_genesis",
+            "uq_reference_delivery_promotions_successor",
+        },
+        "reference_layer_delivery_state": {
+            "ix_reference_layer_delivery_state_active_version",
+            "ix_reference_layer_delivery_state_last_promotion",
+        },
+    }
+    for table_name, expected in expected_indexes.items():
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected
+
+    source_foreign_keys = {
+        foreign_key["name"]: foreign_key
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_sources"
+        )
+    }
+    assert source_foreign_keys[
+        "fk_reference_layer_sources_provider_layer"
+    ]["constrained_columns"] == ["provider_key", "layer_id"]
+
+    version_foreign_keys = {
+        foreign_key["name"]: foreign_key
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_delivery_versions"
+        )
+    }
+    assert version_foreign_keys[
+        "fk_reference_delivery_versions_layer_source"
+    ]["constrained_columns"] == ["provider_key", "layer_id", "source_id"]
+    assert version_foreign_keys[
+        "fk_reference_delivery_versions_source_run"
+    ]["constrained_columns"] == ["source_id", "sync_run_id"]
+    assert version_foreign_keys[
+        "fk_reference_delivery_versions_catalog"
+    ]["constrained_columns"] == [
+        "provider_key",
+        "catalog_snapshot_id",
+        "catalog_definition_sha256",
+    ]
+
+    run_artifact_foreign_keys = {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_sync_run_artifacts"
+        )
+    }
+    assert run_artifact_foreign_keys == {
+        ("source_id", "run_id"),
+        ("source_id", "artifact_id"),
+    }
+    version_artifact_foreign_keys = {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_delivery_version_artifacts"
+        )
+    }
+    assert version_artifact_foreign_keys == {
+        ("source_id", "version_id"),
+        ("source_id", "artifact_id"),
+    }
+
+    state_foreign_keys = {
+        foreign_key["name"]: foreign_key
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_delivery_state"
+        )
+    }
+    assert set(state_foreign_keys) == {
+        "fk_reference_layer_delivery_state_provider_layer",
+        "fk_reference_layer_delivery_state_active_version",
+        "fk_reference_layer_delivery_state_last_promotion",
+    }
+    assert state_foreign_keys[
+        "fk_reference_layer_delivery_state_active_version"
+    ]["constrained_columns"] == [
+        "provider_key",
+        "layer_id",
+        "active_version_id",
+    ]
 
 
 def assert_assistant_attachment_schema(inspector: Inspector) -> None:
@@ -2599,6 +2882,317 @@ def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == "20260717_0033"
+    finally:
+        engine.dispose()
+
+
+def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0033")
+    engine = create_engine(migration_database_url)
+
+    try:
+        assert REFERENCE_MIRROR_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "20260717_0034")
+        assert_reference_mirror_schema(inspect(engine))
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0033")
+        assert REFERENCE_MIRROR_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_mirror_schema(inspect(engine))
+
+        with engine.begin() as connection:
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_snapshots (
+                        provider_key, source_url, content_sha256,
+                        definition_sha256, raw_catalog_json,
+                        normalized_definition_json, retrieved_at,
+                        service_count, group_count, layer_count,
+                        unresolved_count, status, is_current
+                    ) VALUES (
+                        'siur', 'https://example.test/settings.json', :content,
+                        :definition, CAST('{}' AS JSON), CAST('{}' AS JSON),
+                        now(), 1, 0, 1, 0, 'applied', true
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "a" * 64, "definition": "b" * 64},
+            ).scalar_one()
+            service_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_services (
+                        last_seen_snapshot_id, provider_key, source_key, title,
+                        upstream_protocol, base_url, license_status,
+                        cache_policy, status
+                    ) VALUES (
+                        :snapshot_id, 'siur', 'service:mirror-test',
+                        'Mirror test WMS', 'wms',
+                        'https://example.test/geoserver/wms',
+                        'pending', 'mirror', 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id},
+            ).scalar_one()
+            layer_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layers (
+                        last_seen_snapshot_id, service_id, provider_key,
+                        source_key, node_type, title, remote_name, role,
+                        renderer, delivery_mode, sort_order, default_visible,
+                        default_opacity, queryable, downloadable, status
+                    ) VALUES (
+                        :snapshot_id, :service_id, 'siur',
+                        'layer:mirror-test', 'layer', 'Mirror test layer',
+                        'test:layer', 'overlay', 'raster_tile', 'mirror', 0,
+                        false, 1, true, true, 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id, "service_id": service_id},
+            ).scalar_one()
+            source_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layer_sources (
+                        provider_key, layer_id, source_key, protocol,
+                        target_kind, endpoint_url, remote_name,
+                        sync_strategy, config_json, definition_sha256,
+                        enabled, is_primary
+                    ) VALUES (
+                        'siur', :layer_id, 'source:wfs', 'wfs', 'vector',
+                        'https://example.test/geoserver/wfs', 'test:layer',
+                        'paged_snapshot', CAST('{}' AS JSON), :source_hash,
+                        true, true
+                    ) RETURNING id
+                    """
+                ),
+                {"layer_id": layer_id, "source_hash": "c" * 64},
+            ).scalar_one()
+            run_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_sync_runs (
+                        source_id, source_definition_json,
+                        source_definition_sha256, trigger_kind, check_mode,
+                        status, started_at, finished_at
+                    ) VALUES (
+                        :source_id, CAST('{}' AS JSON), :source_hash,
+                        'manual', 'full', 'succeeded', now(), now()
+                    ) RETURNING id
+                    """
+                ),
+                {"source_id": source_id, "source_hash": "c" * 64},
+            ).scalar_one()
+            artifact_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_source_artifacts (
+                        source_id, artifact_kind, source_url, final_url,
+                        source_version, media_type, storage_backend,
+                        storage_key, size_bytes, sha256, metadata_json,
+                        retrieved_at
+                    ) VALUES (
+                        :source_id, 'dataset',
+                        'https://example.test/download.zip',
+                        'https://example.test/download.zip', '2026-07-22',
+                        'application/zip', 'filesystem',
+                        'reference/sha256/dd/dataset.zip', 42, :artifact_hash,
+                        CAST('{}' AS JSON), now()
+                    ) RETURNING id
+                    """
+                ),
+                {"source_id": source_id, "artifact_hash": "d" * 64},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_sync_run_artifacts (
+                        source_id, run_id, artifact_id, role
+                    ) VALUES (:source_id, :run_id, :artifact_id, 'input')
+                    """
+                ),
+                {
+                    "source_id": source_id,
+                    "run_id": run_id,
+                    "artifact_id": artifact_id,
+                },
+            )
+            version_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_delivery_versions (
+                        provider_key, layer_id, source_id, sync_run_id,
+                        catalog_snapshot_id, catalog_definition_sha256,
+                        sequence_number, delivery_kind, source_version,
+                        content_sha256, manifest_sha256, validation_sha256,
+                        reference_at, crs, bounds_json, feature_count,
+                        validation_json
+                    ) VALUES (
+                        'siur', :layer_id, :source_id, :run_id, :snapshot_id,
+                        :definition, 1, 'vector', '2026-07-22', :content,
+                        :manifest, :validation, now(), 'EPSG:3857',
+                        CAST(:bounds AS JSON), 1, CAST('{"passed": true}' AS JSON)
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "layer_id": layer_id,
+                    "source_id": source_id,
+                    "run_id": run_id,
+                    "snapshot_id": snapshot_id,
+                    "definition": "b" * 64,
+                    "content": "e" * 64,
+                    "manifest": "f" * 64,
+                    "validation": "1" * 64,
+                    "bounds": json.dumps(
+                        {"west": -7, "south": 40, "east": -1, "north": 44}
+                    ),
+                },
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_delivery_version_artifacts (
+                        source_id, version_id, artifact_id, role
+                    ) VALUES (:source_id, :version_id, :artifact_id, 'input')
+                    """
+                ),
+                {
+                    "source_id": source_id,
+                    "version_id": version_id,
+                    "artifact_id": artifact_id,
+                },
+            )
+            asset_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_delivery_assets (
+                        version_id, asset_key, asset_kind, is_primary,
+                        storage_backend, storage_key, media_type, sha256,
+                        metadata_json
+                    ) VALUES (
+                        :version_id, 'primary', 'vector_table', true,
+                        'postgres', 'reference_data.layer_test_v1',
+                        'application/x-postgis-table', :asset_hash,
+                        CAST('{}' AS JSON)
+                    ) RETURNING id
+                    """
+                ),
+                {"version_id": version_id, "asset_hash": "2" * 64},
+            ).scalar_one()
+            promotion_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_delivery_promotions (
+                        provider_key, layer_id, sequence_number, action,
+                        from_version_id, to_version_id, run_id, reason,
+                        previous_event_id, previous_event_sha256, event_sha256
+                    ) VALUES (
+                        'siur', :layer_id, 1, 'promote', NULL, :version_id,
+                        :run_id, 'Initial validated local mirror', NULL, NULL,
+                        :event_hash
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "layer_id": layer_id,
+                    "version_id": version_id,
+                    "run_id": run_id,
+                    "event_hash": "3" * 64,
+                },
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layer_delivery_state (
+                        provider_key, layer_id, status, active_version_id,
+                        generation, last_promotion_id
+                    ) VALUES (
+                        'siur', :layer_id, 'active', :version_id, 1,
+                        :promotion_id
+                    )
+                    """
+                ),
+                {
+                    "layer_id": layer_id,
+                    "version_id": version_id,
+                    "promotion_id": promotion_id,
+                },
+            )
+
+        immutable_mutations = (
+            (
+                "UPDATE reference_source_artifacts SET media_type = "
+                "'text/plain' WHERE id = :row_id",
+                "DELETE FROM reference_source_artifacts WHERE id = :row_id",
+                artifact_id,
+            ),
+            (
+                "UPDATE reference_sync_run_artifacts SET role = 'metadata' "
+                "WHERE run_id = :row_id",
+                "DELETE FROM reference_sync_run_artifacts "
+                "WHERE run_id = :row_id",
+                run_id,
+            ),
+            (
+                "UPDATE reference_delivery_versions SET crs = 'EPSG:4326' "
+                "WHERE id = :row_id",
+                "DELETE FROM reference_delivery_versions WHERE id = :row_id",
+                version_id,
+            ),
+            (
+                "UPDATE reference_delivery_version_artifacts "
+                "SET role = 'metadata' WHERE version_id = :row_id",
+                "DELETE FROM reference_delivery_version_artifacts "
+                "WHERE version_id = :row_id",
+                version_id,
+            ),
+            (
+                "UPDATE reference_delivery_assets SET asset_key = 'tampered' "
+                "WHERE id = :row_id",
+                "DELETE FROM reference_delivery_assets WHERE id = :row_id",
+                asset_id,
+            ),
+            (
+                "UPDATE reference_delivery_promotions SET reason = 'tampered' "
+                "WHERE id = :row_id",
+                "DELETE FROM reference_delivery_promotions WHERE id = :row_id",
+                promotion_id,
+            ),
+        )
+        for update_statement, delete_statement, row_id in immutable_mutations:
+            for statement in (update_statement, delete_statement):
+                with pytest.raises(DBAPIError) as error:
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(statement),
+                            {"row_id": row_id},
+                        )
+                assert error.value.orig.sqlstate == "55000"
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0033",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "versioned reference mirror data exists" in refused.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0034"
     finally:
         engine.dispose()
 
