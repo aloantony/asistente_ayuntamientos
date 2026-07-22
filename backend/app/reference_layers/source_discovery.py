@@ -96,6 +96,10 @@ def acquisition_candidates(
         geoserver = _GEOSERVER_SERVICE_RE.fullmatch(parts.path)
         if geoserver:
             prefix = geoserver.group("prefix")
+            style_config = _geoserver_style_config(
+                _with_path(parts, parts.path),
+                layer,
+            )
             candidates.extend(
                 (
                     _candidate(
@@ -105,7 +109,10 @@ def acquisition_candidates(
                         remote_name=layer.remote_name,
                         sync_strategy="paged_snapshot",
                         priority=20,
-                        config={"discovery": "wfs_capabilities"},
+                        config={
+                            "discovery": "wfs_capabilities",
+                            **style_config,
+                        },
                     ),
                     _candidate(
                         protocol="wcs",
@@ -114,7 +121,10 @@ def acquisition_candidates(
                         remote_name=layer.remote_name,
                         sync_strategy="full_snapshot",
                         priority=30,
-                        config={"discovery": "wcs_capabilities"},
+                        config={
+                            "discovery": "wcs_capabilities",
+                            **style_config,
+                        },
                     ),
                 )
             )
@@ -280,6 +290,30 @@ def _tile_config(
         "format": layer.image_format or service.default_format or "image/png",
         "style_name": layer.style_name or "",
         "coverage_required": True,
+    }
+
+
+def _geoserver_style_config(
+    style_endpoint_url: str,
+    layer: ReferenceLayerDefinition,
+) -> dict[str, Any]:
+    """Freeze catalog style identities without database-specific IDs."""
+
+    styles = sorted(
+        (
+            {
+                "catalog_style_source_key": style.source_key,
+                "remote_name": style.remote_name or style.source_key,
+            }
+            for style in layer.styles
+            if style.status in {"active", "degraded"}
+        ),
+        key=lambda item: item["catalog_style_source_key"],
+    )
+    return {
+        "style_endpoint_url": style_endpoint_url,
+        "style_layer_name": layer.remote_name,
+        "styles": styles,
     }
 
 

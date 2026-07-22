@@ -14,6 +14,7 @@ remain separate concerns.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
@@ -73,12 +74,25 @@ _MAX_JSON_DEPTH = 96
 _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 _DEFAULT_MAX_TILE_COUNT = 25_000_000
 _ABSOLUTE_MAX_TILE_COUNT = 250_000_000
+_MAX_STYLES_PER_SOURCE = 256
+_MAX_SLD_ELEMENTS = 100_000
+_MAX_SLD_DEPTH = 64
+_MAX_SLD_TEXT_BYTES = 4 * 1024 * 1024
+_MAX_SLD_EXTRACTED_BYTES = 2 * MAX_PROBE_BYTES
+_STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
+_STYLE_SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+_EXTERNAL_SLD_TEXT_RE = re.compile(
+    r"(?:\b(?:https?|ftp|file|data|jar):|\burl\s*\()",
+    re.IGNORECASE,
+)
+_SLD_NAMESPACE = "http://www.opengis.net/sld"
 _XML_MEDIA_TYPES = frozenset(
     {
         "application/xml",
         "text/xml",
         "application/vnd.ogc.wfs_xml",
         "application/vnd.ogc.wms_xml",
+        "application/vnd.ogc.sld+xml",
         "application/atom+xml",
         "application/octet-stream",
     }
@@ -316,6 +330,25 @@ class _ArcGISIds:
     object_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class _StyleSpec:
+    catalog_style_source_key: str
+    remote_name: str
+
+
+@dataclass(frozen=True)
+class _StyleRequest:
+    endpoint_url: str
+    layer_name: str
+    styles: tuple[_StyleSpec, ...]
+
+
+@dataclass(frozen=True)
+class _ParsedStyleBundle:
+    sld_version: str
+    standalone_slds: tuple[tuple[str, bytes], ...]
+
+
 class ReferenceAcquisitionPipeline:
     """Acquire one source without changing run or delivery lifecycle state."""
 
@@ -541,6 +574,88 @@ class ReferenceAcquisitionPipeline:
             },
         )
         return probe, artifact, document
+
+    def _acquire_styles(
+        self,
+        candidate: SourceCandidate,
+    ) -> list[AcquiredArtifact]:
+        request = _style_request_config(candidate)
+        if request is None or not request.styles:
+            return []
+        if len(request.styles) > _MAX_STYLES_PER_SOURCE:
+            raise AcquisitionLimitError(
+                "source declares too many catalog styles",
+                code="style_count_limit",
+            )
+
+        url = _merge_query(
+            request.endpoint_url,
+            {
+                "service": "WMS",
+                "request": "GetStyles",
+                "version": "1.1.1",
+                "layers": request.layer_name,
+            },
+        )
+        downloaded = self._download(
+            candidate,
+            url,
+            max_bytes=self.limits.max_probe_bytes,
+            accept=(
+                "application/vnd.ogc.sld+xml, application/xml;q=0.9, "
+                "text/xml;q=0.8"
+            ),
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=lambda payload: _parse_style_bundle(
+                payload,
+                layer_name=request.layer_name,
+                style_names=tuple(item.remote_name for item in request.styles),
+            ),
+        )
+        parsed = cast(_ParsedStyleBundle, downloaded.parsed)
+        bundle = self._remote_artifact(
+            downloaded,
+            kind="style",
+            role="observation",
+            source_version=parsed.sld_version,
+            metadata={
+                "schema": "reference-style-bundle/v1",
+                "catalog_style_source_keys": [
+                    item.catalog_style_source_key for item in request.styles
+                ],
+                "remote_names": [item.remote_name for item in request.styles],
+                "style_layer_name": request.layer_name,
+            },
+        )
+        artifacts: list[AcquiredArtifact] = [bundle]
+        standalone_by_name = dict(parsed.standalone_slds)
+        maximum = min(
+            self.limits.max_probe_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        for spec in request.styles:
+            standalone_blob = self.store.put_stream(
+                io.BytesIO(standalone_by_name[spec.remote_name]),
+                max_bytes=maximum,
+            )
+            standalone = AcquiredArtifact(
+                artifact_kind="style",
+                role="style",
+                media_type="application/vnd.ogc.sld+xml",
+                blob=standalone_blob,
+                source_version=parsed.sld_version,
+                metadata={
+                    "schema": "reference-style-sld/v1",
+                    "catalog_style_source_key": spec.catalog_style_source_key,
+                    "remote_name": spec.remote_name,
+                    "style_layer_name": request.layer_name,
+                    "parent_sha256": bundle.blob.sha256,
+                },
+            )
+            artifacts.append(standalone)
+            _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        return artifacts
 
     def _finish(
         self,
@@ -783,6 +898,9 @@ class ReferenceAcquisitionPipeline:
                 code="missing_pagination_identity",
             )
         artifacts.extend(page_artifacts)
+        style_artifacts = self._acquire_styles(candidate)
+        artifacts.extend(style_artifacts)
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
         stats = {
             "page_count": len(page_artifacts),
             "feature_count": total_features,
@@ -790,20 +908,25 @@ class ReferenceAcquisitionPipeline:
             "number_matched": expected_matched,
             "feature_ids_observed": len(seen_feature_ids),
         }
+        materialization = {
+            "kind": "feature-pages",
+            "format": "geojson",
+            "collection": canonical_name,
+            "page_artifact_sha256": [
+                item.blob.sha256
+                for item in page_artifacts
+                if item.role == "input"
+            ],
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
         return self._finish(
             candidate,
             probe=probe,
             artifacts=artifacts,
-            materialization={
-                "kind": "feature-pages",
-                "format": "geojson",
-                "collection": canonical_name,
-                "page_artifact_sha256": [
-                    item.blob.sha256
-                    for item in page_artifacts
-                    if item.role == "input"
-                ],
-            },
+            materialization=materialization,
             feature_count=total_features,
             stats=stats,
             observed=downloaded.result,
@@ -1265,18 +1388,27 @@ class ReferenceAcquisitionPipeline:
                 "coverage": coverage,
             },
         )
+        style_artifacts = self._acquire_styles(candidate)
+        artifacts = [capabilities, dataset, *style_artifacts]
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        materialization = {
+            "kind": "raster",
+            "format": "geotiff",
+            "coverage": coverage,
+            "dataset_sha256": dataset.blob.sha256,
+        }
+        stats = {"dataset_bytes": dataset.blob.size_bytes}
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
         return self._finish(
             candidate,
             probe=probe,
-            artifacts=[capabilities, dataset],
-            materialization={
-                "kind": "raster",
-                "format": "geotiff",
-                "coverage": coverage,
-                "dataset_sha256": dataset.blob.sha256,
-            },
+            artifacts=artifacts,
+            materialization=materialization,
             feature_count=None,
-            stats={"dataset_bytes": dataset.blob.size_bytes},
+            stats=stats,
             observed=downloaded.result,
         )
 
@@ -1761,6 +1893,7 @@ def _validate_candidate(candidate: SourceCandidate) -> None:
     if candidate.protocol == "xyz":
         endpoint_for_validation = _ANY_TEMPLATE_TOKEN_RE.sub("0", endpoint_for_validation)
     normalize_https_url(endpoint_for_validation)
+    _style_request_config(candidate)
 
 
 def source_candidate_definition_sha256(candidate: SourceCandidate) -> str:
@@ -1985,6 +2118,102 @@ def _config_text(
     max_chars: int,
 ) -> str:
     return _config_optional_text(config, name, max_chars=max_chars) or default
+
+
+def _style_request_config(candidate: SourceCandidate) -> _StyleRequest | None:
+    config = candidate.config
+    has_endpoint = "style_endpoint_url" in config
+    has_layer = "style_layer_name" in config
+    has_styles = "styles" in config
+    if not any((has_endpoint, has_layer, has_styles)):
+        return None
+    if candidate.protocol not in {"wfs", "wcs"}:
+        raise AcquisitionConfigurationError(
+            "style acquisition is only supported for GeoServer data sources"
+        )
+    if not all((has_endpoint, has_layer, has_styles)):
+        raise AcquisitionConfigurationError(
+            "style acquisition config is incomplete"
+        )
+    endpoint = _config_optional_text(
+        config,
+        "style_endpoint_url",
+        max_chars=8192,
+    )
+    layer_name = _config_optional_text(
+        config,
+        "style_layer_name",
+        max_chars=1000,
+    )
+    if endpoint is None or layer_name is None:
+        raise AcquisitionConfigurationError(
+            "style acquisition config is incomplete"
+        )
+    if _SAFE_REMOTE_NAME_RE.fullmatch(layer_name) is None:
+        raise AcquisitionConfigurationError("style layer name is invalid")
+    if layer_name != candidate.remote_name:
+        raise AcquisitionConfigurationError(
+            "style layer name does not match the acquired collection"
+        )
+    endpoint = _require_same_origin(candidate.endpoint_url, endpoint)
+    raw_styles = config.get("styles")
+    if not isinstance(raw_styles, list):
+        raise AcquisitionConfigurationError("source config styles must be a list")
+    if len(raw_styles) > _MAX_STYLES_PER_SOURCE:
+        raise AcquisitionLimitError(
+            "source declares too many catalog styles",
+            code="style_count_limit",
+        )
+    styles: list[_StyleSpec] = []
+    source_keys: set[str] = set()
+    remote_names: set[str] = set()
+    for raw_style in raw_styles:
+        if not isinstance(raw_style, dict) or set(raw_style) != {
+            "catalog_style_source_key",
+            "remote_name",
+        }:
+            raise AcquisitionConfigurationError(
+                "source config contains an invalid style identity"
+            )
+        source_key = raw_style.get("catalog_style_source_key")
+        remote_name = raw_style.get("remote_name")
+        if (
+            not isinstance(source_key, str)
+            or _STYLE_SOURCE_KEY_RE.fullmatch(source_key) is None
+            or not isinstance(remote_name, str)
+            or _STYLE_NAME_RE.fullmatch(remote_name) is None
+        ):
+            raise AcquisitionConfigurationError(
+                "source config contains an invalid style identity"
+            )
+        if source_key in source_keys or remote_name in remote_names:
+            raise AcquisitionConfigurationError(
+                "source config repeats a catalog or remote style identity"
+            )
+        source_keys.add(source_key)
+        remote_names.add(remote_name)
+        styles.append(
+            _StyleSpec(
+                catalog_style_source_key=source_key,
+                remote_name=remote_name,
+            )
+        )
+    if styles != sorted(styles, key=lambda item: item.catalog_style_source_key):
+        raise AcquisitionConfigurationError(
+            "source config styles are not in canonical order"
+        )
+    validation_params: dict[str, str] = {
+        "service": "WMS",
+        "request": "GetStyles",
+        "version": "1.1.1",
+        "layers": layer_name,
+    }
+    _merge_query(endpoint, validation_params)
+    return _StyleRequest(
+        endpoint_url=endpoint,
+        layer_name=layer_name,
+        styles=tuple(styles),
+    )
 
 
 def _configured_page_size(config: Mapping[str, Any], default: int) -> int:
@@ -2523,6 +2752,196 @@ def _validate_geojson_dataset(
         page_size=limits.max_features,
         allow_next=False,
     )
+
+
+def _parse_style_bundle(
+    document: bytes,
+    *,
+    layer_name: str,
+    style_names: tuple[str, ...],
+) -> _ParsedStyleBundle:
+    if (
+        not isinstance(document, bytes)
+        or not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError(
+            "GetStyles returned an empty or oversized SLD",
+            code="invalid_sld",
+        )
+    lowered = document.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
+        raise AcquisitionValidationError(
+            "SLD declarations cannot define DTDs or entities",
+            code="unsafe_sld_xml",
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as exc:
+        raise AcquisitionValidationError(
+            "GetStyles returned malformed XML",
+            code="invalid_sld",
+        ) from exc
+    if root.tag != f"{{{_SLD_NAMESPACE}}}StyledLayerDescriptor":
+        raise AcquisitionValidationError(
+            "GetStyles did not return an SLD document",
+            code="invalid_sld",
+        )
+    version = root.get("version")
+    if (
+        not isinstance(version, str)
+        or not version
+        or len(version) > 32
+        or any(ord(character) < 32 for character in version)
+    ):
+        raise AcquisitionValidationError(
+            "SLD version is missing or invalid",
+            code="invalid_sld",
+        )
+
+    stack = [(root, 1)]
+    element_count = 0
+    text_bytes = 0
+    blocked_elements = {
+        "externalgraphic",
+        "externalmark",
+        "onlineresource",
+        "remoteows",
+        "include",
+        "fallback",
+    }
+    while stack:
+        element, depth = stack.pop()
+        element_count += 1
+        if element_count > _MAX_SLD_ELEMENTS or depth > _MAX_SLD_DEPTH:
+            raise AcquisitionLimitError(
+                "SLD exceeds its XML complexity limit",
+                code="sld_complexity_limit",
+            )
+        local_element = _xml_local(element.tag).casefold()
+        if local_element in blocked_elements:
+            raise AcquisitionValidationError(
+                "SLD references an external or auxiliary resource",
+                code="unsafe_sld_reference",
+            )
+        for attribute, raw_value in element.attrib.items():
+            if not isinstance(raw_value, str) or len(raw_value) > MAX_PROBE_BYTES:
+                raise AcquisitionLimitError(
+                    "SLD attribute exceeds its XML complexity limit",
+                    code="sld_complexity_limit",
+                )
+            local_attribute = _xml_local(attribute).casefold()
+            if local_attribute in {"href", "src", "url", "uri"}:
+                raise AcquisitionValidationError(
+                    "SLD references an external or auxiliary resource",
+                    code="unsafe_sld_reference",
+                )
+            # XML schema locations are validation hints rather than runtime
+            # style dependencies.  They are removed from standalone output.
+            if local_attribute not in {
+                "schemalocation",
+                "nonamespaceschemalocation",
+            } and _EXTERNAL_SLD_TEXT_RE.search(raw_value):
+                raise AcquisitionValidationError(
+                    "SLD contains an external resource locator",
+                    code="unsafe_sld_reference",
+                )
+            text_bytes += len(raw_value.encode("utf-8"))
+        for value in (element.text, element.tail):
+            if value:
+                text_bytes += len(value.encode("utf-8"))
+                if _EXTERNAL_SLD_TEXT_RE.search(value):
+                    raise AcquisitionValidationError(
+                        "SLD contains an external resource locator",
+                        code="unsafe_sld_reference",
+                    )
+        if text_bytes > _MAX_SLD_TEXT_BYTES:
+            raise AcquisitionLimitError(
+                "SLD exceeds its XML text limit",
+                code="sld_complexity_limit",
+            )
+        stack.extend((child, depth + 1) for child in element)
+
+    named_layers = [
+        child
+        for child in root
+        if _xml_local(child.tag) == "NamedLayer"
+        and _direct_sld_name(child) == layer_name
+    ]
+    if len(named_layers) != 1:
+        raise AcquisitionValidationError(
+            "GetStyles did not return the exact requested layer",
+            code="style_layer_unavailable",
+        )
+    named_layer = named_layers[0]
+    standalone_slds: list[tuple[str, bytes]] = []
+    standalone_total_bytes = 0
+    for style_name in style_names:
+        matching_styles = [
+            child
+            for child in named_layer
+            if _xml_local(child.tag) == "UserStyle"
+            and _direct_sld_name(child) == style_name
+        ]
+        if len(matching_styles) != 1:
+            raise AcquisitionValidationError(
+                "GetStyles did not return the exact requested style",
+                code="style_unavailable",
+            )
+
+        standalone_root = copy.deepcopy(root)
+        for child in list(standalone_root):
+            standalone_root.remove(child)
+        standalone_layer = copy.deepcopy(named_layer)
+        for child in list(standalone_layer):
+            if _xml_local(child.tag) == "UserStyle" and (
+                _direct_sld_name(child) != style_name
+            ):
+                standalone_layer.remove(child)
+            elif _xml_local(child.tag) == "NamedStyle":
+                standalone_layer.remove(child)
+        standalone_root.append(standalone_layer)
+        for element in standalone_root.iter():
+            for attribute in list(element.attrib):
+                if _xml_local(attribute).casefold() in {
+                    "schemalocation",
+                    "nonamespaceschemalocation",
+                }:
+                    del element.attrib[attribute]
+        standalone = ElementTree.tostring(
+            standalone_root,
+            encoding="utf-8",
+            xml_declaration=True,
+            short_empty_elements=True,
+        )
+        if not standalone or len(standalone) > MAX_PROBE_BYTES:
+            raise AcquisitionLimitError(
+                "standalone SLD exceeds its byte limit",
+                code="sld_size_limit",
+            )
+        standalone_slds.append((style_name, standalone))
+        standalone_total_bytes += len(standalone)
+        if standalone_total_bytes > _MAX_SLD_EXTRACTED_BYTES:
+            raise AcquisitionLimitError(
+                "standalone SLD bundle exceeds its aggregate byte limit",
+                code="sld_size_limit",
+            )
+    return _ParsedStyleBundle(
+        sld_version=version,
+        standalone_slds=tuple(standalone_slds),
+    )
+
+
+def _direct_sld_name(element: ElementTree.Element) -> str | None:
+    names = [
+        (child.text or "").strip()
+        for child in element
+        if _xml_local(child.tag) == "Name" and (child.text or "").strip()
+    ]
+    if len(names) != 1 or len(names[0]) > 1000:
+        return None
+    return names[0]
 
 
 def _parse_atom_feed(document: bytes, remote_name: str) -> str:
@@ -3111,6 +3530,21 @@ def _artifact_manifest(index: int, artifact: AcquiredArtifact) -> dict[str, Any]
         "source_version": artifact.source_version,
         "metadata": artifact.metadata,
     }
+
+
+def _style_digests(artifacts: list[AcquiredArtifact]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for artifact in artifacts:
+        if artifact.artifact_kind != "style" or artifact.role != "style":
+            continue
+        source_key = artifact.metadata.get("catalog_style_source_key")
+        if not isinstance(source_key, str) or source_key in result:
+            raise AcquisitionValidationError(
+                "acquired style identities are invalid",
+                code="invalid_style_artifacts",
+            )
+        result[source_key] = artifact.blob.sha256
+    return dict(sorted(result.items()))
 
 
 def _enforce_total_bytes(
