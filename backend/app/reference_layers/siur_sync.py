@@ -16,6 +16,7 @@ import re
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.db.model_registry import register_all_models
 from app.db.session import SessionLocal
 from app.reference_layers.catalog import (
     ReferenceCatalogSyncPlan,
@@ -294,6 +295,7 @@ def _summary(
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    register_all_models()
     limits = SiurSettingsLimits()
     try:
         baseline = _baseline_from_args(args)

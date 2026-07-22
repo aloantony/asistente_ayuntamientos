@@ -20,7 +20,7 @@ from app.reference_layers.siur_wmc import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "siur_context.xml"
 EXPECTED_SHA256 = (
-    "17e4a58597d91c05d47a84656056990b10f5b13082e459954b1ac64a7e016608"
+    "9c3571179e8f489daa9b9c4531d99d0e0e612be03b1e269fa38908e72e6aaeb8"
 )
 
 
@@ -109,7 +109,8 @@ def test_exact_download_is_parsed_as_partial_wmc_evidence() -> None:
         Decimal("0.8"),
         Decimal("0.75"),
     ]
-    assert all(layer.visible and layer.queryable for layer in evidence.layers)
+    assert sum(layer.visible for layer in evidence.layers) == 8
+    assert all(layer.queryable for layer in evidence.layers)
     assert evidence.normalized()["content_sha256"] == EXPECTED_SHA256
 
 
@@ -146,10 +147,97 @@ def test_wmc_enriches_only_matching_entries_and_never_adds_layers() -> None:
     assert len(enriched.layers) == len(bare.layers) == 12
     assert sum(len(layer.styles) for layer in enriched.layers) == 28
     assert all(service.version == "1.1.1" for service in enriched.services)
+    assert all(
+        layer.queryable
+        for layer in enriched.layers
+        if layer.remote_name != "urbanismo:future"
+    )
     extra = next(
         layer for layer in enriched.layers if layer.remote_name == "urbanismo:future"
     )
     assert extra.styles == ()
+
+
+def test_wmc_merges_workspace_prefixed_style_alias_without_a_duplicate() -> None:
+    evidence = parse_wmc_evidence(exact_fixture())
+    definition = matching_catalog()
+    target = next(
+        layer
+        for layer in definition.layers
+        if layer.remote_name == "plau_cyl_clasificacion"
+    )
+    assert len(target.styles) == 1
+    observed_style = target.styles[0]
+    assert observed_style.source_key.startswith("urbanismo:")
+    local_key = observed_style.source_key.split(":", 1)[1]
+    settings_style = replace(
+        observed_style,
+        source_key=local_key,
+        remote_name=local_key,
+    )
+    settings_layer = replace(
+        target,
+        style_name=local_key,
+        styles=(settings_style,),
+    )
+    native_like = replace(
+        definition,
+        layers=tuple(
+            settings_layer if layer.source_key == target.source_key else layer
+            for layer in definition.layers
+        ),
+    )
+
+    enriched = augment_catalog_with_wmc_evidence(native_like, evidence)
+    report = compare_wmc_to_catalog(evidence, enriched)
+
+    assert report.blocking_issues == ()
+    enriched_layer = next(
+        layer
+        for layer in enriched.layers
+        if layer.source_key == target.source_key
+    )
+    assert enriched_layer.style_name == local_key
+    assert len(enriched_layer.styles) == 1
+    assert enriched_layer.styles[0].source_key == local_key
+    assert enriched_layer.styles[0].remote_name == observed_style.source_key
+    assert enriched_layer.styles[0].is_default is True
+
+
+def test_wmc_style_alias_matching_requires_a_one_to_one_mapping() -> None:
+    evidence = parse_wmc_evidence(exact_fixture())
+    definition = matching_catalog()
+    target = next(
+        layer
+        for layer in evidence.layers
+        if layer.remote_name == "plau_cyl_clasificacion"
+    )
+    selected = target.styles[0]
+    duplicate_alias = replace(
+        selected,
+        source_key=f"alias:{selected.source_key.rsplit(':', 1)[-1]}",
+        remote_name=f"alias:{selected.remote_name.rsplit(':', 1)[-1]}",
+        selected=False,
+    )
+    collided_layer = replace(target, styles=(selected, duplicate_alias))
+    collided_evidence = replace(
+        evidence,
+        layers=tuple(
+            collided_layer if layer.source_key == target.source_key else layer
+            for layer in evidence.layers
+        ),
+    )
+
+    report = compare_wmc_to_catalog(collided_evidence, definition)
+
+    collisions = [
+        identity
+        for identity in report.unmatched_styles
+        if identity.startswith(f"{target.source_key}|")
+    ]
+    assert len(collisions) == 2
+    assert target.source_key in report.selected_style_mismatches
+    assert report.blocking_issues
 
 
 def test_wmc_probe_blocks_missing_or_ambiguous_observed_elements() -> None:

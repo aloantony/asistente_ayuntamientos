@@ -421,6 +421,29 @@ def test_validation_blocks_duplicates_cycles_and_unsafe_service_urls(db) -> None
     oversized_plan = build_catalog_sync_plan(db, oversized_provider)
     assert "Invalid provider_key" in oversized_plan.blocking_issues
 
+    oversized_titles = replace(
+        base,
+        services=(replace(base.services[0], title="s" * 501),),
+        layers=(
+            base.layers[0],
+            replace(
+                base.layers[1],
+                styles=(
+                    replace(base.layers[1].styles[0], title="s" * 501),
+                    base.layers[1].styles[1],
+                ),
+            ),
+        ),
+    )
+    oversized_titles_plan = build_catalog_sync_plan(db, oversized_titles)
+    assert "Invalid service title: service:urbanismo-wms" in (
+        oversized_titles_plan.blocking_issues
+    )
+    assert any(
+        "Invalid style title" in issue
+        for issue in oversized_titles_plan.blocking_issues
+    )
+
     duplicate = replace(base, layers=base.layers + (base.layers[0],))
     duplicate_plan = build_catalog_sync_plan(db, duplicate)
     assert "Duplicate layer key: group:planning" in duplicate_plan.blocking_issues

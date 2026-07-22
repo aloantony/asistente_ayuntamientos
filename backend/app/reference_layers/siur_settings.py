@@ -17,6 +17,7 @@ import json
 import math
 import re
 from typing import Any, Iterable, Mapping
+import unicodedata
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.reference_layers.catalog import (
@@ -31,6 +32,7 @@ DEFAULT_SOURCE_URL = "https://idecyl.jcyl.es/siur/assets/settings/settings.json"
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
 CRS_RE = re.compile(r"^EPSG:[0-9]{3,6}$", re.I)
+REMOTE_STYLE_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
 IDECYL_WMS_PATH_RE = re.compile(
     r"^/geoserver/(?P<workspace>[A-Za-z0-9_.-]+)/(?:wms|ows)$",
     re.I,
@@ -348,9 +350,905 @@ class _Parser:
         if not isinstance(self.root, dict):
             self.issue("$", "unsupported_root", "root must be an object")
             return
-        self._catalog(self.root, "$", None, True, root=True)
+        native_markers = {
+            key for key in self.root if _key(key) in {"settings", "selectedsetting"}
+        }
+        if native_markers:
+            self._native_catalog()
+        else:
+            self._catalog(self.root, "$", None, True, root=True)
         if not self.nodes:
             self.issue("$", "catalog_missing", "no recognized groups or layers")
+
+    def _native_catalog(self) -> None:
+        root = self._native_object(
+            self.root,
+            "$",
+            allowed={"settings", "selectedSetting"},
+            required={"settings", "selectedSetting"},
+            kind="SIUR root",
+        )
+        if root is None:
+            return
+        selected = self._native_text(root.get("selectedSetting"), "$.selectedSetting")
+        settings = self._native_list(root.get("settings"), "$.settings")
+        if settings is None:
+            return
+        if len(settings) != 1:
+            self.issue(
+                "$.settings",
+                "unsupported_settings_count",
+                "exactly one SIUR setting is supported",
+            )
+        matches: list[tuple[Mapping[str, Any], str]] = []
+        for index, value in enumerate(settings):
+            path = f"$.settings[{index}]"
+            setting = self._native_object(
+                value,
+                path,
+                allowed={
+                    "name",
+                    "wmcUrl",
+                    "suggestedServices",
+                    "groupLayers",
+                    "favoritesLayers",
+                    "tematicSearch",
+                    "backMaps",
+                    "apps",
+                },
+                required={
+                    "name",
+                    "wmcUrl",
+                    "suggestedServices",
+                    "groupLayers",
+                    "favoritesLayers",
+                    "tematicSearch",
+                    "backMaps",
+                    "apps",
+                },
+                kind="SIUR setting",
+            )
+            if setting is None:
+                continue
+            name = self._native_text(setting.get("name"), f"{path}.name")
+            if selected is not None and name == selected:
+                matches.append((setting, path))
+        if selected is None or len(matches) != 1:
+            self.issue(
+                "$.selectedSetting",
+                "selected_setting_unresolved",
+                "selectedSetting must identify exactly one setting",
+            )
+            return
+        setting, path = matches[0]
+        self._native_setting(setting, path)
+
+    def _native_setting(self, setting: Mapping[str, Any], path: str) -> None:
+        wmc_url = self._native_text(setting.get("wmcUrl"), f"{path}.wmcUrl")
+        if wmc_url is not None and not _safe_relative_path(wmc_url, suffix=".xml"):
+            self.issue(
+                f"{path}.wmcUrl",
+                "invalid_relative_url",
+                "a safe relative XML path is required",
+            )
+
+        self._native_suggested_services(
+            setting.get("suggestedServices"), f"{path}.suggestedServices"
+        )
+        self._native_favorites(
+            setting.get("favoritesLayers"), f"{path}.favoritesLayers"
+        )
+        self._native_thematic_search(
+            setting.get("tematicSearch"), f"{path}.tematicSearch"
+        )
+        self._native_apps(setting.get("apps"), f"{path}.apps")
+
+        group_root = self._native_object(
+            setting.get("groupLayers"),
+            f"{path}.groupLayers",
+            allowed={"name", "children"},
+            required={"name", "children"},
+            kind="groupLayers root",
+        )
+        top_level_count = 0
+        if group_root is not None:
+            name = self._native_text(
+                group_root.get("name"), f"{path}.groupLayers.name"
+            )
+            if name is not None and name != "root":
+                self.issue(
+                    f"{path}.groupLayers.name",
+                    "unsupported_group_root",
+                    "the non-persistent groupLayers wrapper must be named root",
+                )
+            children = self._native_list(
+                group_root.get("children"), f"{path}.groupLayers.children"
+            )
+            if children is not None:
+                top_level_count = len(children)
+                self._native_nodes(
+                    children,
+                    f"{path}.groupLayers.children",
+                    parent=None,
+                    top_level=True,
+                    breadcrumb=(),
+                )
+        self._native_back_maps(
+            setting.get("backMaps"),
+            f"{path}.backMaps",
+            sort_offset=top_level_count,
+        )
+
+    def _native_nodes(
+        self,
+        values: list[Any],
+        path: str,
+        *,
+        parent: str | None,
+        top_level: bool,
+        breadcrumb: tuple[str, ...],
+    ) -> None:
+        sibling_names: dict[str, str] = {}
+        for order, value in enumerate(values):
+            item_path = f"{path}[{order}]"
+            if not isinstance(value, Mapping):
+                self.issue(item_path, "invalid_entry", "object required")
+                continue
+            name_value = value.get("name")
+            if isinstance(name_value, str) and name_value.strip():
+                normalized = _native_name(name_value)
+                previous = sibling_names.setdefault(normalized, item_path)
+                if previous != item_path:
+                    self.issue(item_path, "duplicate_sibling_name", previous)
+            has_children = "children" in value
+            has_endpoint = "endPoint" in value
+            if has_children == has_endpoint:
+                self.issue(
+                    item_path,
+                    "invalid_native_node",
+                    "exactly one of children or endPoint is required",
+                )
+                continue
+            if has_children:
+                self._native_group(
+                    value,
+                    item_path,
+                    parent=parent,
+                    top_level=top_level,
+                    order=order,
+                    breadcrumb=breadcrumb,
+                )
+            else:
+                self._native_layer(
+                    value,
+                    item_path,
+                    parent=parent,
+                    order=order,
+                    breadcrumb=breadcrumb,
+                )
+
+    def _native_group(
+        self,
+        value: Mapping[str, Any],
+        path: str,
+        *,
+        parent: str | None,
+        top_level: bool,
+        order: int,
+        breadcrumb: tuple[str, ...],
+    ) -> None:
+        group = self._native_object(
+            value,
+            path,
+            allowed={"name", "children"},
+            required={"name", "children"},
+            kind="group",
+        )
+        if group is None:
+            return
+        title = self._native_text(group.get("name"), f"{path}.name")
+        children = self._native_list(group.get("children"), f"{path}.children")
+        lineage = breadcrumb + ((title or ""),)
+        source_key = (
+            self._identity(
+                "group",
+                "native\0" + "\0".join(_native_name(item) for item in lineage),
+                path,
+            )
+            if title
+            else None
+        )
+        self.nodes.append(
+            SiurSettingsNodeEvidence(
+                path=path,
+                kind="group",
+                source_key=source_key,
+                source_id=" / ".join(lineage) if title else None,
+                title=title,
+                parent_key=parent,
+                top_level=top_level,
+            )
+        )
+        if source_key and title:
+            self.layer_definitions.append(
+                ReferenceLayerDefinition(
+                    source_key=source_key,
+                    node_type="group",
+                    title=title,
+                    parent_key=parent,
+                    sort_order=order,
+                )
+            )
+        if children is not None:
+            self._native_nodes(
+                children,
+                f"{path}.children",
+                parent=source_key,
+                top_level=False,
+                breadcrumb=lineage,
+            )
+
+    def _native_layer(
+        self,
+        value: Mapping[str, Any],
+        path: str,
+        *,
+        parent: str | None,
+        order: int,
+        breadcrumb: tuple[str, ...],
+    ) -> None:
+        leaf = self._native_object(
+            value,
+            path,
+            allowed={"name", "endPoint"},
+            required={"name", "endPoint"},
+            kind="layer placement",
+        )
+        if leaf is None:
+            return
+        title = self._native_text(leaf.get("name"), f"{path}.name")
+        endpoint = self._native_object(
+            leaf.get("endPoint"),
+            f"{path}.endPoint",
+            allowed={"type", "url", "layer"},
+            required={"url", "layer"},
+            kind="layer endpoint",
+        )
+        if endpoint is None:
+            return
+        raw_type = endpoint.get("type", "wms")
+        type_text = self._native_text(raw_type, f"{path}.endPoint.type")
+        protocol = _protocol(type_text or "")
+        if protocol not in PROTOCOLS:
+            self.issue(
+                f"{path}.endPoint.type",
+                "layer_protocol_missing",
+                "unsupported SIUR endpoint type",
+            )
+        url = self._native_text(endpoint.get("url"), f"{path}.endPoint.url")
+        version = (
+            self._native_service_version(url, f"{path}.endPoint.url")
+            if url and protocol == "wms"
+            else None
+        )
+        service_key = (
+            self._embedded_service(
+                url,
+                protocol,
+                f"{path}.endPoint#service",
+                version=version,
+            )
+            if url and protocol
+            else None
+        )
+        layer = self._native_object(
+            endpoint.get("layer"),
+            f"{path}.endPoint.layer",
+            allowed={"name", "extent", "styles", "legend", "metadata"},
+            required={"name", "extent", "styles", "metadata"},
+            kind="layer definition",
+        )
+        if layer is None:
+            return
+        remote = self._native_text(
+            layer.get("name"), f"{path}.endPoint.layer.name"
+        )
+        extent = self._native_extent(
+            layer.get("extent"), f"{path}.endPoint.layer.extent"
+        )
+        styles, selected_style = self._native_styles(
+            layer.get("styles"), f"{path}.endPoint.layer.styles"
+        )
+        metadata_url = self._native_metadata(
+            layer.get("metadata"), f"{path}.endPoint.layer.metadata"
+        )
+        legend_url = None
+        image_format = None
+        if "legend" in layer:
+            legend_url, image_format = self._native_legend(
+                layer.get("legend"), f"{path}.endPoint.layer.legend"
+            )
+
+        lineage = breadcrumb + ((title or ""),)
+        identity = "\0".join(
+            (
+                "native",
+                service_key or "",
+                protocol or "",
+                remote or "",
+                *(_native_name(item) for item in lineage),
+            )
+        )
+        source_key = (
+            self._identity("layer", identity, path)
+            if service_key and protocol and remote and title
+            else None
+        )
+        self.nodes.append(
+            SiurSettingsNodeEvidence(
+                path=path,
+                kind="layer",
+                source_key=source_key,
+                source_id=remote,
+                title=title,
+                parent_key=parent,
+                service_key=service_key,
+                remote_name=remote,
+            )
+        )
+        renderer = (
+            "raster_tile"
+            if protocol in RASTER
+            else "vector_tile"
+            if protocol == "wfs"
+            else None
+        )
+        if source_key and title and service_key and remote and renderer:
+            options: dict[str, Any] = {
+                "settings_path": path,
+                "source_extent": extent,
+            }
+            if legend_url and image_format:
+                options["source_legend"] = {
+                    "url": legend_url,
+                    "format": image_format,
+                }
+            self.layer_definitions.append(
+                ReferenceLayerDefinition(
+                    source_key=source_key,
+                    node_type="layer",
+                    title=title,
+                    parent_key=parent,
+                    service_key=service_key,
+                    remote_name=remote,
+                    role="overlay",
+                    renderer=renderer,
+                    delivery_mode="proxy",
+                    style_name=selected_style,
+                    image_format=None,
+                    bounds=None,
+                    options=options,
+                    sort_order=order,
+                    default_visible=False,
+                    default_opacity=Decimal("1"),
+                    queryable=False,
+                    downloadable=False,
+                    legend_url=legend_url,
+                    metadata_url=metadata_url,
+                    status="active",
+                    styles=styles,
+                )
+            )
+
+    def _native_back_maps(
+        self,
+        value: Any,
+        path: str,
+        *,
+        sort_offset: int,
+    ) -> None:
+        entries = self._native_list(value, path)
+        if entries is None:
+            return
+        sentinel_count = 0
+        persisted_order = 0
+        for index, value in enumerate(entries):
+            item_path = f"{path}[{index}]"
+            if isinstance(value, Mapping) and set(value) == {"name"}:
+                name = self._native_text(value.get("name"), f"{item_path}.name")
+                if name != "SIN FONDO":
+                    self.issue(
+                        item_path,
+                        "unsupported_back_map_marker",
+                        "only the exact SIN FONDO marker may omit an endpoint",
+                    )
+                else:
+                    sentinel_count += 1
+                continue
+            item = self._native_object(
+                value,
+                item_path,
+                allowed={"name", "url", "layer", "type"},
+                required={"name", "url", "layer", "type"},
+                kind="background map",
+            )
+            if item is None:
+                continue
+            title = self._native_text(item.get("name"), f"{item_path}.name")
+            url = self._native_text(item.get("url"), f"{item_path}.url")
+            remote = self._native_text(item.get("layer"), f"{item_path}.layer")
+            raw_type = self._native_text(item.get("type"), f"{item_path}.type")
+            protocol = _protocol(raw_type or "")
+            if protocol not in {"wmts", "xyz"}:
+                self.issue(
+                    f"{item_path}.type",
+                    "unsupported_back_map_protocol",
+                    "only WMTS and XYZ backgrounds are supported",
+                )
+            service_key = (
+                self._embedded_service(url, protocol, f"{item_path}#service")
+                if url and protocol
+                else None
+            )
+            source_key = (
+                self._identity(
+                    "layer",
+                    "\0".join(
+                        ("native-back-map", service_key or "", remote or "")
+                    ),
+                    item_path,
+                )
+                if title and service_key and remote
+                else None
+            )
+            self.nodes.append(
+                SiurSettingsNodeEvidence(
+                    path=item_path,
+                    kind="layer",
+                    source_key=source_key,
+                    source_id=remote,
+                    title=title,
+                    parent_key=None,
+                    service_key=service_key,
+                    remote_name=remote,
+                )
+            )
+            if source_key and title and service_key and remote and protocol:
+                self.layer_definitions.append(
+                    ReferenceLayerDefinition(
+                        source_key=source_key,
+                        node_type="layer",
+                        title=title,
+                        service_key=service_key,
+                        remote_name=remote,
+                        role="base",
+                        renderer="raster_tile",
+                        delivery_mode="proxy",
+                        options={"settings_path": item_path},
+                        sort_order=sort_offset + persisted_order,
+                        default_visible=persisted_order == 0,
+                        default_opacity=Decimal("1"),
+                        queryable=False,
+                        downloadable=False,
+                        status="active",
+                    )
+                )
+            persisted_order += 1
+        if sentinel_count != 1:
+            self.issue(
+                path,
+                "back_map_marker_mismatch",
+                "exactly one SIN FONDO marker is required",
+            )
+
+    def _native_extent(self, value: Any, path: str) -> dict[str, str] | None:
+        extent = self._native_object(
+            value,
+            path,
+            allowed={"srs", "minx", "miny", "maxx", "maxy"},
+            required={"srs", "minx", "miny", "maxx", "maxy"},
+            kind="extent",
+        )
+        if extent is None:
+            return None
+        crs = self._native_text(extent.get("srs"), f"{path}.srs")
+        if crs is not None and not CRS_RE.fullmatch(crs):
+            self.issue(f"{path}.srs", "invalid_crs", crs)
+        raw_values: dict[str, str] = {}
+        numbers: dict[str, Decimal] = {}
+        for key in ("minx", "miny", "maxx", "maxy"):
+            raw = extent.get(key)
+            if not isinstance(raw, str) or not raw.strip():
+                self.issue(f"{path}.{key}", "invalid_extent", "decimal text required")
+                continue
+            try:
+                number = Decimal(raw)
+            except InvalidOperation:
+                number = Decimal("NaN")
+            if not number.is_finite():
+                self.issue(f"{path}.{key}", "invalid_extent", "finite decimal required")
+                continue
+            raw_values[key] = raw
+            numbers[key] = number
+        if (
+            set(numbers) == {"minx", "miny", "maxx", "maxy"}
+            and not (
+                numbers["minx"] < numbers["maxx"]
+                and numbers["miny"] < numbers["maxy"]
+            )
+        ):
+            self.issue(path, "invalid_extent", "minimums must be below maximums")
+        if crs is None or len(raw_values) != 4:
+            return None
+        return {"srs": crs.upper(), **raw_values}
+
+    def _native_styles(
+        self, value: Any, path: str
+    ) -> tuple[tuple[ReferenceLayerStyleDefinition, ...], str | None]:
+        entries = self._native_list(value, path)
+        if entries is None:
+            return (), None
+        if not entries or len(entries) > 256:
+            self.issue(path, "invalid_style_count", "between 1 and 256 styles required")
+        definitions: list[ReferenceLayerStyleDefinition] = []
+        keys: set[str] = set()
+        selected: str | None = None
+        for order, value in enumerate(entries):
+            item_path = f"{path}[{order}]"
+            item = self._native_object(
+                value,
+                item_path,
+                allowed={"name", "title"},
+                required={"name", "title"},
+                kind="style",
+            )
+            if item is None:
+                continue
+            name = item.get("name")
+            title = self._native_text(item.get("title"), f"{item_path}.title")
+            if not isinstance(name, str):
+                self.issue(f"{item_path}.name", "invalid_style", "text required")
+                continue
+            if name == "":
+                if len(entries) != 1:
+                    self.issue(
+                        f"{item_path}.name",
+                        "unsupported_implicit_style",
+                        "an implicit WMS style must be the only style",
+                    )
+                continue
+            key = name.casefold()
+            if not REMOTE_STYLE_RE.fullmatch(name) or not KEY_RE.fullmatch(key):
+                self.issue(f"{item_path}.name", "invalid_style", name)
+                continue
+            if key in keys:
+                self.issue(f"{item_path}.name", "duplicate_style", key)
+                continue
+            keys.add(key)
+            if order == 0:
+                selected = key
+            if title:
+                definitions.append(
+                    ReferenceLayerStyleDefinition(
+                        source_key=key,
+                        title=title,
+                        remote_name=name,
+                        sort_order=order,
+                        is_default=order == 0,
+                    )
+                )
+        return tuple(definitions), selected
+
+    def _native_legend(self, value: Any, path: str) -> tuple[str | None, str | None]:
+        legend = self._native_object(
+            value,
+            path,
+            allowed={"url", "format"},
+            required={"url", "format"},
+            kind="legend",
+        )
+        if legend is None:
+            return None, None
+        url = self._native_reference_url(legend.get("url"), f"{path}.url")
+        image_format = self._native_text(legend.get("format"), f"{path}.format")
+        if image_format is not None and not re.fullmatch(
+            r"image/[A-Za-z0-9.+-]{1,64}", image_format
+        ):
+            self.issue(f"{path}.format", "invalid_image_format", image_format)
+            image_format = None
+        return url, image_format
+
+    def _native_metadata(self, value: Any, path: str) -> str | None:
+        metadata = self._native_object(
+            value,
+            path,
+            allowed={"url"},
+            required={"url"},
+            kind="metadata",
+        )
+        if metadata is None:
+            return None
+        return self._native_reference_url(
+            metadata.get("url"), f"{path}.url", allow_fragment=True
+        )
+
+    def _native_suggested_services(self, value: Any, path: str) -> None:
+        section = self._native_object(
+            value,
+            path,
+            allowed={"wms", "wfs", "wmts"},
+            required={"wms", "wfs", "wmts"},
+            kind="suggested services",
+        )
+        if section is None:
+            return
+        for protocol in ("wms", "wfs", "wmts"):
+            entries = self._native_list(section.get(protocol), f"{path}.{protocol}")
+            if entries is None:
+                continue
+            for index, url in enumerate(entries):
+                self._native_reference_url(url, f"{path}.{protocol}[{index}]")
+
+    def _native_favorites(self, value: Any, path: str) -> None:
+        section = self._native_object(
+            value,
+            path,
+            allowed={"categories"},
+            required={"categories"},
+            kind="favorites",
+        )
+        if section is None:
+            return
+        categories = self._native_list(section.get("categories"), f"{path}.categories")
+        if categories is None:
+            return
+        for category_index, value in enumerate(categories):
+            category_path = f"{path}.categories[{category_index}]"
+            category = self._native_object(
+                value,
+                category_path,
+                allowed={"name", "servers"},
+                required={"name", "servers"},
+                kind="favorite category",
+            )
+            if category is None:
+                continue
+            self._native_text(category.get("name"), f"{category_path}.name")
+            servers = self._native_list(
+                category.get("servers"), f"{category_path}.servers"
+            )
+            if servers is None:
+                continue
+            for server_index, server_value in enumerate(servers):
+                server_path = f"{category_path}.servers[{server_index}]"
+                server = self._native_object(
+                    server_value,
+                    server_path,
+                    allowed={"url", "layers"},
+                    required={"url", "layers"},
+                    kind="favorite server",
+                )
+                if server is None:
+                    continue
+                self._native_reference_url(server.get("url"), f"{server_path}.url")
+                layers = self._native_list(server.get("layers"), f"{server_path}.layers")
+                if layers is not None:
+                    for layer_index, layer_name in enumerate(layers):
+                        self._native_text(
+                            layer_name, f"{server_path}.layers[{layer_index}]"
+                        )
+
+    def _native_thematic_search(self, value: Any, path: str) -> None:
+        section = self._native_object(
+            value,
+            path,
+            allowed={"themes"},
+            required={"themes"},
+            kind="thematic search",
+        )
+        if section is None:
+            return
+        themes = self._native_list(section.get("themes"), f"{path}.themes")
+        if themes is None:
+            return
+        for theme_index, value in enumerate(themes):
+            theme_path = f"{path}.themes[{theme_index}]"
+            if not isinstance(value, Mapping):
+                self.issue(theme_path, "invalid_entry", "object required")
+                continue
+            has_layers = "layers" in value
+            has_categories = "categories" in value
+            allowed = {"name", "layers"} if has_layers else {"name", "categories"}
+            theme = self._native_object(
+                value,
+                theme_path,
+                allowed=allowed,
+                required=allowed,
+                kind="thematic search theme",
+            )
+            if theme is None:
+                continue
+            if has_layers == has_categories:
+                self.issue(
+                    theme_path,
+                    "invalid_thematic_theme",
+                    "exactly one of layers or categories is required",
+                )
+                continue
+            self._native_text(theme.get("name"), f"{theme_path}.name")
+            if has_layers:
+                self._native_search_layers(theme.get("layers"), f"{theme_path}.layers")
+                continue
+            categories = self._native_list(
+                theme.get("categories"), f"{theme_path}.categories"
+            )
+            if categories is None:
+                continue
+            for category_index, category_value in enumerate(categories):
+                category_path = f"{theme_path}.categories[{category_index}]"
+                category = self._native_object(
+                    category_value,
+                    category_path,
+                    allowed={"name", "layers"},
+                    required={"name", "layers"},
+                    kind="thematic search category",
+                )
+                if category is None:
+                    continue
+                self._native_text(category.get("name"), f"{category_path}.name")
+                self._native_search_layers(
+                    category.get("layers"), f"{category_path}.layers"
+                )
+
+    def _native_search_layers(self, value: Any, path: str) -> None:
+        layers = self._native_list(value, path)
+        if layers is None:
+            return
+        for layer_index, value in enumerate(layers):
+            layer_path = f"{path}[{layer_index}]"
+            layer = self._native_object(
+                value,
+                layer_path,
+                allowed={"name", "url", "layer", "style", "properties"},
+                required={"name", "url", "layer", "style", "properties"},
+                kind="thematic search layer",
+            )
+            if layer is None:
+                continue
+            for key in ("name", "layer", "style"):
+                self._native_text(layer.get(key), f"{layer_path}.{key}")
+            self._native_reference_url(layer.get("url"), f"{layer_path}.url")
+            properties = self._native_list(
+                layer.get("properties"), f"{layer_path}.properties"
+            )
+            if properties is None:
+                continue
+            for property_index, value in enumerate(properties):
+                property_path = f"{layer_path}.properties[{property_index}]"
+                item = self._native_object(
+                    value,
+                    property_path,
+                    allowed={"name", "label", "type", "required"},
+                    required={"name", "label", "type", "required"},
+                    kind="thematic search property",
+                )
+                if item is None:
+                    continue
+                for key in ("name", "label", "type"):
+                    self._native_text(item.get(key), f"{property_path}.{key}")
+                if not isinstance(item.get("required"), bool):
+                    self.issue(
+                        f"{property_path}.required",
+                        "invalid_boolean",
+                        "boolean required",
+                    )
+
+    def _native_apps(self, value: Any, path: str) -> None:
+        apps = self._native_list(value, path)
+        if apps is None:
+            return
+        for index, value in enumerate(apps):
+            item_path = f"{path}[{index}]"
+            app = self._native_object(
+                value,
+                item_path,
+                allowed={"name", "image", "external", "url"},
+                required={"name", "image", "external", "url"},
+                kind="application link",
+            )
+            if app is None:
+                continue
+            self._native_text(app.get("name"), f"{item_path}.name")
+            image = self._native_text(app.get("image"), f"{item_path}.image")
+            if image is not None and not _safe_relative_path(image):
+                self.issue(
+                    f"{item_path}.image",
+                    "invalid_relative_url",
+                    "safe relative asset required",
+                )
+            external = app.get("external")
+            if not isinstance(external, bool):
+                self.issue(f"{item_path}.external", "invalid_boolean", "boolean required")
+                continue
+            if external:
+                self._native_reference_url(app.get("url"), f"{item_path}.url")
+            else:
+                route = self._native_text(app.get("url"), f"{item_path}.url")
+                if route is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", route):
+                    self.issue(
+                        f"{item_path}.url",
+                        "invalid_internal_application",
+                        "component identifier required",
+                    )
+
+    def _native_service_version(self, url: str, path: str) -> str | None:
+        try:
+            versions = [
+                value
+                for key, value in parse_qsl(urlsplit(url).query, keep_blank_values=True)
+                if key.casefold() == "version"
+            ]
+        except ValueError:
+            return None
+        if not versions:
+            return None
+        if len(set(versions)) != 1 or versions[0] not in {"1.1.1", "1.3.0"}:
+            self.issue(path, "invalid_service_version", "unsupported WMS version")
+            return None
+        return versions[0]
+
+    def _native_reference_url(
+        self, value: Any, path: str, *, allow_fragment: bool = False
+    ) -> str | None:
+        url = self._native_text(value, path)
+        if url is not None and not _safe_http_reference(
+            url, allow_fragment=allow_fragment
+        ):
+            self.issue(path, "invalid_reference_url", "URL rejected")
+            return None
+        return url
+
+    def _native_object(
+        self,
+        value: Any,
+        path: str,
+        *,
+        allowed: set[str],
+        required: set[str],
+        kind: str,
+    ) -> Mapping[str, Any] | None:
+        if not isinstance(value, Mapping):
+            self.issue(path, "invalid_entry", f"{kind} object required")
+            return None
+        for key in value:
+            if key not in allowed:
+                self.issue(
+                    _path(path, key),
+                    "unrecognized_field",
+                    f"unrecognized {kind} field",
+                )
+        for key in sorted(required - set(value)):
+            self.issue(_path(path, key), "missing_field", f"required {kind} field")
+        return value
+
+    def _native_list(self, value: Any, path: str) -> list[Any] | None:
+        if not isinstance(value, list):
+            self.issue(path, "invalid_container", "list required")
+            return None
+        return value
+
+    def _native_text(
+        self, value: Any, path: str, *, maximum: int = 500
+    ) -> str | None:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value.strip()) > maximum
+            or any(ord(character) < 32 for character in value)
+        ):
+            self.issue(path, "invalid_text", "non-empty text required")
+            return None
+        return value.strip()
 
     def _catalog(
         self,
@@ -753,11 +1651,18 @@ class _Parser:
         return source_key
 
     def _embedded_service(
-        self, url: str, protocol: str | None, path: str
+        self,
+        url: str,
+        protocol: str | None,
+        path: str,
+        *,
+        version: str | None = None,
     ) -> str | None:
         value: dict[str, Any] = {"title": "Embedded SIUR service", "url": url}
         if protocol:
             value["protocol"] = protocol
+        if version:
+            value["version"] = version
         return self._service(value, path, None)
 
     def _url(self, value: str, path: str) -> tuple[str | None, str | None]:
@@ -1007,6 +1912,50 @@ def _absolute_url(value: str) -> bool:
     except ValueError:
         return False
     return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+
+def _safe_http_reference(value: str, *, allow_fragment: bool = False) -> bool:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if (
+        scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or (parsed.fragment and not allow_fragment)
+        or (port is not None and port != {"http": 80, "https": 443}[scheme])
+        or host in {"localhost", "local"}
+        or host.endswith((".localhost", ".local", ".internal"))
+    ):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return True
+
+
+def _safe_relative_path(value: str, *, suffix: str | None = None) -> bool:
+    parsed = urlsplit(value)
+    parts = parsed.path.split("/")
+    return (
+        parsed.scheme == ""
+        and parsed.netloc == ""
+        and parsed.query == ""
+        and parsed.fragment == ""
+        and not parsed.path.startswith("/")
+        and all(part not in {"", ".", ".."} for part in parts)
+        and bool(re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", parsed.path))
+        and (suffix is None or parsed.path.casefold().endswith(suffix.casefold()))
+    )
+
+
+def _native_name(value: str) -> str:
+    return unicodedata.normalize("NFC", value.strip()).casefold()
 
 
 def _key(value: str) -> str:

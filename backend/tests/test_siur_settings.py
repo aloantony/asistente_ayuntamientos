@@ -1,5 +1,7 @@
 import hashlib
 import json
+from pathlib import Path
+import unicodedata
 
 import pytest
 
@@ -10,6 +12,9 @@ from app.reference_layers.siur_settings import (
     SiurSettingsPromotionError,
     analyze_siur_settings,
 )
+
+
+NATIVE_FIXTURE = Path(__file__).parent / "fixtures" / "siur_settings_native.json"
 
 
 def settings_bytes(
@@ -74,6 +79,28 @@ def baseline(document=None, **overrides):
     return SiurSettingsBaseline(**values)
 
 
+def native_settings_bytes() -> bytes:
+    return NATIVE_FIXTURE.read_bytes()
+
+
+def baseline_for(document: bytes, **overrides) -> SiurSettingsBaseline:
+    probe = analyze_siur_settings(document)
+    values = {
+        "top_level_groups": probe.top_level_group_count,
+        "groups": probe.group_count,
+        "layers": probe.layer_count,
+        "services": len(probe.services),
+        "raw_sha256": probe.raw_sha256,
+        "layer_keys": frozenset(
+            node.source_key
+            for node in probe.nodes
+            if node.kind == "layer" and node.source_key is not None
+        ),
+    }
+    values.update(overrides)
+    return SiurSettingsBaseline(**values)
+
+
 def test_complete_reviewed_catalog_yields_definition_and_raw_hash() -> None:
     document = settings_bytes()
 
@@ -115,6 +142,215 @@ def test_style_identity_is_stable_but_remote_name_preserves_exact_case() -> None
 
     assert style.source_key == "urbanismo:plau_cyl_clasificacion_color"
     assert style.remote_name == "Urbanismo:Plau_Cyl_Clasificacion_Color"
+
+
+def test_real_siur_profile_maps_tree_backgrounds_and_nested_evidence() -> None:
+    document = native_settings_bytes()
+
+    analysis = analyze_siur_settings(document, baseline=baseline_for(document))
+
+    assert analysis.can_apply is True
+    assert analysis.top_level_group_count == 1
+    assert analysis.group_count == 2
+    assert analysis.layer_count == 5
+    definition = analysis.require_definition()
+    assert len(definition.services) == 5
+    assert sorted(service.upstream_protocol for service in definition.services) == [
+        "wms",
+        "wmts",
+        "wmts",
+        "wmts",
+        "xyz",
+    ]
+    assert all(service.license_status == "pending" for service in definition.services)
+
+    overlays = [
+        layer
+        for layer in definition.layers
+        if layer.node_type == "layer" and layer.role == "overlay"
+    ]
+    assert len(overlays) == 2
+    classification = next(
+        layer for layer in overlays if layer.remote_name == "plau_cyl_clasificacion"
+    )
+    classification_service = next(
+        service
+        for service in definition.services
+        if service.source_key == classification.service_key
+    )
+    assert classification_service.upstream_protocol == "wms"
+    assert classification_service.base_url == (
+        "https://www.ign.es/wms-inspire/unidades-administrativas"
+    )
+    assert classification.default_visible is False
+    assert classification.queryable is False
+    assert classification.image_format is None
+    assert classification.bounds is None
+    assert classification.supported_crs == ()
+    assert classification.options == {
+        "settings_path": (
+            "$.settings[0].groupLayers.children[0].children[0]"
+        ),
+        "source_extent": {
+            "srs": "EPSG:25830",
+            "minx": "146569.61819428788",
+            "miny": "4430813.815909118",
+            "maxx": "608202.6727624929",
+            "maxy": "4798875.983524372",
+        },
+        "source_legend": {
+            "url": "https://idecyl.jcyl.es/geoserver/urbanismo/ows",
+            "format": "image/png",
+        },
+    }
+    assert classification.metadata_url.endswith("#/metadata/urbanismo")
+    assert classification.legend_url.endswith("/urbanismo/ows")
+    assert classification.style_name == "plau_cyl_clasificacion_color"
+    assert [style.remote_name for style in classification.styles] == [
+        "plau_cyl_clasificacion_color",
+        "plau_cyl_clasificacion_trama",
+    ]
+    assert [style.is_default for style in classification.styles] == [True, False]
+
+    implicit = next(layer for layer in overlays if layer.remote_name == "catastrones")
+    assert implicit.style_name is None
+    assert implicit.styles == ()
+
+    backgrounds = [
+        layer
+        for layer in definition.layers
+        if layer.node_type == "layer" and layer.role == "base"
+    ]
+    assert [layer.title for layer in backgrounds] == ["IMAGEN", "MAPA", "RELIEVE"]
+    assert [layer.default_visible for layer in backgrounds] == [True, False, False]
+    assert all(layer.parent_key is None for layer in backgrounds)
+
+
+def test_native_layer_identity_preserves_repeated_placements() -> None:
+    value = json.loads(native_settings_bytes())
+    urbanismo = value["settings"][0]["groupLayers"]["children"][0]
+    original = urbanismo["children"][0]
+    urbanismo["children"].append(
+        {
+            "name": "Otra ubicación",
+            "children": [json.loads(json.dumps(original))],
+        }
+    )
+    document = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+    analysis = analyze_siur_settings(document, baseline=baseline_for(document))
+
+    repeated = [
+        node
+        for node in analysis.nodes
+        if node.kind == "layer" and node.remote_name == "plau_cyl_clasificacion"
+    ]
+    assert analysis.can_apply is True
+    assert len(repeated) == 2
+    assert len({node.source_key for node in repeated}) == 2
+
+
+def test_native_identities_normalize_case_and_unicode_composition() -> None:
+    original_document = native_settings_bytes()
+    original = analyze_siur_settings(
+        original_document,
+        baseline=baseline_for(original_document),
+    )
+    value = json.loads(original_document)
+    root_group = value["settings"][0]["groupLayers"]["children"][0]
+    root_group["name"] = root_group["name"].upper()
+    leaf = root_group["children"][0]
+    leaf["name"] = unicodedata.normalize("NFD", leaf["name"])
+    normalized_document = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    normalized = analyze_siur_settings(
+        normalized_document,
+        baseline=baseline_for(normalized_document),
+    )
+
+    assert original.can_apply is True
+    assert normalized.can_apply is True
+    assert [node.source_key for node in original.nodes] == [
+        node.source_key for node in normalized.nodes
+    ]
+
+
+def test_native_wms_version_is_extracted_before_endpoint_normalization() -> None:
+    value = json.loads(native_settings_bytes())
+    endpoint = value["settings"][0]["groupLayers"]["children"][0]["children"][0][
+        "endPoint"
+    ]
+    endpoint["url"] = "https://mapas.igme.es/gis/services/Cartografia/WMS?version=1.3.0"
+    document = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+    analysis = analyze_siur_settings(document, baseline=baseline_for(document))
+
+    service = next(
+        service
+        for service in analysis.require_definition().services
+        if service.base_url.startswith("https://mapas.igme.es/")
+    )
+    assert service.base_url == "https://mapas.igme.es/gis/services/Cartografia/WMS"
+    assert service.version == "1.3.0"
+
+
+def test_native_profile_rejects_unknown_nested_fields() -> None:
+    value = json.loads(native_settings_bytes())
+    layer = value["settings"][0]["groupLayers"]["children"][0]["children"][0][
+        "endPoint"
+    ]["layer"]
+    layer["futureRendererOptions"] = {"x": 1}
+    document = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+    analysis = analyze_siur_settings(document, baseline=baseline_for(document))
+
+    assert analysis.definition is None
+    assert any(
+        issue.code == "unrecognized_field"
+        and issue.path.endswith(".futureRendererOptions")
+        for issue in analysis.unresolved
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation, issue_code",
+    [
+        ("selected", "selected_setting_unresolved"),
+        ("protocol", "layer_protocol_missing"),
+        ("extent", "invalid_extent"),
+        ("service_fragment", "invalid_service_url"),
+        ("wmc_url", "invalid_relative_url"),
+        ("control_character", "invalid_text"),
+    ],
+)
+def test_native_profile_rejects_unsafe_or_ambiguous_input(
+    mutation, issue_code
+) -> None:
+    value = json.loads(native_settings_bytes())
+    endpoint = value["settings"][0]["groupLayers"]["children"][0]["children"][0][
+        "endPoint"
+    ]
+    if mutation == "selected":
+        value["selectedSetting"] = "missing"
+    elif mutation == "protocol":
+        endpoint["type"] = "future-map-service"
+    elif mutation == "extent":
+        endpoint["layer"]["extent"]["maxx"] = "100"
+    elif mutation == "service_fragment":
+        endpoint["url"] = "https://idecyl.jcyl.es/geoserver/urbanismo/wms#unsafe"
+    elif mutation == "wmc_url":
+        value["settings"][0]["wmcUrl"] = "../default.xml"
+    else:
+        value["settings"][0]["groupLayers"]["children"][0]["name"] += "\u0000"
+    document = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+    analysis = analyze_siur_settings(document, baseline=baseline_for(document))
+
+    assert analysis.definition is None
+    assert any(issue.code == issue_code for issue in analysis.unresolved)
 
 
 def test_identities_do_not_depend_on_titles_or_order() -> None:
