@@ -8,7 +8,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.reference_layers.models import (
@@ -30,6 +30,7 @@ DELIVERY_MODES = {"proxy", "mirror"}
 PROVIDER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$")
 SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
 REMOTE_STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
+_CATALOG_PROVIDER_LOCK_DOMAIN = b"asistente/reference-catalog-apply/v1\0"
 
 
 class ReferenceCatalogValidationError(ValueError):
@@ -118,6 +119,7 @@ class ReferenceCatalogSyncPlan:
     definition: ReferenceCatalogDefinition
     content_sha256: str
     definition_sha256: str
+    base_state_sha256: str
     new_services: tuple[str, ...]
     updated_services: tuple[str, ...]
     missing_services: tuple[str, ...]
@@ -156,6 +158,20 @@ def canonical_catalog_sha256(raw_catalog: dict[str, Any]) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _catalog_provider_lock_key(provider_key: str) -> int:
+    digest = hashlib.sha256(
+        _CATALOG_PROVIDER_LOCK_DOMAIN + provider_key.encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _lock_catalog_provider(db: Session, provider_key: str) -> None:
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _catalog_provider_lock_key(provider_key)},
+    )
 
 
 def canonical_definition_sha256(
@@ -218,6 +234,7 @@ def build_catalog_sync_plan(
             definition=definition,
             content_sha256=content_sha256,
             definition_sha256=definition_sha256,
+            base_state_sha256="0" * 64,
             new_services=(),
             updated_services=(),
             missing_services=(),
@@ -260,6 +277,20 @@ def build_catalog_sync_plan(
             )
         )
     }
+    current_snapshots = tuple(
+        db.scalars(
+            select(ReferenceCatalogSnapshot).where(
+                ReferenceCatalogSnapshot.provider_key == definition.provider_key,
+                ReferenceCatalogSnapshot.is_current.is_(True),
+            )
+        )
+    )
+    base_state_sha256 = _catalog_base_state_sha256(
+        existing_services,
+        existing_layers,
+        existing_styles,
+        current_snapshots,
+    )
 
     new_services: list[str] = []
     updated_services: list[str] = []
@@ -336,6 +367,7 @@ def build_catalog_sync_plan(
         definition=definition,
         content_sha256=content_sha256,
         definition_sha256=definition_sha256,
+        base_state_sha256=base_state_sha256,
         new_services=tuple(sorted(new_services)),
         updated_services=tuple(sorted(updated_services)),
         missing_services=tuple(sorted(missing_services)),
@@ -356,18 +388,24 @@ def apply_catalog_definition(
     *,
     expected_plan: ReferenceCatalogSyncPlan | None = None,
 ) -> tuple[ReferenceCatalogSnapshot, ReferenceCatalogSyncPlan]:
-    plan = build_catalog_sync_plan(db, definition)
-    if plan.blocking_issues:
-        raise ReferenceCatalogValidationError("; ".join(plan.blocking_issues))
-    if (
-        expected_plan is not None
-        and _sync_plan_signature(plan) != _sync_plan_signature(expected_plan)
-    ):
-        raise ReferenceCatalogValidationError(
-            "Catalog state changed after the reviewed dry-run"
-        )
-
     try:
+        _lock_catalog_provider(db, definition.provider_key)
+        # A caller can build the reviewed plan with this same Session before
+        # waiting for the provider lock. Reload ORM state so the revalidation
+        # observes any catalog transaction that committed while we waited.
+        db.expire_all()
+        plan = build_catalog_sync_plan(db, definition)
+        if plan.blocking_issues:
+            raise ReferenceCatalogValidationError("; ".join(plan.blocking_issues))
+        if (
+            expected_plan is not None
+            and _sync_plan_signature(plan)
+            != _sync_plan_signature(expected_plan)
+        ):
+            raise ReferenceCatalogValidationError(
+                "Catalog state changed after the reviewed dry-run"
+            )
+
         snapshot = db.scalar(
             select(ReferenceCatalogSnapshot).where(
                 ReferenceCatalogSnapshot.provider_key == definition.provider_key,
@@ -814,6 +852,7 @@ def _sync_plan_signature(plan: ReferenceCatalogSyncPlan) -> tuple:
     return (
         plan.content_sha256,
         plan.definition_sha256,
+        plan.base_state_sha256,
         plan.new_services,
         plan.updated_services,
         plan.missing_services,
@@ -824,6 +863,44 @@ def _sync_plan_signature(plan: ReferenceCatalogSyncPlan) -> tuple:
         plan.updated_styles,
         plan.missing_styles,
     )
+
+
+def _catalog_base_state_sha256(
+    services: dict[str, ReferenceService],
+    layers: dict[str, ReferenceLayer],
+    styles: dict[str, ReferenceLayerStyle],
+    current_snapshots: tuple[ReferenceCatalogSnapshot, ...],
+) -> str:
+    payload = {
+        "current_snapshots": [
+            (snapshot.content_sha256, snapshot.definition_sha256)
+            for snapshot in sorted(
+                current_snapshots,
+                key=lambda item: (
+                    item.content_sha256,
+                    item.definition_sha256,
+                ),
+            )
+        ],
+        "services": [
+            (key, _service_signature(services[key]))
+            for key in sorted(services)
+        ],
+        "layers": [
+            (key, _layer_signature(layers[key])) for key in sorted(layers)
+        ],
+        "styles": [
+            (key, _style_signature(styles[key])) for key in sorted(styles)
+        ],
+    }
+    encoded = json.dumps(
+        _canonical_json_value(payload),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _service_definition_signature(item: ReferenceServiceDefinition) -> tuple:
