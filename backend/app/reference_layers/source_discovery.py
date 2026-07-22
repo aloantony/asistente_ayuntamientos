@@ -20,7 +20,10 @@ from app.reference_layers.catalog import (
     ReferenceLayerDefinition,
     ReferenceServiceDefinition,
 )
-from app.reference_layers.mirror_coverage import reviewed_tile_coverage
+from app.reference_layers.mirror_coverage import (
+    reviewed_tile_coverage,
+    reviewed_tile_format,
+)
 
 SourceProtocol = Literal[
     "wfs",
@@ -279,12 +282,21 @@ def _tile_config(
         bounds=layer.bounds,
         min_zoom=layer.min_zoom,
         max_zoom=layer.max_zoom,
+        endpoint_url=service.base_url,
+        remote_name=layer.remote_name,
+    )
+    requested_format = layer.image_format or service.default_format
+    image_format = reviewed_tile_format(
+        layer_source_key=layer.source_key,
+        endpoint_url=service.base_url,
+        remote_name=layer.remote_name or "",
+        requested_format=requested_format,
     )
     config = {
         "bounds": coverage.bounds,
         "min_zoom": coverage.min_zoom,
         "max_zoom": coverage.max_zoom,
-        "format": layer.image_format or service.default_format or "image/png",
+        "format": image_format or _protocol_default_tile_format(service),
         "style_name": layer.style_name or "",
         "coverage_required": True,
     }
@@ -293,6 +305,16 @@ def _tile_config(
     if coverage.profile is not None:
         config["coverage_profile"] = coverage.profile
     return config
+
+
+def _protocol_default_tile_format(
+    service: ReferenceServiceDefinition,
+) -> str:
+    if service.upstream_protocol.casefold() == "xyz":
+        path = urlsplit(service.base_url).path.casefold()
+        if path.endswith((".jpg", ".jpeg")):
+            return "image/jpeg"
+    return "image/png"
 
 
 def _local_target_kind(layer: ReferenceLayerDefinition) -> TargetKind:

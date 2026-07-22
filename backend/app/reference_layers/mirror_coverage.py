@@ -13,10 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 
 SIUR_LAYER_PREFIX = "layer:siur:"
 SIUR_TILE_PROFILE = "siur-castilla-y-leon-native-z16-v1"
+SIUR_ORTHO_TILE_PROFILE = "siur-castilla-y-leon-ortho-native-z15-v1"
 SIUR_TILE_BOUNDS = {
     "west": -7.6,
     "south": 39.9,
@@ -25,7 +27,17 @@ SIUR_TILE_BOUNDS = {
 }
 SIUR_TILE_MIN_ZOOM = 0
 SIUR_TILE_MAX_ZOOM = 16
+SIUR_ORTHO_TILE_MAX_ZOOM = 15
 SIUR_TILE_MAX_COUNT = 2_000_000
+
+_SIUR_ORTHO_HOST = "orto.wms.itacyl.es"
+_SIUR_JPEG_LAYERS = frozenset(
+    {
+        ("www.ign.es", "OI.OrthoimageCoverage"),
+        ("www.ign.es", "MTN"),
+    }
+)
+_SIUR_JPEG_HOSTS = frozenset({_SIUR_ORTHO_HOST, "tms-relieve.idee.es"})
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,8 @@ def reviewed_tile_coverage(
     bounds: Mapping[str, Any] | None,
     min_zoom: int | None,
     max_zoom: int | None,
+    endpoint_url: str | None = None,
+    remote_name: str | None = None,
 ) -> ReviewedTileCoverage:
     """Fill only missing SIUR coverage; generic sources remain fail-closed."""
 
@@ -55,10 +69,55 @@ def reviewed_tile_coverage(
             max_tile_count=None,
             profile=None,
         )
+    ortho_profile = _is_siur_ortho(endpoint_url, remote_name)
     return ReviewedTileCoverage(
         bounds=normalized_bounds or dict(SIUR_TILE_BOUNDS),
         min_zoom=SIUR_TILE_MIN_ZOOM if min_zoom is None else min_zoom,
-        max_zoom=SIUR_TILE_MAX_ZOOM if max_zoom is None else max_zoom,
+        max_zoom=(
+            SIUR_ORTHO_TILE_MAX_ZOOM
+            if max_zoom is None and ortho_profile
+            else SIUR_TILE_MAX_ZOOM if max_zoom is None else max_zoom
+        ),
         max_tile_count=SIUR_TILE_MAX_COUNT,
-        profile=SIUR_TILE_PROFILE,
+        profile=SIUR_ORTHO_TILE_PROFILE if ortho_profile else SIUR_TILE_PROFILE,
     )
+
+
+def reviewed_tile_format(
+    *,
+    layer_source_key: str,
+    endpoint_url: str,
+    remote_name: str,
+    requested_format: str | None,
+) -> str | None:
+    """Select JPEG only for reviewed opaque SIUR imagery sources.
+
+    An explicit catalog format always wins.  Unknown providers and unreviewed
+    SIUR layers retain their normal protocol default, including PNG alpha for
+    thematic overlays.
+    """
+
+    if requested_format:
+        return requested_format
+    if not layer_source_key.startswith(SIUR_LAYER_PREFIX):
+        return None
+    host = _hostname(endpoint_url)
+    if host in _SIUR_JPEG_HOSTS or (host, remote_name) in _SIUR_JPEG_LAYERS:
+        return "image/jpeg"
+    return None
+
+
+def _is_siur_ortho(endpoint_url: str | None, remote_name: str | None) -> bool:
+    return bool(
+        endpoint_url
+        and remote_name
+        and _hostname(endpoint_url) == _SIUR_ORTHO_HOST
+        and remote_name.startswith("Ortofoto_")
+    )
+
+
+def _hostname(endpoint_url: str) -> str | None:
+    try:
+        return urlsplit(endpoint_url).hostname
+    except ValueError:
+        return None

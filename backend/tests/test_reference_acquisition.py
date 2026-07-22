@@ -997,10 +997,37 @@ def test_wms_materializes_finite_getmap_recipe_instead_of_runtime_proxy(store, l
     )["descriptor"]
     assert descriptor["kvp"]["request"] == "GetMap"
     assert descriptor["kvp"]["CRS"] == "EPSG:3857"
+    assert descriptor["kvp"]["transparent"] == "TRUE"
     assert descriptor["min_zoom"] == 6
     assert descriptor["max_zoom"] == 18
     assert descriptor["estimated_tile_count"] == 16_885_744
     assert descriptor["estimated_tile_count"] < descriptor["max_tile_count"]
+
+
+def test_wms_jpeg_recipe_disables_impossible_transparency(store, limits):
+    capabilities = WMS_CAPABILITIES.replace(b"image/png", b"image/jpeg")
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(capabilities, "application/xml")
+        ),
+    ).acquire(
+        candidate(
+            "wms_tiles",
+            remote_name="workspace:roads",
+            endpoint="https://data.example.es/geoserver/wms",
+            config={**TILE_CONFIG, "format": "image/jpeg"},
+        )
+    )
+
+    descriptor = read_json_artifact(
+        store,
+        result,
+        "metadata",
+        metadata_kind="reference-tile-source/v1",
+    )["descriptor"]
+    assert descriptor["kvp"]["transparent"] == "FALSE"
 
 
 def test_tile_materialization_rejects_unbounded_or_invalid_coverage(store, limits):

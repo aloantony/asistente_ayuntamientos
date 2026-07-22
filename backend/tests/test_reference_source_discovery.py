@@ -188,6 +188,50 @@ def test_unknown_provider_with_missing_coverage_remains_fail_closed() -> None:
     assert "max_tile_count" not in candidate.config
 
 
+def test_xyz_jpeg_template_uses_matching_archive_format() -> None:
+    candidate = acquisition_candidates(
+        replace(
+            service(
+                "xyz",
+                "https://tms-relieve.idee.es/1.0.0/relieve/{z}/{x}/{-y}.jpeg",
+            ),
+            default_format=None,
+        ),
+        replace(
+            layer(),
+            source_key="layer:siur:" + "b" * 64,
+            bounds=None,
+            min_zoom=None,
+            max_zoom=None,
+            image_format=None,
+        ),
+    )[0]
+
+    assert candidate.config["format"] == "image/jpeg"
+
+
+def test_siur_ortho_fallback_uses_reviewed_jpeg_and_z15_profile() -> None:
+    candidate = acquisition_candidates(
+        replace(
+            service("wms", "https://orto.wms.itacyl.es/WMS"),
+            default_format=None,
+        ),
+        replace(
+            layer("Ortofoto_2002"),
+            source_key="layer:siur:" + "c" * 64,
+            bounds=None,
+            min_zoom=None,
+            max_zoom=None,
+            image_format=None,
+        ),
+    )[0]
+
+    assert candidate.protocol == "wms_tiles"
+    assert candidate.config["format"] == "image/jpeg"
+    assert candidate.config["max_zoom"] == 15
+    assert candidate.config["coverage_profile"].endswith("ortho-native-z15-v1")
+
+
 def test_source_identity_changes_with_effective_definition_only() -> None:
     first = acquisition_candidates(service(), layer())[0]
     repeated = acquisition_candidates(service(), layer())[0]

@@ -2967,7 +2967,11 @@ def _wms_tile_descriptor(
             "layers": probe.canonical_name,
             "styles": style,
             "format": common["format"],
-            "transparent": "TRUE",
+            "transparent": (
+                "FALSE"
+                if common["format"] in {"image/jpeg", "image/jpg"}
+                else "TRUE"
+            ),
             crs_parameter: "EPSG:3857",
             "bbox_placeholder": "{bbox}",
             "width_placeholder": "{width}",
