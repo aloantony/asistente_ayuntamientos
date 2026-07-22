@@ -989,7 +989,8 @@ class ReferenceLayerSource(TimestampMixin, Base):
         ),
         CheckConstraint(
             "protocol in ('wfs', 'ogc_api_features', 'wcs', "
-            "'arcgis_rest', 'atom', 'download', 'wmts', 'xyz', 'local')",
+            "'arcgis_rest', 'atom', 'download', 'wmts', 'xyz', "
+            "'wms_tiles', 'local')",
             name="ck_reference_layer_sources_protocol",
         ),
         CheckConstraint(
