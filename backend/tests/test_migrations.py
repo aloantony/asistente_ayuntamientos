@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0034"
+HEAD_REVISION = "20260723_0035"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -885,7 +885,11 @@ def assert_reference_delivery_evidence_schema(inspector: Inspector) -> None:
     }
 
 
-def assert_reference_mirror_schema(inspector: Inspector) -> None:
+def assert_reference_mirror_schema(
+    inspector: Inspector,
+    *,
+    shared_artifact_storage: bool = True,
+) -> None:
     assert REFERENCE_MIRROR_TABLES <= set(inspector.get_table_names())
     for table_name, expected_columns in REFERENCE_MIRROR_COLUMNS.items():
         assert {
@@ -907,6 +911,11 @@ def assert_reference_mirror_schema(inspector: Inspector) -> None:
         },
         "reference_source_artifacts": {
             "ix_reference_source_artifacts_source_history",
+            *(
+                {"ix_reference_source_artifacts_storage"}
+                if shared_artifact_storage
+                else set()
+            ),
         },
         "reference_sync_run_artifacts": {
             "ix_reference_sync_run_artifacts_artifact",
@@ -2897,7 +2906,10 @@ def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
             inspect(engine).get_table_names()
         )
         run_alembic(migration_database_url, "upgrade", "20260717_0034")
-        assert_reference_mirror_schema(inspect(engine))
+        assert_reference_mirror_schema(
+            inspect(engine),
+            shared_artifact_storage=False,
+        )
 
         run_alembic(migration_database_url, "downgrade", "20260717_0033")
         assert REFERENCE_MIRROR_TABLES.isdisjoint(
@@ -3192,7 +3204,7 @@ def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260717_0034"
+            ).scalar_one() == HEAD_REVISION
     finally:
         engine.dispose()
 

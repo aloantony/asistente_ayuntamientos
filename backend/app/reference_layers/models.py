@@ -1291,10 +1291,10 @@ class ReferenceSourceArtifact(Base):
             "id",
             name="uq_reference_source_artifacts_source_id",
         ),
-        UniqueConstraint(
+        Index(
+            "ix_reference_source_artifacts_storage",
             "storage_backend",
             "storage_key",
-            name="uq_reference_source_artifacts_storage_key",
         ),
         Index(
             "ix_reference_source_artifacts_source_history",

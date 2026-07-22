@@ -353,3 +353,57 @@ def test_sync_run_constraints_allow_only_one_open_run_per_source(db) -> None:
                 )
             )
             db.flush()
+
+
+def test_content_addressed_blob_can_be_shared_by_multiple_sources(db) -> None:
+    layer = _seed_catalog(db)
+    first_source = _seed_source(db, layer)
+    second_source = ReferenceLayerSource(
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        source_key="source:wms-fallback",
+        protocol="wms_tiles",
+        target_kind="tiles",
+        endpoint_url="https://example.test/geoserver/wms",
+        remote_name="test:layer",
+        source_format="image/png",
+        sync_strategy="tile_seed",
+        config_json={"max_zoom": 12},
+        definition_sha256="9" * 64,
+        enabled=True,
+        is_primary=False,
+    )
+    db.add(second_source)
+    db.flush()
+
+    shared = {
+        "artifact_kind": "capabilities",
+        "source_url": "https://example.test/geoserver/ows",
+        "final_url": "https://example.test/geoserver/ows",
+        "media_type": "application/xml",
+        "storage_backend": "filesystem",
+        "storage_key": f"blobs/sha256/{'a' * 2}/{'a' * 64}",
+        "size_bytes": 128,
+        "sha256": "a" * 64,
+        "metadata_json": {},
+        "retrieved_at": datetime(2026, 7, 23, tzinfo=timezone.utc),
+    }
+    db.add_all(
+        [
+            ReferenceSourceArtifact(source_id=first_source.id, **shared),
+            ReferenceSourceArtifact(source_id=second_source.id, **shared),
+        ]
+    )
+    db.commit()
+
+    artifacts = list(
+        db.scalars(
+            select(ReferenceSourceArtifact).where(
+                ReferenceSourceArtifact.storage_key == shared["storage_key"]
+            )
+        )
+    )
+    assert {artifact.source_id for artifact in artifacts} == {
+        first_source.id,
+        second_source.id,
+    }
