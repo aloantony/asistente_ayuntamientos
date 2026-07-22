@@ -1,11 +1,15 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 
 from app.reference_layers.catalog import (
+    ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
     ReferenceServiceDefinition,
+    apply_catalog_definition,
 )
+from app.reference_layers.source_audit import audit_current_catalog_sources
 from app.reference_layers.source_discovery import (
     SourceDiscoveryError,
     acquisition_candidates,
@@ -176,3 +180,53 @@ def test_group_or_unnamed_layer_cannot_be_marked_covered() -> None:
             service(),
             replace(layer(), node_type="group", remote_name=None),
         )
+
+
+def test_current_catalog_audit_requires_a_candidate_for_every_leaf(db) -> None:
+    definition = ReferenceCatalogDefinition(
+        provider_key="audit",
+        source_url="https://example.es/catalog.json",
+        raw_catalog={"version": 1},
+        services=(
+            replace(
+                service(),
+                source_key="urbanismo",
+                license_status="pending",
+            ),
+            service(
+                "wmts",
+                "https://www.ign.es/wmts/pnoa-ma",
+            ),
+        ),
+        layers=(
+            replace(
+                layer(),
+                source_key="planning",
+                service_key="urbanismo",
+                style_name=None,
+            ),
+            replace(
+                layer("OI.OrthoimageCoverage"),
+                source_key="ortho",
+                service_key="service",
+                role="base",
+                style_name=None,
+            ),
+        ),
+        retrieved_at=datetime(2026, 7, 22, tzinfo=timezone.utc),
+    )
+    apply_catalog_definition(db, definition)
+
+    report = audit_current_catalog_sources(db, provider_key="audit")
+
+    assert report.candidate_coverage_complete is True
+    assert report.layer_count == 2
+    assert report.candidate_count == 4
+    assert report.data_candidate_layer_count == 1
+    assert report.tile_fallback_layer_count == 2
+    assert report.protocol_counts == {
+        "wcs": 1,
+        "wfs": 1,
+        "wms_tiles": 1,
+        "wmts": 1,
+    }
