@@ -236,6 +236,17 @@ def test_builder_rejects_unsafe_or_inconsistent_primary_asset(db) -> None:
     with pytest.raises(DeliveryBuildError, match="content hash"):
         create_delivery_version(db, lease=lease, prepared=mismatch, now=NOW)
 
+    oversized_version = PreparedDelivery(
+        **{**prepared.__dict__, "source_version": "v" * 2_049}
+    )
+    with pytest.raises(DeliveryBuildError, match="source version"):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=oversized_version,
+            now=NOW,
+        )
+
 
 def test_filesystem_assets_must_be_content_addressed() -> None:
     asset = PreparedDeliveryAsset(

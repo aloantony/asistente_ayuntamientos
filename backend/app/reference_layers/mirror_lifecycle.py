@@ -49,6 +49,10 @@ _MIRROR_SOURCE_LOCK_DOMAIN = b"asistente/reference-mirror-sources/v1\0"
 _MIRROR_LAYER_LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _LEASE_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_ETAG_LENGTH = 4_096
+_MAX_VERSION_LENGTH = 2_048
+_MAX_ERROR_SUMMARY_LENGTH = 4_096
+_MAX_STATS_JSON_BYTES = 1_048_576
 
 TerminalOutcome = Literal["unchanged", "succeeded", "rejected", "failed"]
 
@@ -272,6 +276,14 @@ def build_mirror_bootstrap_plan(
             .order_by(ReferenceLayerSource.layer_id, ReferenceLayerSource.source_key)
         )
     )
+    administratively_disabled_layer_ids = set(
+        db.scalars(
+            select(ReferenceLayerDeliveryState.layer_id).where(
+                ReferenceLayerDeliveryState.provider_key == provider_key,
+                ReferenceLayerDeliveryState.status == "disabled",
+            )
+        )
+    )
     base_state_sha256 = _canonical_sha256(
         [_stored_source_state(item) for item in existing]
     )
@@ -291,7 +303,13 @@ def build_mirror_bootstrap_plan(
         display_key = _display_source_key(item.layer_id, item.source_key)
         if record is None:
             new.append(display_key)
-        elif not _source_matches_plan(record, item):
+        elif not _source_matches_plan(
+            record,
+            item,
+            expected_enabled=(
+                item.layer_id not in administratively_disabled_layer_ids
+            ),
+        ):
             updated.append(display_key)
         else:
             unchanged += 1
@@ -340,6 +358,15 @@ def apply_mirror_bootstrap_plan(
                 )
             )
         }
+        administratively_disabled_layer_ids = set(
+            db.scalars(
+                select(ReferenceLayerDeliveryState.layer_id).where(
+                    ReferenceLayerDeliveryState.provider_key
+                    == reviewed_plan.provider_key,
+                    ReferenceLayerDeliveryState.status == "disabled",
+                )
+            )
+        )
         planned_keys: set[tuple[int, str]] = set()
         created = 0
         updated_count = 0
@@ -361,13 +388,22 @@ def apply_mirror_bootstrap_plan(
                         sync_strategy=item.sync_strategy,
                         config_json=item.config_json,
                         definition_sha256=item.definition_sha256,
-                        enabled=True,
+                        enabled=(
+                            item.layer_id
+                            not in administratively_disabled_layer_ids
+                        ),
                         is_primary=False,
                         priority=item.priority,
                     )
                 )
                 created += 1
-            elif not _source_matches_plan(record, item):
+            elif not _source_matches_plan(
+                record,
+                item,
+                expected_enabled=(
+                    item.layer_id not in administratively_disabled_layer_ids
+                ),
+            ):
                 record.protocol = item.protocol
                 record.target_kind = item.target_kind
                 record.endpoint_url = item.endpoint_url
@@ -376,7 +412,9 @@ def apply_mirror_bootstrap_plan(
                 record.sync_strategy = item.sync_strategy
                 record.config_json = item.config_json
                 record.definition_sha256 = item.definition_sha256
-                record.enabled = True
+                record.enabled = (
+                    item.layer_id not in administratively_disabled_layer_ids
+                )
                 record.is_primary = False
                 record.priority = item.priority
                 updated_count += 1
@@ -420,6 +458,15 @@ def enqueue_due_sources(
             ReferenceSyncRun.status.in_(("queued", "running")),
         )
     )
+    administratively_disabled = exists(
+        select(ReferenceLayerDeliveryState.layer_id).where(
+            ReferenceLayerDeliveryState.provider_key
+            == ReferenceLayerSource.provider_key,
+            ReferenceLayerDeliveryState.layer_id
+            == ReferenceLayerSource.layer_id,
+            ReferenceLayerDeliveryState.status == "disabled",
+        )
+    )
     try:
         sources = list(
             db.scalars(
@@ -429,6 +476,7 @@ def enqueue_due_sources(
                     ReferenceLayerSource.sync_strategy != "manual",
                     ReferenceLayerSource.next_check_at <= moment,
                     ~open_run,
+                    ~administratively_disabled,
                 )
                 .order_by(
                     ReferenceLayerSource.next_check_at,
@@ -561,19 +609,15 @@ def heartbeat_sync_run(
 ) -> SyncRunLease:
     """Extend a still-live lease; expired leases cannot be resurrected."""
 
-    moment = _moment(now)
     _validate_lease(lease)
     _validate_lease_seconds(lease_seconds)
-    expires_at = moment + timedelta(seconds=lease_seconds)
     try:
-        row = db.execute(
-            update(ReferenceSyncRun)
-            .where(*_live_lease_predicates(lease, moment))
-            .values(heartbeat_at=moment, lease_expires_at=expires_at)
-            .returning(ReferenceSyncRun.id)
-        ).first()
-        if row is None:
-            raise MirrorLeaseLostError("sync-run lease is absent or expired")
+        run = _lock_leased_run(db, lease)
+        moment = _fresh_lease_moment(db, now)
+        _require_live_lease(run, lease, moment)
+        expires_at = moment + timedelta(seconds=lease_seconds)
+        run.heartbeat_at = moment
+        run.lease_expires_at = expires_at
         db.commit()
         return SyncRunLease(
             run_id=lease.run_id,
@@ -603,46 +647,59 @@ def finish_sync_run(
 ) -> int:
     """Finalize a live leased run with a fencing-safe conditional update."""
 
-    moment = _moment(now)
     _validate_lease(lease)
     if outcome not in {"unchanged", "succeeded", "rejected", "failed"}:
         raise MirrorLifecycleError("unsupported sync-run outcome")
     if outcome in {"rejected", "failed"}:
         error_code = _bounded_required_text(error_code, "error_code", 64)
+        error_summary = _bounded_optional_text(
+            error_summary,
+            "error_summary",
+            _MAX_ERROR_SUMMARY_LENGTH,
+            strip=True,
+        )
     else:
         error_code = None
         error_summary = None
+    observed_etag = _bounded_optional_text(
+        observed_etag,
+        "observed_etag",
+        _MAX_ETAG_LENGTH,
+    )
+    observed_version = _bounded_optional_text(
+        observed_version,
+        "observed_version",
+        _MAX_VERSION_LENGTH,
+        strip=True,
+    )
     if observed_manifest_sha256 is not None and not _SHA256_RE.fullmatch(
         observed_manifest_sha256
     ):
         raise MirrorLifecycleError("observed manifest hash is invalid")
     if observed_last_modified is not None:
         observed_last_modified = _moment(observed_last_modified)
-    stats = stats_json or {}
-    _canonical_json(stats)
+    stats = _bounded_json_object(
+        stats_json,
+        "stats_json",
+        _MAX_STATS_JSON_BYTES,
+    )
     try:
-        row = db.execute(
-            update(ReferenceSyncRun)
-            .where(*_live_lease_predicates(lease, moment))
-            .values(
-                status=outcome,
-                finished_at=moment,
-                lease_token=None,
-                lease_expires_at=None,
-                observed_etag=observed_etag,
-                observed_last_modified=observed_last_modified,
-                observed_version=observed_version,
-                observed_manifest_sha256=observed_manifest_sha256,
-                error_code=error_code,
-                error_summary=error_summary,
-                stats_json=stats,
-            )
-            .returning(ReferenceSyncRun.id)
-        ).first()
-        if row is None:
-            raise MirrorLeaseLostError("sync-run lease is absent or expired")
+        run = _lock_leased_run(db, lease)
+        moment = _fresh_lease_moment(db, now)
+        _require_live_lease(run, lease, moment)
+        run.status = outcome
+        run.finished_at = moment
+        run.lease_token = None
+        run.lease_expires_at = None
+        run.observed_etag = observed_etag
+        run.observed_last_modified = observed_last_modified
+        run.observed_version = observed_version
+        run.observed_manifest_sha256 = observed_manifest_sha256
+        run.error_code = error_code
+        run.error_summary = error_summary
+        run.stats_json = stats
         db.commit()
-        return row[0]
+        return run.id
     except Exception:
         db.rollback()
         raise
@@ -671,10 +728,20 @@ def promote_delivery_version(
     ``finish_sync_run`` from leaving an active but permanently unusable map.
     """
 
-    moment = _moment(now)
     _validate_lease(lease)
     _validate_expected_generation(expected_generation)
     reason = _bounded_required_text(reason, "reason", 10_000)
+    observed_etag = _bounded_optional_text(
+        observed_etag,
+        "observed_etag",
+        _MAX_ETAG_LENGTH,
+    )
+    observed_version = _bounded_optional_text(
+        observed_version,
+        "observed_version",
+        _MAX_VERSION_LENGTH,
+        strip=True,
+    )
     if observed_last_modified is not None:
         observed_last_modified = _moment(observed_last_modified)
     if observed_manifest_sha256 is not None and (
@@ -682,13 +749,20 @@ def promote_delivery_version(
         or _SHA256_RE.fullmatch(observed_manifest_sha256) is None
     ):
         raise ValueError("observed_manifest_sha256 must be a lowercase SHA-256")
-    stats = stats_json or {}
-    _canonical_json(stats)
+    stats = _bounded_json_object(
+        stats_json,
+        "stats_json",
+        _MAX_STATS_JSON_BYTES,
+    )
     try:
-        version = db.get(ReferenceDeliveryVersion, version_id)
-        if version is None:
+        preliminary_version = db.get(ReferenceDeliveryVersion, version_id)
+        if preliminary_version is None:
             raise MirrorPromotionConflict("delivery version does not exist")
-        _lock_delivery_layer(db, version.provider_key, version.layer_id)
+        _lock_delivery_layer(
+            db,
+            preliminary_version.provider_key,
+            preliminary_version.layer_id,
+        )
         version = db.scalar(
             select(ReferenceDeliveryVersion)
             .where(ReferenceDeliveryVersion.id == version_id)
@@ -696,13 +770,28 @@ def promote_delivery_version(
         )
         if version is None:
             raise MirrorPromotionConflict("delivery version does not exist")
-        run = db.scalar(
-            select(ReferenceSyncRun)
-            .where(*_live_lease_predicates(lease, moment))
+        state, latest = _locked_delivery_state_and_chain(
+            db,
+            provider_key=version.provider_key,
+            layer_id=version.layer_id,
+        )
+        source = db.scalar(
+            select(ReferenceLayerSource)
+            .where(ReferenceLayerSource.id == version.source_id)
             .with_for_update()
         )
-        if run is None:
-            raise MirrorLeaseLostError("sync-run lease is absent or expired")
+        run = _lock_leased_run(db, lease)
+        moment = _fresh_lease_moment(db, now)
+        _require_live_lease(run, lease, moment)
+        if state is not None and state.status == "disabled":
+            raise MirrorPromotionConflict(
+                "delivery layer is administratively disabled"
+            )
+        generation = state.generation if state is not None else 0
+        if generation != expected_generation:
+            raise MirrorPromotionConflict(
+                "active delivery generation changed before promotion"
+            )
         if version.sync_run_id != run.id or version.source_id != run.source_id:
             raise MirrorPromotionConflict(
                 "delivery version does not belong to the leased run"
@@ -718,7 +807,6 @@ def promote_delivery_version(
             raise MirrorPromotionConflict(
                 "sync run source-definition hash is invalid"
             )
-        source = db.get(ReferenceLayerSource, version.source_id)
         if source is None or (
             source.provider_key != version.provider_key
             or source.layer_id != version.layer_id
@@ -743,17 +831,6 @@ def promote_delivery_version(
             )
         _validate_current_version_catalog(db, version)
         _validate_version_ready(db, version)
-
-        state, latest = _locked_delivery_state_and_chain(
-            db,
-            provider_key=version.provider_key,
-            layer_id=version.layer_id,
-        )
-        generation = state.generation if state is not None else 0
-        if generation != expected_generation:
-            raise MirrorPromotionConflict(
-                "active delivery generation changed before promotion"
-            )
         from_version_id = (
             state.active_version_id
             if state is not None and state.status == "active"
@@ -841,7 +918,9 @@ def rollback_delivery_version(
                 ReferenceDeliveryPromotion.provider_key == provider_key,
                 ReferenceDeliveryPromotion.layer_id == layer_id,
                 ReferenceDeliveryPromotion.to_version_id == version.id,
-                ReferenceDeliveryPromotion.action.in_(("promote", "rollback")),
+                ReferenceDeliveryPromotion.action.in_(
+                    ("promote", "rollback", "reactivate")
+                ),
             )
             .limit(1)
         )
@@ -849,7 +928,7 @@ def rollback_delivery_version(
             raise MirrorPromotionConflict(
                 "rollback target was never an active delivery"
             )
-        _validate_version_ready(db, version)
+        _validate_stored_version_servability(db, version)
         promotion, generation = _append_promotion(
             db,
             provider_key=provider_key,
@@ -899,6 +978,31 @@ def deactivate_delivery(
             raise MirrorPromotionConflict(
                 "active delivery generation changed before deactivation"
             )
+        source_ids = select(ReferenceLayerSource.id).where(
+            ReferenceLayerSource.provider_key == provider_key,
+            ReferenceLayerSource.layer_id == layer_id,
+        )
+        db.execute(
+            update(ReferenceSyncRun)
+            .where(
+                ReferenceSyncRun.source_id.in_(source_ids),
+                ReferenceSyncRun.status == "queued",
+            )
+            .values(
+                status="cancelled",
+                finished_at=moment,
+                lease_token=None,
+                lease_expires_at=None,
+            )
+        )
+        db.execute(
+            update(ReferenceLayerSource)
+            .where(
+                ReferenceLayerSource.provider_key == provider_key,
+                ReferenceLayerSource.layer_id == layer_id,
+            )
+            .values(enabled=False, is_primary=False)
+        )
         promotion, generation = _append_promotion(
             db,
             provider_key=provider_key,
@@ -906,6 +1010,96 @@ def deactivate_delivery(
             action="deactivate",
             from_version_id=state.active_version_id,
             to_version_id=None,
+            run_id=None,
+            actor_id=actor_id,
+            reason=reason,
+            created_at=moment,
+            state=state,
+            latest=latest,
+        )
+        db.commit()
+        return _promotion_result(promotion, generation)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reactivate_delivery(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+    to_version_id: int,
+    expected_generation: int,
+    reason: str,
+    actor_id: int | None = None,
+    now: datetime | None = None,
+) -> PromotionResult:
+    """Explicitly reactivate one previously served, still-valid version.
+
+    Deactivation disables every acquisition source.  Reactivation therefore
+    revalidates the complete immutable delivery first and enables only the
+    source that produced the selected version; a later bootstrap may restore
+    other current acquisition candidates.
+    """
+
+    moment = _moment(now)
+    _validate_expected_generation(expected_generation)
+    reason = _bounded_required_text(reason, "reason", 10_000)
+    try:
+        _lock_delivery_layer(db, provider_key, layer_id)
+        state, latest = _locked_delivery_state_and_chain(
+            db,
+            provider_key=provider_key,
+            layer_id=layer_id,
+        )
+        if state is None or state.status != "disabled":
+            raise MirrorPromotionConflict("layer is not disabled")
+        if state.generation != expected_generation:
+            raise MirrorPromotionConflict(
+                "delivery generation changed before reactivation"
+            )
+        version = db.scalar(
+            select(ReferenceDeliveryVersion).where(
+                ReferenceDeliveryVersion.id == to_version_id,
+                ReferenceDeliveryVersion.provider_key == provider_key,
+                ReferenceDeliveryVersion.layer_id == layer_id,
+            )
+        )
+        if version is None:
+            raise MirrorPromotionConflict(
+                "reactivation target is not a version of this layer"
+            )
+        was_active = db.scalar(
+            select(ReferenceDeliveryPromotion.id)
+            .where(
+                ReferenceDeliveryPromotion.provider_key == provider_key,
+                ReferenceDeliveryPromotion.layer_id == layer_id,
+                ReferenceDeliveryPromotion.to_version_id == version.id,
+                ReferenceDeliveryPromotion.action.in_(
+                    ("promote", "rollback", "reactivate")
+                ),
+            )
+            .limit(1)
+        )
+        if was_active is None:
+            raise MirrorPromotionConflict(
+                "reactivation target was never an active delivery"
+            )
+        source = _validate_stored_version_servability(
+            db,
+            version,
+            allow_disabled_source=True,
+        )
+        source.enabled = True
+        source.next_check_at = moment
+        promotion, generation = _append_promotion(
+            db,
+            provider_key=provider_key,
+            layer_id=layer_id,
+            action="reactivate",
+            from_version_id=None,
+            to_version_id=version.id,
             run_id=None,
             actor_id=actor_id,
             reason=reason,
@@ -977,6 +1171,32 @@ def stored_promotion_hash_is_valid(
     except (MirrorLifecycleError, TypeError, ValueError):
         return False
     return digest == promotion.event_sha256
+
+
+def delivery_state_matches_promotion_head(
+    state: ReferenceLayerDeliveryState,
+    latest: ReferenceDeliveryPromotion | None,
+) -> bool:
+    """Return whether mutable delivery state faithfully projects its head."""
+
+    if latest is None or not stored_promotion_hash_is_valid(latest):
+        return False
+    if (
+        state.provider_key != latest.provider_key
+        or state.layer_id != latest.layer_id
+        or state.last_promotion_id != latest.id
+        or state.generation != latest.sequence_number
+    ):
+        return False
+    if latest.action == "deactivate":
+        return state.status == "disabled" and state.active_version_id is None
+    if latest.action not in {"promote", "rollback", "reactivate"}:
+        return False
+    return (
+        latest.to_version_id is not None
+        and state.status == "active"
+        and state.active_version_id == latest.to_version_id
+    )
 
 
 def _append_promotion(
@@ -1091,17 +1311,7 @@ def _locked_delivery_state_and_chain(
             raise MirrorPromotionConflict(
                 "delivery state does not point to the promotion-chain head"
             )
-        expected_status = (
-            "disabled" if latest.action == "deactivate" else "active"
-        )
-        expected_version_id = (
-            None if latest.action == "deactivate" else latest.to_version_id
-        )
-        if (
-            state.generation != latest.sequence_number
-            or state.status != expected_status
-            or state.active_version_id != expected_version_id
-        ):
+        if not delivery_state_matches_promotion_head(state, latest):
             raise MirrorPromotionConflict(
                 "delivery state does not match the promotion-chain head"
             )
@@ -1159,6 +1369,62 @@ def _validate_version_ready(
         raise MirrorPromotionConflict(
             "primary asset is incompatible with the delivery kind"
         )
+    if (
+        _SHA256_RE.fullmatch(version.content_sha256) is None
+        or _SHA256_RE.fullmatch(version.manifest_sha256) is None
+        or _SHA256_RE.fullmatch(primary.sha256) is None
+        or primary.sha256 != version.content_sha256
+    ):
+        raise MirrorPromotionConflict("delivery content hash is invalid")
+
+
+def _validate_stored_version_servability(
+    db: Session,
+    version: ReferenceDeliveryVersion,
+    *,
+    allow_disabled_source: bool = False,
+) -> ReferenceLayerSource:
+    source = db.scalar(
+        select(ReferenceLayerSource)
+        .where(ReferenceLayerSource.id == version.source_id)
+        .with_for_update()
+    )
+    if source is None or (
+        source.provider_key != version.provider_key
+        or source.layer_id != version.layer_id
+    ):
+        raise MirrorPromotionConflict("delivery source identity is invalid")
+    if not allow_disabled_source and not source.enabled:
+        raise MirrorPromotionConflict("delivery source is disabled")
+    if not stored_source_definition_is_valid(source):
+        raise MirrorPromotionConflict(
+            "current delivery source-definition hash is invalid"
+        )
+    run = db.scalar(
+        select(ReferenceSyncRun).where(
+            ReferenceSyncRun.id == version.sync_run_id,
+            ReferenceSyncRun.source_id == version.source_id,
+        )
+    )
+    if run is None or run.status != "succeeded":
+        raise MirrorPromotionConflict(
+            "delivery sync run did not finish successfully"
+        )
+    if not sync_run_source_definition_is_valid(run):
+        raise MirrorPromotionConflict(
+            "delivery sync-run source-definition hash is invalid"
+        )
+    if run.source_definition_sha256 != source.definition_sha256:
+        raise MirrorPromotionConflict(
+            "delivery source changed since the version was published"
+        )
+    if source.target_kind != version.delivery_kind:
+        raise MirrorPromotionConflict(
+            "delivery kind does not match the acquisition source"
+        )
+    _validate_current_version_catalog(db, version)
+    _validate_version_ready(db, version)
+    return source
 
 
 def _promotion_result(
@@ -1191,6 +1457,24 @@ def _stored_source_definition(source: ReferenceLayerSource) -> dict[str, Any]:
     }
 
 
+def stored_source_definition_is_valid(source: ReferenceLayerSource) -> bool:
+    try:
+        return _canonical_sha256(_stored_source_definition(source)) == (
+            source.definition_sha256
+        )
+    except (MirrorLifecycleError, TypeError, ValueError):
+        return False
+
+
+def sync_run_source_definition_is_valid(run: ReferenceSyncRun) -> bool:
+    try:
+        return _canonical_sha256(run.source_definition_json) == (
+            run.source_definition_sha256
+        )
+    except (MirrorLifecycleError, TypeError, ValueError):
+        return False
+
+
 def _stored_source_state(source: ReferenceLayerSource) -> dict[str, Any]:
     return {
         "layer_id": source.layer_id,
@@ -1211,6 +1495,8 @@ def _stored_source_state(source: ReferenceLayerSource) -> dict[str, Any]:
 def _source_matches_plan(
     source: ReferenceLayerSource,
     planned: PlannedMirrorSource,
+    *,
+    expected_enabled: bool = True,
 ) -> bool:
     definition = {
         "protocol": planned.protocol,
@@ -1222,7 +1508,7 @@ def _source_matches_plan(
         "config": planned.config_json,
     }
     return (
-        source.enabled
+        source.enabled is expected_enabled
         and source.protocol == planned.protocol
         and source.target_kind == planned.target_kind
         and source.endpoint_url == planned.endpoint_url
@@ -1236,18 +1522,51 @@ def _source_matches_plan(
     )
 
 
-def _live_lease_predicates(
+def _lock_leased_run(
+    db: Session,
+    lease: SyncRunLease,
+) -> ReferenceSyncRun:
+    run = db.scalar(
+        select(ReferenceSyncRun)
+        .where(
+            ReferenceSyncRun.id == lease.run_id,
+            ReferenceSyncRun.source_id == lease.source_id,
+            ReferenceSyncRun.attempt_no == lease.attempt_no,
+        )
+        .with_for_update()
+    )
+    if run is None:
+        raise MirrorLeaseLostError("sync-run lease is absent or expired")
+    return run
+
+
+def _require_live_lease(
+    run: ReferenceSyncRun,
     lease: SyncRunLease,
     moment: datetime,
-) -> tuple[Any, ...]:
-    return (
-        ReferenceSyncRun.id == lease.run_id,
-        ReferenceSyncRun.source_id == lease.source_id,
-        ReferenceSyncRun.attempt_no == lease.attempt_no,
-        ReferenceSyncRun.status == "running",
-        ReferenceSyncRun.lease_token == lease.token,
-        ReferenceSyncRun.lease_expires_at > moment,
-    )
+) -> None:
+    expires_at = run.lease_expires_at
+    if (
+        run.status != "running"
+        or run.lease_token != lease.token
+        or expires_at is None
+        or expires_at <= moment
+    ):
+        raise MirrorLeaseLostError("sync-run lease is absent or expired")
+
+
+def _fresh_lease_moment(
+    db: Session,
+    injected: datetime | None,
+) -> datetime:
+    """Read time only after all transition locks have been acquired."""
+
+    if injected is not None:
+        return _moment(injected)
+    database_now = db.scalar(select(func.clock_timestamp()))
+    if not isinstance(database_now, datetime):
+        raise MirrorLifecycleError("database clock is unavailable")
+    return _moment(database_now)
 
 
 def _validate_lease(lease: SyncRunLease) -> None:
@@ -1282,6 +1601,36 @@ def _bounded_required_text(
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise MirrorLifecycleError(f"{field} must be non-empty and bounded")
     return value.strip()
+
+
+def _bounded_optional_text(
+    value: str | None,
+    field: str,
+    maximum: int,
+    *,
+    strip: bool = False,
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > maximum:
+        raise MirrorLifecycleError(f"{field} must be bounded text")
+    normalized = value.strip() if strip else value
+    return normalized or None
+
+
+def _bounded_json_object(
+    value: dict[str, Any] | None,
+    field: str,
+    maximum_bytes: int,
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise MirrorLifecycleError(f"{field} must be a JSON object")
+    encoded = _canonical_json(value).encode("utf-8")
+    if len(encoded) > maximum_bytes:
+        raise MirrorLifecycleError(f"{field} is too large")
+    return value
 
 
 def _lock_source_provider(db: Session, provider_key: str) -> None:

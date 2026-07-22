@@ -1,10 +1,12 @@
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import time
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from app.reference_layers.catalog import (
@@ -26,6 +28,7 @@ from app.reference_layers.mirror_lifecycle import (
     finish_sync_run,
     heartbeat_sync_run,
     promote_delivery_version,
+    reactivate_delivery,
     rollback_delivery_version,
     stored_promotion_hash_is_valid,
 )
@@ -225,7 +228,7 @@ def _create_version(db, *, source, snapshot, lease, sequence_number: int):
             storage_backend=storage_backend,
             storage_key=f"mirror/{source.id}/v{sequence_number}",
             media_type="application/octet-stream",
-            sha256=f"{sequence_number + 6:x}" * 64,
+            sha256=version.content_sha256,
             size_bytes=None if storage_backend == "postgres" else 1024,
             metadata_json={},
         )
@@ -616,6 +619,59 @@ def test_reclaimed_attempt_is_fenced_even_if_a_token_is_reused(db) -> None:
     )
 
 
+def test_finish_rechecks_database_clock_after_waiting_for_the_run_lock(
+    engine,
+    committed_reference_providers,
+) -> None:
+    provider_key = "mirror-fresh-clock-fencing-test"
+    committed_reference_providers.append(provider_key)
+    current = datetime.now(timezone.utc)
+    with Session(engine, expire_on_commit=False) as setup:
+        _, _, _, sources, _ = _seed_bootstrap(
+            setup,
+            provider_key=provider_key,
+        )
+        _only_source_due(setup, sources[0], at=current)
+        enqueue_due_sources(setup, now=current)
+        lease = claim_next_sync_run(
+            setup,
+            now=current,
+            lease_seconds=30,
+            token_factory=lambda: "f" * 64,
+        )
+        setup.execute(
+            text(
+                "UPDATE reference_sync_runs "
+                "SET lease_expires_at = clock_timestamp() + "
+                "INTERVAL '300 milliseconds' WHERE id = :run_id"
+            ),
+            {"run_id": lease.run_id},
+        )
+        setup.commit()
+
+    def finish_after_lock() -> int:
+        with Session(engine, expire_on_commit=False) as worker:
+            return finish_sync_run(
+                worker,
+                lease,
+                outcome="unchanged",
+                now=None,
+            )
+
+    with Session(engine, expire_on_commit=False) as locker:
+        locker.scalar(
+            select(ReferenceSyncRun)
+            .where(ReferenceSyncRun.id == lease.run_id)
+            .with_for_update()
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(finish_after_lock)
+            time.sleep(0.6)
+            locker.commit()
+            with pytest.raises(MirrorLeaseLostError):
+                future.result(timeout=5)
+
+
 def test_promotion_rejects_corrupt_current_source_definition(db) -> None:
     _, _, snapshot, sources, _ = _seed_bootstrap(db)
     source = next(item for item in sources if item.target_kind == "vector")
@@ -808,4 +864,214 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         and events[index].previous_event_sha256
         == events[index - 1].event_sha256
         for index in range(1, len(events))
+    )
+
+
+def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
+    db,
+) -> None:
+    _, layer, snapshot, sources, _ = _seed_bootstrap(db)
+    source = next(item for item in sources if item.target_kind == "vector")
+    _only_source_due(db, source)
+    enqueue_due_sources(db, now=NOW)
+    first_lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "7" * 64,
+    )
+    first_version = _create_version(
+        db,
+        source=source,
+        snapshot=snapshot,
+        lease=first_lease,
+        sequence_number=1,
+    )
+    promote_delivery_version(
+        db,
+        version_id=first_version.id,
+        lease=first_lease,
+        expected_generation=0,
+        reason="initial version",
+        now=NOW + timedelta(seconds=1),
+    )
+
+    source.next_check_at = NOW + timedelta(seconds=2)
+    db.commit()
+    enqueue_due_sources(db, now=NOW + timedelta(seconds=2))
+    second_lease = claim_next_sync_run(
+        db,
+        now=NOW + timedelta(seconds=2),
+        token_factory=lambda: "8" * 64,
+    )
+    second_version = _create_version(
+        db,
+        source=source,
+        snapshot=snapshot,
+        lease=second_lease,
+        sequence_number=2,
+    )
+    deactivated = deactivate_delivery(
+        db,
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        expected_generation=1,
+        reason="administrative stop",
+        now=NOW + timedelta(seconds=3),
+    )
+    run_count = db.scalar(select(func.count(ReferenceSyncRun.id)))
+    assert all(
+        not item.enabled and not item.is_primary
+        for item in db.scalars(
+            select(ReferenceLayerSource).where(
+                ReferenceLayerSource.provider_key == layer.provider_key,
+                ReferenceLayerSource.layer_id == layer.id,
+            )
+        )
+    )
+    assert enqueue_due_sources(db, now=NOW + timedelta(days=2)) == ()
+    assert db.scalar(select(func.count(ReferenceSyncRun.id))) == run_count
+    disabled_plan = build_mirror_bootstrap_plan(
+        db,
+        provider_key=layer.provider_key,
+    )
+    apply_mirror_bootstrap_plan(db, disabled_plan)
+    assert all(
+        not item.enabled
+        for item in db.scalars(
+            select(ReferenceLayerSource).where(
+                ReferenceLayerSource.provider_key == layer.provider_key,
+                ReferenceLayerSource.layer_id == layer.id,
+            )
+        )
+    )
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="administratively disabled",
+    ):
+        promote_delivery_version(
+            db,
+            version_id=second_version.id,
+            lease=second_lease,
+            expected_generation=1,
+            reason="implicit reactivation is forbidden",
+            now=NOW + timedelta(seconds=4),
+        )
+
+    reactivated = reactivate_delivery(
+        db,
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        to_version_id=first_version.id,
+        expected_generation=deactivated.generation,
+        reason="operator explicitly restored the last known good version",
+        now=NOW + timedelta(seconds=5),
+    )
+    assert reactivated.action == "reactivate"
+    assert reactivated.generation == 3
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.status == "active"
+    assert state.active_version_id == first_version.id
+    assert db.get(ReferenceLayerSource, source.id).enabled is True
+    finish_sync_run(
+        db,
+        second_lease,
+        outcome="rejected",
+        error_code="superseded_by_operator",
+        now=NOW + timedelta(seconds=6),
+    )
+    [queued_id] = enqueue_due_sources(
+        db,
+        now=NOW + timedelta(seconds=6),
+    )
+    assert db.get(ReferenceSyncRun, queued_id).expected_active_generation == 3
+
+
+def test_rollback_revalidates_the_original_run_and_current_source(db) -> None:
+    _, layer, snapshot, sources, _ = _seed_bootstrap(db)
+    source = next(item for item in sources if item.target_kind == "vector")
+    _only_source_due(db, source)
+
+    versions = []
+    for sequence_number, token in ((1, "a" * 64), (2, "b" * 64)):
+        source.next_check_at = NOW + timedelta(seconds=sequence_number)
+        db.commit()
+        enqueue_due_sources(db, now=NOW + timedelta(seconds=sequence_number))
+        lease = claim_next_sync_run(
+            db,
+            now=NOW + timedelta(seconds=sequence_number),
+            token_factory=lambda token=token: token,
+        )
+        version = _create_version(
+            db,
+            source=source,
+            snapshot=snapshot,
+            lease=lease,
+            sequence_number=sequence_number,
+        )
+        promote_delivery_version(
+            db,
+            version_id=version.id,
+            lease=lease,
+            expected_generation=sequence_number - 1,
+            reason=f"version {sequence_number}",
+            now=NOW + timedelta(seconds=sequence_number, milliseconds=100),
+        )
+        versions.append(version)
+
+    original_run = db.get(ReferenceSyncRun, versions[0].sync_run_id)
+    original_run.status = "failed"
+    original_run.error_code = "post_publish_integrity_failure"
+    original_run.error_summary = "operator marked the source evidence invalid"
+    db.commit()
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="did not finish successfully",
+    ):
+        rollback_delivery_version(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=versions[0].id,
+            expected_generation=2,
+            reason="must not revive invalid evidence",
+            now=NOW + timedelta(seconds=5),
+        )
+
+
+def test_worker_observation_metadata_is_bounded(db) -> None:
+    _, _, _, sources, _ = _seed_bootstrap(db)
+    _only_source_due(db, sources[0])
+    enqueue_due_sources(db, now=NOW)
+    lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "c" * 64,
+    )
+    invalid_arguments = (
+        {"observed_etag": "e" * 4_097},
+        {"observed_version": "v" * 2_049},
+        {
+            "outcome": "failed",
+            "error_code": "failed",
+            "error_summary": "x" * 4_097,
+        },
+        {"stats_json": {"payload": "x" * 1_048_576}},
+    )
+    for arguments in invalid_arguments:
+        with pytest.raises(MirrorLifecycleError):
+            finish_sync_run(
+                db,
+                lease,
+                outcome=arguments.pop("outcome", "unchanged"),
+                now=NOW + timedelta(seconds=1),
+                **arguments,
+            )
+    finish_sync_run(
+        db,
+        lease,
+        outcome="unchanged",
+        now=NOW + timedelta(seconds=1),
     )

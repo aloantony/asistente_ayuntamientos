@@ -23,6 +23,8 @@ from app.reference_layers.mirror_lifecycle import (
     MirrorLeaseLostError,
     MirrorLifecycleError,
     SyncRunLease,
+    stored_source_definition_is_valid,
+    sync_run_source_definition_is_valid,
 )
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
@@ -30,6 +32,7 @@ from app.reference_layers.models import (
     ReferenceDeliveryVersion,
     ReferenceDeliveryVersionArtifact,
     ReferenceLayer,
+    ReferenceLayerDeliveryState,
     ReferenceLayerSource,
     ReferenceSourceArtifact,
     ReferenceSyncRun,
@@ -48,7 +51,8 @@ _BLOB_KEY_RE = re.compile(
     r"^blobs/sha256/(?P<prefix>[0-9a-f]{2})/(?P<sha>[0-9a-f]{64})$",
     re.ASCII,
 )
-_LOCK_DOMAIN = b"asistente/reference-delivery-build/v1\0"
+_LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
+_MAX_SOURCE_VERSION_LENGTH = 2_048
 
 
 class DeliveryBuildError(MirrorLifecycleError):
@@ -99,24 +103,58 @@ def create_delivery_version(
 ) -> BuiltDeliveryVersion:
     """Persist one immutable, unpromoted version for a live leased run."""
 
-    moment = _aware_moment(now)
     normalized = _validate_prepared(prepared)
     try:
+        preliminary_source = db.get(ReferenceLayerSource, lease.source_id)
+        if preliminary_source is None:
+            raise MirrorLeaseLostError("sync-run lease is absent or expired")
+        _lock_layer(
+            db,
+            preliminary_source.provider_key,
+            preliminary_source.layer_id,
+        )
+        source = db.scalar(
+            select(ReferenceLayerSource)
+            .where(ReferenceLayerSource.id == lease.source_id)
+            .with_for_update()
+        )
         run = db.scalar(
             select(ReferenceSyncRun)
             .where(
                 ReferenceSyncRun.id == lease.run_id,
                 ReferenceSyncRun.source_id == lease.source_id,
-                ReferenceSyncRun.status == "running",
-                ReferenceSyncRun.lease_token == lease.token,
                 ReferenceSyncRun.attempt_no == lease.attempt_no,
-                ReferenceSyncRun.lease_expires_at.is_not(None),
-                ReferenceSyncRun.lease_expires_at > moment,
             )
             .with_for_update()
         )
-        if run is None:
+        state = db.scalar(
+            select(ReferenceLayerDeliveryState)
+            .where(
+                ReferenceLayerDeliveryState.provider_key
+                == preliminary_source.provider_key,
+                ReferenceLayerDeliveryState.layer_id
+                == preliminary_source.layer_id,
+            )
+            .with_for_update()
+        )
+        moment = _fresh_lease_moment(db, now)
+        if (
+            run is None
+            or run.status != "running"
+            or run.lease_token != lease.token
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= moment
+        ):
             raise MirrorLeaseLostError("sync-run lease is absent or expired")
+        if source is None or (
+            source.provider_key != preliminary_source.provider_key
+            or source.layer_id != preliminary_source.layer_id
+        ):
+            raise DeliveryBuildError("delivery source identity changed")
+        if state is not None and state.status == "disabled":
+            raise DeliveryBuildError(
+                "delivery layer is administratively disabled"
+            )
         if db.scalar(
             select(ReferenceDeliveryVersion.id).where(
                 ReferenceDeliveryVersion.sync_run_id == run.id
@@ -124,9 +162,12 @@ def create_delivery_version(
         ) is not None:
             raise DeliveryBuildError("sync run already has a delivery version")
 
-        source = db.get(ReferenceLayerSource, run.source_id)
-        if source is None or not source.enabled:
+        if not source.enabled:
             raise DeliveryBuildError("delivery source is absent or disabled")
+        if not stored_source_definition_is_valid(source):
+            raise DeliveryBuildError("current delivery source definition is invalid")
+        if not sync_run_source_definition_is_valid(run):
+            raise DeliveryBuildError("sync-run source definition is invalid")
         if source.definition_sha256 != run.source_definition_sha256:
             raise DeliveryBuildError("delivery source changed during the run")
         if source.target_kind != prepared.delivery_kind:
@@ -178,7 +219,6 @@ def create_delivery_version(
         if {item.id for item in artifact_rows} != artifact_ids:
             raise DeliveryBuildError("prepared input artifact identity is invalid")
 
-        _lock_layer(db, source.provider_key, source.layer_id)
         sequence_number = int(
             db.scalar(
                 select(func.coalesce(func.max(ReferenceDeliveryVersion.sequence_number), 0))
@@ -293,6 +333,11 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
         raise DeliveryBuildError("prepared delivery has an invalid type")
     if prepared.delivery_kind not in {"vector", "raster", "tiles"}:
         raise DeliveryBuildError("prepared delivery kind is unsupported")
+    if prepared.source_version is not None and (
+        not isinstance(prepared.source_version, str)
+        or len(prepared.source_version) > _MAX_SOURCE_VERSION_LENGTH
+    ):
+        raise DeliveryBuildError("prepared source version is too large")
     _sha(prepared.content_sha256, "content")
     if _CRS_RE.fullmatch(prepared.crs) is None:
         raise DeliveryBuildError("prepared delivery CRS is invalid")
@@ -480,8 +525,20 @@ def _aware_moment(value: datetime | None) -> datetime:
     return result.astimezone(timezone.utc)
 
 
+def _fresh_lease_moment(
+    db: Session,
+    injected: datetime | None,
+) -> datetime:
+    if injected is not None:
+        return _aware_moment(injected)
+    database_now = db.scalar(select(func.clock_timestamp()))
+    if not isinstance(database_now, datetime):
+        raise DeliveryBuildError("database clock is unavailable")
+    return _aware_moment(database_now)
+
+
 def _lock_layer(db: Session, provider_key: str, layer_id: int) -> None:
-    identity = f"{provider_key}:{layer_id}".encode()
+    identity = f"{provider_key}\0{layer_id}".encode("utf-8")
     digest = hashlib.sha256(_LOCK_DOMAIN + identity).digest()
     key = int.from_bytes(digest[:8], "big", signed=True)
     db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})

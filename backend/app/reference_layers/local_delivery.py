@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 from typing import Any, Literal
 
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
+from app.reference_layers.catalog import canonical_normalized_definition_sha256
+from app.reference_layers.mirror_lifecycle import (
+    delivery_state_matches_promotion_head,
+    stored_source_definition_is_valid,
+    sync_run_source_definition_is_valid,
+)
 from app.reference_layers.models import (
+    ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
+    ReferenceDeliveryPromotion,
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
@@ -21,6 +31,12 @@ from app.reference_layers.models import (
 from app.reference_layers.wms_delivery import LayerDeliveryAvailability
 
 _RESOURCE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,255}$", re.ASCII)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
+_POSTGIS_KEY = re.compile(r"^reference_data\.[a-z][a-z0-9_]{0,62}$", re.ASCII)
+_BLOB_KEY = re.compile(
+    r"^blobs/sha256/(?P<prefix>[0-9a-f]{2})/(?P<sha>[0-9a-f]{64})$",
+    re.ASCII,
+)
 Operation = Literal["tile", "legend", "identify"]
 
 
@@ -54,6 +70,8 @@ class _ActiveRecord:
     version: ReferenceDeliveryVersion
     source: ReferenceLayerSource
     run: ReferenceSyncRun
+    snapshot: ReferenceCatalogSnapshot
+    head: ReferenceDeliveryPromotion
 
 
 def resolve_local_delivery(
@@ -89,6 +107,18 @@ def resolve_local_delivery(
                 "local_not_ready" if any(configured) else "local_disabled"
             )
         return None
+    head = db.scalar(
+        select(ReferenceDeliveryPromotion)
+        .where(
+            ReferenceDeliveryPromotion.provider_key == layer.provider_key,
+            ReferenceDeliveryPromotion.layer_id == layer.id,
+        )
+        .order_by(ReferenceDeliveryPromotion.sequence_number.desc())
+        .limit(1)
+    )
+    if not delivery_state_matches_promotion_head(state, head):
+        raise LocalDeliveryError("local_version_invalid")
+    assert head is not None
     if state.status != "active" or state.active_version_id is None:
         raise LocalDeliveryError("local_disabled")
     row = db.execute(
@@ -96,6 +126,7 @@ def resolve_local_delivery(
             ReferenceDeliveryVersion,
             ReferenceLayerSource,
             ReferenceSyncRun,
+            ReferenceCatalogSnapshot,
         )
         .join(
             ReferenceLayerSource,
@@ -104,6 +135,15 @@ def resolve_local_delivery(
                 ReferenceLayerSource.provider_key
                 == ReferenceDeliveryVersion.provider_key,
                 ReferenceLayerSource.layer_id == ReferenceDeliveryVersion.layer_id,
+            ),
+        )
+        .join(
+            ReferenceCatalogSnapshot,
+            and_(
+                ReferenceCatalogSnapshot.id
+                == ReferenceDeliveryVersion.catalog_snapshot_id,
+                ReferenceCatalogSnapshot.provider_key
+                == ReferenceDeliveryVersion.provider_key,
             ),
         )
         .join(
@@ -121,7 +161,7 @@ def resolve_local_delivery(
     ).one_or_none()
     if row is None:
         raise LocalDeliveryError("local_version_invalid")
-    version, source, run = row
+    version, source, run, snapshot = row
     assets = list(
         db.scalars(
             select(ReferenceDeliveryAsset)
@@ -130,7 +170,7 @@ def resolve_local_delivery(
         )
     )
     return _build_selection(
-        _ActiveRecord(state, version, source, run),
+        _ActiveRecord(state, version, source, run, snapshot, head),
         assets,
         style=style,
         operation=operation,
@@ -166,6 +206,21 @@ def catalog_local_delivery_availability(
             )
         )
     }
+    heads = {
+        promotion.layer_id: promotion
+        for promotion in db.scalars(
+            select(ReferenceDeliveryPromotion)
+            .where(
+                ReferenceDeliveryPromotion.provider_key == provider_key,
+                ReferenceDeliveryPromotion.layer_id.in_(leaf_ids),
+            )
+            .distinct(ReferenceDeliveryPromotion.layer_id)
+            .order_by(
+                ReferenceDeliveryPromotion.layer_id,
+                ReferenceDeliveryPromotion.sequence_number.desc(),
+            )
+        )
+    }
     source_enabled_by_layer: dict[int, list[bool]] = {}
     for layer_id, enabled in db.execute(
         select(ReferenceLayerSource.layer_id, ReferenceLayerSource.enabled).where(
@@ -178,6 +233,10 @@ def catalog_local_delivery_availability(
         state.active_version_id
         for state in states.values()
         if state.status == "active" and state.active_version_id is not None
+        and delivery_state_matches_promotion_head(
+            state,
+            heads.get(state.layer_id),
+        )
     ]
     active_records: dict[int, _ActiveRecord] = {}
     if active_ids:
@@ -186,6 +245,7 @@ def catalog_local_delivery_availability(
                 ReferenceDeliveryVersion,
                 ReferenceLayerSource,
                 ReferenceSyncRun,
+                ReferenceCatalogSnapshot,
             )
             .join(
                 ReferenceLayerSource,
@@ -205,16 +265,33 @@ def catalog_local_delivery_availability(
                     == ReferenceDeliveryVersion.source_id,
                 ),
             )
+            .join(
+                ReferenceCatalogSnapshot,
+                and_(
+                    ReferenceCatalogSnapshot.id
+                    == ReferenceDeliveryVersion.catalog_snapshot_id,
+                    ReferenceCatalogSnapshot.provider_key
+                    == ReferenceDeliveryVersion.provider_key,
+                ),
+            )
             .where(ReferenceDeliveryVersion.id.in_(active_ids))
         ).all()
-        for version, source, run in rows:
+        for version, source, run, snapshot in rows:
             state = states.get(version.layer_id)
-            if state is not None and state.active_version_id == version.id:
+            head = heads.get(version.layer_id)
+            if (
+                state is not None
+                and head is not None
+                and state.active_version_id == version.id
+                and delivery_state_matches_promotion_head(state, head)
+            ):
                 active_records[version.layer_id] = _ActiveRecord(
                     state,
                     version,
                     source,
                     run,
+                    snapshot,
+                    head,
                 )
     version_ids = [record.version.id for record in active_records.values()]
     assets_by_version: dict[int, list[ReferenceDeliveryAsset]] = {}
@@ -240,6 +317,12 @@ def catalog_local_delivery_availability(
                 result[layer.id] = _unavailable(
                     "local_not_ready" if any(configured) else "local_disabled"
                 )
+            continue
+        if not delivery_state_matches_promotion_head(
+            state,
+            heads.get(layer.id),
+        ):
+            result[layer.id] = _unavailable("local_version_invalid")
             continue
         if state.status != "active" or state.active_version_id is None:
             result[layer.id] = _unavailable("local_disabled")
@@ -315,16 +398,7 @@ def _build_selection(
     style: ReferenceLayerStyle | None,
     operation: Operation,
 ) -> LocalDeliverySelection:
-    if (
-        record.run.status != "succeeded"
-        or record.run.source_definition_sha256
-        != record.source.definition_sha256
-    ):
-        raise LocalDeliveryError("local_source_changed")
-    primary = [asset for asset in assets if asset.is_primary]
-    if len(primary) != 1:
-        raise LocalDeliveryError("local_version_invalid")
-    primary_asset = primary[0]
+    primary_asset = _validate_active_record(record, assets)
     if record.version.delivery_kind in {"vector", "raster"}:
         return _geoserver_selection(
             record,
@@ -341,6 +415,92 @@ def _build_selection(
             operation=operation,
         )
     raise LocalDeliveryError("local_version_invalid")
+
+
+def _validate_active_record(
+    record: _ActiveRecord,
+    assets: list[ReferenceDeliveryAsset],
+) -> ReferenceDeliveryAsset:
+    if not delivery_state_matches_promotion_head(record.state, record.head):
+        raise LocalDeliveryError("local_version_invalid")
+    if (
+        not record.source.enabled
+        or not stored_source_definition_is_valid(record.source)
+        or not sync_run_source_definition_is_valid(record.run)
+        or record.run.status != "succeeded"
+        or record.run.source_definition_sha256
+        != record.source.definition_sha256
+    ):
+        raise LocalDeliveryError("local_source_changed")
+    if (
+        record.source.provider_key != record.version.provider_key
+        or record.source.layer_id != record.version.layer_id
+        or record.source.id != record.version.source_id
+        or record.run.id != record.version.sync_run_id
+        or record.run.source_id != record.version.source_id
+        or record.source.target_kind != record.version.delivery_kind
+    ):
+        raise LocalDeliveryError("local_version_invalid")
+    try:
+        catalog_hash_is_valid = (
+            record.snapshot.is_current
+            and record.snapshot.status == "applied"
+            and record.snapshot.id == record.version.catalog_snapshot_id
+            and record.snapshot.provider_key == record.version.provider_key
+            and record.snapshot.definition_sha256
+            == record.version.catalog_definition_sha256
+            and canonical_normalized_definition_sha256(
+                record.snapshot.normalized_definition_json
+            )
+            == record.snapshot.definition_sha256
+        )
+        validation_hash = hashlib.sha256(
+            json.dumps(
+                record.version.validation_json,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError, RecursionError):
+        raise LocalDeliveryError("local_version_invalid") from None
+    if (
+        not catalog_hash_is_valid
+        or not isinstance(record.version.validation_json, dict)
+        or record.version.validation_json.get("passed") is not True
+        or validation_hash != record.version.validation_sha256
+        or _SHA256.fullmatch(record.version.content_sha256) is None
+        or _SHA256.fullmatch(record.version.manifest_sha256) is None
+    ):
+        raise LocalDeliveryError("local_version_invalid")
+    primary = [asset for asset in assets if asset.is_primary]
+    if len(primary) != 1:
+        raise LocalDeliveryError("local_version_invalid")
+    asset = primary[0]
+    expected_kind = {
+        "vector": "vector_table",
+        "raster": "raster_cog",
+        "tiles": "tile_archive",
+    }.get(record.version.delivery_kind)
+    if (
+        asset.asset_kind != expected_kind
+        or _SHA256.fullmatch(asset.sha256) is None
+        or asset.sha256 != record.version.content_sha256
+        or not isinstance(asset.media_type, str)
+        or not 1 <= len(asset.media_type) <= 255
+    ):
+        raise LocalDeliveryError("local_version_invalid")
+    if record.version.delivery_kind == "vector":
+        if (
+            asset.storage_backend != "postgres"
+            or _POSTGIS_KEY.fullmatch(asset.storage_key) is None
+        ):
+            raise LocalDeliveryError("local_version_invalid")
+    else:
+        if not _filesystem_asset_is_valid(asset):
+            raise LocalDeliveryError("local_version_invalid")
+    return asset
 
 
 def _geoserver_selection(
@@ -424,7 +584,7 @@ def _tile_archive_selection(
     metadata = _metadata(selected.metadata_json)
     if (
         metadata.get("renderer") != "tile_archive"
-        or selected.storage_backend != "filesystem"
+        or not _filesystem_asset_is_valid(selected)
     ):
         raise LocalDeliveryError("local_version_invalid")
     return LocalDeliverySelection(
@@ -440,6 +600,20 @@ def _tile_archive_selection(
         content_type=selected.media_type,
         identify_available=False,
         legend_available=False,
+    )
+
+
+def _filesystem_asset_is_valid(asset: ReferenceDeliveryAsset) -> bool:
+    match = _BLOB_KEY.fullmatch(asset.storage_key)
+    return bool(
+        asset.storage_backend == "filesystem"
+        and _SHA256.fullmatch(asset.sha256) is not None
+        and match is not None
+        and match.group("prefix") == asset.sha256[:2]
+        and match.group("sha") == asset.sha256
+        and not isinstance(asset.size_bytes, bool)
+        and isinstance(asset.size_bytes, int)
+        and asset.size_bytes > 0
     )
 
 

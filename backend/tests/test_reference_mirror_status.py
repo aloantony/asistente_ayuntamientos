@@ -38,6 +38,7 @@ def test_active_status_and_failed_refresh_serve_previous_version(db) -> None:
             trigger_kind="retry",
             check_mode="conditional",
             status="failed",
+            expected_active_generation=1,
             started_at=failed_at,
             finished_at=failed_at,
             error_code="upstream_timeout",
@@ -109,6 +110,48 @@ def test_pending_syncing_and_disabled_statuses(db) -> None:
     assert status.status == "disabled"
 
 
+def test_status_ignores_obsolete_runs_and_fails_closed_on_unservable_state(
+    db,
+) -> None:
+    layer, _, source, _, version, _ = seed_local_delivery(db)
+    obsolete_at = version.created_at + timedelta(seconds=1)
+    db.add(
+        ReferenceSyncRun(
+            source_id=source.id,
+            source_definition_json={"obsolete": True},
+            source_definition_sha256=source.definition_sha256,
+            trigger_kind="retry",
+            check_mode="conditional",
+            status="failed",
+            expected_active_generation=0,
+            started_at=obsolete_at,
+            finished_at=obsolete_at,
+            error_code="obsolete_failure",
+            error_summary="must not shadow the current generation",
+        )
+    )
+    db.commit()
+
+    status = catalog_mirror_statuses(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+    )[layer.id]
+    assert status.status == "active"
+    assert status.last_error_code is None
+
+    source.definition_sha256 = "9" * 64
+    db.commit()
+    status = catalog_mirror_statuses(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+    )[layer.id]
+    assert status.status == "error"
+    assert status.active_version_id is None
+    assert status.active_generation is None
+
+
 def test_group_and_unconfigured_layer_statuses_are_explicit(db) -> None:
     definition = ReferenceCatalogDefinition(
         provider_key="mirror-status-unconfigured",
@@ -159,3 +202,16 @@ def test_group_and_unconfigured_layer_statuses_are_explicit(db) -> None:
     )
     by_kind = {item.node_type: statuses[item.id].status for item in layers}
     assert by_kind == {"group": "not_applicable", "layer": "legacy"}
+
+
+def test_tile_delivery_status_uses_catalog_styles_for_servability(db) -> None:
+    layer, _, _, _, version, _ = seed_local_delivery(db, kind="tiles")
+
+    status = catalog_mirror_statuses(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+    )[layer.id]
+
+    assert status.status == "active"
+    assert status.active_version_id == version.id

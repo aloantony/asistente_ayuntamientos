@@ -1153,6 +1153,13 @@ class ReferenceSyncRun(TimestampMixin, Base):
             "(error_code is not null and btrim(error_code) <> '')",
             name="ck_reference_sync_runs_failure_error",
         ),
+        CheckConstraint(
+            "(observed_etag is null or length(observed_etag) <= 4096) and "
+            "(observed_version is null or length(observed_version) <= 2048) "
+            "and (error_summary is null or length(error_summary) <= 4096) "
+            "and octet_length(stats_json::text) <= 1048576",
+            name="ck_reference_sync_runs_observed_bounds",
+        ),
         UniqueConstraint(
             "source_id",
             "id",
@@ -1280,6 +1287,12 @@ class ReferenceSourceArtifact(Base):
             "btrim(media_type) <> '' and btrim(storage_key) <> ''",
             name="ck_reference_source_artifacts_required_text",
         ),
+        CheckConstraint(
+            "(source_version is null or length(source_version) <= 2048) and "
+            "(upstream_etag is null or length(upstream_etag) <= 4096) and "
+            "octet_length(metadata_json::text) <= 4194304",
+            name="ck_reference_source_artifacts_metadata_bounds",
+        ),
         UniqueConstraint(
             "source_id",
             "artifact_kind",
@@ -1402,6 +1415,10 @@ class ReferenceDeliveryVersion(Base):
         CheckConstraint(
             "btrim(provider_key) <> '' and btrim(crs) <> ''",
             name="ck_reference_delivery_versions_required_text",
+        ),
+        CheckConstraint(
+            "source_version is null or length(source_version) <= 2048",
+            name="ck_reference_delivery_versions_source_version_bounds",
         ),
         UniqueConstraint(
             "provider_key",
@@ -1571,6 +1588,10 @@ class ReferenceDeliveryAsset(Base):
             "btrim(media_type) <> ''",
             name="ck_reference_delivery_assets_required_text",
         ),
+        CheckConstraint(
+            "octet_length(metadata_json::text) <= 4194304",
+            name="ck_reference_delivery_assets_metadata_bounds",
+        ),
         UniqueConstraint(
             "version_id",
             "asset_key",
@@ -1625,7 +1646,7 @@ class ReferenceDeliveryPromotion(Base):
     __tablename__ = "reference_delivery_promotions"
     __table_args__ = (
         CheckConstraint(
-            "action in ('promote', 'rollback', 'deactivate')",
+            "action in ('promote', 'rollback', 'deactivate', 'reactivate')",
             name="ck_reference_delivery_promotions_action",
         ),
         CheckConstraint(
@@ -1633,7 +1654,9 @@ class ReferenceDeliveryPromotion(Base):
             "(action = 'rollback' and from_version_id is not null and "
             "to_version_id is not null) or "
             "(action = 'deactivate' and from_version_id is not null and "
-            "to_version_id is null)",
+            "to_version_id is null) or "
+            "(action = 'reactivate' and from_version_id is null and "
+            "to_version_id is not null)",
             name="ck_reference_delivery_promotions_shape",
         ),
         CheckConstraint(

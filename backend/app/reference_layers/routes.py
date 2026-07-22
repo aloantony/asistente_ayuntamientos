@@ -143,6 +143,8 @@ def get_reference_catalog(
         db,
         provider_key=snapshot.provider_key,
         layers=layers,
+        styles=styles,
+        local_availability=local_delivery_availability,
     )
 
     layer_reads: list[ReferenceLayerRead] = []
