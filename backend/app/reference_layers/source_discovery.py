@@ -20,6 +20,7 @@ from app.reference_layers.catalog import (
     ReferenceLayerDefinition,
     ReferenceServiceDefinition,
 )
+from app.reference_layers.mirror_coverage import reviewed_tile_coverage
 
 SourceProtocol = Literal[
     "wfs",
@@ -273,14 +274,25 @@ def _tile_config(
     service: ReferenceServiceDefinition,
     layer: ReferenceLayerDefinition,
 ) -> dict[str, Any]:
-    return {
-        "bounds": layer.bounds,
-        "min_zoom": layer.min_zoom,
-        "max_zoom": layer.max_zoom,
+    coverage = reviewed_tile_coverage(
+        layer_source_key=layer.source_key,
+        bounds=layer.bounds,
+        min_zoom=layer.min_zoom,
+        max_zoom=layer.max_zoom,
+    )
+    config = {
+        "bounds": coverage.bounds,
+        "min_zoom": coverage.min_zoom,
+        "max_zoom": coverage.max_zoom,
         "format": layer.image_format or service.default_format or "image/png",
         "style_name": layer.style_name or "",
         "coverage_required": True,
     }
+    if coverage.max_tile_count is not None:
+        config["max_tile_count"] = coverage.max_tile_count
+    if coverage.profile is not None:
+        config["coverage_profile"] = coverage.profile
+    return config
 
 
 def _local_target_kind(layer: ReferenceLayerDefinition) -> TargetKind:

@@ -15,6 +15,13 @@ from app.reference_layers.source_discovery import (
     acquisition_candidates,
     candidate_definition,
 )
+from app.reference_layers.mirror_coverage import (
+    SIUR_TILE_BOUNDS,
+    SIUR_TILE_MAX_COUNT,
+    SIUR_TILE_MAX_ZOOM,
+    SIUR_TILE_MIN_ZOOM,
+    SIUR_TILE_PROFILE,
+)
 
 
 def service(
@@ -136,6 +143,49 @@ def test_native_delivery_protocols_always_have_a_local_candidate(
 
     assert len(candidates) == 1
     assert candidates[0].protocol == expected
+
+
+def test_siur_tile_fallback_uses_the_reviewed_finite_coverage() -> None:
+    candidate = acquisition_candidates(
+        service(),
+        replace(
+            layer(),
+            source_key="layer:siur:" + "a" * 64,
+            bounds=None,
+            min_zoom=None,
+            max_zoom=None,
+        ),
+    )[-1]
+
+    assert candidate.config == {
+        "bounds": SIUR_TILE_BOUNDS,
+        "min_zoom": SIUR_TILE_MIN_ZOOM,
+        "max_zoom": SIUR_TILE_MAX_ZOOM,
+        "format": "image/png",
+        "style_name": "default",
+        "coverage_required": True,
+        "max_tile_count": SIUR_TILE_MAX_COUNT,
+        "coverage_profile": SIUR_TILE_PROFILE,
+    }
+
+
+def test_unknown_provider_with_missing_coverage_remains_fail_closed() -> None:
+    candidate = acquisition_candidates(
+        service("xyz", "https://tiles.example.es/{z}/{x}/{y}.png"),
+        replace(
+            layer(),
+            source_key="layer:other:roads",
+            bounds=None,
+            min_zoom=None,
+            max_zoom=None,
+        ),
+    )[0]
+
+    assert candidate.config["bounds"] is None
+    assert candidate.config["min_zoom"] is None
+    assert candidate.config["max_zoom"] is None
+    assert "coverage_profile" not in candidate.config
+    assert "max_tile_count" not in candidate.config
 
 
 def test_source_identity_changes_with_effective_definition_only() -> None:
