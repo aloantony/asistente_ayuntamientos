@@ -60,6 +60,17 @@ class ReferenceLayerRead(BaseModel):
     available_style_ids: list[int] = Field(default_factory=list)
     legend_available: bool = False
     metadata_available: bool = False
+    mirror_status: str = "legacy"
+    active_version_id: int | None = None
+    active_generation: int | None = None
+    active_source_version: str | None = None
+    active_reference_at: datetime | None = None
+    active_created_at: datetime | None = None
+    last_run_status: str | None = None
+    last_checked_at: datetime | None = None
+    last_sync_error_code: str | None = None
+    last_sync_error_summary: str | None = None
+    next_check_at: datetime | None = None
     status: str
     updated_at: datetime
 

@@ -22,6 +22,7 @@ from app.reference_layers.models import (
 from app.reference_layers.local_delivery import (
     catalog_local_delivery_availability,
 )
+from app.reference_layers.mirror_status import catalog_mirror_statuses
 from app.reference_layers.schemas import (
     ReferenceCatalogRead,
     ReferenceCatalogSnapshotRead,
@@ -138,6 +139,11 @@ def get_reference_catalog(
         )
         for layer in layers
     }
+    mirror_statuses = catalog_mirror_statuses(
+        db,
+        provider_key=snapshot.provider_key,
+        layers=layers,
+    )
 
     layer_reads: list[ReferenceLayerRead] = []
     for layer in layers:
@@ -150,6 +156,7 @@ def get_reference_catalog(
             if setting.opacity is not None:
                 effective_opacity = Decimal(setting.opacity)
         availability = delivery_availability[layer.id]
+        mirror_status = mirror_statuses[layer.id]
         layer_reads.append(
             ReferenceLayerRead.model_validate(layer).model_copy(
                 update={
@@ -169,6 +176,19 @@ def get_reference_catalog(
                         availability.legend_available
                     ),
                     "metadata_available": layer.metadata_url is not None,
+                    "mirror_status": mirror_status.status,
+                    "active_version_id": mirror_status.active_version_id,
+                    "active_generation": mirror_status.active_generation,
+                    "active_source_version": (
+                        mirror_status.active_source_version
+                    ),
+                    "active_reference_at": mirror_status.active_reference_at,
+                    "active_created_at": mirror_status.active_created_at,
+                    "last_run_status": mirror_status.last_run_status,
+                    "last_checked_at": mirror_status.last_checked_at,
+                    "last_sync_error_code": mirror_status.last_error_code,
+                    "last_sync_error_summary": mirror_status.last_error_summary,
+                    "next_check_at": mirror_status.next_check_at,
                 }
             )
         )
