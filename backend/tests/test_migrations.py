@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260723_0035"
+HEAD_REVISION = "20260723_0036"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -889,6 +889,7 @@ def assert_reference_mirror_schema(
     inspector: Inspector,
     *,
     shared_artifact_storage: bool = True,
+    hardened: bool = True,
 ) -> None:
     assert REFERENCE_MIRROR_TABLES <= set(inspector.get_table_names())
     for table_name, expected_columns in REFERENCE_MIRROR_COLUMNS.items():
@@ -1021,6 +1022,24 @@ def assert_reference_mirror_schema(
         "layer_id",
         "active_version_id",
     ]
+    if hardened:
+        expected_hardening_checks = {
+            "reference_sync_runs": "ck_reference_sync_runs_observed_bounds",
+            "reference_source_artifacts": (
+                "ck_reference_source_artifacts_metadata_bounds"
+            ),
+            "reference_delivery_versions": (
+                "ck_reference_delivery_versions_source_version_bounds"
+            ),
+            "reference_delivery_assets": (
+                "ck_reference_delivery_assets_metadata_bounds"
+            ),
+        }
+        for table_name, check_name in expected_hardening_checks.items():
+            assert check_name in {
+                item["name"]
+                for item in inspector.get_check_constraints(table_name)
+            }
 
 
 def assert_assistant_attachment_schema(inspector: Inspector) -> None:
@@ -2890,7 +2909,67 @@ def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260717_0033"
+            ).scalar_one() == HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_reference_mirror_hardening_migration_adds_truncate_guards(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260723_0035")
+    engine = create_engine(migration_database_url)
+    immutable_tables = (
+        "reference_source_artifacts",
+        "reference_sync_run_artifacts",
+        "reference_delivery_versions",
+        "reference_delivery_version_artifacts",
+        "reference_delivery_assets",
+        "reference_delivery_promotions",
+    )
+    try:
+        with engine.connect() as connection:
+            before = connection.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM pg_trigger
+                    WHERE tgname LIKE 'trg_reference_%_truncate_immutable'
+                      AND NOT tgisinternal
+                    """
+                )
+            ).scalar_one()
+        assert before == 0
+
+        run_alembic(migration_database_url, "upgrade", "20260723_0036")
+        with engine.connect() as connection:
+            trigger_rows = connection.execute(
+                text(
+                    """
+                    SELECT c.relname, t.tgname
+                    FROM pg_trigger AS t
+                    JOIN pg_class AS c ON c.oid = t.tgrelid
+                    WHERE t.tgname LIKE 'trg_reference_%_truncate_immutable'
+                      AND NOT t.tgisinternal
+                    ORDER BY c.relname
+                    """
+                )
+            ).all()
+        assert {row[0] for row in trigger_rows} == set(immutable_tables)
+
+        for table_name in immutable_tables:
+            with pytest.raises(DBAPIError) as error:
+                with engine.begin() as connection:
+                    connection.execute(text(f"TRUNCATE {table_name} CASCADE"))
+            assert error.value.orig.sqlstate == "55000"
+
+        run_alembic(migration_database_url, "downgrade", "20260723_0035")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260723_0035"
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
     finally:
         engine.dispose()
 
@@ -2909,6 +2988,7 @@ def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
         assert_reference_mirror_schema(
             inspect(engine),
             shared_artifact_storage=False,
+            hardened=False,
         )
 
         run_alembic(migration_database_url, "downgrade", "20260717_0033")
@@ -3192,6 +3272,61 @@ def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
                             {"row_id": row_id},
                         )
                 assert error.value.orig.sqlstate == "55000"
+
+        with pytest.raises(DBAPIError) as error:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE reference_layer_delivery_state
+                        SET generation = generation + 1
+                        WHERE provider_key = 'siur' AND layer_id = :layer_id
+                        """
+                    ),
+                    {"layer_id": layer_id},
+                )
+        assert error.value.orig.sqlstate == "55000"
+
+        with pytest.raises(DBAPIError) as error:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO reference_delivery_promotions (
+                            provider_key, layer_id, sequence_number, action,
+                            from_version_id, to_version_id, run_id, reason,
+                            previous_event_id, previous_event_sha256,
+                            event_sha256
+                        ) VALUES (
+                            'siur', :layer_id, 2, 'deactivate', :version_id,
+                            NULL, NULL, 'Unprojected deactivation',
+                            :promotion_id, :previous_hash, :event_hash
+                        )
+                        """
+                    ),
+                    {
+                        "layer_id": layer_id,
+                        "version_id": version_id,
+                        "promotion_id": promotion_id,
+                        "previous_hash": "3" * 64,
+                        "event_hash": "4" * 64,
+                    },
+                )
+        assert error.value.orig.sqlstate == "55000"
+
+        with pytest.raises(DBAPIError) as error:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE reference_sync_runs
+                        SET observed_etag = repeat('e', 4097)
+                        WHERE id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+        assert error.value.orig.sqlstate == "23514"
 
         refused = run_alembic(
             migration_database_url,

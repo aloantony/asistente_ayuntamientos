@@ -15,6 +15,10 @@ from app.reference_layers.local_delivery import (
     catalog_local_delivery_availability,
     resolve_local_delivery,
 )
+from app.reference_layers.delivery_builder import canonical_json_sha256
+from app.reference_layers.mirror_lifecycle import (
+    canonical_promotion_event_sha256,
+)
 from app.reference_layers.models import (
     ReferenceDeliveryAsset,
     ReferenceDeliveryPromotion,
@@ -99,10 +103,20 @@ def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
     )
     db.add(source)
     db.flush()
+    source_definition = {
+        "protocol": source.protocol,
+        "target_kind": source.target_kind,
+        "endpoint_url": source.endpoint_url,
+        "remote_name": source.remote_name,
+        "sync_strategy": source.sync_strategy,
+        "priority": source.priority,
+        "config": source.config_json,
+    }
+    source.definition_sha256 = canonical_json_sha256(source_definition)
     finished = datetime(2026, 7, 22, 10, tzinfo=timezone.utc)
     run = ReferenceSyncRun(
         source_id=source.id,
-        source_definition_json={"source": "test"},
+        source_definition_json=source_definition,
         source_definition_sha256=source.definition_sha256,
         trigger_kind="manual",
         check_mode="full",
@@ -121,9 +135,9 @@ def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
         catalog_definition_sha256=snapshot.definition_sha256,
         sequence_number=1,
         delivery_kind=kind,
-        content_sha256="b" * 64,
+        content_sha256="e" * 64,
         manifest_sha256="c" * 64,
-        validation_sha256="d" * 64,
+        validation_sha256=canonical_json_sha256({"passed": True}),
         crs="EPSG:3857",
         bounds_json={"west": -7, "south": 40, "east": -1, "north": 44},
         feature_count=1 if kind == "vector" else None,
@@ -176,6 +190,8 @@ def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
     )
     db.add(asset)
     db.flush()
+    promotion_reason = "Validated local version"
+    promotion_created_at = finished
     promotion = ReferenceDeliveryPromotion(
         provider_key=layer.provider_key,
         layer_id=layer.id,
@@ -183,8 +199,22 @@ def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
         action="promote",
         to_version_id=version.id,
         run_id=run.id,
-        reason="Validated local version",
-        event_sha256="f" * 64,
+        reason=promotion_reason,
+        event_sha256=canonical_promotion_event_sha256(
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            sequence_number=1,
+            action="promote",
+            from_version_id=None,
+            to_version_id=version.id,
+            run_id=run.id,
+            actor_id=None,
+            reason=promotion_reason,
+            previous_event_id=None,
+            previous_event_sha256=None,
+            created_at=promotion_created_at,
+        ),
+        created_at=promotion_created_at,
     )
     db.add(promotion)
     db.flush()
@@ -252,6 +282,73 @@ def test_changed_source_definition_blocks_without_remote_fallback(db) -> None:
         )
 
     assert raised.value.blocker == "local_source_changed"
+
+
+@pytest.mark.parametrize("corruption", ["generation", "unprojected_head"])
+def test_delivery_state_must_match_the_valid_promotion_head(
+    db,
+    corruption: str,
+) -> None:
+    layer, styles, _, _, version, _ = seed_local_delivery(db)
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    promotion = db.get(ReferenceDeliveryPromotion, state.last_promotion_id)
+    if corruption == "generation":
+        state.generation += 1
+    elif corruption == "unprojected_head":
+        created_at = promotion.created_at.replace(microsecond=0)
+        reason = "forged head without matching delivery state"
+        db.add(
+            ReferenceDeliveryPromotion(
+                provider_key=layer.provider_key,
+                layer_id=layer.id,
+                sequence_number=2,
+                action="deactivate",
+                from_version_id=version.id,
+                to_version_id=None,
+                run_id=None,
+                reason=reason,
+                previous_event_id=promotion.id,
+                previous_event_sha256=promotion.event_sha256,
+                event_sha256=canonical_promotion_event_sha256(
+                    provider_key=layer.provider_key,
+                    layer_id=layer.id,
+                    sequence_number=2,
+                    action="deactivate",
+                    from_version_id=version.id,
+                    to_version_id=None,
+                    run_id=None,
+                    actor_id=None,
+                    reason=reason,
+                    previous_event_id=promotion.id,
+                    previous_event_sha256=promotion.event_sha256,
+                    created_at=created_at,
+                ),
+                created_at=created_at,
+            )
+        )
+    db.commit()
+
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+    assert raised.value.blocker == "local_version_invalid"
+
+    availability = catalog_local_delivery_availability(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        styles=styles,
+    )[layer.id]
+    assert availability is not None
+    assert availability.delivery_available is False
+    assert availability.delivery_blocker == "local_version_invalid"
 
 
 def test_invalid_internal_resource_name_is_fail_closed(db) -> None:
