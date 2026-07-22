@@ -1,12 +1,17 @@
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+import threading
+import time
 
 import pytest
-from conftest import headers_for
-from sqlalchemy import func, select
+from conftest import headers_for, unique_suffix
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
+from app.reference_layers import catalog as reference_catalog
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceCatalogValidationError,
@@ -130,6 +135,32 @@ def get_overlay(db) -> ReferenceLayer:
     )
 
 
+def _wait_for_pending_advisory_lock(
+    engine,
+    backend_pid: int,
+    future: Future,
+) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with engine.connect() as connection:
+            waiting = connection.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_locks "
+                    "WHERE pid = :pid AND locktype = 'advisory' "
+                    "AND NOT granted)"
+                ),
+                {"pid": backend_pid},
+            ).scalar_one()
+        if waiting:
+            return
+        if future.done():
+            future.result()
+            pytest.fail("Concurrent catalog apply bypassed the provider lock")
+        time.sleep(0.02)
+    pytest.fail("Concurrent catalog apply did not wait for the provider lock")
+
+
 def test_sync_is_dry_run_idempotent_and_preserves_stable_layer_identity(db) -> None:
     definition = make_definition()
 
@@ -204,6 +235,148 @@ def test_sync_is_dry_run_idempotent_and_preserves_stable_layer_identity(db) -> N
     assert renamed_plan.updated_layers == ("layer:classification",)
     assert renamed_overlay.id == overlay_id
     assert renamed_overlay.title == "Clasificación urbanística vigente"
+
+
+def test_reviewed_catalog_plan_is_revalidated_after_provider_lock(
+    engine,
+    monkeypatch,
+) -> None:
+    provider_key = f"siur-{unique_suffix()}"
+    baseline = replace(make_definition(), provider_key=provider_key)
+    first_definition = replace(
+        make_definition(
+            layer_title="Clasificación urbanística primera",
+            version=2,
+        ),
+        provider_key=provider_key,
+    )
+    second_definition = replace(
+        make_definition(
+            layer_title="Clasificación urbanística segunda",
+            version=3,
+        ),
+        provider_key=provider_key,
+    )
+    with Session(engine) as seed_db:
+        baseline_snapshot, _ = apply_catalog_definition(seed_db, baseline)
+        baseline_snapshot_id = baseline_snapshot.id
+
+    first_plan_built = threading.Event()
+    release_first_apply = threading.Event()
+    second_apply_started = threading.Event()
+    first_worker = threading.local()
+    second_backend_pid: list[int] = []
+    original_build = reference_catalog.build_catalog_sync_plan
+
+    def controlled_build(db, candidate_definition):
+        plan = original_build(db, candidate_definition)
+        if getattr(first_worker, "pause_after_build", False):
+            first_plan_built.set()
+            assert release_first_apply.wait(timeout=10)
+        return plan
+
+    monkeypatch.setattr(
+        reference_catalog,
+        "build_catalog_sync_plan",
+        controlled_build,
+    )
+
+    def apply_reviewed_plan(
+        candidate_definition,
+        *,
+        pause_after_build: bool,
+    ) -> int:
+        with Session(engine, expire_on_commit=False) as worker_db:
+            first_worker.pause_after_build = False
+            reviewed_plan = build_catalog_sync_plan(
+                worker_db,
+                candidate_definition,
+            )
+            assert reviewed_plan.updated_layers == ("layer:classification",)
+            first_worker.pause_after_build = pause_after_build
+            if not pause_after_build:
+                second_backend_pid.append(
+                    worker_db.execute(text("SELECT pg_backend_pid()"))
+                    .scalar_one()
+                )
+                second_apply_started.set()
+            snapshot, _ = apply_catalog_definition(
+                worker_db,
+                candidate_definition,
+                expected_plan=reviewed_plan,
+            )
+            return snapshot.id
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(
+                apply_reviewed_plan,
+                first_definition,
+                pause_after_build=True,
+            )
+            assert first_plan_built.wait(timeout=10)
+            second_future = executor.submit(
+                apply_reviewed_plan,
+                second_definition,
+                pause_after_build=False,
+            )
+            assert second_apply_started.wait(timeout=10)
+            try:
+                _wait_for_pending_advisory_lock(
+                    engine,
+                    second_backend_pid[0],
+                    second_future,
+                )
+            finally:
+                release_first_apply.set()
+
+            first_snapshot_id = first_future.result(timeout=10)
+            with pytest.raises(
+                ReferenceCatalogValidationError,
+                match="state changed",
+            ):
+                second_future.result(timeout=10)
+
+        with Session(engine) as verification_db:
+            snapshots = verification_db.scalars(
+                select(ReferenceCatalogSnapshot).where(
+                    ReferenceCatalogSnapshot.provider_key == provider_key
+                )
+            ).all()
+            current_snapshot_id = verification_db.scalar(
+                select(ReferenceCatalogSnapshot.id).where(
+                    ReferenceCatalogSnapshot.provider_key == provider_key,
+                    ReferenceCatalogSnapshot.is_current.is_(True),
+                )
+            )
+        assert {snapshot.id for snapshot in snapshots} == {
+            baseline_snapshot_id,
+            first_snapshot_id,
+        }
+        assert current_snapshot_id == first_snapshot_id
+    finally:
+        release_first_apply.set()
+        with engine.begin() as cleanup:
+            cleanup.execute(
+                delete(ReferenceLayerStyle).where(
+                    ReferenceLayerStyle.provider_key == provider_key
+                )
+            )
+            cleanup.execute(
+                delete(ReferenceLayer).where(
+                    ReferenceLayer.provider_key == provider_key
+                )
+            )
+            cleanup.execute(
+                delete(ReferenceService).where(
+                    ReferenceService.provider_key == provider_key
+                )
+            )
+            cleanup.execute(
+                delete(ReferenceCatalogSnapshot).where(
+                    ReferenceCatalogSnapshot.provider_key == provider_key
+                )
+            )
 
 
 def test_sync_marks_disappeared_layers_missing_without_deleting_preferences(

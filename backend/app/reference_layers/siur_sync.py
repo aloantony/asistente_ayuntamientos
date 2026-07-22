@@ -210,6 +210,7 @@ def _approval_issue(
 def _plan_sha256(plan: ReferenceCatalogSyncPlan) -> str:
     payload = {
         "definition_sha256": plan.definition_sha256,
+        "base_state_sha256": plan.base_state_sha256,
         "new_services": plan.new_services,
         "updated_services": plan.updated_services,
         "missing_services": plan.missing_services,
@@ -276,6 +277,7 @@ def _summary(
             "plan_sha256": plan_sha256,
             "content_sha256": plan.content_sha256,
             "definition_sha256": plan.definition_sha256,
+            "base_state_sha256": plan.base_state_sha256,
             "new_services": list(plan.new_services),
             "updated_services": list(plan.updated_services),
             "missing_services": list(plan.missing_services),
