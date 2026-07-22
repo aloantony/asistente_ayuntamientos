@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from math import isfinite
 from pathlib import Path
@@ -22,6 +23,9 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     document_storage_root: str = "/var/lib/asistente_ayuntamientos/documents"
     document_max_upload_bytes: int = 25 * 1024 * 1024
+    local_geoserver_base_url: str = "http://127.0.0.1:8081/geoserver"
+    local_geoserver_workspace: str = "siur"
+    local_geoserver_timeout_seconds: float = 8.0
     assistant_runtime: str = "anthropic"
     anthropic_api_key: str | None = None
     assistant_model: str = "claude-opus-4-8"
@@ -137,6 +141,51 @@ class Settings(BaseSettings):
     def prefer_psycopg_driver(cls, value: str) -> str:
         if value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+psycopg://", 1)
+        return value
+
+    @field_validator("local_geoserver_base_url")
+    @classmethod
+    def validate_local_geoserver_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        try:
+            parsed = urlsplit(normalized)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("local_geoserver_base_url is invalid") from error
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is None
+            or not 1 <= port <= 65535
+            or parsed.netloc != f"127.0.0.1:{port}"
+            or parsed.path != "/geoserver"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "local_geoserver_base_url must be an explicit loopback "
+                "HTTP URL ending in /geoserver"
+            )
+        return f"http://127.0.0.1:{port}/geoserver"
+
+    @field_validator("local_geoserver_workspace")
+    @classmethod
+    def validate_local_geoserver_workspace(cls, value: str) -> str:
+        normalized = value.strip()
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", normalized) is None:
+            raise ValueError("local_geoserver_workspace is invalid")
+        return normalized
+
+    @field_validator("local_geoserver_timeout_seconds")
+    @classmethod
+    def validate_local_geoserver_timeout(cls, value: float) -> float:
+        if not isfinite(value) or not 0.1 <= value <= 30.0:
+            raise ValueError(
+                "local_geoserver_timeout_seconds must be finite and between "
+                "0.1 and 30 seconds"
+            )
         return value
 
     @field_validator("assistant_runtime")

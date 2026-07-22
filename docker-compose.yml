@@ -25,6 +25,7 @@ services:
       ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
+      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,6 +64,23 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  geoserver:
+    image: docker.osgeo.org/geoserver:3.0.0
+    environment:
+      GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
+      GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
+      RUN_UNPRIVILEGED: "true"
+      SKIP_DEMO_DATA: "true"
+    ports:
+      - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
+    volumes:
+      - geoserver_data:/opt/geoserver_data
+      - geowebcache_data:/opt/geoserver_data/gwc
+      - reference_artifacts:/mnt/reference_artifacts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   redis:
     image: redis:7-alpine
     ports:
@@ -76,3 +94,6 @@ services:
 volumes:
   postgres_data:
   document_storage:
+  reference_artifacts:
+  geoserver_data:
+  geowebcache_data:
