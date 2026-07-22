@@ -563,15 +563,23 @@ def test_expired_worker_is_fenced_from_finish_and_promotion(db) -> None:
         lease=replacement,
         expected_generation=0,
         reason="replacement worker validated version",
+        observed_manifest_sha256="a" * 64,
+        stats_json={"features": 10},
         now=after_expiry + timedelta(seconds=1),
     )
     assert promoted.generation == 1
-    finish_sync_run(
-        db,
-        replacement,
-        outcome="succeeded",
-        now=after_expiry + timedelta(seconds=2),
-    )
+    promoted_run = db.get(ReferenceSyncRun, replacement.run_id)
+    assert promoted_run.status == "succeeded"
+    assert promoted_run.lease_token is None
+    assert promoted_run.observed_manifest_sha256 == "a" * 64
+    assert promoted_run.stats_json == {"features": 10}
+    with pytest.raises(MirrorLeaseLostError):
+        finish_sync_run(
+            db,
+            replacement,
+            outcome="succeeded",
+            now=after_expiry + timedelta(seconds=2),
+        )
 
 
 def test_reclaimed_attempt_is_fenced_even_if_a_token_is_reused(db) -> None:
@@ -670,13 +678,8 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         reason="initial validated mirror",
         now=NOW + timedelta(seconds=1),
     )
-    finish_sync_run(
-        db,
-        first_lease,
-        outcome="succeeded",
-        now=NOW + timedelta(seconds=2),
-    )
     assert first.generation == 1
+    assert db.get(ReferenceSyncRun, first_lease.run_id).status == "succeeded"
 
     state = db.get(
         ReferenceLayerDeliveryState,
@@ -754,14 +757,9 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         reason="second validated mirror",
         now=NOW + timedelta(seconds=4),
     )
-    finish_sync_run(
-        db,
-        second_lease,
-        outcome="succeeded",
-        now=NOW + timedelta(seconds=5),
-    )
     assert second.from_version_id == first_version.id
     assert second.generation == 2
+    assert db.get(ReferenceSyncRun, second_lease.run_id).status == "succeeded"
 
     rollback = rollback_delivery_version(
         db,

@@ -656,14 +656,34 @@ def promote_delivery_version(
     expected_generation: int,
     reason: str,
     actor_id: int | None = None,
+    observed_etag: str | None = None,
+    observed_last_modified: datetime | None = None,
+    observed_version: str | None = None,
+    observed_manifest_sha256: str | None = None,
+    stats_json: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> PromotionResult:
-    """Atomically publish a validated version owned by a live worker lease."""
+    """Atomically publish a validated version and finish its leased run.
+
+    A promoted version must never point at a run that is still ``running``:
+    delivery resolution intentionally rejects such versions.  Finalizing the
+    run in this transaction also prevents a worker crash between promotion and
+    ``finish_sync_run`` from leaving an active but permanently unusable map.
+    """
 
     moment = _moment(now)
     _validate_lease(lease)
     _validate_expected_generation(expected_generation)
     reason = _bounded_required_text(reason, "reason", 10_000)
+    if observed_last_modified is not None:
+        observed_last_modified = _moment(observed_last_modified)
+    if observed_manifest_sha256 is not None and (
+        not isinstance(observed_manifest_sha256, str)
+        or _SHA256_RE.fullmatch(observed_manifest_sha256) is None
+    ):
+        raise ValueError("observed_manifest_sha256 must be a lowercase SHA-256")
+    stats = stats_json or {}
+    _canonical_json(stats)
     try:
         version = db.get(ReferenceDeliveryVersion, version_id)
         if version is None:
@@ -755,6 +775,17 @@ def promote_delivery_version(
             state=state,
             latest=latest,
         )
+        run.status = "succeeded"
+        run.finished_at = moment
+        run.lease_token = None
+        run.lease_expires_at = None
+        run.observed_etag = observed_etag
+        run.observed_last_modified = observed_last_modified
+        run.observed_version = observed_version
+        run.observed_manifest_sha256 = observed_manifest_sha256
+        run.error_code = None
+        run.error_summary = None
+        run.stats_json = stats
         db.commit()
         return _promotion_result(promotion, new_generation)
     except Exception:
