@@ -83,7 +83,7 @@ class StagingCleanupResult:
 class ReferenceBlobStore:
     """A content-addressed blob store rooted in one local filesystem."""
 
-    storage_backend = "local"
+    storage_backend = "filesystem"
 
     def __init__(
         self,

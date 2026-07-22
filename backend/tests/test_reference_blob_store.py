@@ -43,7 +43,7 @@ def test_streams_to_private_staging_and_commits_content_addressed_blob(store) ->
         assert staging.write(memoryview(payload[8:])) == len(payload) - 8
         stored = staging.commit(expected_sha256=expected, expected_size=len(payload))
 
-    assert stored.storage_backend == "local"
+    assert stored.storage_backend == "filesystem"
     assert stored.sha256 == expected
     assert stored.size_bytes == len(payload)
     assert stored.storage_key == f"blobs/sha256/{expected[:2]}/{expected}"
