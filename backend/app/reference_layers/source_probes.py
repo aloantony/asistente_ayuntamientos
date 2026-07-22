@@ -24,6 +24,8 @@ MAX_JSON_NODES = 100_000
 MAX_JSON_DEPTH = 48
 MAX_COLLECTIONS = 20_000
 MAX_XML_DEPTH = 64
+MAX_WMTS_MATRIX_SETS = 2_000
+MAX_WMTS_TILE_MATRICES = 64
 _XML_ENCODING_RE = re.compile(
     br"<\?xml[^>]*\bencoding\s*=\s*['\"]([^'\"]+)['\"]",
     re.IGNORECASE,
@@ -110,8 +112,21 @@ def _probe_ogc_xml(
         )
     elif kind == "wmts":
         entries = _wmts_layers(root)
+        matrix_sets = _wmts_matrix_sets(root)
+        definitions = {item["identifier"]: item for item in matrix_sets}
+        for entry in entries:
+            linked = entry.get("tile_matrix_sets", [])
+            missing = [identifier for identifier in linked if identifier not in definitions]
+            if missing:
+                raise SourceProbeError(
+                    "WMTS layer links a tile-matrix set without a definition"
+                )
+            entry["tile_matrix_set_definitions"] = [
+                definitions[identifier]
+                for identifier in linked
+            ]
     else:
-        entries = _named_entries(root, containers={"Layer"})
+        entries = _wms_layers(root)
 
     selected = _select_entry(entries, candidate.remote_name)
     if selected is None:
@@ -352,12 +367,321 @@ def _named_entries(
 
 
 def _wmts_layers(root: ElementTree.Element) -> list[dict[str, Any]]:
-    entries = _named_entries(
-        root,
-        containers={"Layer"},
-        identifiers={"Identifier"},
-    )
+    entries: list[dict[str, Any]] = []
+    names_seen: set[str] = set()
+    for element in root.iter():
+        if _local_name(element.tag) != "Layer":
+            continue
+        name = _first_child_text(element, {"Identifier"}, 500)
+        if name is None:
+            continue
+        if name in names_seen:
+            raise SourceProbeError("capabilities contains duplicate collections")
+        names_seen.add(name)
+
+        entry: dict[str, Any] = {"name": name}
+        formats = _direct_child_texts(element, {"Format"}, 200)
+        if formats:
+            entry["formats"] = formats
+
+        styles: list[dict[str, Any]] = []
+        matrix_sets: list[str] = []
+        matrix_limits: dict[str, list[dict[str, Any]]] = {}
+        resources: list[dict[str, Any]] = []
+        for child in element:
+            child_name = _local_name(child.tag)
+            if child_name == "Style":
+                identifier = _first_child_text(child, {"Identifier"}, 500)
+                if identifier is None:
+                    raise SourceProbeError("WMTS style has no valid identifier")
+                style: dict[str, Any] = {"name": identifier}
+                if str(child.get("isDefault", "")).casefold() in {"true", "1"}:
+                    style["default"] = True
+                styles.append(style)
+            elif child_name == "TileMatrixSetLink":
+                identifier = _first_child_text(child, {"TileMatrixSet"}, 500)
+                if identifier is None:
+                    raise SourceProbeError("WMTS matrix-set link is malformed")
+                matrix_sets.append(identifier)
+                limits = _wmts_matrix_limits(child)
+                if limits:
+                    matrix_limits[identifier] = limits
+            elif child_name == "ResourceURL":
+                template = _clean_text(child.get("template"), 8192)
+                resource_type = _clean_text(child.get("resourceType"), 100)
+                resource_format = _clean_text(child.get("format"), 200)
+                if template is None or resource_type is None:
+                    raise SourceProbeError("WMTS resource URL is malformed")
+                resource: dict[str, Any] = {
+                    "template": template,
+                    "resource_type": resource_type,
+                }
+                if resource_format is not None:
+                    resource["format"] = resource_format
+                resources.append(resource)
+        if styles:
+            style_names = [item["name"] for item in styles]
+            if len(style_names) != len(set(style_names)):
+                raise SourceProbeError("WMTS layer repeats a style identifier")
+            entry["styles"] = styles
+        if matrix_sets:
+            if len(matrix_sets) != len(set(matrix_sets)):
+                raise SourceProbeError("WMTS layer repeats a matrix-set link")
+            entry["tile_matrix_sets"] = matrix_sets
+            if matrix_limits:
+                entry["tile_matrix_set_limits"] = matrix_limits
+        if resources:
+            entry["resource_urls"] = resources
+        entries.append(entry)
+        if len(entries) > MAX_COLLECTIONS:
+            raise SourceProbeError("capabilities advertises too many collections")
     return entries
+
+
+def _wms_layers(root: ElementTree.Element) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    get_map_formats: list[str] = []
+    for element in root.iter():
+        if _local_name(element.tag) == "GetMap":
+            get_map_formats = _direct_child_texts(element, {"Format"}, 200)
+            break
+    if not get_map_formats:
+        raise SourceProbeError("WMS capabilities do not advertise a GetMap format")
+
+    def visit(
+        element: ElementTree.Element,
+        inherited_crs: tuple[str, ...],
+        inherited_styles: tuple[str, ...],
+    ) -> None:
+        direct_crs = [
+            token
+            for value in _direct_child_texts(element, {"CRS", "SRS"}, 500)
+            for token in value.split()
+        ]
+        crs = tuple(dict.fromkeys((*inherited_crs, *direct_crs)))
+        direct_styles = [
+            style_name
+            for child in element
+            if _local_name(child.tag) == "Style"
+            for style_name in [_first_child_text(child, {"Name"}, 500)]
+            if style_name is not None
+        ]
+        styles = tuple(dict.fromkeys((*inherited_styles, *direct_styles)))
+        name = _first_child_text(element, {"Name"}, 500)
+        if name is not None:
+            if name in seen:
+                raise SourceProbeError("capabilities contains duplicate collections")
+            seen.add(name)
+            entry: dict[str, Any] = {"name": name}
+            if crs:
+                entry["crs"] = sorted(crs)
+            entry["formats"] = get_map_formats
+            if styles:
+                entry["styles"] = list(styles)
+            result.append(entry)
+            if len(result) > MAX_COLLECTIONS:
+                raise SourceProbeError("capabilities advertises too many collections")
+        for child in element:
+            if _local_name(child.tag) == "Layer":
+                visit(child, crs, styles)
+
+    for element in root.iter():
+        if _local_name(element.tag) == "Capability":
+            for child in element:
+                if _local_name(child.tag) == "Layer":
+                    visit(child, (), ())
+            break
+    return result
+
+
+def _wmts_matrix_sets(root: ElementTree.Element) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    identifiers: set[str] = set()
+    for element in root.iter():
+        if _local_name(element.tag) != "TileMatrixSet":
+            continue
+        identifier = _first_child_text(element, {"Identifier"}, 500)
+        supported_crs = _first_child_text(element, {"SupportedCRS"}, 1000)
+        matrices = [
+            child for child in element if _local_name(child.tag) == "TileMatrix"
+        ]
+        if identifier is None and supported_crs is None and not matrices:
+            continue  # This is the text-only element inside a layer link.
+        if identifier is None or supported_crs is None or not matrices:
+            raise SourceProbeError("WMTS tile-matrix set is incomplete")
+        if identifier in identifiers:
+            raise SourceProbeError("WMTS repeats a tile-matrix set identifier")
+        identifiers.add(identifier)
+        if len(matrices) > MAX_WMTS_TILE_MATRICES:
+            raise SourceProbeError("WMTS tile-matrix set contains too many matrices")
+        parsed_matrices = [_wmts_tile_matrix(item) for item in matrices]
+        matrix_identifiers = [item["identifier"] for item in parsed_matrices]
+        if len(matrix_identifiers) != len(set(matrix_identifiers)):
+            raise SourceProbeError("WMTS tile-matrix set repeats a matrix identifier")
+        definition: dict[str, Any] = {
+            "identifier": identifier,
+            "supported_crs": supported_crs,
+            "tile_matrices": parsed_matrices,
+        }
+        well_known = _first_child_text(element, {"WellKnownScaleSet"}, 1000)
+        if well_known is not None:
+            definition["well_known_scale_set"] = well_known
+        result.append(definition)
+        if len(result) > MAX_WMTS_MATRIX_SETS:
+            raise SourceProbeError("WMTS advertises too many tile-matrix sets")
+    return result
+
+
+def _wmts_tile_matrix(element: ElementTree.Element) -> dict[str, Any]:
+    identifier = _first_child_text(element, {"Identifier"}, 500)
+    scale = _positive_float_text(
+        _first_child_text(element, {"ScaleDenominator"}, 100),
+        "scale denominator",
+    )
+    top_left_text = _first_child_text(element, {"TopLeftCorner"}, 200)
+    if top_left_text is None:
+        raise SourceProbeError("WMTS tile matrix has no top-left corner")
+    try:
+        top_left = [float(value) for value in top_left_text.split()]
+    except ValueError as exc:
+        raise SourceProbeError("WMTS top-left corner is malformed") from exc
+    if len(top_left) != 2 or any(not math.isfinite(value) for value in top_left):
+        raise SourceProbeError("WMTS top-left corner is malformed")
+    if identifier is None:
+        raise SourceProbeError("WMTS tile matrix has no identifier")
+    return {
+        "identifier": identifier,
+        "scale_denominator": scale,
+        "top_left_corner": top_left,
+        "tile_width": _positive_int_text(
+            _first_child_text(element, {"TileWidth"}, 20),
+            "tile width",
+            maximum=4096,
+        ),
+        "tile_height": _positive_int_text(
+            _first_child_text(element, {"TileHeight"}, 20),
+            "tile height",
+            maximum=4096,
+        ),
+        "matrix_width": _positive_int_text(
+            _first_child_text(element, {"MatrixWidth"}, 20),
+            "matrix width",
+            maximum=2**31,
+        ),
+        "matrix_height": _positive_int_text(
+            _first_child_text(element, {"MatrixHeight"}, 20),
+            "matrix height",
+            maximum=2**31,
+        ),
+    }
+
+
+def _wmts_matrix_limits(link: ElementTree.Element) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for element in link.iter():
+        if _local_name(element.tag) != "TileMatrixLimits":
+            continue
+        identifier = _first_child_text(element, {"TileMatrix"}, 500)
+        if identifier is None or identifier in seen:
+            raise SourceProbeError("WMTS tile-matrix limits are malformed")
+        seen.add(identifier)
+        minimum_row = _non_negative_int_text(
+            _first_child_text(element, {"MinTileRow"}, 20),
+            "minimum tile row",
+        )
+        maximum_row = _non_negative_int_text(
+            _first_child_text(element, {"MaxTileRow"}, 20),
+            "maximum tile row",
+        )
+        minimum_col = _non_negative_int_text(
+            _first_child_text(element, {"MinTileCol"}, 20),
+            "minimum tile column",
+        )
+        maximum_col = _non_negative_int_text(
+            _first_child_text(element, {"MaxTileCol"}, 20),
+            "maximum tile column",
+        )
+        if minimum_row > maximum_row or minimum_col > maximum_col:
+            raise SourceProbeError("WMTS tile-matrix limits are inverted")
+        result.append(
+            {
+                "tile_matrix": identifier,
+                "min_tile_row": minimum_row,
+                "max_tile_row": maximum_row,
+                "min_tile_col": minimum_col,
+                "max_tile_col": maximum_col,
+            }
+        )
+        if len(result) > MAX_WMTS_TILE_MATRICES:
+            raise SourceProbeError("WMTS contains too many tile-matrix limits")
+    return result
+
+
+def _positive_float_text(value: str | None, name: str) -> float:
+    try:
+        result = float(value) if value is not None else math.nan
+    except ValueError as exc:
+        raise SourceProbeError(f"WMTS {name} is malformed") from exc
+    if not math.isfinite(result) or result <= 0:
+        raise SourceProbeError(f"WMTS {name} is malformed")
+    return result
+
+
+def _positive_int_text(
+    value: str | None,
+    name: str,
+    *,
+    maximum: int,
+) -> int:
+    result = _non_negative_int_text(value, name)
+    if result <= 0 or result > maximum:
+        raise SourceProbeError(f"WMTS {name} is outside its allowed range")
+    return result
+
+
+def _non_negative_int_text(value: str | None, name: str) -> int:
+    if value is None or not value.isdecimal():
+        raise SourceProbeError(f"WMTS {name} is malformed")
+    result = int(value)
+    if result > 2**31:
+        raise SourceProbeError(f"WMTS {name} is outside its allowed range")
+    return result
+
+
+def _first_child_text(
+    element: ElementTree.Element,
+    names: set[str],
+    max_chars: int,
+) -> str | None:
+    return next(
+        (
+            value
+            for child in element
+            if _local_name(child.tag) in names
+            for value in [_clean_text(child.text, max_chars)]
+            if value is not None
+        ),
+        None,
+    )
+
+
+def _direct_child_texts(
+    element: ElementTree.Element,
+    names: set[str],
+    max_chars: int,
+) -> list[str]:
+    values = [
+        value
+        for child in element
+        if _local_name(child.tag) in names
+        for value in [_clean_text(child.text, max_chars)]
+        if value is not None
+    ]
+    if len(values) != len(set(values)):
+        raise SourceProbeError("capabilities contains duplicate values")
+    return values
 
 
 def _select_entry(
