@@ -79,7 +79,18 @@ def test_wmts_probe_requires_exact_advertised_layer() -> None:
       xmlns="http://www.opengis.net/wmts/1.0"
       xmlns:ows="http://www.opengis.net/ows/1.1">
       <Contents><Layer><ows:Identifier>OI.OrthoimageCoverage</ows:Identifier>
-      </Layer></Contents>
+        <TileMatrixSetLink><TileMatrixSet>WebMercator</TileMatrixSet>
+        </TileMatrixSetLink></Layer>
+        <TileMatrixSet><ows:Identifier>WebMercator</ows:Identifier>
+          <ows:SupportedCRS>EPSG:3857</ows:SupportedCRS>
+          <TileMatrix><ows:Identifier>level-zero</ows:Identifier>
+            <ScaleDenominator>559082264.0287178</ScaleDenominator>
+            <TopLeftCorner>-20037508.342789244 20037508.342789244</TopLeftCorner>
+            <TileWidth>256</TileWidth><TileHeight>256</TileHeight>
+            <MatrixWidth>1</MatrixWidth><MatrixHeight>1</MatrixHeight>
+          </TileMatrix>
+        </TileMatrixSet>
+      </Contents>
     </Capabilities>"""
 
     probe = probe_candidate_document(
@@ -91,15 +102,86 @@ def test_wmts_probe_requires_exact_advertised_layer() -> None:
     assert probe.service_version == "1.0.0"
 
 
+def test_wmts_probe_preserves_bounded_seed_metadata() -> None:
+    document = b"""<Capabilities version="1.0.0"
+      xmlns="http://www.opengis.net/wmts/1.0"
+      xmlns:ows="http://www.opengis.net/ows/1.1">
+      <Contents><Layer><ows:Identifier>ortho</ows:Identifier>
+        <Style isDefault="true"><ows:Identifier>default</ows:Identifier></Style>
+        <Format>image/png</Format>
+        <TileMatrixSetLink><TileMatrixSet>GoogleMapsCompatible</TileMatrixSet>
+        </TileMatrixSetLink>
+        <ResourceURL format="image/png" resourceType="tile"
+          template="https://example.es/wmts/ortho/{TileMatrix}/{TileRow}/{TileCol}.png" />
+      </Layer>
+      <TileMatrixSet><ows:Identifier>GoogleMapsCompatible</ows:Identifier>
+        <ows:SupportedCRS>urn:ogc:def:crs:EPSG::3857</ows:SupportedCRS>
+        <ows:WellKnownScaleSet>urn:ogc:def:wkss:OGC:1.0:GoogleMapsCompatible</ows:WellKnownScaleSet>
+        <TileMatrix><ows:Identifier>custom-zero</ows:Identifier>
+          <ScaleDenominator>559082264.0287178</ScaleDenominator>
+          <TopLeftCorner>-20037508.342789244 20037508.342789244</TopLeftCorner>
+          <TileWidth>256</TileWidth><TileHeight>256</TileHeight>
+          <MatrixWidth>1</MatrixWidth><MatrixHeight>1</MatrixHeight>
+        </TileMatrix>
+      </TileMatrixSet></Contents>
+    </Capabilities>"""
+
+    probe = probe_candidate_document(candidate("wmts", "ortho"), document)
+
+    assert probe.metadata == {
+        "name": "ortho",
+        "formats": ["image/png"],
+        "styles": [{"name": "default", "default": True}],
+        "tile_matrix_sets": ["GoogleMapsCompatible"],
+        "resource_urls": [
+            {
+                "template": (
+                    "https://example.es/wmts/ortho/"
+                    "{TileMatrix}/{TileRow}/{TileCol}.png"
+                ),
+                "resource_type": "tile",
+                "format": "image/png",
+            }
+        ],
+        "tile_matrix_set_definitions": [
+            {
+                "identifier": "GoogleMapsCompatible",
+                "supported_crs": "urn:ogc:def:crs:EPSG::3857",
+                "well_known_scale_set": (
+                    "urn:ogc:def:wkss:OGC:1.0:GoogleMapsCompatible"
+                ),
+                "tile_matrices": [
+                    {
+                        "identifier": "custom-zero",
+                        "scale_denominator": 559082264.0287178,
+                        "top_left_corner": [
+                            -20037508.342789244,
+                            20037508.342789244,
+                        ],
+                        "tile_width": 256,
+                        "tile_height": 256,
+                        "matrix_width": 1,
+                        "matrix_height": 1,
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def test_wms_image_fallback_still_proves_the_layer_exists() -> None:
     document = b"""<WMS_Capabilities version="1.3.0">
-      <Capability><Layer><Layer><Name>flood:Q100</Name></Layer></Layer></Capability>
+      <Capability><Request><GetMap><Format>image/png</Format></GetMap></Request>
+      <Layer><CRS>EPSG:3857</CRS>
+      <Layer><Name>flood:Q100</Name></Layer></Layer></Capability>
     </WMS_Capabilities>"""
 
     probe = probe_candidate_document(candidate("wms_tiles", "flood:Q100"), document)
 
     assert probe.available is True
     assert probe.canonical_name == "flood:Q100"
+    assert probe.metadata["crs"] == ["EPSG:3857"]
+    assert probe.metadata["formats"] == ["image/png"]
 
 
 def test_arcgis_probe_uses_layer_id_and_last_edit_fingerprint() -> None:
