@@ -44,7 +44,9 @@ services:
       - backend
 
   postgres:
-    image: pgvector/pgvector:pg17
+    build:
+      context: ./postgres
+    image: asistente-ayuntamientos-postgres:17-postgis-pgvector
     environment:
       POSTGRES_DB: app
       POSTGRES_USER: app

@@ -19,7 +19,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0029"
+HEAD_REVISION = "20260717_0030"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -160,6 +160,42 @@ def assert_pgvector_extension(engine: Engine) -> None:
                 ")"
             )
         ).scalar_one() is True
+
+
+def assert_postgis_extension(engine: Engine) -> None:
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_extension WHERE extname = 'postgis'"
+                ")"
+            )
+        ).scalar_one() is True
+
+
+def assert_spatial_extensions(engine: Engine) -> None:
+    assert_pgvector_extension(engine)
+    assert_postgis_extension(engine)
+    with engine.connect() as connection:
+        vector_distance = connection.execute(
+            text(
+                "SELECT '[1,2,3]'::vector(3) "
+                "<-> '[1,2,4]'::vector(3)"
+            )
+        ).scalar_one()
+        transformed = connection.execute(
+            text(
+                "SELECT ST_SRID(geom), ST_X(geom), ST_Y(geom) "
+                "FROM (SELECT ST_Transform("
+                "ST_SetSRID(ST_MakePoint(400000, 4600000), 25830), "
+                "4326) AS geom) AS transformed"
+            )
+        ).one()
+
+    assert float(vector_distance) == pytest.approx(1.0)
+    assert transformed[0] == 4326
+    assert -10 <= transformed[1] <= 5
+    assert 35 <= transformed[2] <= 45
 
 
 def assert_reference_geography_schema(inspector: Inspector) -> None:
@@ -1006,7 +1042,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(upgraded_inspector)
         assert_maintenance_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(upgraded_inspector)
         assert_assistant_attachment_schema(upgraded_inspector)
         assert_document_project_scope_is_composite(upgraded_inspector)
@@ -1049,7 +1085,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(reupgraded_inspector)
         assert_maintenance_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(reupgraded_inspector)
         assert_assistant_attachment_schema(reupgraded_inspector)
         assert_document_project_scope_is_composite(reupgraded_inspector)
@@ -1706,6 +1742,62 @@ def test_reconciliation_upgrade_has_bounded_schema_lock_wait(
         engine.dispose()
 
 
+def test_postgis_upgrade_from_reconciled_head_is_non_destructive(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0029")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community, ine_code
+                    ) VALUES (
+                        'PostGIS migration check', 'Burgos',
+                        'Castilla y León', '09998'
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+
+        assert_pgvector_extension(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT NOT EXISTS ("
+                    "SELECT 1 FROM pg_extension WHERE extname = 'postgis'"
+                    ")"
+                )
+            ).scalar_one() is True
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_spatial_extensions(engine)
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0029")
+        assert_spatial_extensions(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0029"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM municipalities "
+                    "WHERE id = :municipality_id"
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one() == 1
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_spatial_extensions(engine)
+    finally:
+        engine.dispose()
+
+
 def test_fresh_upgrade_and_asset_inventory_downgrade(
     migration_database_url: str,
 ) -> None:
@@ -1716,7 +1808,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
         assert_document_project_scope_is_composite(inspect(engine))
@@ -1744,7 +1836,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
         assert_document_project_scope_is_composite(inspect(engine))

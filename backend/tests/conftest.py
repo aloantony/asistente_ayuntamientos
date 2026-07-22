@@ -93,6 +93,11 @@ def engine() -> Generator[Engine, None, None]:
     server_engine.dispose()
 
     engine = create_engine(TEST_DATABASE_URL)
+    with engine.begin() as connection:
+        # Each process-specific database is created from template1, so shared
+        # extension capabilities must be enabled before ORM tables are built.
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     try:
