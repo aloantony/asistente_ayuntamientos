@@ -19,7 +19,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0031"
+HEAD_REVISION = "20260717_0032"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -114,6 +114,7 @@ REFERENCE_CATALOG_TABLES = {
     "reference_catalog_snapshots",
     "reference_services",
     "reference_layers",
+    "reference_layer_styles",
     "organization_reference_layer_settings",
 }
 REFERENCE_CATALOG_COLUMNS = {
@@ -188,6 +189,21 @@ REFERENCE_CATALOG_COLUMNS = {
         "downloadable",
         "legend_url",
         "metadata_url",
+        "status",
+        "created_at",
+        "updated_at",
+    },
+    "reference_layer_styles": {
+        "id",
+        "last_seen_snapshot_id",
+        "layer_id",
+        "provider_key",
+        "source_key",
+        "title",
+        "description",
+        "legend_url",
+        "sort_order",
+        "is_default",
         "status",
         "created_at",
         "updated_at",
@@ -359,6 +375,27 @@ def assert_reference_catalog_schema(inspector: Inspector) -> None:
     }
     assert {
         index["name"]
+        for index in inspector.get_indexes("reference_layer_styles")
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_layer_styles_layer_order",
+        "ix_reference_layer_styles_snapshot",
+        "uq_reference_layer_styles_default",
+    }
+    style_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes("reference_layer_styles")
+        if not index.get("duplicates_constraint")
+    }
+    default_style_index = style_indexes["uq_reference_layer_styles_default"]
+    assert default_style_index["unique"] is True
+    assert default_style_index["column_names"] == [
+        "provider_key",
+        "layer_id",
+    ]
+    assert "is_default" in str(default_style_index.get("dialect_options", {}))
+    assert {
+        index["name"]
         for index in inspector.get_indexes(
             "organization_reference_layer_settings"
         )
@@ -392,6 +429,15 @@ def assert_reference_catalog_schema(inspector: Inspector) -> None:
         "uq_reference_layers_provider_source",
     }
     assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_layer_styles"
+        )
+    } == {
+        "uq_reference_layer_styles_provider_id",
+        "uq_reference_layer_styles_provider_layer_source",
+    }
+    assert {
         tuple(foreign_key["constrained_columns"])
         for foreign_key in inspector.get_foreign_keys("reference_services")
     } == {("provider_key", "last_seen_snapshot_id")}
@@ -402,6 +448,47 @@ def assert_reference_catalog_schema(inspector: Inspector) -> None:
         ("provider_key", "last_seen_snapshot_id"),
         ("provider_key", "service_id"),
         ("provider_key", "parent_id"),
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_styles"
+        )
+    } == {
+        ("provider_key", "last_seen_snapshot_id"),
+        ("provider_key", "layer_id"),
+    }
+    style_foreign_keys = {
+        foreign_key["name"]: foreign_key
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_styles"
+        )
+    }
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_snapshot"
+    ]["referred_table"] == "reference_catalog_snapshots"
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_snapshot"
+    ]["referred_columns"] == ["provider_key", "id"]
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_snapshot"
+    ]["options"]["ondelete"] == "RESTRICT"
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_layer"
+    ]["referred_table"] == "reference_layers"
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_layer"
+    ]["referred_columns"] == ["provider_key", "id"]
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_layer_styles"
+        )
+    } == {
+        "ck_reference_layer_styles_identity_nonempty",
+        "ck_reference_layer_styles_legend_url",
+        "ck_reference_layer_styles_sort_order",
+        "ck_reference_layer_styles_status",
     }
 
 
@@ -1936,6 +2023,36 @@ def test_reference_catalog_migration_from_postgis_head_is_reversible(
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == "20260717_0030"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_catalog_schema(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_reference_layer_styles_migration_is_isolated_and_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0031")
+    engine = create_engine(migration_database_url)
+
+    try:
+        before = inspect(engine)
+        assert "reference_layers" in before.get_table_names()
+        assert "reference_layer_styles" not in before.get_table_names()
+
+        run_alembic(migration_database_url, "upgrade", "20260717_0032")
+        assert_reference_catalog_schema(inspect(engine))
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0031")
+        downgraded = inspect(engine)
+        assert "reference_layers" in downgraded.get_table_names()
+        assert "reference_layer_styles" not in downgraded.get_table_names()
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0031"
 
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")

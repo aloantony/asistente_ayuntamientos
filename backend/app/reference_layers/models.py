@@ -127,6 +127,15 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
             "ReferenceLayer.last_seen_snapshot_id"
         ),
     )
+    styles: Mapped[list["ReferenceLayerStyle"]] = relationship(
+        "ReferenceLayerStyle",
+        back_populates="last_seen_snapshot",
+        foreign_keys="ReferenceLayerStyle.last_seen_snapshot_id",
+        primaryjoin=(
+            "ReferenceCatalogSnapshot.id == "
+            "ReferenceLayerStyle.last_seen_snapshot_id"
+        ),
+    )
 
 
 class ReferenceService(TimestampMixin, Base):
@@ -455,6 +464,124 @@ class ReferenceLayer(TimestampMixin, Base):
             "OrganizationReferenceLayerSetting",
             back_populates="layer",
         )
+    )
+    styles: Mapped[list["ReferenceLayerStyle"]] = relationship(
+        "ReferenceLayerStyle",
+        back_populates="layer",
+        foreign_keys="ReferenceLayerStyle.layer_id",
+        primaryjoin="ReferenceLayer.id == ReferenceLayerStyle.layer_id",
+        order_by=(
+            "ReferenceLayerStyle.sort_order, ReferenceLayerStyle.id"
+        ),
+    )
+
+
+class ReferenceLayerStyle(TimestampMixin, Base):
+    __tablename__ = "reference_layer_styles"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> '' and btrim(source_key) <> '' "
+            "and btrim(title) <> ''",
+            name="ck_reference_layer_styles_identity_nonempty",
+        ),
+        CheckConstraint(
+            "legend_url is null or legend_url ~ '^https?://'",
+            name="ck_reference_layer_styles_legend_url",
+        ),
+        CheckConstraint(
+            "sort_order >= 0",
+            name="ck_reference_layer_styles_sort_order",
+        ),
+        CheckConstraint(
+            "status in ('active', 'degraded', 'missing', 'disabled')",
+            name="ck_reference_layer_styles_status",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_key",
+            name="uq_reference_layer_styles_provider_layer_source",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_layer_styles_provider_id",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "last_seen_snapshot_id"],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+            ],
+            name="fk_reference_layer_styles_provider_snapshot",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id"],
+            ["reference_layers.provider_key", "reference_layers.id"],
+            name="fk_reference_layer_styles_provider_layer",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "uq_reference_layer_styles_default",
+            "provider_key",
+            "layer_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+        Index(
+            "ix_reference_layer_styles_layer_order",
+            "layer_id",
+            "sort_order",
+            "id",
+        ),
+        Index(
+            "ix_reference_layer_styles_snapshot",
+            "last_seen_snapshot_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    last_seen_snapshot_id: Mapped[int] = mapped_column(nullable=False)
+    layer_id: Mapped[int] = mapped_column(nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    legend_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    is_default: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="active",
+        server_default="active",
+        nullable=False,
+    )
+
+    last_seen_snapshot: Mapped[ReferenceCatalogSnapshot] = relationship(
+        "ReferenceCatalogSnapshot",
+        back_populates="styles",
+        foreign_keys=[last_seen_snapshot_id],
+        primaryjoin=(
+            "ReferenceLayerStyle.last_seen_snapshot_id == "
+            "ReferenceCatalogSnapshot.id"
+        ),
+    )
+    layer: Mapped[ReferenceLayer] = relationship(
+        "ReferenceLayer",
+        back_populates="styles",
+        foreign_keys=[layer_id],
+        primaryjoin="ReferenceLayerStyle.layer_id == ReferenceLayer.id",
     )
 
 

@@ -8,12 +8,13 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceLayer,
+    ReferenceLayerStyle,
     ReferenceService,
 )
 
@@ -28,6 +29,7 @@ RENDERERS = {"raster_tile", "vector_tile"}
 DELIVERY_MODES = {"proxy", "mirror"}
 PROVIDER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$")
 SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+_CATALOG_PROVIDER_LOCK_DOMAIN = b"asistente/reference-catalog-apply/v1\0"
 
 
 class ReferenceCatalogValidationError(ValueError):
@@ -52,6 +54,17 @@ class ReferenceServiceDefinition:
     capabilities_sha256: str | None = None
     status: str = "active"
     last_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ReferenceLayerStyleDefinition:
+    source_key: str
+    title: str
+    description: str | None = None
+    legend_url: str | None = None
+    sort_order: int = 0
+    is_default: bool = False
+    status: str = "active"
 
 
 @dataclass(frozen=True)
@@ -83,6 +96,7 @@ class ReferenceLayerDefinition:
     legend_url: str | None = None
     metadata_url: str | None = None
     status: str = "active"
+    styles: tuple[ReferenceLayerStyleDefinition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,12 +117,16 @@ class ReferenceCatalogSyncPlan:
     definition: ReferenceCatalogDefinition
     content_sha256: str
     definition_sha256: str
+    base_state_sha256: str
     new_services: tuple[str, ...]
     updated_services: tuple[str, ...]
     missing_services: tuple[str, ...]
     new_layers: tuple[str, ...]
     updated_layers: tuple[str, ...]
     missing_layers: tuple[str, ...]
+    new_styles: tuple[str, ...]
+    updated_styles: tuple[str, ...]
+    missing_styles: tuple[str, ...]
     unchanged_count: int
     blocking_issues: tuple[str, ...]
 
@@ -124,6 +142,10 @@ class ReferenceCatalogSyncPlan:
     def layer_count(self) -> int:
         return sum(layer.node_type == "layer" for layer in self.definition.layers)
 
+    @property
+    def style_count(self) -> int:
+        return sum(len(layer.styles) for layer in self.definition.layers)
+
 
 def canonical_catalog_sha256(raw_catalog: dict[str, Any]) -> str:
     encoded = json.dumps(
@@ -134,6 +156,20 @@ def canonical_catalog_sha256(raw_catalog: dict[str, Any]) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _catalog_provider_lock_key(provider_key: str) -> int:
+    digest = hashlib.sha256(
+        _CATALOG_PROVIDER_LOCK_DOMAIN + provider_key.encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _lock_catalog_provider(db: Session, provider_key: str) -> None:
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _catalog_provider_lock_key(provider_key)},
+    )
 
 
 def canonical_definition_sha256(
@@ -162,7 +198,7 @@ def normalized_catalog_definition(
             key=lambda service: service["source_key"],
         ),
         "layers": sorted(
-            (asdict(layer) for layer in definition.layers),
+            (_normalized_layer_definition(layer) for layer in definition.layers),
             key=lambda layer: layer["source_key"],
         ),
     }
@@ -189,12 +225,16 @@ def build_catalog_sync_plan(
             definition=definition,
             content_sha256=content_sha256,
             definition_sha256=definition_sha256,
+            base_state_sha256="0" * 64,
             new_services=(),
             updated_services=(),
             missing_services=(),
             new_layers=(),
             updated_layers=(),
             missing_layers=(),
+            new_styles=(),
+            updated_styles=(),
+            missing_styles=(),
             unchanged_count=0,
             blocking_issues=tuple(issues),
         )
@@ -218,6 +258,30 @@ def build_catalog_sync_plan(
             .where(ReferenceLayer.provider_key == definition.provider_key)
         )
     }
+    existing_styles = {
+        f"{style.layer.source_key}|{style.source_key}": style
+        for style in db.scalars(
+            select(ReferenceLayerStyle)
+            .options(selectinload(ReferenceLayerStyle.layer))
+            .where(
+                ReferenceLayerStyle.provider_key == definition.provider_key
+            )
+        )
+    }
+    current_snapshots = tuple(
+        db.scalars(
+            select(ReferenceCatalogSnapshot).where(
+                ReferenceCatalogSnapshot.provider_key == definition.provider_key,
+                ReferenceCatalogSnapshot.is_current.is_(True),
+            )
+        )
+    )
+    base_state_sha256 = _catalog_base_state_sha256(
+        existing_services,
+        existing_layers,
+        existing_styles,
+        current_snapshots,
+    )
 
     new_services: list[str] = []
     updated_services: list[str] = []
@@ -225,9 +289,14 @@ def build_catalog_sync_plan(
     new_layers: list[str] = []
     updated_layers: list[str] = []
     missing_layers: list[str] = []
+    new_styles: list[str] = []
+    updated_styles: list[str] = []
+    missing_styles: list[str] = []
     unchanged_count = 0
 
-    service_definitions = {service.source_key: service for service in definition.services}
+    service_definitions = {
+        service.source_key: service for service in definition.services
+    }
     for key, service_definition in service_definitions.items():
         existing = existing_services.get(key)
         if existing is None:
@@ -263,16 +332,42 @@ def build_catalog_sync_plan(
             else:
                 unchanged_count += 1
 
+    style_definitions = {
+        f"{layer.source_key}|{style.source_key}": style
+        for layer in definition.layers
+        for style in layer.styles
+    }
+    for key, style_definition in style_definitions.items():
+        existing = existing_styles.get(key)
+        if existing is None:
+            new_styles.append(key)
+        elif _style_signature(existing) != _style_definition_signature(
+            style_definition
+        ):
+            updated_styles.append(key)
+        else:
+            unchanged_count += 1
+    for key, existing in existing_styles.items():
+        if key not in style_definitions:
+            if existing.status != "missing":
+                missing_styles.append(key)
+            else:
+                unchanged_count += 1
+
     return ReferenceCatalogSyncPlan(
         definition=definition,
         content_sha256=content_sha256,
         definition_sha256=definition_sha256,
+        base_state_sha256=base_state_sha256,
         new_services=tuple(sorted(new_services)),
         updated_services=tuple(sorted(updated_services)),
         missing_services=tuple(sorted(missing_services)),
         new_layers=tuple(sorted(new_layers)),
         updated_layers=tuple(sorted(updated_layers)),
         missing_layers=tuple(sorted(missing_layers)),
+        new_styles=tuple(sorted(new_styles)),
+        updated_styles=tuple(sorted(updated_styles)),
+        missing_styles=tuple(sorted(missing_styles)),
         unchanged_count=unchanged_count,
         blocking_issues=(),
     )
@@ -281,12 +376,27 @@ def build_catalog_sync_plan(
 def apply_catalog_definition(
     db: Session,
     definition: ReferenceCatalogDefinition,
+    *,
+    expected_plan: ReferenceCatalogSyncPlan | None = None,
 ) -> tuple[ReferenceCatalogSnapshot, ReferenceCatalogSyncPlan]:
-    plan = build_catalog_sync_plan(db, definition)
-    if plan.blocking_issues:
-        raise ReferenceCatalogValidationError("; ".join(plan.blocking_issues))
-
     try:
+        _lock_catalog_provider(db, definition.provider_key)
+        # A caller can build the reviewed plan with this same Session before
+        # waiting for the provider lock. Reload ORM state so the revalidation
+        # observes any catalog transaction that committed while we waited.
+        db.expire_all()
+        plan = build_catalog_sync_plan(db, definition)
+        if plan.blocking_issues:
+            raise ReferenceCatalogValidationError("; ".join(plan.blocking_issues))
+        if (
+            expected_plan is not None
+            and _sync_plan_signature(plan)
+            != _sync_plan_signature(expected_plan)
+        ):
+            raise ReferenceCatalogValidationError(
+                "Catalog state changed after the reviewed dry-run"
+            )
+
         snapshot = db.scalar(
             select(ReferenceCatalogSnapshot).where(
                 ReferenceCatalogSnapshot.provider_key == definition.provider_key,
@@ -370,6 +480,54 @@ def apply_catalog_definition(
             service = services.get(item.service_key) if item.service_key else None
             _apply_layer_definition(layer, item, snapshot.id, parent, service)
             db.flush()
+
+        styles = {
+            f"{style.layer.source_key}|{style.source_key}": style
+            for style in db.scalars(
+                select(ReferenceLayerStyle)
+                .options(selectinload(ReferenceLayerStyle.layer))
+                .where(
+                    ReferenceLayerStyle.provider_key == definition.provider_key
+                )
+                .with_for_update()
+            )
+        }
+        incoming_style_keys = {
+            f"{layer.source_key}|{style.source_key}"
+            for layer in definition.layers
+            for style in layer.styles
+        }
+        incoming_default_style_keys = {
+            f"{layer.source_key}|{style.source_key}"
+            for layer in definition.layers
+            for style in layer.styles
+            if style.is_default
+        }
+        for key, style in styles.items():
+            if key not in incoming_style_keys:
+                style.status = "missing"
+                style.is_default = False
+            elif style.is_default and key not in incoming_default_style_keys:
+                style.is_default = False
+        db.flush()
+
+        for layer_definition in definition.layers:
+            layer = layers[layer_definition.source_key]
+            for item in layer_definition.styles:
+                key = f"{layer_definition.source_key}|{item.source_key}"
+                style = styles.get(key)
+                if style is None:
+                    style = ReferenceLayerStyle(
+                        provider_key=definition.provider_key,
+                        layer_id=layer.id,
+                        source_key=item.source_key,
+                        title=item.title,
+                        last_seen_snapshot_id=snapshot.id,
+                    )
+                    db.add(style)
+                    styles[key] = style
+                _apply_style_definition(style, item, snapshot.id, layer)
+                db.flush()
 
         current_snapshots = list(
             db.scalars(
@@ -466,6 +624,8 @@ def validate_catalog_definition(
             if scale is not None and scale <= 0:
                 issues.append(f"Invalid scale denominator: {layer.source_key}")
         if layer.node_type == "group":
+            if layer.styles:
+                issues.append(f"Group has styles: {layer.source_key}")
             if any(
                 value is not None
                 for value in (
@@ -485,6 +645,57 @@ def validate_catalog_definition(
                 issues.append(f"Invalid renderer: {layer.source_key}")
             if layer.delivery_mode not in DELIVERY_MODES:
                 issues.append(f"Invalid delivery mode: {layer.source_key}")
+            style_keys: set[str] = set()
+            default_style_keys: list[str] = []
+            for style in layer.styles:
+                if style.source_key in style_keys:
+                    issues.append(
+                        f"Duplicate style key: {layer.source_key}|{style.source_key}"
+                    )
+                style_keys.add(style.source_key)
+                if not SOURCE_KEY_RE.fullmatch(style.source_key):
+                    issues.append(
+                        f"Invalid style key: {layer.source_key}|{style.source_key}"
+                    )
+                if not style.title.strip():
+                    issues.append(
+                        f"Style title is empty: {layer.source_key}|{style.source_key}"
+                    )
+                if style.status not in LAYER_STATUSES:
+                    issues.append(
+                        f"Invalid style status: {layer.source_key}|{style.source_key}"
+                    )
+                if style.sort_order < 0:
+                    issues.append(
+                        "Negative style sort order: "
+                        f"{layer.source_key}|{style.source_key}"
+                    )
+                if style.legend_url and not _valid_declared_http_url(
+                    style.legend_url
+                ):
+                    issues.append(
+                        "Invalid style legend URL: "
+                        f"{layer.source_key}|{style.source_key}"
+                    )
+                if style.is_default:
+                    default_style_keys.append(style.source_key)
+            if len(default_style_keys) > 1:
+                issues.append(f"Multiple default styles: {layer.source_key}")
+            if layer.style_name and not layer.styles:
+                issues.append(
+                    f"Selected style has no definition: {layer.source_key}"
+                )
+            elif layer.style_name and layer.style_name not in style_keys:
+                issues.append(f"Unknown selected style: {layer.source_key}")
+            if layer.styles and layer.style_name:
+                if default_style_keys != [layer.style_name]:
+                    issues.append(
+                        f"Selected/default style mismatch: {layer.source_key}"
+                    )
+            elif default_style_keys:
+                issues.append(
+                    f"Default style has no selected style: {layer.source_key}"
+                )
         for label, url in (
             ("legend", layer.legend_url),
             ("metadata", layer.metadata_url),
@@ -551,6 +762,17 @@ def _canonical_json_value(value: Any) -> Any:
     raise TypeError(f"Unsupported catalog value: {type(value).__name__}")
 
 
+def _normalized_layer_definition(
+    layer: ReferenceLayerDefinition,
+) -> dict[str, Any]:
+    payload = asdict(layer)
+    payload["styles"] = sorted(
+        payload["styles"],
+        key=lambda style: style["source_key"],
+    )
+    return payload
+
+
 def _valid_zoom_range(min_zoom: int | None, max_zoom: int | None) -> bool:
     if min_zoom is not None and not 0 <= min_zoom <= 24:
         return False
@@ -598,7 +820,69 @@ def _topological_layers(
         depth_cache[key] = value
         return value
 
-    return sorted(definitions, key=lambda item: (depth(item.source_key), item.sort_order, item.source_key))
+    return sorted(
+        definitions,
+        key=lambda item: (
+            depth(item.source_key),
+            item.sort_order,
+            item.source_key,
+        ),
+    )
+
+
+def _sync_plan_signature(plan: ReferenceCatalogSyncPlan) -> tuple:
+    return (
+        plan.content_sha256,
+        plan.definition_sha256,
+        plan.base_state_sha256,
+        plan.new_services,
+        plan.updated_services,
+        plan.missing_services,
+        plan.new_layers,
+        plan.updated_layers,
+        plan.missing_layers,
+        plan.new_styles,
+        plan.updated_styles,
+        plan.missing_styles,
+    )
+
+
+def _catalog_base_state_sha256(
+    services: dict[str, ReferenceService],
+    layers: dict[str, ReferenceLayer],
+    styles: dict[str, ReferenceLayerStyle],
+    current_snapshots: tuple[ReferenceCatalogSnapshot, ...],
+) -> str:
+    payload = {
+        "current_snapshots": [
+            (snapshot.content_sha256, snapshot.definition_sha256)
+            for snapshot in sorted(
+                current_snapshots,
+                key=lambda item: (
+                    item.content_sha256,
+                    item.definition_sha256,
+                ),
+            )
+        ],
+        "services": [
+            (key, _service_signature(services[key]))
+            for key in sorted(services)
+        ],
+        "layers": [
+            (key, _layer_signature(layers[key])) for key in sorted(layers)
+        ],
+        "styles": [
+            (key, _style_signature(styles[key])) for key in sorted(styles)
+        ],
+    }
+    encoded = json.dumps(
+        _canonical_json_value(payload),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _service_definition_signature(item: ReferenceServiceDefinition) -> tuple:
@@ -618,6 +902,28 @@ def _service_definition_signature(item: ReferenceServiceDefinition) -> tuple:
         item.capabilities_sha256,
         item.status,
         item.last_error,
+    )
+
+
+def _style_definition_signature(item: ReferenceLayerStyleDefinition) -> tuple:
+    return (
+        item.title,
+        item.description,
+        item.legend_url,
+        item.sort_order,
+        item.is_default,
+        item.status,
+    )
+
+
+def _style_signature(item: ReferenceLayerStyle) -> tuple:
+    return (
+        item.title,
+        item.description,
+        item.legend_url,
+        item.sort_order,
+        item.is_default,
+        item.status,
     )
 
 
@@ -767,3 +1073,22 @@ def _apply_layer_definition(
     }
     for name, value in values.items():
         setattr(layer, name, value)
+
+
+def _apply_style_definition(
+    style: ReferenceLayerStyle,
+    item: ReferenceLayerStyleDefinition,
+    snapshot_id: int,
+    layer: ReferenceLayer,
+) -> None:
+    style.last_seen_snapshot_id = snapshot_id
+    style.layer_id = layer.id
+    for name, value in (
+        ("title", item.title),
+        ("description", item.description),
+        ("legend_url", item.legend_url),
+        ("sort_order", item.sort_order),
+        ("is_default", item.is_default),
+        ("status", item.status),
+    ):
+        setattr(style, name, value)
