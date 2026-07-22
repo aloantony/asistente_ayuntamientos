@@ -23,7 +23,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
+  Suspense,
   useEffect,
   useRef,
   useState,
@@ -90,6 +92,32 @@ const TAB_DEFINITIONS: TabDefinition[] = [
   { id: "people", label: "Personal", icon: Users },
   { id: "roadmap", label: "Hoja de ruta", icon: ClipboardList },
 ];
+
+function isWorkspaceTab(value: string | null): value is WorkspaceTab {
+  return TAB_DEFINITIONS.some(({ id }) => id === value);
+}
+
+export function resolveWorkspaceTab(
+  searchParams: Pick<URLSearchParams, "get">,
+): WorkspaceTab {
+  const requestedTab = searchParams.get("tab");
+  return isWorkspaceTab(requestedTab) ? requestedTab : "summary";
+}
+
+export function buildWorkspaceTabHref(
+  pathname: string,
+  searchParams: Pick<URLSearchParams, "toString">,
+  tab: WorkspaceTab,
+) {
+  const params = new URLSearchParams(searchParams.toString());
+  if (tab === "summary") {
+    params.delete("tab");
+  } else {
+    params.set("tab", tab);
+  }
+  const query = params.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
 
 const EMPTY_RESOURCE_ERRORS: ResourceErrors = {
   ordinances: "",
@@ -1177,9 +1205,12 @@ function EmptyState({ user }: { user: User }) {
   );
 }
 
-export function MunicipalWorkspace() {
+function MunicipalWorkspaceContent() {
   const { user, handleRequestError } = useSession();
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("summary");
+  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const activeTab = resolveWorkspaceTab(searchParams);
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
@@ -1238,13 +1269,6 @@ export function MunicipalWorkspace() {
         userHasPermission(user, permission),
       ),
   );
-
-  useEffect(() => {
-    const requestedTab = new URLSearchParams(window.location.search).get("tab");
-    if (TAB_DEFINITIONS.some(({ id }) => id === requestedTab)) {
-      setActiveTab(requestedTab as WorkspaceTab);
-    }
-  }, []);
 
   useEffect(() => {
     if (!user || !canViewMunicipalHub(user) || !selectedContext) {
@@ -1426,14 +1450,9 @@ export function MunicipalWorkspace() {
   }
 
   function selectWorkspaceTab(tab: WorkspaceTab, moveFocus = false) {
-    setActiveTab(tab);
-    const url = new URL(window.location.href);
-    if (tab === "summary") {
-      url.searchParams.delete("tab");
-    } else {
-      url.searchParams.set("tab", tab);
-    }
-    window.history.replaceState(window.history.state, "", url);
+    router.replace(buildWorkspaceTabHref(pathname, searchParams, tab), {
+      scroll: false,
+    });
 
     if (moveFocus) {
       const tabIndex = TAB_DEFINITIONS.findIndex(({ id }) => id === tab);
@@ -1614,5 +1633,13 @@ export function MunicipalWorkspace() {
         )}
       </div>
     </section>
+  );
+}
+
+export function MunicipalWorkspace() {
+  return (
+    <Suspense fallback={null}>
+      <MunicipalWorkspaceContent />
+    </Suspense>
   );
 }
