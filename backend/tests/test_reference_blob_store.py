@@ -70,6 +70,68 @@ def test_put_stream_is_bounded_and_validates_expected_identity(store) -> None:
     assert store.resolve_blob(stored.storage_key).read_bytes() == payload
 
 
+def test_completed_staging_file_is_adopted_without_copying(store) -> None:
+    directory = store.root / "staging" / "derived"
+    directory.mkdir(mode=0o700)
+    candidate = directory / "snapshot.mbtiles"
+    payload = b"immutable mbtiles payload"
+    candidate.write_bytes(payload)
+    inode = candidate.stat().st_ino
+
+    stored = store.commit_staged_file(
+        candidate,
+        max_bytes=len(payload),
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+        expected_size=len(payload),
+    )
+
+    destination = store.resolve_blob(stored.storage_key)
+    assert destination.read_bytes() == payload
+    assert destination.stat().st_ino == inode
+    assert not candidate.exists()
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+
+
+def test_completed_file_outside_staging_or_with_wrong_identity_is_rejected(
+    store,
+    tmp_path,
+) -> None:
+    outside = tmp_path / "outside.mbtiles"
+    outside.write_bytes(b"outside")
+    with pytest.raises(ReferenceBlobStoreError, match="outside"):
+        store.commit_staged_file(outside)
+
+    directory = store.root / "staging" / "derived-invalid"
+    directory.mkdir(mode=0o700)
+    candidate = directory / "snapshot.mbtiles"
+    candidate.write_bytes(b"payload")
+    with pytest.raises(ReferenceBlobIntegrityError, match="digest"):
+        store.commit_staged_file(candidate, expected_sha256="0" * 64)
+    assert candidate.read_bytes() == b"payload"
+
+
+def test_capacity_preflight_uses_quota_and_free_space(tmp_path, monkeypatch) -> None:
+    instance = ReferenceBlobStore(
+        tmp_path / "preflight",
+        max_blob_bytes=8,
+        quota_bytes=8,
+        min_free_bytes=3,
+    )
+    try:
+        instance.put_stream(io.BytesIO(b"1234"))
+        with pytest.raises(ReferenceStorageQuotaError):
+            instance.ensure_capacity(5)
+        monkeypatch.setattr(
+            blob_store_module.shutil,
+            "disk_usage",
+            lambda _path: SimpleNamespace(total=100, used=94, free=6),
+        )
+        with pytest.raises(ReferenceStorageSpaceError):
+            instance.ensure_capacity(4)
+    finally:
+        instance.close()
+
+
 def test_mutable_input_cannot_change_hash_after_bytes_are_written(
     store,
     monkeypatch,

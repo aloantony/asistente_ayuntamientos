@@ -203,6 +203,151 @@ class ReferenceBlobStore:
                 expected_size=expected_size,
             )
 
+    def ensure_capacity(self, additional_bytes: int) -> None:
+        """Fail before expensive work when the configured storage cannot fit it.
+
+        This is a preflight rather than a reservation.  Writers still repeat
+        quota and free-space checks while they make progress, so a concurrent
+        consumer cannot turn this check into permission to overfill the
+        filesystem.
+        """
+
+        amount = _non_negative_integer(additional_bytes, "additional_bytes")
+        if self._lock_fd is None:
+            raise ReferenceBlobStoreError("blob store is closed")
+        with self._exclusive_lock():
+            self._ensure_write_capacity(amount)
+
+    def commit_staged_file(
+        self,
+        path: str | Path,
+        *,
+        max_bytes: int | None = None,
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
+    ) -> StoredReferenceBlob:
+        """Atomically adopt a completed regular file already under staging.
+
+        Large derived artifacts such as MBTiles databases are created by
+        libraries that need a filesystem path.  Copying them through
+        ``put_stream`` would temporarily require twice their size.  This
+        method verifies the complete immutable identity under an exclusive
+        file lock and then moves the same inode into the CAS.
+        """
+
+        if self._lock_fd is None:
+            raise ReferenceBlobStoreError("blob store is closed")
+        limit = self.max_blob_bytes
+        if max_bytes is not None:
+            requested = _positive_integer(max_bytes, "max_bytes")
+            if requested > self.max_blob_bytes:
+                raise ValueError("max_bytes cannot exceed the store maximum")
+            limit = requested
+        if expected_sha256 is not None and (
+            not isinstance(expected_sha256, str)
+            or SHA256_RE.fullmatch(expected_sha256) is None
+        ):
+            raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+        if expected_size is not None:
+            _non_negative_integer(expected_size, "expected_size")
+
+        candidate = Path(path)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(self._staging_dir)
+        except (OSError, ValueError) as error:
+            raise ReferenceBlobStoreError(
+                "completed artifact is outside reference staging"
+            ) from error
+        if resolved == self._staging_dir or candidate.is_symlink():
+            raise ReferenceBlobStoreError("completed staging artifact is invalid")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = -1
+        try:
+            descriptor = os.open(resolved, flags)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_size <= 0
+                or before.st_size > limit
+            ):
+                raise ReferenceBlobTooLargeError(
+                    "completed artifact size is outside its byte limit"
+                )
+            digest = _sha256_descriptor(descriptor)
+            after = os.fstat(descriptor)
+            if (
+                before.st_dev != after.st_dev
+                or before.st_ino != after.st_ino
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                raise ReferenceBlobIntegrityError(
+                    "completed staging artifact changed during verification"
+                )
+            if expected_sha256 is not None and digest != expected_sha256:
+                raise ReferenceBlobIntegrityError(
+                    "completed artifact digest mismatch"
+                )
+            if expected_size is not None and before.st_size != expected_size:
+                raise ReferenceBlobIntegrityError("completed artifact size mismatch")
+            os.fchmod(descriptor, 0o640)
+            os.fsync(descriptor)
+
+            with self._exclusive_lock():
+                # The file is already counted by quota because staging lives
+                # below the store root.  Rechecking zero catches an exhausted
+                # quota or reserve without double-counting these bytes.
+                self._ensure_write_capacity(0)
+                storage_key, destination = self._blob_path(digest)
+                try:
+                    metadata = destination.lstat()
+                except FileNotFoundError:
+                    metadata = None
+                if metadata is not None:
+                    if (
+                        not stat.S_ISREG(metadata.st_mode)
+                        or destination.is_symlink()
+                        or metadata.st_size != before.st_size
+                        or _sha256_file(destination) != digest
+                    ):
+                        raise ReferenceBlobCollisionError(
+                            "content-addressed destination does not match its digest"
+                        )
+                    resolved.unlink()
+                else:
+                    os.replace(resolved, destination)
+                    self._fsync_directory(destination.parent)
+                self._fsync_directory(resolved.parent)
+        except ReferenceBlobStoreError:
+            raise
+        except BlockingIOError as error:
+            raise ReferenceBlobStoreError(
+                "completed staging artifact is still being written"
+            ) from error
+        except OSError as error:
+            raise ReferenceBlobStoreError(
+                "could not commit completed staging artifact"
+            ) from error
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        return StoredReferenceBlob(
+            storage_backend=self.storage_backend,
+            storage_key=storage_key,
+            sha256=digest,
+            size_bytes=before.st_size,
+        )
+
     def resolve_blob(self, storage_key: str) -> Path:
         match = _validated_blob_key(storage_key)
         path = self.root.joinpath(*PurePosixPath(storage_key).parts)
@@ -679,6 +824,20 @@ def _sha256_file(path: Path) -> str:
     except OSError as error:
         raise ReferenceBlobCollisionError(
             "content-addressed destination could not be verified"
+        ) from error
+    return digest.hexdigest()
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while chunk := os.read(descriptor, DEFAULT_CHUNK_BYTES):
+            digest.update(chunk)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as error:
+        raise ReferenceBlobIntegrityError(
+            "completed staging artifact could not be hashed"
         ) from error
     return digest.hexdigest()
 

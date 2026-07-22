@@ -33,6 +33,9 @@ COORDINATE_HASH_SCHEMA = "xyz-z-x-y-newline-v1"
 MAX_SEED_TILES = 25_000_000
 MAX_TILE_BYTES = 1024 * 1024
 MAX_ZOOM = 22
+DEFAULT_PREFLIGHT_SAMPLES = 64
+PREFLIGHT_FIXED_BYTES = 64 * 1024
+PREFLIGHT_TILE_OVERHEAD_BYTES = 128
 WEB_MERCATOR_MAX_LATITUDE = 85.0511287798066
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,500}$", re.ASCII)
@@ -86,6 +89,29 @@ class TileSeedResult:
     image_format: str
     bounds_json: dict[str, float]
     validation_json: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TileSeedPreflight:
+    tile_count: int
+    sample_count: int
+    sample_bytes: int
+    largest_tile_bytes: int
+    projected_archive_bytes: int
+
+
+@dataclass(frozen=True)
+class _TileWindow:
+    zoom: int
+    min_x: int
+    max_x: int
+    min_y: int
+    max_y: int
+    matrix_identifier: str | None
+
+    @property
+    def tile_count(self) -> int:
+        return (self.max_x - self.min_x + 1) * (self.max_y - self.min_y + 1)
 
 
 TileFetcher = Callable[[str, str], bytes]
@@ -185,7 +211,7 @@ def parse_tile_source_document(value: object) -> TileSourceDescriptor:
         matrices=matrices,
         matrix_limits=limits,
     )
-    actual_count = sum(1 for _ in iter_tile_coordinates(parsed))
+    actual_count = sum(window.tile_count for window in _tile_windows(parsed))
     if actual_count != estimated:
         raise TileSeedError(
             "reviewed tile estimate does not match the exact coverage"
@@ -197,6 +223,20 @@ def iter_tile_coordinates(
     descriptor: TileSourceDescriptor,
 ) -> Iterator[TileCoordinate]:
     """Yield the exact XYZ coverage in stable zoom/column/row order."""
+
+    for window in _tile_windows(descriptor):
+        for x in range(window.min_x, window.max_x + 1):
+            for y in range(window.min_y, window.max_y + 1):
+                yield TileCoordinate(
+                    window.zoom,
+                    x,
+                    y,
+                    window.matrix_identifier,
+                )
+
+
+def _tile_windows(descriptor: TileSourceDescriptor) -> tuple[_TileWindow, ...]:
+    """Return exact non-empty coverage windows without enumerating every tile."""
 
     west = descriptor.bounds["west"]
     south = max(
@@ -210,6 +250,7 @@ def iter_tile_coordinates(
     )
     if south >= north:
         raise TileSeedError("tile bounds do not intersect Web Mercator")
+    windows: list[_TileWindow] = []
     for zoom in range(descriptor.min_zoom, descriptor.max_zoom + 1):
         count = 2**zoom
         min_x = _clamp_tile(math.floor(_longitude_position(west, count)), count)
@@ -238,9 +279,17 @@ def iter_tile_coordinates(
             max_y = min(max_y, limit_max_row)
         if min_x > max_x or min_y > max_y:
             continue
-        for x in range(min_x, max_x + 1):
-            for y in range(min_y, max_y + 1):
-                yield TileCoordinate(zoom, x, y, matrix_identifier)
+        windows.append(
+            _TileWindow(
+                zoom=zoom,
+                min_x=min_x,
+                max_x=max_x,
+                min_y=min_y,
+                max_y=max_y,
+                matrix_identifier=matrix_identifier,
+            )
+        )
+    return tuple(windows)
 
 
 def coordinate_sha256(coordinates: Iterator[TileCoordinate]) -> str:
@@ -250,6 +299,32 @@ def coordinate_sha256(coordinates: Iterator[TileCoordinate]) -> str:
             f"{coordinate.z}/{coordinate.x}/{coordinate.y}\n".encode("ascii")
         )
     return digest.hexdigest()
+
+
+def preflight_tile_archive(
+    store: ReferenceBlobStore,
+    *,
+    source_document: object,
+    max_archive_bytes: int,
+    fetcher: TileFetcher | None = None,
+    sample_limit: int = DEFAULT_PREFLIGHT_SAMPLES,
+    concurrency: int = 4,
+) -> TileSeedPreflight:
+    """Sample a reviewed pyramid and reject infeasible seeds before bulk I/O."""
+
+    descriptor = parse_tile_source_document(source_document)
+    maximum = _archive_byte_limit(store, max_archive_bytes)
+    workers = _integer(concurrency, "tile concurrency", 1, 16)
+    samples = _integer(sample_limit, "preflight sample limit", 1, 256)
+    result, _ = _run_preflight(
+        store,
+        descriptor,
+        max_archive_bytes=maximum,
+        fetcher=fetcher or _https_fetcher(descriptor),
+        sample_limit=samples,
+        concurrency=workers,
+    )
+    return result
 
 
 def seed_tile_archive(
@@ -265,18 +340,21 @@ def seed_tile_archive(
     """Download and atomically store a complete reviewed tile pyramid."""
 
     descriptor = parse_tile_source_document(source_document)
-    if (
-        isinstance(max_archive_bytes, bool)
-        or not isinstance(max_archive_bytes, int)
-        or not 1 <= max_archive_bytes <= store.max_blob_bytes
-    ):
-        raise TileSeedError("tile archive byte limit is invalid")
+    max_archive_bytes = _archive_byte_limit(store, max_archive_bytes)
     concurrency = _integer(concurrency, "tile concurrency", 1, 16)
     batch_size = _integer(batch_size, "tile batch size", concurrency, 64)
     expected_coordinate_sha256 = coordinate_sha256(
         iter_tile_coordinates(descriptor)
     )
     tile_fetcher = fetcher or _https_fetcher(descriptor)
+    preflight, prefetched = _run_preflight(
+        store,
+        descriptor,
+        max_archive_bytes=max_archive_bytes,
+        fetcher=tile_fetcher,
+        sample_limit=DEFAULT_PREFLIGHT_SAMPLES,
+        concurrency=concurrency,
+    )
     staging_root = store.root / "staging"
     try:
         with tempfile.TemporaryDirectory(
@@ -285,6 +363,7 @@ def seed_tile_archive(
         ) as directory:
             archive = Path(directory, "snapshot.mbtiles")
             _write_archive(
+                store,
                 archive,
                 descriptor,
                 iter_tile_coordinates(descriptor),
@@ -295,9 +374,12 @@ def seed_tile_archive(
                 heartbeat=heartbeat,
                 concurrency=concurrency,
                 batch_size=batch_size,
+                prefetched=prefetched,
             )
-            with archive.open("rb") as stream:
-                blob = store.put_stream(stream, max_bytes=max_archive_bytes)
+            blob = store.commit_staged_file(
+                archive,
+                max_bytes=max_archive_bytes,
+            )
     except TileSeedError:
         raise
     except (OSError, sqlite3.Error) as error:
@@ -313,6 +395,12 @@ def seed_tile_archive(
             "all_images_valid": True,
             "unique_coordinate_index": True,
             "source_definition_sha256": descriptor.definition_sha256,
+            "capacity_preflight": {
+                "sample_count": preflight.sample_count,
+                "sample_bytes": preflight.sample_bytes,
+                "largest_tile_bytes": preflight.largest_tile_bytes,
+                "projected_archive_bytes": preflight.projected_archive_bytes,
+            },
         },
     }
     return TileSeedResult(
@@ -325,6 +413,138 @@ def seed_tile_archive(
         bounds_json=descriptor.bounds,
         validation_json=validation,
     )
+
+
+def _archive_byte_limit(store: ReferenceBlobStore, value: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= store.max_blob_bytes
+    ):
+        raise TileSeedError("tile archive byte limit is invalid")
+    return value
+
+
+def _run_preflight(
+    store: ReferenceBlobStore,
+    descriptor: TileSourceDescriptor,
+    *,
+    max_archive_bytes: int,
+    fetcher: TileFetcher,
+    sample_limit: int,
+    concurrency: int,
+) -> tuple[TileSeedPreflight, dict[TileCoordinate, bytes]]:
+    coordinates = _sample_coordinates(descriptor, sample_limit)
+    with ThreadPoolExecutor(
+        max_workers=concurrency,
+        thread_name_prefix="reference-tile-preflight",
+    ) as executor:
+        bodies = list(
+            executor.map(
+                lambda item: _fetch_validated_tile(descriptor, item, fetcher),
+                coordinates,
+            )
+        )
+    if not bodies:
+        raise TileSeedError("tile preflight did not select any coverage")
+    sizes = [len(body) for body in bodies]
+    if descriptor.estimated_tile_count <= len(coordinates):
+        projected = (
+            PREFLIGHT_FIXED_BYTES
+            + sum(sizes)
+            + descriptor.estimated_tile_count * PREFLIGHT_TILE_OVERHEAD_BYTES
+        )
+    else:
+        conservative_payload = max(
+            max(sizes) * 2,
+            math.ceil(sum(sizes) / len(sizes) * 2),
+        )
+        projected = (
+            PREFLIGHT_FIXED_BYTES
+            + descriptor.estimated_tile_count
+            * (conservative_payload + PREFLIGHT_TILE_OVERHEAD_BYTES)
+        )
+    result = TileSeedPreflight(
+        tile_count=descriptor.estimated_tile_count,
+        sample_count=len(coordinates),
+        sample_bytes=sum(sizes),
+        largest_tile_bytes=max(sizes),
+        projected_archive_bytes=projected,
+    )
+    if projected > max_archive_bytes:
+        raise TileSeedError(
+            "tile archive capacity projection exceeds its byte limit"
+        )
+    store.ensure_capacity(projected)
+    return result, dict(zip(coordinates, bodies, strict=True))
+
+
+def _sample_coordinates(
+    descriptor: TileSourceDescriptor,
+    sample_limit: int,
+) -> tuple[TileCoordinate, ...]:
+    windows = _tile_windows(descriptor)
+    counts = [window.tile_count for window in windows]
+    total = sum(counts)
+    if total != descriptor.estimated_tile_count or total <= 0:
+        raise TileSeedError("tile sampling coverage differs from its estimate")
+    if total <= sample_limit:
+        return tuple(iter_tile_coordinates(descriptor))
+
+    cumulative: list[tuple[int, _TileWindow]] = []
+    cursor = 0
+    for window in windows:
+        cumulative.append((cursor, window))
+        cursor += window.tile_count
+    if sample_limit <= len(cumulative):
+        selected_windows = (
+            [cumulative[len(cumulative) // 2]]
+            if sample_limit == 1
+            else [
+                cumulative[index * (len(cumulative) - 1) // (sample_limit - 1)]
+                for index in range(sample_limit)
+            ]
+        )
+        ordinals = {
+            start + window.tile_count // 2
+            for start, window in selected_windows
+        }
+    else:
+        ordinals = {
+            start + window.tile_count // 2
+            for start, window in cumulative
+        }
+        if sample_limit == 1:
+            candidates = [total // 2]
+        else:
+            candidates = [
+                index * (total - 1) // (sample_limit - 1)
+                for index in range(sample_limit)
+            ]
+        for ordinal in candidates:
+            if len(ordinals) >= sample_limit:
+                break
+            ordinals.add(ordinal)
+    selected: list[TileCoordinate] = []
+    window_index = 0
+    for ordinal in sorted(ordinals):
+        while (
+            window_index + 1 < len(cumulative)
+            and ordinal >= cumulative[window_index + 1][0]
+        ):
+            window_index += 1
+        start, window = cumulative[window_index]
+        local = ordinal - start
+        height = window.max_y - window.min_y + 1
+        selected.append(
+            TileCoordinate(
+                z=window.zoom,
+                x=window.min_x + local // height,
+                y=window.min_y + local % height,
+                matrix_identifier=window.matrix_identifier,
+            )
+        )
+    return tuple(selected)
 
 
 def tile_url(
@@ -405,6 +625,7 @@ def tile_url(
 
 
 def _write_archive(
+    store: ReferenceBlobStore,
     path: Path,
     descriptor: TileSourceDescriptor,
     coordinates: Iterator[TileCoordinate],
@@ -416,6 +637,7 @@ def _write_archive(
     heartbeat: Heartbeat | None,
     concurrency: int,
     batch_size: int,
+    prefetched: Mapping[TileCoordinate, bytes],
 ) -> None:
     connection = sqlite3.connect(path, timeout=30)
     try:
@@ -456,7 +678,7 @@ def _write_archive(
                             descriptor,
                             item,
                             fetcher,
-                        ),
+                        ) if item not in prefetched else prefetched[item],
                         batch,
                     )
                 )
@@ -483,6 +705,8 @@ def _write_archive(
                 if _sqlite_size(connection) > max_archive_bytes:
                     raise TileSeedError("tile archive exceeds its byte limit")
                 completed += len(batch)
+                if completed == total_tiles or completed % 8192 < len(batch):
+                    store.ensure_capacity(0)
                 if heartbeat is not None:
                     heartbeat(completed, total_tiles)
         stored_count = int(

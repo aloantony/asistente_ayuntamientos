@@ -14,6 +14,7 @@ from app.reference_layers.tile_seed import (
     coordinate_sha256,
     iter_tile_coordinates,
     parse_tile_source_document,
+    preflight_tile_archive,
     seed_tile_archive,
     tile_url,
 )
@@ -286,3 +287,62 @@ def test_seed_rejects_invalid_image_without_publishing_a_blob(tmp_path) -> None:
         )
     assert not list((store.root / "blobs" / "sha256").rglob("?" * 64))
     store.close()
+
+
+def test_preflight_samples_large_coverage_and_rejects_capacity_before_bulk_seed(
+    tmp_path,
+) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=4 * 1024 * 1024,
+    )
+    requested: list[str] = []
+
+    def fetcher(url: str, _media_type: str) -> bytes:
+        requested.append(url)
+        return _png()
+
+    try:
+        with pytest.raises(TileSeedError, match="capacity projection"):
+            preflight_tile_archive(
+                store,
+                source_document=_xyz_document(
+                    estimated=4,
+                    minimum=1,
+                    maximum=1,
+                ),
+                max_archive_bytes=64 * 1024,
+                fetcher=fetcher,
+                sample_limit=2,
+                concurrency=2,
+            )
+        assert len(requested) == 2
+        assert not list((store.root / "blobs" / "sha256").rglob("?" * 64))
+    finally:
+        store.close()
+
+
+def test_preflight_reports_conservative_projection_without_writing(tmp_path) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=4 * 1024 * 1024,
+    )
+    try:
+        result = preflight_tile_archive(
+            store,
+            source_document=_xyz_document(
+                estimated=4,
+                minimum=1,
+                maximum=1,
+            ),
+            max_archive_bytes=3 * 1024 * 1024,
+            fetcher=lambda _url, _media_type: _png(),
+            sample_limit=2,
+        )
+        assert result.tile_count == 4
+        assert result.sample_count == 2
+        assert result.largest_tile_bytes == len(_png())
+        assert result.projected_archive_bytes > result.sample_bytes
+        assert not list((store.root / "blobs" / "sha256").rglob("?" * 64))
+    finally:
+        store.close()
