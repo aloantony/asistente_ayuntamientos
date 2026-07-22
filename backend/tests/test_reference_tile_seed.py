@@ -261,7 +261,7 @@ def test_seed_builds_complete_indexed_content_addressed_archive(tmp_path) -> Non
             "SELECT value FROM metadata WHERE name='coordinate_sha256'"
         ).fetchone() == (result.coordinate_sha256,)
         indexes = connection.execute("PRAGMA index_list(tiles)").fetchall()
-        assert any(row[2] == 1 for row in indexes)
+        assert any(row[1] == "tile_index" and row[2] == 1 for row in indexes)
         rows = connection.execute(
             "SELECT zoom_level, tile_column, tile_row FROM tiles "
             "ORDER BY zoom_level, tile_column, tile_row"

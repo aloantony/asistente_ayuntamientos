@@ -29,7 +29,7 @@ from app.reference_layers.wms_proxy import TILE_SIZE, tile_bbox
 
 
 TILE_SOURCE_SCHEMA = "reference-tile-source/v1"
-COORDINATE_HASH_SCHEMA = "z/x/y-newline-v1"
+COORDINATE_HASH_SCHEMA = "xyz-z-x-y-newline-v1"
 MAX_SEED_TILES = 25_000_000
 MAX_TILE_BYTES = 1024 * 1024
 MAX_ZOOM = 22
@@ -429,8 +429,11 @@ def _write_archive(
         connection.execute(
             "CREATE TABLE tiles ("
             "zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL, "
-            "tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL, "
-            "PRIMARY KEY (zoom_level, tile_column, tile_row)) WITHOUT ROWID"
+            "tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX tile_index ON tiles "
+            "(zoom_level, tile_column, tile_row)"
         )
         connection.executemany(
             "INSERT INTO metadata (name, value) VALUES (?, ?)",
@@ -558,10 +561,12 @@ def _archive_metadata(
         ("name", descriptor.layer),
         ("type", "baselayer"),
         ("version", "1.3"),
+        ("description", "Immutable complete local reference snapshot"),
         ("format", descriptor.image_format),
         ("bounds", bounds),
         ("minzoom", str(descriptor.min_zoom)),
         ("maxzoom", str(descriptor.max_zoom)),
+        ("scheme", "tms"),
         ("coordinate_hash_schema", COORDINATE_HASH_SCHEMA),
         ("coordinate_sha256", coordinate_digest),
         ("source_definition_sha256", descriptor.definition_sha256),
