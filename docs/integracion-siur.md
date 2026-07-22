@@ -95,9 +95,14 @@ conteos revisados, un manifiesto JSON con todas las identidades, el SHA-256
 exacto del JSON y el del WMC. Ese informe produce además los hashes de la
 definición normalizada y del plan contra el estado actual de la base de datos.
 Solo cuando también se aprueban esos dos hashes puede repetirse el mismo comando
-con `--apply`. Cambiar los bytes, el resultado del adaptador o las altas,
-cambios y desapariciones del plan invalida la aprobación. El comando no acepta
-URL ni descarga nada, por lo que esta fase tampoco introduce un proxy abierto.
+con `--apply`. El plan expone una huella `base_state_sha256` del snapshot,
+servicios, capas y estilos observados, y su hash aprobado incluye esa huella.
+Al aplicar, el backend serializa por proveedor, recarga el estado y reconstruye
+el plan dentro de la misma transacción; una promoción concurrente invalida la
+aprobación aunque ambas operaciones afecten a las mismas identidades. Cambiar
+los bytes, el resultado del adaptador o el estado base invalida la aprobación.
+El comando no acepta URL ni descarga nada, por lo que esta fase tampoco
+introduce un proxy abierto.
 
 El WMC puede completar estilos, leyendas y versión WMS únicamente sobre capas
 que ya existan y coincidan de forma unívoca en el catálogo completo. Nunca crea

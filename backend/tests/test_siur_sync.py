@@ -205,6 +205,7 @@ def test_cli_requires_reviewed_definition_and_plan_before_apply(
     plan = SimpleNamespace(
         content_sha256="c" * 64,
         definition_sha256="d" * 64,
+        base_state_sha256="b" * 64,
         new_services=("service:wms:idecyl:urbanismo",),
         updated_services=(),
         missing_services=(),
@@ -258,6 +259,7 @@ def test_cli_requires_reviewed_definition_and_plan_before_apply(
     assert review["wmc"]["matched_layers"] == 1
     assert review["wmc"]["matched_styles"] == 1
     assert review["plan"]["definition_sha256"] == "d" * 64
+    assert review["plan"]["base_state_sha256"] == "b" * 64
     assert applied_definitions == []
 
     approved_args = reviewed_args + [
