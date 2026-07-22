@@ -25,6 +25,9 @@ services:
   worker:
     build:
       context: ./backend
+    # New reference artifacts are root-owned but share this private group with
+    # the unprivileged GeoServer process (directories 0750, blobs 0640).
+    user: "0:${REFERENCE_STORAGE_GID:-2000}"
     env_file:
       - .env
     network_mode: host
@@ -77,6 +80,8 @@ services:
       GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
       GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
       RUN_UNPRIVILEGED: "true"
+      RUN_WITH_USER_UID: "999"
+      RUN_WITH_USER_GID: ${REFERENCE_STORAGE_GID:-2000}
       SKIP_DEMO_DATA: "true"
     ports:
       - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
