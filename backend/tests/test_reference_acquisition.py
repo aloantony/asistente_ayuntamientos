@@ -13,6 +13,8 @@ import pytest
 from sqlalchemy import func, select
 
 from app.reference_layers.acquisition import (
+    AcquiredArtifact,
+    AcquisitionResult,
     AcquisitionConfigurationError,
     AcquisitionLimitError,
     AcquisitionLimits,
@@ -24,7 +26,7 @@ from app.reference_layers.acquisition import (
     persist_acquisition_result,
     source_candidate_definition_sha256,
 )
-from app.reference_layers.blob_store import ReferenceBlobStore
+from app.reference_layers.blob_store import ReferenceBlobStore, StoredReferenceBlob
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
@@ -859,6 +861,83 @@ def test_wmts_manifest_keeps_matrix_sets_styles_and_safe_resource_template(store
     assert descriptor["resource_urls"][0]["resource_type"] == "tile"
 
 
+def test_wmts_estimate_intersects_advertised_matrix_limits(store, limits):
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(
+                WMTS_CAPABILITIES,
+                "application/xml",
+            )
+        ),
+    ).acquire(
+        candidate(
+            "wmts",
+            remote_name="ortho",
+            endpoint="https://data.example.es/wmts",
+            config={
+                **TILE_CONFIG,
+                "bounds": {
+                    "west": -180.0,
+                    "south": -85.0,
+                    "east": 180.0,
+                    "north": 85.0,
+                },
+                "min_zoom": 1,
+                "max_zoom": 1,
+            },
+        )
+    )
+
+    descriptor = read_json_artifact(
+        store,
+        result,
+        "metadata",
+        metadata_kind="reference-tile-source/v1",
+    )["descriptor"]
+    assert descriptor["estimated_tile_count"] == 4
+
+    limited = WMTS_CAPABILITIES.replace(
+        b"<MaxTileRow>1</MaxTileRow>",
+        b"<MaxTileRow>0</MaxTileRow>",
+    ).replace(
+        b"<MaxTileCol>1</MaxTileCol>",
+        b"<MaxTileCol>0</MaxTileCol>",
+    )
+    limited_result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(limited, "application/xml")
+        ),
+    ).acquire(
+        candidate(
+            "wmts",
+            remote_name="ortho",
+            endpoint="https://data.example.es/wmts",
+            config={
+                **TILE_CONFIG,
+                "bounds": {
+                    "west": -180.0,
+                    "south": -85.0,
+                    "east": 180.0,
+                    "north": 85.0,
+                },
+                "min_zoom": 1,
+                "max_zoom": 1,
+            },
+        )
+    )
+    limited_descriptor = read_json_artifact(
+        store,
+        limited_result,
+        "metadata",
+        metadata_kind="reference-tile-source/v1",
+    )["descriptor"]
+    assert limited_descriptor["estimated_tile_count"] == 1
+
+
 def test_wmts_rejects_non_webmercator_matrix_set_as_not_materializable(store, limits):
     capabilities = WMTS_CAPABILITIES.replace(
         b"urn:ogc:def:crs:EPSG::3857",
@@ -1001,6 +1080,43 @@ def test_effective_source_mutation_cannot_reuse_an_old_definition_digest(store, 
 
     assert error.value.code == "source_definition_mismatch"
     assert transport.calls == []
+
+
+def test_acquisition_values_fail_before_exceeding_database_metadata_bounds() -> None:
+    blob = StoredReferenceBlob(
+        storage_backend="filesystem",
+        storage_key="blobs/sha256/aa/" + "a" * 64,
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    with pytest.raises(AcquisitionValidationError) as artifact_error:
+        AcquiredArtifact(
+            artifact_kind="metadata",
+            role="metadata",
+            media_type="application/json",
+            blob=blob,
+            metadata={"oversized": "x" * (4 * 1024 * 1024)},
+        )
+    assert artifact_error.value.code == "metadata_too_large"
+
+    with pytest.raises(AcquisitionValidationError) as result_error:
+        AcquisitionResult(
+            source_key="source",
+            source_definition_sha256="a" * 64,
+            protocol="wfs",
+            target_kind="vector",
+            not_modified=False,
+            artifacts=(),
+            manifest_sha256=None,
+            probe=None,
+            observed_etag="e" * 4097,
+            observed_last_modified=None,
+            observed_version=None,
+            feature_count=0,
+            total_bytes=0,
+            stats={},
+        )
+    assert result_error.value.code == "metadata_too_large"
 
 
 def test_conditional_request_from_previous_run_formats_utc_header():

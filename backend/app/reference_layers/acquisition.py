@@ -73,6 +73,10 @@ _MAX_JSON_DEPTH = 96
 _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 _DEFAULT_MAX_TILE_COUNT = 25_000_000
 _ABSOLUTE_MAX_TILE_COUNT = 250_000_000
+_MAX_ETAG_CHARS = 4096
+_MAX_SOURCE_VERSION_CHARS = 2048
+_MAX_RUN_STATS_BYTES = 1024 * 1024
+_MAX_ARTIFACT_METADATA_BYTES = 4 * 1024 * 1024
 _XML_MEDIA_TYPES = frozenset(
     {
         "application/xml",
@@ -259,6 +263,23 @@ class AcquiredArtifact:
     metadata: dict[str, Any] = field(default_factory=dict)
     retrieved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    def __post_init__(self) -> None:
+        _bounded_optional_text(
+            self.source_version,
+            "artifact source version",
+            _MAX_SOURCE_VERSION_CHARS,
+        )
+        _bounded_optional_text(
+            self.upstream_etag,
+            "artifact ETag",
+            _MAX_ETAG_CHARS,
+        )
+        _bounded_json_object(
+            self.metadata,
+            "artifact metadata",
+            _MAX_ARTIFACT_METADATA_BYTES,
+        )
+
 
 @dataclass(frozen=True)
 class AcquisitionResult:
@@ -276,6 +297,23 @@ class AcquisitionResult:
     feature_count: int | None
     total_bytes: int
     stats: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        _bounded_optional_text(
+            self.observed_etag,
+            "observed ETag",
+            _MAX_ETAG_CHARS,
+        )
+        _bounded_optional_text(
+            self.observed_version,
+            "observed source version",
+            _MAX_SOURCE_VERSION_CHARS,
+        )
+        _bounded_json_object(
+            self.stats,
+            "acquisition stats",
+            _MAX_RUN_STATS_BYTES,
+        )
 
 
 class _Downloader(Protocol):
@@ -2670,34 +2708,45 @@ def _estimate_web_mercator_tile_count(
     min_zoom: int,
     max_zoom: int,
 ) -> int:
-    def tile_y(latitude: float, scale: int) -> float:
-        clamped = max(-85.0511287798066, min(85.0511287798066, latitude))
-        radians = math.radians(clamped)
-        return (
-            1
-            - math.asinh(math.tan(radians)) / math.pi
-        ) / 2 * scale
-
     total = 0
     for zoom in range(min_zoom, max_zoom + 1):
-        scale = 2**zoom
-        west = max(0, min(scale - 1, math.floor((bounds["west"] + 180) / 360 * scale)))
-        east = max(
-            0,
-            min(
-                scale - 1,
-                math.floor((bounds["east"] + 180) / 360 * scale - 1e-12),
-            ),
-        )
-        north = max(0, min(scale - 1, math.floor(tile_y(bounds["north"], scale))))
-        south = max(
-            0,
-            min(scale - 1, math.floor(tile_y(bounds["south"], scale) - 1e-12)),
-        )
+        west, east, north, south = _web_mercator_tile_window(bounds, zoom)
         total += (east - west + 1) * (south - north + 1)
         if total > _ABSOLUTE_MAX_TILE_COUNT:
             return total
     return total
+
+
+def _web_mercator_tile_window(
+    bounds: Mapping[str, float],
+    zoom: int,
+) -> tuple[int, int, int, int]:
+    def tile_y(latitude: float, scale: int) -> float:
+        clamped = max(-85.0511287798066, min(85.0511287798066, latitude))
+        radians = math.radians(clamped)
+        return (1 - math.asinh(math.tan(radians)) / math.pi) / 2 * scale
+
+    scale = 2**zoom
+    west = max(
+        0,
+        min(scale - 1, math.floor((bounds["west"] + 180) / 360 * scale)),
+    )
+    east = max(
+        0,
+        min(
+            scale - 1,
+            math.floor((bounds["east"] + 180) / 360 * scale - 1e-12),
+        ),
+    )
+    north = max(
+        0,
+        min(scale - 1, math.floor(tile_y(bounds["north"], scale))),
+    )
+    south = max(
+        0,
+        min(scale - 1, math.floor(tile_y(bounds["south"], scale) - 1e-12)),
+    )
+    return west, east, north, south
 
 
 def _xyz_tile_descriptor(candidate: SourceCandidate) -> dict[str, Any]:
@@ -2763,6 +2812,24 @@ def _wmts_tile_descriptor(
         else [],
         selected_definition,
     )
+    exact_tile_count = _estimate_wmts_tile_count(
+        common["bounds"],
+        min_zoom=common["min_zoom"],
+        max_zoom=common["max_zoom"],
+        matrix_set=selected_definition,
+        limits=selected_limits,
+    )
+    if exact_tile_count <= 0:
+        raise AcquisitionValidationError(
+            "WMTS limits do not intersect the requested coverage",
+            code="wmts_not_materializable",
+        )
+    if exact_tile_count > common["max_tile_count"]:
+        raise AcquisitionLimitError(
+            "tile coverage exceeds the reviewed seed limit",
+            code="tile_count_limit",
+        )
+    common["estimated_tile_count"] = exact_tile_count
     styles = metadata.get("styles", [])
     style_names = [item.get("name") for item in styles if isinstance(item, dict)]
     configured_style = _config_optional_text(candidate.config, "style_name", max_chars=500)
@@ -3082,6 +3149,44 @@ def _validated_wmts_limits(
     return result
 
 
+def _estimate_wmts_tile_count(
+    bounds: Mapping[str, float],
+    *,
+    min_zoom: int,
+    max_zoom: int,
+    matrix_set: Mapping[str, Any],
+    limits: list[dict[str, Any]],
+) -> int:
+    matrices = {
+        item["zoom"]: item
+        for item in matrix_set["tile_matrices"]
+        if isinstance(item, dict)
+        and isinstance(item.get("zoom"), int)
+        and isinstance(item.get("identifier"), str)
+    }
+    limits_by_identifier = {item["tile_matrix"]: item for item in limits}
+    total = 0
+    for zoom in range(min_zoom, max_zoom + 1):
+        matrix = matrices.get(zoom)
+        if matrix is None:
+            raise AcquisitionValidationError(
+                "WMTS matrix coverage has a zoom gap",
+                code="wmts_not_materializable",
+            )
+        min_x, max_x, min_y, max_y = _web_mercator_tile_window(bounds, zoom)
+        limit = limits_by_identifier.get(matrix["identifier"])
+        if limit is not None:
+            min_x = max(min_x, limit["min_tile_col"])
+            max_x = min(max_x, limit["max_tile_col"])
+            min_y = max(min_y, limit["min_tile_row"])
+            max_y = min(max_y, limit["max_tile_row"])
+        if min_x <= max_x and min_y <= max_y:
+            total += (max_x - min_x + 1) * (max_y - min_y + 1)
+        if total > _ABSOLUTE_MAX_TILE_COUNT:
+            return total
+    return total
+
+
 def _probe_manifest(probe: SourceProbe | None) -> dict[str, Any] | None:
     if probe is None:
         return None
@@ -3121,6 +3226,52 @@ def _enforce_total_bytes(
         raise AcquisitionLimitError(
             "source snapshot exceeds the aggregate byte limit",
             code="snapshot_too_large",
+        )
+
+
+def _bounded_optional_text(
+    value: str | None,
+    label: str,
+    maximum: int,
+) -> None:
+    if value is not None and (
+        not isinstance(value, str) or len(value) > maximum
+    ):
+        raise AcquisitionValidationError(
+            f"{label} exceeds its persistence limit",
+            code="metadata_too_large",
+        )
+
+
+def _bounded_json_object(
+    value: dict[str, Any],
+    label: str,
+    maximum: int,
+) -> None:
+    if not isinstance(value, dict):
+        raise AcquisitionValidationError(
+            f"{label} must be an object",
+            code="invalid_manifest",
+        )
+    try:
+        # PostgreSQL JSONB's text representation includes separators with a
+        # following space, so use the same conservative form as the database
+        # octet-length constraint rather than the compact manifest encoding.
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise AcquisitionValidationError(
+            f"{label} contains a non-JSON value",
+            code="invalid_manifest",
+        ) from exc
+    if len(encoded) > maximum:
+        raise AcquisitionValidationError(
+            f"{label} exceeds its persistence limit",
+            code="metadata_too_large",
         )
 
 

@@ -1,8 +1,10 @@
+from io import BytesIO
 import sqlite3
 import struct
 import zlib
 
 import pytest
+from PIL import Image
 
 from app.reference_layers.local_tile_archive import (
     InvalidLocalTileArchiveError,
@@ -48,6 +50,7 @@ def archive(tmp_path, *, image=None, image_format="png", duplicate=False):
         "tile_row INTEGER, tile_data BLOB)"
     )
     connection.execute("INSERT INTO metadata VALUES ('format', ?)", (image_format,))
+    connection.execute("INSERT INTO metadata VALUES ('maxzoom', '3')")
     if image is not None:
         connection.execute("INSERT INTO tiles VALUES (3, 2, 6, ?)", (image,))
         if duplicate:
@@ -88,6 +91,45 @@ def test_jpeg_archive_is_delivered_with_its_real_content_type(tmp_path) -> None:
 
     assert response.body == image
     assert response.content_type == "image/jpeg"
+
+
+def test_zoom_above_native_archive_is_rendered_from_local_parent(tmp_path) -> None:
+    source = Image.new("RGB", (256, 256), (255, 0, 0))
+    output = BytesIO()
+    source.save(output, format="PNG")
+    archive(tmp_path, image=output.getvalue())
+
+    response = LocalTileArchiveRenderer(tmp_path).render_tile(
+        storage_key=KEY,
+        archive_sha256=SHA,
+        z=5,
+        x=9,
+        y=6,
+    )
+
+    assert response.content_type == "image/png"
+    with Image.open(BytesIO(response.body)) as rendered:
+        rendered.load()
+        assert rendered.size == (256, 256)
+        assert rendered.getpixel((128, 128)) == (255, 0, 0)
+
+
+def test_overzoom_never_falls_back_to_network_or_an_unbounded_ancestor(
+    tmp_path,
+) -> None:
+    source = Image.new("RGB", (256, 256), (0, 0, 0))
+    output = BytesIO()
+    source.save(output, format="PNG")
+    archive(tmp_path, image=output.getvalue())
+
+    with pytest.raises(LocalTileNotFoundError):
+        LocalTileArchiveRenderer(tmp_path).render_tile(
+            storage_key=KEY,
+            archive_sha256=SHA,
+            z=12,
+            x=2 << 9,
+            y=1 << 9,
+        )
 
 
 def test_missing_coordinate_is_distinct_from_corrupt_archive(tmp_path) -> None:

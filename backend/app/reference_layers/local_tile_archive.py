@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from io import BytesIO
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -12,9 +13,12 @@ import stat
 import struct
 import zlib
 
+from PIL import Image, UnidentifiedImageError
+
 from app.reference_layers.wms_proxy import TILE_SIZE, tile_bbox
 
 MAX_TILE_BYTES = 1024 * 1024
+MAX_OVERZOOM_LEVELS = 8
 _SHA256 = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _BLOB_KEY = re.compile(
     r"^blobs/sha256/(?P<prefix>[0-9a-f]{2})/(?P<sha>[0-9a-f]{64})$",
@@ -88,12 +92,25 @@ class LocalTileArchiveRenderer:
             )
             connection.execute("PRAGMA query_only = ON")
             archive_format = self._archive_format(connection)
-            rows = connection.execute(
-                "SELECT tile_data FROM tiles "
-                "WHERE zoom_level = ? AND tile_column = ? AND tile_row = ? "
-                "LIMIT 2",
-                (z, x, tms_y),
-            ).fetchall()
+            rows = self._tile_rows(connection, z=z, x=x, tms_y=tms_y)
+            overzoom = 0
+            source_x = x
+            source_y = y
+            if not rows:
+                maximum_zoom = self._archive_max_zoom(connection)
+                overzoom = z - maximum_zoom
+                if not 1 <= overzoom <= MAX_OVERZOOM_LEVELS:
+                    raise LocalTileNotFoundError("local tile is not present")
+                factor = 2**overzoom
+                source_x = x // factor
+                source_y = y // factor
+                source_tms_y = (2**maximum_zoom - 1) - source_y
+                rows = self._tile_rows(
+                    connection,
+                    z=maximum_zoom,
+                    x=source_x,
+                    tms_y=source_tms_y,
+                )
         except sqlite3.Error as exc:
             raise InvalidLocalTileArchiveError(
                 "local tile archive cannot be read"
@@ -111,12 +128,56 @@ class LocalTileArchiveRenderer:
         if not isinstance(body, bytes) or not 0 < len(body) <= MAX_TILE_BYTES:
             raise InvalidLocalTileArchiveError("local tile bytes are invalid")
         content_type = _validate_image(body, archive_format)
+        if overzoom:
+            body = _render_overzoomed_tile(
+                body,
+                archive_format=archive_format,
+                levels=overzoom,
+                child_x=x - source_x * (2**overzoom),
+                child_y=y - source_y * (2**overzoom),
+            )
+            content_type = "image/png"
         digest = hashlib.sha256(body).hexdigest()
         return LocalTileArchiveResponse(
             body=body,
             content_type=content_type,
             etag=f'"{archive_sha256[:16]}-{digest}"',
         )
+
+    @staticmethod
+    def _tile_rows(
+        connection: sqlite3.Connection,
+        *,
+        z: int,
+        x: int,
+        tms_y: int,
+    ) -> list[tuple[object]]:
+        return connection.execute(
+            "SELECT tile_data FROM tiles "
+            "WHERE zoom_level = ? AND tile_column = ? AND tile_row = ? "
+            "LIMIT 2",
+            (z, x, tms_y),
+        ).fetchall()
+
+    @staticmethod
+    def _archive_max_zoom(connection: sqlite3.Connection) -> int:
+        rows = connection.execute(
+            "SELECT value FROM metadata WHERE name = 'maxzoom' LIMIT 2"
+        ).fetchall()
+        if (
+            len(rows) != 1
+            or not isinstance(rows[0][0], str)
+            or not rows[0][0].isdecimal()
+        ):
+            raise InvalidLocalTileArchiveError(
+                "local tile archive has no unique maximum zoom metadata"
+            )
+        value = int(rows[0][0])
+        if not 0 <= value <= 22:
+            raise InvalidLocalTileArchiveError(
+                "local tile archive maximum zoom is invalid"
+            )
+        return value
 
     def _resolve_blob(self, storage_key: str, archive_sha256: str) -> Path:
         if not isinstance(storage_key, str) or not isinstance(archive_sha256, str):
@@ -198,6 +259,59 @@ def validate_tile_image(body: bytes, archive_format: str) -> str:
     if archive_format not in {"png", "jpg"}:
         raise InvalidLocalTileArchiveError("local tile format is unsupported")
     return _validate_image(body, archive_format)
+
+
+def _render_overzoomed_tile(
+    body: bytes,
+    *,
+    archive_format: str,
+    levels: int,
+    child_x: int,
+    child_y: int,
+) -> bytes:
+    factor = 2**levels
+    if (
+        not 1 <= levels <= MAX_OVERZOOM_LEVELS
+        or not 0 <= child_x < factor
+        or not 0 <= child_y < factor
+    ):
+        raise InvalidLocalTileArchiveError("local tile overzoom is invalid")
+    try:
+        with Image.open(BytesIO(body)) as source:
+            expected_format = "PNG" if archive_format == "png" else "JPEG"
+            if source.format != expected_format or source.size != (TILE_SIZE, TILE_SIZE):
+                raise InvalidLocalTileArchiveError(
+                    "local overzoom source image is invalid"
+                )
+            source.load()
+            left = child_x * TILE_SIZE // factor
+            top = child_y * TILE_SIZE // factor
+            right = (child_x + 1) * TILE_SIZE // factor
+            bottom = (child_y + 1) * TILE_SIZE // factor
+            if left >= right or top >= bottom:
+                raise InvalidLocalTileArchiveError(
+                    "local tile overzoom exceeds image resolution"
+                )
+            rendered = source.crop((left, top, right, bottom)).resize(
+                (TILE_SIZE, TILE_SIZE),
+                resample=Image.Resampling.BILINEAR,
+            )
+            if rendered.mode not in {"RGB", "RGBA"}:
+                rendered = rendered.convert("RGBA")
+            output = BytesIO()
+            rendered.save(output, format="PNG", optimize=False, compress_level=6)
+            payload = output.getvalue()
+    except InvalidLocalTileArchiveError:
+        raise
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise InvalidLocalTileArchiveError(
+            "local overzoom source image cannot be decoded"
+        ) from exc
+    if not 0 < len(payload) <= MAX_TILE_BYTES:
+        raise InvalidLocalTileArchiveError(
+            "local overzoom result exceeds its byte limit"
+        )
+    return payload
 
 
 def _png_dimensions(body: bytes) -> tuple[int, int]:
