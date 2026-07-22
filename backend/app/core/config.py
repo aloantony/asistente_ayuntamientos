@@ -4,7 +4,7 @@ from math import isfinite
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     local_geoserver_base_url: str = "http://127.0.0.1:8081/geoserver"
     local_geoserver_workspace: str = "siur"
     local_geoserver_timeout_seconds: float = 8.0
+    geoserver_admin_user: str | None = None
+    geoserver_admin_password: SecretStr | None = None
+    local_geoserver_postgis_host: str = "postgres"
+    local_geoserver_postgis_port: int = 5432
+    local_geoserver_postgis_database: str = "app"
+    local_geoserver_postgis_user: str = "app"
+    local_geoserver_postgis_password: SecretStr | None = None
     assistant_runtime: str = "anthropic"
     anthropic_api_key: str | None = None
     assistant_model: str = "claude-opus-4-8"
@@ -186,6 +193,80 @@ class Settings(BaseSettings):
                 "local_geoserver_timeout_seconds must be finite and between "
                 "0.1 and 30 seconds"
             )
+        return value
+
+    @field_validator("geoserver_admin_user")
+    @classmethod
+    def validate_geoserver_admin_user(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", normalized) is None:
+            raise ValueError("geoserver_admin_user is invalid")
+        return normalized
+
+    @field_validator(
+        "geoserver_admin_password",
+        "local_geoserver_postgis_password",
+        mode="before",
+    )
+    @classmethod
+    def empty_local_geoserver_secret_is_unconfigured(
+        cls,
+        value: object,
+    ) -> object:
+        return None if value == "" else value
+
+    @field_validator(
+        "geoserver_admin_password",
+        "local_geoserver_postgis_password",
+    )
+    @classmethod
+    def validate_local_geoserver_secret(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value()
+        if not secret or len(secret) > 1024 or "\x00" in secret:
+            raise ValueError("local GeoServer secret is invalid")
+        return value
+
+    @field_validator("local_geoserver_postgis_host")
+    @classmethod
+    def validate_local_geoserver_postgis_host(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if (
+            len(normalized) > 253
+            or re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?",
+                normalized,
+            )
+            is None
+            or ".." in normalized
+        ):
+            raise ValueError("local_geoserver_postgis_host is invalid")
+        return normalized
+
+    @field_validator(
+        "local_geoserver_postgis_database",
+        "local_geoserver_postgis_user",
+    )
+    @classmethod
+    def validate_local_geoserver_postgis_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", normalized) is None:
+            raise ValueError("local GeoServer PostGIS name is invalid")
+        return normalized
+
+    @field_validator("local_geoserver_postgis_port")
+    @classmethod
+    def validate_local_geoserver_postgis_port(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 65535:
+            raise ValueError("local_geoserver_postgis_port is invalid")
         return value
 
     @field_validator("assistant_runtime")
