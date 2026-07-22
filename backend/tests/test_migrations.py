@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0033"
+HEAD_REVISION = "20260722_0034"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -3847,5 +3847,105 @@ def test_maintenance_migration_is_reversible_and_events_are_immutable(
         run_alembic(migration_database_url, "check")
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+    finally:
+        engine.dispose()
+
+
+def test_fresh_upgrade_creates_nullable_user_sidebar_shortcuts(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "head")
+    engine = create_engine(migration_database_url)
+
+    try:
+        columns = {
+            column["name"]: column
+            for column in inspect(engine).get_columns("users")
+        }
+        sidebar_shortcuts = columns["sidebar_shortcut_ids"]
+        assert sidebar_shortcuts["nullable"] is True
+        assert sidebar_shortcuts["default"] is None
+        assert str(sidebar_shortcuts["type"]) == "JSON"
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_sidebar_shortcuts_upgrade_preserves_users_and_guards_downgrade(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0033")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    "INSERT INTO users (email, hashed_password, full_name) "
+                    "VALUES ('sidebar-migration@example.test', 'hash', "
+                    "'Sidebar Migration') RETURNING id"
+                )
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT sidebar_shortcut_ids FROM users WHERE id = :user_id"
+                ),
+                {"user_id": user_id},
+            ).scalar_one() is None
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE users SET sidebar_shortcut_ids = "
+                    "'[\"requirements\"]'::json WHERE id = :user_id"
+                ),
+                {"user_id": user_id},
+            )
+
+        blocked = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0033",
+            check=False,
+        )
+        assert blocked.returncode != 0
+        assert "user sidebar shortcut preferences exist" in blocked.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE users SET sidebar_shortcut_ids = NULL "
+                    "WHERE id = :user_id"
+                ),
+                {"user_id": user_id},
+            )
+        run_alembic(migration_database_url, "downgrade", "20260717_0033")
+        downgraded_columns = {
+            column["name"] for column in inspect(engine).get_columns("users")
+        }
+        assert "sidebar_shortcut_ids" not in downgraded_columns
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT count(*) FROM users WHERE id = :user_id"),
+                {"user_id": user_id},
+            ).scalar_one() == 1
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
     finally:
         engine.dispose()
