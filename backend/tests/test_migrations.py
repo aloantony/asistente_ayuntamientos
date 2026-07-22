@@ -2598,7 +2598,7 @@ def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260717_0033"
+            ).scalar_one() == HEAD_REVISION
     finally:
         engine.dispose()
 

@@ -1,24 +1,20 @@
 "use client";
 
 import { LogOut } from "lucide-react";
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Suspense,
   useCallback,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
+import { SidebarNavigation } from "../components/SidebarNavigation";
 import { userHasPermission, type User } from "../components/types";
 import { fetchRequirementsTotal } from "../lib/fetchers";
 import {
-  canViewMunicipalHub,
-  canViewOrdinanceLibrary,
-} from "../lib/permissions";
-import {
   consumePendingLoginRedirect,
-  shouldShowAdminPanel,
-  shouldShowProjectsPanel,
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
@@ -51,131 +47,6 @@ function getMunicipalBrandName(user: User) {
 
   return "Anacleto";
 }
-
-// Iconos del menú lateral (trazo fino, coherentes con el resto del shell).
-type NavIconName =
-  | "home"
-  | "townhall"
-  | "ordinances"
-  | "needs"
-  | "inventory"
-  | "maintenance"
-  | "map"
-  | "projects"
-  | "anacleto"
-  | "admin"
-  | "account";
-
-function NavIcon({ name }: { name: NavIconName }) {
-  const common = {
-    "aria-hidden": true,
-    fill: "none",
-    height: 17,
-    stroke: "currentColor",
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    strokeWidth: 1.6,
-    viewBox: "0 0 24 24",
-    width: 17,
-  };
-  switch (name) {
-    case "home":
-      return (
-        <svg {...common}>
-          <rect x="3" y="3" width="7" height="7" rx="1.5" />
-          <rect x="14" y="3" width="7" height="7" rx="1.5" />
-          <rect x="3" y="14" width="7" height="7" rx="1.5" />
-          <rect x="14" y="14" width="7" height="7" rx="1.5" />
-        </svg>
-      );
-    case "townhall":
-      return (
-        <svg {...common}>
-          <path d="m3 10 9-6 9 6" />
-          <path d="M5 10h14M6 20h12M8 10v10M12 10v10M16 10v10" />
-        </svg>
-      );
-    case "ordinances":
-      return (
-        <svg {...common}>
-          <path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v17H7.5A2.5 2.5 0 0 0 5 21.5v-17Z" />
-          <path d="M5 4.5v17M9 7h7M9 11h7M9 15h4" />
-        </svg>
-      );
-    case "needs":
-      return (
-        <svg {...common}>
-          <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
-          <rect x="9" y="3" width="6" height="4" rx="1" />
-          <path d="m9 13 2 2 4-4" />
-        </svg>
-      );
-    case "projects":
-      return (
-        <svg {...common}>
-          <path d="M4 5h5l2 2.5h9A1.5 1.5 0 0 1 21 9v9.5A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5v-12A1.5 1.5 0 0 1 4 5Z" />
-        </svg>
-      );
-    case "map":
-      return (
-        <svg {...common}>
-          <path d="M9 18 3.5 21V6L9 3l6 3 5.5-3v15L15 21l-6-3Z" />
-          <path d="M9 3v15" />
-          <path d="M15 6v15" />
-        </svg>
-      );
-    case "inventory":
-      return (
-        <svg {...common}>
-          <path d="M4 8.5 12 4l8 4.5v9L12 22l-8-4.5v-9Z" />
-          <path d="m4 8.5 8 4.5 8-4.5M12 13v9" />
-          <path d="m8 6.25 8 4.5" />
-        </svg>
-      );
-    case "maintenance":
-      return (
-        <svg {...common}>
-          <path d="M14.5 6.5a4 4 0 0 0-5-5l2.1 2.1-3 3-2.1-2.1a4 4 0 0 0 5 5L19 17a2.1 2.1 0 0 1-3 3l-7.5-7.5" />
-          <path d="m5.5 14.5-3 3a2.1 2.1 0 0 0 3 3l3-3" />
-        </svg>
-      );
-    case "anacleto":
-      return (
-        <svg aria-hidden="true" height="17" viewBox="0 0 24 24" width="17">
-          <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />
-        </svg>
-      );
-    case "admin":
-      return (
-        <svg {...common}>
-          <path d="M4 8h10M18 8h2M4 16h2M10 16h10" />
-          <circle cx="16" cy="8" r="2" />
-          <circle cx="8" cy="16" r="2" />
-        </svg>
-      );
-    case "account":
-      return (
-        <svg {...common}>
-          <circle cx="12" cy="8" r="3.5" />
-          <path d="M5 20c0-3.3 3.1-6 7-6s7 2.7 7 6" />
-        </svg>
-      );
-  }
-}
-
-type NavItem = {
-  href: string;
-  label: string;
-  icon: NavIconName;
-  // "Inicio" vive en "/", prefijo de todo lo demás: solo se marca activo con
-  // coincidencia exacta; el resto usa startsWith.
-  exact?: boolean;
-  // Conteo real opcional (null mientras carga / si falla → sin badge).
-  badge?: number | null;
-  beta?: boolean;
-};
-
-type NavGroup = { label: string; items: NavItem[] };
 
 // El tema (claro/oscuro) lo aplica el script anti-parpadeo del layout raíz
 // añadiendo la clase .dark a <html>; aquí sólo leemos ese estado tras montar
@@ -216,6 +87,8 @@ export default function AppLayout({
   const router = useRouter();
   const pathname = usePathname();
   const { user, isLoadingSession, logout } = useSession();
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const navigationRef = useRef<HTMLElement>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [requirementsTotal, setRequirementsTotal] = useState<number | null>(
@@ -297,28 +170,97 @@ export default function AppLayout({
     }
   }, [user]);
 
+  const closeMobileMenu = useCallback((restoreFocus = false) => {
+    setIsMenuOpen(false);
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => menuButtonRef.current?.focus());
+    }
+  }, []);
+
   // Close the mobile menu after navigating to another section.
   useEffect(() => {
     setIsMenuOpen(false);
   }, [pathname]);
 
-  // The mobile menu also closes with Escape, as a standard dropdown.
+  // El drawer móvil coloca el foco en su primer control y lo devuelve al
+  // disparador al cerrarse con Escape.
   useEffect(() => {
     if (!isMenuOpen) {
       return;
     }
 
+    const isMobile = window.matchMedia("(max-width: 900px)").matches;
+    const previousBodyOverflow = document.body.style.overflow;
+    const backgroundElements = isMobile
+      ? Array.from(
+          document.querySelectorAll<HTMLElement>(
+            ".app-brand, .menu-toggle, .app-session, .app-main",
+          ),
+        )
+      : [];
+    const previouslyInertElements = new Set(
+      backgroundElements.filter((element) => element.hasAttribute("inert")),
+    );
+    backgroundElements.forEach((element) => element.setAttribute("inert", ""));
+    if (isMobile) {
+      document.body.style.overflow = "hidden";
+    }
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (isMobile) {
+        navigationRef.current
+          ?.querySelector<HTMLElement>("a[href], button:not([disabled])")
+          ?.focus();
+      }
+    });
+
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setIsMenuOpen(false);
+        event.preventDefault();
+        closeMobileMenu(true);
+        return;
+      }
+
+      if (event.key === "Tab" && isMobile && navigationRef.current) {
+        const navigationControls = Array.from(
+          navigationRef.current.querySelectorAll<HTMLElement>(
+            "a[href], button:not([disabled])",
+          ),
+        );
+        const closeControl = document.querySelector<HTMLElement>(
+          ".menu-drawer-scrim",
+        );
+        const focusableElements = closeControl
+          ? [...navigationControls, closeControl]
+          : navigationControls;
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements.at(-1);
+
+        if (!firstElement || !lastElement) {
+          return;
+        }
+        if (event.shiftKey && document.activeElement === firstElement) {
+          event.preventDefault();
+          lastElement.focus();
+        } else if (!event.shiftKey && document.activeElement === lastElement) {
+          event.preventDefault();
+          firstElement.focus();
+        }
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => {
+      window.cancelAnimationFrame(focusFrame);
       window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+      backgroundElements.forEach((element) => {
+        if (!previouslyInertElements.has(element)) {
+          element.removeAttribute("inert");
+        }
+      });
     };
-  }, [isMenuOpen]);
+  }, [closeMobileMenu, isMenuOpen]);
 
   useEffect(() => {
     if (!showOnboarding) {
@@ -356,17 +298,6 @@ export default function AppLayout({
   }
 
   const canUseAssistant = userHasPermission(user, "assistant.use");
-  const canViewProjects = shouldShowProjectsPanel(user);
-  const canViewOrdinances = canViewOrdinanceLibrary(user);
-  const canViewMap =
-    userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
-  const canViewInventory =
-    userHasPermission(user, "assets.view") ||
-    userHasPermission(user, "assets.manage");
-  const canViewMaintenance =
-    canViewInventory &&
-    (userHasPermission(user, "maintenance.view") ||
-      userHasPermission(user, "maintenance.manage"));
   const brandName = getMunicipalBrandName(user);
 
   const onboardingSteps: OnboardingStep[] = [
@@ -382,7 +313,7 @@ export default function AppLayout({
             id: "assistant" as const,
             eyebrow: "Anacleto",
             title: "Asistente municipal",
-            body: "Abre Anacleto desde la sección Inteligencia del menú lateral para consultar información, organizar trabajo o preparar borradores supervisados.",
+            body: "Abre Anacleto desde la sección Principal del menú lateral para consultar información, organizar trabajo o preparar borradores supervisados.",
           },
         ]
       : []),
@@ -390,7 +321,7 @@ export default function AppLayout({
       id: "account",
       eyebrow: "Cuenta",
       title: "Tu perfil",
-      body: "Entra en Mi cuenta, dentro de la sección Gestión del menú lateral, para revisar tus datos, organización y permisos.",
+      body: "Entra en Mi cuenta, fijada al final del menú lateral, para revisar tus datos, organización y permisos.",
     },
   ];
 
@@ -399,110 +330,6 @@ export default function AppLayout({
     onboardingSteps.length - 1,
   );
   const activeOnboardingStep = onboardingSteps[safeOnboardingIndex];
-
-  const navGroups: NavGroup[] = [
-    {
-      label: "Trabajo",
-      items: [
-        { href: "/", label: "Inicio", icon: "home", exact: true },
-        ...(canViewMunicipalHub(user)
-          ? [
-              {
-                href: "/ayuntamiento",
-                label: "Ayuntamiento",
-                icon: "townhall" as const,
-              },
-            ]
-          : []),
-        ...(canViewOrdinances
-          ? [
-              {
-                href: "/ordenanzas",
-                label: "Ordenanzas",
-                icon: "ordinances" as const,
-              },
-            ]
-          : []),
-        ...(shouldShowRequirementsPanel(user)
-          ? [
-              {
-                href: "/requisitos",
-                label: "Necesidades",
-                icon: "needs" as const,
-                badge: requirementsTotal,
-              },
-            ]
-          : []),
-        ...(canViewProjects
-          ? [{ href: "/proyectos", label: "Proyectos", icon: "projects" as const }]
-          : []),
-      ],
-    },
-    ...(canViewInventory || canViewMaintenance || canViewMap
-      ? [
-          {
-            label: "Territorio",
-            items: [
-              ...(canViewInventory
-                ? [
-                    {
-                      href: "/inventario",
-                      label: "Inventario",
-                      icon: "inventory" as const,
-                    },
-                  ]
-                : []),
-              ...(canViewMaintenance
-                ? [
-                    {
-                      href: "/mantenimiento",
-                      label: "Mantenimiento",
-                      icon: "maintenance" as const,
-                    },
-                  ]
-                : []),
-              ...(canViewMap
-                ? [{ href: "/mapa", label: "Mapa", icon: "map" as const }]
-                : []),
-            ],
-          },
-        ]
-      : []),
-    ...(canUseAssistant
-      ? [
-          {
-            label: "Inteligencia",
-            items: [
-              {
-                href: "/asistente",
-                label: "Anacleto",
-                icon: "anacleto" as const,
-                beta: true,
-              },
-            ],
-          },
-        ]
-      : []),
-    {
-      label: "Gestión",
-      items: [
-        ...(shouldShowAdminPanel(user)
-          ? [
-              {
-                href: "/admin",
-                label: "Administración",
-                icon: "admin" as const,
-              },
-            ]
-          : []),
-        { href: "/cuenta", label: "Mi cuenta", icon: "account" },
-      ],
-    },
-  ];
-
-  function isActive(item: NavItem) {
-    return item.exact ? pathname === item.href : pathname.startsWith(item.href);
-  }
 
   function dismissOnboarding() {
     setShowOnboarding(false);
@@ -593,43 +420,45 @@ export default function AppLayout({
           </button>
         </div>
         <button
+          aria-controls="app-primary-navigation"
           aria-expanded={isMenuOpen}
           className="menu-toggle"
-          onClick={() => setIsMenuOpen((open) => !open)}
+          onClick={() =>
+            isMenuOpen ? closeMobileMenu(false) : setIsMenuOpen(true)
+          }
+          ref={menuButtonRef}
           type="button"
         >
           Menú
         </button>
-        <nav className={isMenuOpen ? "app-nav app-nav--open" : "app-nav"}>
-          {navGroups
-            .filter((group) => group.items.length > 0)
-            .map((group) => (
-              <div className="app-nav-group" key={group.label}>
-                <span className="app-nav-section">{group.label}</span>
-                {group.items.map((item) => (
-                  <Link
-                    aria-current={isActive(item) ? "page" : undefined}
-                    className={`app-nav-link${isActive(item) ? " active" : ""}`}
-                    href={item.href}
-                    key={item.href}
-                    title={isSidebarCollapsed ? item.label : undefined}
-                    // Cierra también al pulsar la sección ya activa, donde el
-                    // pathname no cambia y el efecto de navegación no se dispara.
-                    onClick={() => setIsMenuOpen(false)}
-                  >
-                    <NavIcon name={item.icon} />
-                    <span className="app-nav-label">{item.label}</span>
-                    {item.beta ? (
-                      <span className="app-nav-beta">BETA</span>
-                    ) : null}
-                    {typeof item.badge === "number" ? (
-                      <span className="app-nav-badge">{item.badge}</span>
-                    ) : null}
-                  </Link>
-                ))}
-              </div>
-            ))}
-        </nav>
+        {isMenuOpen ? (
+          <button
+            aria-label="Cerrar menú"
+            className="menu-drawer-scrim"
+            onClick={() => closeMobileMenu(true)}
+            type="button"
+          />
+        ) : null}
+        <Suspense
+          fallback={
+            <nav
+              aria-busy="true"
+              aria-label="Navegación principal"
+              className={isMenuOpen ? "app-nav app-nav--open" : "app-nav"}
+              id="app-primary-navigation"
+              ref={navigationRef}
+            />
+          }
+        >
+          <SidebarNavigation
+            isCollapsed={isSidebarCollapsed}
+            isMenuOpen={isMenuOpen}
+            navigationRef={navigationRef}
+            onNavigate={() => closeMobileMenu(false)}
+            requirementsTotal={requirementsTotal}
+            user={user}
+          />
+        </Suspense>
         <div className="app-session">
           <button
             aria-pressed={dark}

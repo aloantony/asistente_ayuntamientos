@@ -57,16 +57,10 @@ def list_users(
         if not visible_organization_ids:
             raise_permission_required("users.manage")
 
-        query = (
-            query.join(
-                organization_users,
-                organization_users.c.user_id == User.id,
-            )
-            .where(
-                organization_users.c.organization_id.in_(visible_organization_ids)
-            )
-            .distinct()
+        visible_user_ids = select(organization_users.c.user_id).where(
+            organization_users.c.organization_id.in_(visible_organization_ids)
         )
+        query = query.where(User.id.in_(visible_user_ids))
 
     return list(db.scalars(paginate(db, query, page, response)))
 
