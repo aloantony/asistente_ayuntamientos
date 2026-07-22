@@ -330,3 +330,52 @@ def test_tile_archive_never_claims_identify_or_legend(db) -> None:
                 operation=operation,
             )
         assert raised.value.blocker == blocker
+
+
+def test_configured_source_without_promotion_never_falls_back_remote(db) -> None:
+    layer, styles, _, _, _, _ = seed_local_delivery(db)
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    db.delete(state)
+    db.commit()
+
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+    assert raised.value.blocker == "local_not_ready"
+
+    availability = catalog_local_delivery_availability(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        styles=styles,
+    )[layer.id]
+    assert availability is not None
+    assert availability.delivery_available is False
+    assert availability.delivery_blocker == "local_not_ready"
+
+
+def test_disabled_local_sources_are_authoritative(db) -> None:
+    layer, styles, source, _, _, _ = seed_local_delivery(db)
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    db.delete(state)
+    source.enabled = False
+    db.commit()
+
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+    assert raised.value.blocker == "local_disabled"

@@ -76,6 +76,18 @@ def resolve_local_delivery(
         )
     )
     if state is None:
+        configured = list(
+            db.scalars(
+                select(ReferenceLayerSource.enabled).where(
+                    ReferenceLayerSource.provider_key == layer.provider_key,
+                    ReferenceLayerSource.layer_id == layer.id,
+                )
+            )
+        )
+        if configured:
+            raise LocalDeliveryError(
+                "local_not_ready" if any(configured) else "local_disabled"
+            )
         return None
     if state.status != "active" or state.active_version_id is None:
         raise LocalDeliveryError("local_disabled")
@@ -154,6 +166,14 @@ def catalog_local_delivery_availability(
             )
         )
     }
+    source_enabled_by_layer: dict[int, list[bool]] = {}
+    for layer_id, enabled in db.execute(
+        select(ReferenceLayerSource.layer_id, ReferenceLayerSource.enabled).where(
+            ReferenceLayerSource.provider_key == provider_key,
+            ReferenceLayerSource.layer_id.in_(leaf_ids),
+        )
+    ):
+        source_enabled_by_layer.setdefault(layer_id, []).append(enabled)
     active_ids = [
         state.active_version_id
         for state in states.values()
@@ -215,6 +235,11 @@ def catalog_local_delivery_availability(
             continue
         state = states.get(layer.id)
         if state is None:
+            configured = source_enabled_by_layer.get(layer.id)
+            if configured:
+                result[layer.id] = _unavailable(
+                    "local_not_ready" if any(configured) else "local_disabled"
+                )
             continue
         if state.status != "active" or state.active_version_id is None:
             result[layer.id] = _unavailable("local_disabled")
