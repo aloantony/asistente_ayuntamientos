@@ -23,6 +23,7 @@ from app.organizations.routes import router as organizations_router
 from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
+from app.reference_layers.routes import router as reference_layers_router
 from app.telegram.routes import router as telegram_router
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ for app_router in (
     documents_router,
     requirements_router,
     geo_router,
+    reference_layers_router,
     assets_router,
     maintenance_router,
     assistant_router,

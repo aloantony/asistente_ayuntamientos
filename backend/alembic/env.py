@@ -17,6 +17,7 @@ from app.organizations import models as organization_models  # noqa: F401
 from app.projects import models as project_models  # noqa: F401
 from app.rbac import models as rbac_models  # noqa: F401
 from app.requirements import models as requirement_models  # noqa: F401
+from app.reference_layers import models as reference_layer_models  # noqa: F401
 from app.telegram import models as telegram_models  # noqa: F401
 from app.users import models as user_models  # noqa: F401
 

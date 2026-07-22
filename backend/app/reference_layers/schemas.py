@@ -1,0 +1,123 @@
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class ReferenceCatalogSnapshotRead(BaseModel):
+    id: int
+    provider_key: str
+    content_sha256: str
+    definition_sha256: str
+    retrieved_at: datetime
+    service_count: int
+    group_count: int
+    layer_count: int
+    unresolved_count: int
+    status: str
+    is_current: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReferenceServiceRead(BaseModel):
+    id: int
+    source_key: str
+    title: str
+    upstream_protocol: str
+    version: str | None
+    default_crs: str | None
+    default_format: str | None
+    attribution: str | None
+    license_name: str | None
+    license_status: str
+    cache_policy: str
+    status: str
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReferenceLayerRead(BaseModel):
+    id: int
+    service_id: int | None
+    parent_id: int | None
+    source_key: str
+    node_type: str
+    title: str
+    description: str | None
+    remote_name: str | None
+    role: str | None
+    renderer: str | None
+    delivery_mode: str | None
+    style_name: str | None
+    image_format: str | None
+    supported_crs_json: list[str] | None
+    bounds_json: dict[str, Any] | None
+    sort_order: int
+    default_visible: bool
+    default_opacity: float
+    effective_visible: bool = False
+    effective_opacity: float = 1.0
+    min_zoom: int | None
+    max_zoom: int | None
+    min_scale_denominator: Decimal | None
+    max_scale_denominator: Decimal | None
+    queryable: bool
+    downloadable: bool
+    legend_available: bool = False
+    metadata_available: bool = False
+    status: str
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReferenceCatalogRead(BaseModel):
+    snapshot: ReferenceCatalogSnapshotRead
+    organization_id: int | None
+    services: list[ReferenceServiceRead]
+    layers: list[ReferenceLayerRead]
+
+
+class ReferenceLayerSettingUpdate(BaseModel):
+    visible: bool | None = None
+    opacity: Decimal | None = Field(default=None, ge=0, le=1, decimal_places=3)
+
+    @model_validator(mode="after")
+    def require_override(self):
+        if self.visible is None and self.opacity is None:
+            raise ValueError("At least one layer setting override is required")
+        return self
+
+
+class ReferenceLayerSettingRead(BaseModel):
+    id: int
+    organization_id: int
+    layer_id: int
+    visible: bool | None
+    opacity: float | None
+    updated_by_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReferenceCatalogSyncPlanRead(BaseModel):
+    provider_key: str
+    content_sha256: str
+    definition_sha256: str
+    service_count: int
+    group_count: int
+    layer_count: int
+    unresolved_count: int
+    new_services: list[str]
+    updated_services: list[str]
+    missing_services: list[str]
+    new_layers: list[str]
+    updated_layers: list[str]
+    missing_layers: list[str]
+    unchanged_count: int
+    blocking_issues: list[str]
