@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     document_storage_root: str = "/var/lib/asistente_ayuntamientos/documents"
     document_max_upload_bytes: int = 25 * 1024 * 1024
+    reference_storage_root: str = (
+        "/var/lib/asistente_ayuntamientos/reference-artifacts"
+    )
     local_geoserver_base_url: str = "http://127.0.0.1:8081/geoserver"
     local_geoserver_workspace: str = "siur"
     local_geoserver_timeout_seconds: float = 8.0
@@ -169,6 +172,17 @@ class Settings(BaseSettings):
                 "HTTP URL ending in /geoserver"
             )
         return f"http://127.0.0.1:{port}/geoserver"
+
+    @field_validator("reference_storage_root")
+    @classmethod
+    def validate_reference_storage_root(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("reference_storage_root is invalid")
+        path = Path(normalized)
+        if not path.is_absolute() or path == Path("/"):
+            raise ValueError("reference_storage_root must be an absolute directory")
+        return str(path.resolve(strict=False))
 
     @field_validator("local_geoserver_workspace")
     @classmethod

@@ -9,6 +9,7 @@ services:
       ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
+      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts:ro
     depends_on:
       postgres:
         condition: service_healthy

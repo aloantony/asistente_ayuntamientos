@@ -12,9 +12,26 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
+from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.db.session import get_db
 from app.reference_layers.access import require_catalog_view
+from app.reference_layers.local_delivery import (
+    LocalDeliveryError,
+    LocalDeliverySelection,
+    resolve_local_delivery,
+)
+from app.reference_layers.local_geoserver import (
+    LocalGeoServerError,
+    LocalGeoServerRenderer,
+    LocalGeoServerResponse,
+)
+from app.reference_layers.local_tile_archive import (
+    LocalTileArchiveError,
+    LocalTileArchiveRenderer,
+    LocalTileArchiveResponse,
+    LocalTileNotFoundError,
+)
 from app.reference_layers.models import (
     ReferenceLayer,
     ReferenceLayerStyle,
@@ -75,6 +92,13 @@ class ReferenceWMSContext:
     delivery: AttestedWMSDelivery
 
 
+@dataclass(frozen=True)
+class ReferenceLocalContext:
+    layer: ReferenceLayer
+    style: ReferenceLayerStyle | None
+    delivery: LocalDeliverySelection
+
+
 @router.get(
     "/organizations/{organization_id}/reference-layers/{layer_id}"
     "/tiles/{z}/{x}/{y}.png",
@@ -91,7 +115,7 @@ def get_reference_layer_tile(
     current_user: Annotated[User, Depends(get_current_user)],
     style_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> Response:
-    context = _resolve_wms_context(
+    context = _resolve_delivery_context(
         db,
         current_user=current_user,
         organization_id=organization_id,
@@ -101,6 +125,14 @@ def get_reference_layer_tile(
     )
     _require_rate_limit(_tile_rate_limiter, "tile", current_user.id)
     _require_tile_scope(context.layer, z=z, x=x, y=y)
+    if isinstance(context, ReferenceLocalContext):
+        return _render_local_tile(
+            request=request,
+            context=context,
+            z=z,
+            x=x,
+            y=y,
+        )
     try:
         wms_request = build_tile_request(
             endpoint_url=context.delivery.endpoint_url,
@@ -135,7 +167,7 @@ def get_reference_layer_legend(
     current_user: Annotated[User, Depends(get_current_user)],
     style_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> Response:
-    context = _resolve_wms_context(
+    context = _resolve_delivery_context(
         db,
         current_user=current_user,
         organization_id=organization_id,
@@ -144,6 +176,8 @@ def get_reference_layer_legend(
         operation="legend",
     )
     _require_rate_limit(_legend_rate_limiter, "legend", current_user.id)
+    if isinstance(context, ReferenceLocalContext):
+        return _render_local_legend(request=request, context=context)
     try:
         wms_request = build_legend_request(
             endpoint_url=context.delivery.endpoint_url,
@@ -183,7 +217,7 @@ def identify_reference_layer(
     style_id: Annotated[int | None, Query(ge=1)] = None,
     feature_count: Annotated[int, Query(ge=1, le=10)] = 5,
 ) -> JSONResponse:
-    context = _resolve_wms_context(
+    context = _resolve_delivery_context(
         db,
         current_user=current_user,
         organization_id=organization_id,
@@ -194,6 +228,16 @@ def identify_reference_layer(
     )
     _require_rate_limit(_identify_rate_limiter, "identify", current_user.id)
     _require_tile_scope(context.layer, z=z, x=x, y=y)
+    if isinstance(context, ReferenceLocalContext):
+        return _render_local_identify(
+            context=context,
+            z=z,
+            x=x,
+            y=y,
+            pixel_x=pixel_x,
+            pixel_y=pixel_y,
+            feature_count=feature_count,
+        )
     try:
         wms_request = build_identify_request(
             endpoint_url=context.delivery.endpoint_url,
@@ -238,7 +282,7 @@ def identify_reference_layer(
     )
 
 
-def _resolve_wms_context(
+def _resolve_delivery_context(
     db: Session,
     *,
     current_user: User,
@@ -247,7 +291,7 @@ def _resolve_wms_context(
     style_id: int | None,
     operation: Literal["tile", "legend", "identify"],
     require_queryable: bool = False,
-) -> ReferenceWMSContext:
+) -> ReferenceWMSContext | ReferenceLocalContext:
     require_catalog_view(db, current_user, organization_id)
     layer = db.scalar(
         select(ReferenceLayer).where(
@@ -261,11 +305,42 @@ def _resolve_wms_context(
         layer.node_type != "layer"
         or layer.renderer != "raster_tile"
         or layer.delivery_mode not in {"mirror", "proxy"}
-        or not layer.remote_name
     ):
         raise HTTPException(status_code=409, detail="Layer cannot be rendered")
     if require_queryable and not layer.queryable:
         raise HTTPException(status_code=409, detail="Layer is not queryable")
+    style = _resolve_style(db, layer=layer, style_id=style_id)
+    try:
+        local_delivery = resolve_local_delivery(
+            db,
+            layer=layer,
+            style=style,
+            operation=operation,
+        )
+    except LocalDeliveryError as exc:
+        if exc.blocker in {
+            "style_unsupported",
+            "local_identify_unavailable",
+            "local_legend_unavailable",
+            "local_disabled",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="Layer cannot perform this operation",
+            ) from None
+        raise HTTPException(
+            status_code=503,
+            detail="Local reference layer is unavailable",
+        ) from None
+    if local_delivery is not None:
+        return ReferenceLocalContext(
+            layer=layer,
+            style=style,
+            delivery=local_delivery,
+        )
+
+    if not layer.remote_name:
+        raise HTTPException(status_code=409, detail="Layer cannot be rendered")
     service = layer.service
     if (
         service is None
@@ -274,7 +349,6 @@ def _resolve_wms_context(
         or service.status not in {"active", "degraded"}
     ):
         raise HTTPException(status_code=409, detail="Layer cannot be rendered")
-    style = _resolve_style(db, layer=layer, style_id=style_id)
     try:
         delivery = resolve_attested_wms_delivery(
             db,
@@ -349,6 +423,158 @@ def _resolve_style(
     if any_style is not None:
         raise HTTPException(status_code=409, detail="Layer has no default style")
     return None
+
+
+def _render_local_tile(
+    *,
+    request: Request,
+    context: ReferenceLocalContext,
+    z: int,
+    x: int,
+    y: int,
+) -> Response:
+    try:
+        if context.delivery.backend == "geoserver":
+            if context.delivery.layer_name is None:
+                raise LocalGeoServerError("missing local renderer layer")
+            rendered: LocalGeoServerResponse | LocalTileArchiveResponse = (
+                LocalGeoServerRenderer().render_tile(
+                    layer_name=context.delivery.layer_name,
+                    style_name=context.delivery.style_name,
+                    z=z,
+                    x=x,
+                    y=y,
+                )
+            )
+            cache_status = "GWC"
+        else:
+            rendered = LocalTileArchiveRenderer(
+                settings.reference_storage_root
+            ).render_tile(
+                storage_key=context.delivery.storage_key,
+                archive_sha256=context.delivery.asset_sha256,
+                z=z,
+                x=x,
+                y=y,
+            )
+            cache_status = "ARCHIVE"
+    except LocalTileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Layer is not available for tile",
+        ) from None
+    except (LocalGeoServerError, LocalTileArchiveError, ValueError):
+        logger.error("Local reference tile rendering failed", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Local reference map service is unavailable",
+        ) from None
+    return _local_binary_response(
+        request=request,
+        rendered=rendered,
+        cache_status=cache_status,
+        version_id=context.delivery.version_id,
+    )
+
+
+def _render_local_legend(
+    *,
+    request: Request,
+    context: ReferenceLocalContext,
+) -> Response:
+    if (
+        context.delivery.backend != "geoserver"
+        or context.delivery.layer_name is None
+    ):
+        raise HTTPException(status_code=409, detail="Layer has no local legend")
+    try:
+        rendered = LocalGeoServerRenderer().render_legend(
+            layer_name=context.delivery.layer_name,
+            style_name=context.delivery.style_name,
+        )
+    except (LocalGeoServerError, ValueError):
+        logger.error("Local reference legend rendering failed", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Local reference map service is unavailable",
+        ) from None
+    return _local_binary_response(
+        request=request,
+        rendered=rendered,
+        cache_status="GWC",
+        version_id=context.delivery.version_id,
+    )
+
+
+def _render_local_identify(
+    *,
+    context: ReferenceLocalContext,
+    z: int,
+    x: int,
+    y: int,
+    pixel_x: int,
+    pixel_y: int,
+    feature_count: int,
+) -> JSONResponse:
+    if (
+        context.delivery.backend != "geoserver"
+        or context.delivery.layer_name is None
+    ):
+        raise HTTPException(status_code=409, detail="Layer is not queryable")
+    try:
+        rendered = LocalGeoServerRenderer().get_feature_info(
+            layer_name=context.delivery.layer_name,
+            style_name=context.delivery.style_name,
+            z=z,
+            x=x,
+            y=y,
+            pixel_x=pixel_x,
+            pixel_y=pixel_y,
+            feature_count=feature_count,
+        )
+        payload = parse_feature_collection(
+            rendered.body,
+            max_features=feature_count,
+        )
+    except (LocalGeoServerError, InvalidFeatureInfoError, ValueError):
+        logger.error("Local reference identify failed", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Local reference map service is unavailable",
+        ) from None
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Vary": "Authorization, Cookie",
+            "X-Content-Type-Options": "nosniff",
+            "X-Reference-Version": str(context.delivery.version_id),
+        },
+    )
+
+
+def _local_binary_response(
+    *,
+    request: Request,
+    rendered: LocalGeoServerResponse | LocalTileArchiveResponse,
+    cache_status: str,
+    version_id: int,
+) -> Response:
+    headers = {
+        "Cache-Control": "private, max-age=300",
+        "ETag": rendered.etag,
+        "Vary": "Authorization, Cookie",
+        "X-Content-Type-Options": "nosniff",
+        "X-Reference-Cache": cache_status,
+        "X-Reference-Version": str(version_id),
+    }
+    if _etag_matches(request.headers.get("if-none-match"), rendered.etag):
+        return Response(status_code=304, headers=headers)
+    return Response(
+        content=rendered.body,
+        media_type=rendered.content_type,
+        headers=headers,
+    )
 
 
 def _cached_binary_response(
@@ -487,7 +713,10 @@ def _require_tile_scope(
     try:
         bounds = _geographic_bounds(layer.bounds_json)
     except ValueError:
-        raise HTTPException(status_code=409, detail="Layer cannot be rendered") from None
+        raise HTTPException(
+            status_code=409,
+            detail="Layer cannot be rendered",
+        ) from None
     if bounds is None:
         return
     west, south, east, north = bounds

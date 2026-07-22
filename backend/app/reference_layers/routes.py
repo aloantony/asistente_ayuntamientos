@@ -19,6 +19,9 @@ from app.reference_layers.models import (
     ReferenceLayerStyle,
     ReferenceService,
 )
+from app.reference_layers.local_delivery import (
+    catalog_local_delivery_availability,
+)
 from app.reference_layers.schemas import (
     ReferenceCatalogRead,
     ReferenceCatalogSnapshotRead,
@@ -114,13 +117,27 @@ def get_reference_catalog(
             )
         }
 
-    delivery_availability = catalog_delivery_availability(
+    proxy_delivery_availability = catalog_delivery_availability(
         db,
         snapshot=snapshot,
         services=services,
         layers=layers,
         styles=styles,
     )
+    local_delivery_availability = catalog_local_delivery_availability(
+        db,
+        provider_key=snapshot.provider_key,
+        layers=layers,
+        styles=styles,
+    )
+    delivery_availability = {
+        layer.id: (
+            local_delivery_availability[layer.id]
+            if local_delivery_availability[layer.id] is not None
+            else proxy_delivery_availability[layer.id]
+        )
+        for layer in layers
+    }
 
     layer_reads: list[ReferenceLayerRead] = []
     for layer in layers:

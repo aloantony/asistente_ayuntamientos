@@ -229,6 +229,44 @@ def assert_private_auth_vary(response) -> None:
     assert {"authorization", "cookie"} <= tokens
 
 
+class FakeLocalGeoServerRenderer:
+    def __init__(self, *, png_body: bytes | None = None) -> None:
+        self.png_body = png_body or make_png(256, 256)
+
+    def render_tile(self, **kwargs):
+        return wms_routes.LocalGeoServerResponse(
+            body=self.png_body,
+            content_type="image/png",
+            etag='"local-tile"',
+        )
+
+    def render_legend(self, **kwargs):
+        return wms_routes.LocalGeoServerResponse(
+            body=make_png(20, 20),
+            content_type="image/png",
+            etag='"local-legend"',
+        )
+
+    def get_feature_info(self, **kwargs):
+        body = json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"name": "local"},
+                        "geometry": None,
+                    }
+                ],
+            }
+        ).encode()
+        return wms_routes.LocalGeoServerResponse(
+            body=body,
+            content_type="application/json",
+            etag='"local-identify"',
+        )
+
+
 @pytest.fixture
 def isolated_wms_cache_redis(monkeypatch):
     redis = Redis.from_url(
@@ -2014,3 +2052,151 @@ def test_feature_collection_parser_rejects_duplicates_constants_and_limits() -> 
             ).encode(),
             max_features=1,
         )
+
+
+def _local_geoserver_selection(layer: ReferenceLayer):
+    return wms_routes.LocalDeliverySelection(
+        backend="geoserver",
+        version_id=77,
+        generation=3,
+        delivery_kind="vector",
+        asset_id=88,
+        asset_sha256="a" * 64,
+        storage_key="reference_data.layer_v77",
+        layer_name="layer_v77",
+        style_name="style_v77",
+        content_type="application/x-postgis-table",
+        identify_available=layer.queryable,
+        legend_available=True,
+    )
+
+
+def test_tile_route_prefers_active_local_delivery_without_wms_evidence(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db, with_evidence=False, license_status="pending")
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "resolve_local_delivery",
+        lambda db, layer, style, operation: _local_geoserver_selection(layer),
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "LocalGeoServerRenderer",
+        FakeLocalGeoServerRenderer,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: pytest.fail("the upstream WMS must not be contacted"),
+    )
+
+    path = (
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png"
+    )
+    delivered = client.get(path, headers=headers_for(viewer))
+    not_modified = client.get(
+        path,
+        headers={**headers_for(viewer), "If-None-Match": '"local-tile"'},
+    )
+
+    assert delivered.status_code == 200
+    assert delivered.headers["x-reference-cache"] == "GWC"
+    assert delivered.headers["x-reference-version"] == "77"
+    assert delivered.headers["content-type"].startswith("image/png")
+    assert not_modified.status_code == 304
+
+
+def test_local_legend_and_identify_keep_authenticated_public_contract(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db, with_evidence=False, license_status="pending")
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "resolve_local_delivery",
+        lambda db, layer, style, operation: _local_geoserver_selection(layer),
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "LocalGeoServerRenderer",
+        FakeLocalGeoServerRenderer,
+    )
+    prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
+
+    legend = client.get(f"{prefix}/legend.png", headers=headers_for(viewer))
+    identify = client.get(
+        f"{prefix}/identify",
+        params={
+            "z": 0,
+            "x": 0,
+            "y": 0,
+            "pixel_x": 128,
+            "pixel_y": 128,
+        },
+        headers=headers_for(viewer),
+    )
+
+    assert legend.status_code == 200
+    assert legend.headers["x-reference-version"] == "77"
+    assert identify.status_code == 200
+    assert identify.json()["features"][0]["properties"] == {"name": "local"}
+    assert identify.headers["x-reference-version"] == "77"
+
+
+def test_invalid_active_local_state_never_falls_back_to_remote_wms(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db, with_evidence=True)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def reject_local(*args, **kwargs):
+        raise wms_routes.LocalDeliveryError("local_version_invalid")
+
+    monkeypatch.setattr(wms_routes, "resolve_local_delivery", reject_local)
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: pytest.fail("the upstream WMS must not be contacted"),
+    )
+    path = (
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png"
+    )
+
+    response = client.get(path, headers=headers_for(viewer))
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Local reference layer is unavailable"
