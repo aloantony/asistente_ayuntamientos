@@ -23,7 +23,11 @@ from app.organizations.models import Organization
 from app.rbac.permissions import get_user_permission_codes
 from app.users.crud import count_users, create_user, get_user_by_email
 from app.users.models import User
-from app.users.schemas import UserRead
+from app.users.schemas import (
+    SidebarShortcutsRead,
+    SidebarShortcutsUpdate,
+    UserRead,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -145,6 +149,28 @@ def read_me(
             "organizations": organizations,
         }
     )
+
+
+@router.put("/me/sidebar-shortcuts", response_model=SidebarShortcutsRead)
+def update_sidebar_shortcuts(
+    payload: SidebarShortcutsUpdate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SidebarShortcutsRead:
+    current_user.sidebar_shortcut_ids = list(payload.shortcut_ids)
+    db.commit()
+    db.refresh(current_user)
+    return SidebarShortcutsRead(shortcut_ids=current_user.sidebar_shortcut_ids)
+
+
+@router.delete("/me/sidebar-shortcuts", response_model=SidebarShortcutsRead)
+def reset_sidebar_shortcuts(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SidebarShortcutsRead:
+    current_user.sidebar_shortcut_ids = None
+    db.commit()
+    return SidebarShortcutsRead(shortcut_ids=None)
 
 
 @router.post(
