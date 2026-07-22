@@ -17,6 +17,18 @@ import {
   fetchAllGeoMapItems,
   fetchMunicipalAssets,
 } from "../lib/geo";
+import {
+  buildReferenceLayerTree,
+  buildSiurMapLayers,
+  fetchReferenceCatalog,
+  fetchReferenceIdentify,
+  reconcileSiurPreferences,
+  type ReferenceCatalog,
+  type ReferenceIdentifyFeature,
+  type SiurIdentifyPoint,
+  type SiurLayerControl,
+  type SiurMapPreferences,
+} from "../lib/referenceLayers";
 import { useSession } from "../lib/session";
 import { AssetMaintenancePanel } from "./AssetMaintenancePanel";
 import {
@@ -28,6 +40,7 @@ import {
   type MapBaseLayer,
   type MapBounds,
 } from "./MunicipalMap";
+import { SiurLayerTree } from "./SiurLayerTree";
 import type {
   AssetStatus,
   GeoEntityType,
@@ -64,6 +77,7 @@ type LayeredGeoMapItem = GeoMapItem & {
 };
 
 const MAP_PREFERENCES_KEY = "municipal-map-preferences-v1";
+const SIUR_PREFERENCES_PREFIX = "siur-map-preferences-v1";
 const MUNICIPAL_CAPITAL_ZOOM = 14;
 const MAP_LAYER_COLORS: Record<GeoEntityType, string> = {
   requirement: "#c0603a",
@@ -106,6 +120,14 @@ type AssetLocationDraft = {
   assetId: string;
   label: string;
   address: string;
+};
+
+type SiurIdentifyState = {
+  layerId: number;
+  layerTitle: string;
+  features: ReferenceIdentifyFeature[];
+  isLoading: boolean;
+  error: string;
 };
 
 function getItemKey(item: GeoMapItem) {
@@ -375,6 +397,28 @@ function downloadTextFile(contents: string, filename: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+function siurPreferencesKey(organizationId: number) {
+  return `${SIUR_PREFERENCES_PREFIX}:${organizationId}`;
+}
+
+function formatIdentifyProperty(value: unknown) {
+  if (value === null) {
+    return "—";
+  }
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return String(value).slice(0, 500);
+  }
+  try {
+    return JSON.stringify(value).slice(0, 500);
+  } catch {
+    return "Valor no representable";
+  }
+}
+
 export function MapPanel({ user }: MapPanelProps) {
   const canViewMap =
     userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
@@ -407,6 +451,14 @@ export function MapPanel({ user }: MapPanelProps) {
   const [preferencesReady, setPreferencesReady] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState("");
+  const [siurCatalog, setSiurCatalog] = useState<ReferenceCatalog | null>(null);
+  const [siurPreferences, setSiurPreferences] =
+    useState<SiurMapPreferences | null>(null);
+  const [siurCatalogError, setSiurCatalogError] = useState("");
+  const [isLoadingSiurCatalog, setIsLoadingSiurCatalog] = useState(false);
+  const [siurIdentify, setSiurIdentify] = useState<SiurIdentifyState | null>(
+    null,
+  );
   const [mapContextMenu, setMapContextMenu] = useState<MapContextMenu | null>(
     null,
   );
@@ -433,6 +485,8 @@ export function MapPanel({ user }: MapPanelProps) {
   const mapRequestSequenceRef = useRef(0);
   const assetRequestSequenceRef = useRef(0);
   const mapAbortControllerRef = useRef<AbortController | null>(null);
+  const siurCatalogAbortControllerRef = useRef<AbortController | null>(null);
+  const siurIdentifyAbortControllerRef = useRef<AbortController | null>(null);
   const assetAbortControllerRef = useRef<AbortController | null>(null);
   const assetSearchRef = useRef<HTMLInputElement | null>(null);
   const layerDragKeyRef = useRef<string | null>(null);
@@ -480,6 +534,14 @@ export function MapPanel({ user }: MapPanelProps) {
   const focusedOrganizationId = parseNumberParam(
     searchParams.get("organization_id"),
   );
+  const siurOrganizationId =
+    focusedOrganizationId !== null && focusedOrganizationId > 0
+      ? focusedOrganizationId
+      : (user.organizations?.find(
+          (organization) => organization.status === "active",
+        )?.id ??
+        user.organizations?.[0]?.id ??
+        null);
   const focusedEntityId = parseNumberParam(searchParams.get("entity_id"));
   const focusedLatitude = parseNumberParam(searchParams.get("lat"));
   const focusedLongitude = parseNumberParam(searchParams.get("lng"));
@@ -598,6 +660,81 @@ export function MapPanel({ user }: MapPanelProps) {
     };
   }, [canViewAssets, canViewMap, focusedItemKey, queryParams]);
 
+  useEffect(() => {
+    siurCatalogAbortControllerRef.current?.abort();
+    siurIdentifyAbortControllerRef.current?.abort();
+    siurIdentifyAbortControllerRef.current = null;
+    setSiurIdentify(null);
+
+    if (!canViewMap || siurOrganizationId === null) {
+      setSiurCatalog(null);
+      setSiurPreferences(null);
+      setSiurCatalogError("");
+      setIsLoadingSiurCatalog(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    siurCatalogAbortControllerRef.current = controller;
+    setSiurCatalog(null);
+    setSiurPreferences(null);
+    setSiurCatalogError("");
+    setIsLoadingSiurCatalog(true);
+
+    fetchReferenceCatalog(
+      siurOrganizationId,
+      getStoredToken(),
+      controller.signal,
+    )
+      .then((catalog) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        let storedPreferences: Partial<SiurMapPreferences> | null = null;
+        try {
+          const serialized = window.localStorage.getItem(
+            siurPreferencesKey(siurOrganizationId),
+          );
+          storedPreferences = serialized
+            ? (JSON.parse(serialized) as Partial<SiurMapPreferences>)
+            : null;
+        } catch {
+          // A valid catalog must remain usable when browser storage is denied.
+          storedPreferences = null;
+        }
+        setSiurCatalog(catalog);
+        setSiurPreferences(
+          reconcileSiurPreferences(catalog, storedPreferences),
+        );
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || isAbortError(error)) {
+          return;
+        }
+        setSiurCatalog(null);
+        setSiurPreferences(null);
+        handleRequestErrorRef.current(
+          error,
+          setSiurCatalogError,
+          "No se pudo cargar la cartografía SIUR.",
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsLoadingSiurCatalog(false);
+        }
+      });
+
+    return () => {
+      controller.abort();
+      siurIdentifyAbortControllerRef.current?.abort();
+      siurIdentifyAbortControllerRef.current = null;
+      if (siurCatalogAbortControllerRef.current === controller) {
+        siurCatalogAbortControllerRef.current = null;
+      }
+    };
+  }, [canViewMap, getStoredToken, siurOrganizationId]);
+
   const mapLayers = useMemo(() => {
     const definitions = new Map<string, MapLayer>();
     definitions.set("requirements", {
@@ -670,6 +807,17 @@ export function MapPanel({ user }: MapPanelProps) {
       return layerA.label.localeCompare(layerB.label, "es");
     });
   }, [layerOrder, mapLayers]);
+  const siurTree = useMemo(
+    () => (siurCatalog ? buildReferenceLayerTree(siurCatalog.layers) : null),
+    [siurCatalog],
+  );
+  const siurMapLayers = useMemo(
+    () =>
+      siurCatalog && siurPreferences
+        ? buildSiurMapLayers(siurCatalog, siurPreferences)
+        : [],
+    [siurCatalog, siurPreferences],
+  );
 
   const availableStatuses = useMemo(
     () =>
@@ -821,6 +969,20 @@ export function MapPanel({ user }: MapPanelProps) {
     visibleStatuses,
   ]);
 
+  useEffect(() => {
+    if (!siurPreferences || siurOrganizationId === null) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        siurPreferencesKey(siurOrganizationId),
+        JSON.stringify(siurPreferences),
+      );
+    } catch {
+      // SIUR display preferences remain optional in restricted browsers.
+    }
+  }, [siurOrganizationId, siurPreferences]);
+
   const isAssetDialogOpen = assetLocationDraft !== null;
   const assetOrganizationId = assetLocationDraft?.organizationId ?? "";
 
@@ -958,7 +1120,113 @@ export function MapPanel({ user }: MapPanelProps) {
     };
   }, [isAssetDialogOpen, isLocatingAsset]);
 
+  const handleSiurControlChange = useCallback(
+    (layerId: number, control: SiurLayerControl) => {
+      setSiurPreferences((current) => {
+        if (!current || !current.layers[String(layerId)]) {
+          return current;
+        }
+        return {
+          ...current,
+          layers: {
+            ...current.layers,
+            [String(layerId)]: {
+              ...control,
+              opacity: Math.min(1, Math.max(0, control.opacity)),
+            },
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const handleSiurMove = useCallback(
+    (layerId: number, direction: "forward" | "backward") => {
+      setSiurPreferences((current) => {
+        if (!current) {
+          return current;
+        }
+        const sourceIndex = current.stackOrder.indexOf(layerId);
+        const targetIndex =
+          direction === "forward" ? sourceIndex + 1 : sourceIndex - 1;
+        if (
+          sourceIndex < 0 ||
+          targetIndex < 0 ||
+          targetIndex >= current.stackOrder.length
+        ) {
+          return current;
+        }
+        const stackOrder = [...current.stackOrder];
+        [stackOrder[sourceIndex], stackOrder[targetIndex]] = [
+          stackOrder[targetIndex],
+          stackOrder[sourceIndex],
+        ];
+        return { ...current, stackOrder };
+      });
+    },
+    [],
+  );
+
+  const handleSiurIdentify = useCallback(
+    (point: SiurIdentifyPoint) => {
+      siurIdentifyAbortControllerRef.current?.abort();
+      const controller = new AbortController();
+      siurIdentifyAbortControllerRef.current = controller;
+      setSelectedItem(null);
+      setManualFocusLocation(null);
+      setManualFocusZoom(null);
+      setSiurIdentify({
+        layerId: point.layer.layerId,
+        layerTitle: point.layer.title,
+        features: [],
+        isLoading: true,
+        error: "",
+      });
+
+      fetchReferenceIdentify(point, getStoredToken(), controller.signal)
+        .then((result) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+          setSiurIdentify({
+            layerId: point.layer.layerId,
+            layerTitle: point.layer.title,
+            features: result.features,
+            isLoading: false,
+            error: "",
+          });
+        })
+        .catch((error) => {
+          if (controller.signal.aborted || isAbortError(error)) {
+            return;
+          }
+          handleRequestErrorRef.current(
+            error,
+            (errorMessage) =>
+              setSiurIdentify({
+                layerId: point.layer.layerId,
+                layerTitle: point.layer.title,
+                features: [],
+                isLoading: false,
+                error: errorMessage,
+              }),
+            "No se pudo consultar la capa SIUR.",
+          );
+        })
+        .finally(() => {
+          if (siurIdentifyAbortControllerRef.current === controller) {
+            siurIdentifyAbortControllerRef.current = null;
+          }
+        });
+    },
+    [getStoredToken],
+  );
+
   const handleSelectItem = useCallback((item: GeoMapItem) => {
+    siurIdentifyAbortControllerRef.current?.abort();
+    siurIdentifyAbortControllerRef.current = null;
+    setSiurIdentify(null);
     setSelectedItem(item);
     if (
       typeof item.location.latitude === "number" &&
@@ -1748,6 +2016,16 @@ export function MapPanel({ user }: MapPanelProps) {
                   </section>
                 );
               })}
+              <SiurLayerTree
+                catalog={siurCatalog}
+                error={siurCatalogError}
+                isLoading={isLoadingSiurCatalog}
+                onControlChange={handleSiurControlChange}
+                onMove={handleSiurMove}
+                preferences={siurPreferences}
+                structuralWarnings={siurTree?.warnings ?? []}
+                tree={siurTree?.roots ?? []}
+              />
               {canViewAssets ? (
                 <Link className="map-layer-manage-link" href="/inventario">
                   Gestionar categorías y activos
@@ -1821,7 +2099,9 @@ export function MapPanel({ user }: MapPanelProps) {
             onLocationError={setMessage}
             onMapContextMenu={handleMapContextMenu}
             onSelectItem={handleSelectItem}
+            onSiurIdentify={handleSiurIdentify}
             selectedItemId={selectedItem ? getItemKey(selectedItem) : null}
+            siurLayers={siurMapLayers}
           />
 
           <div className="map-overlay-tools">
@@ -1909,7 +2189,7 @@ export function MapPanel({ user }: MapPanelProps) {
 
         <aside
           className="map-detail-card"
-          aria-label="Detalle del marcador seleccionado"
+          aria-label="Detalle del mapa"
         >
           {selectedItem ? (
             <>
@@ -1986,6 +2266,61 @@ export function MapPanel({ user }: MapPanelProps) {
                 />
               ) : null}
             </>
+          ) : siurIdentify ? (
+            <div className="siur-identify-detail">
+              <div className="map-detail-heading">
+                <span className="map-item-type">Consulta SIUR</span>
+                <button
+                  aria-label="Cerrar consulta SIUR"
+                  onClick={() => {
+                    siurIdentifyAbortControllerRef.current?.abort();
+                    siurIdentifyAbortControllerRef.current = null;
+                    setSiurIdentify(null);
+                  }}
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+              <h2>{siurIdentify.layerTitle}</h2>
+              {siurIdentify.isLoading ? (
+                <p role="status">Consultando la capa superior visible…</p>
+              ) : null}
+              {siurIdentify.error ? (
+                <p className="siur-layer-error" role="alert">
+                  {siurIdentify.error}
+                </p>
+              ) : null}
+              {!siurIdentify.isLoading &&
+              !siurIdentify.error &&
+              siurIdentify.features.length === 0 ? (
+                <p>No hay elementos de esta capa en el punto seleccionado.</p>
+              ) : null}
+              {siurIdentify.features.map((feature, featureIndex) => {
+                const properties = Object.entries(feature.properties);
+                return (
+                  <section
+                    className="siur-identify-feature"
+                    key={`${siurIdentify.layerId}-${featureIndex}`}
+                  >
+                    <h3>Resultado {featureIndex + 1}</h3>
+                    <dl>
+                      {properties.slice(0, 20).map(([key, value]) => (
+                        <div key={key}>
+                          <dt>{key.slice(0, 120)}</dt>
+                          <dd>{formatIdentifyProperty(value)}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    {properties.length > 20 ? (
+                      <p className="small-muted">
+                        Se muestran 20 de {properties.length} atributos.
+                      </p>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
           ) : (
             <div className="map-detail-placeholder">
               <h2>Registra trabajo sobre el territorio</h2>

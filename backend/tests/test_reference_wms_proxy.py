@@ -1020,15 +1020,29 @@ def test_explicit_style_legend_availability_is_independent_of_default_style(
     styles = {item["id"]: item for item in body["styles"]}
     assert delivered["delivery_available"] is False
     assert delivered["legend_available"] is False
+    assert delivered["identify_available"] is True
     assert delivered["available_style_ids"] == [explicit_style.id]
     assert styles[default_style.id]["legend_available"] is False
     assert styles[explicit_style.id]["legend_available"] is True
 
     disable_test_cache(monkeypatch)
-    monkeypatch.setattr(
-        wms_routes,
-        "fetch_wms_response",
-        lambda request: fake_png_response(),
+
+    def fake_fetch(request):
+        if request.operation == "identify":
+            body = b'{"type":"FeatureCollection","features":[]}'
+            return WMSResponse(
+                body=body,
+                content_type="application/json",
+                etag=f'"{hashlib.sha256(body).hexdigest()}"',
+            )
+        return fake_png_response()
+
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", fake_fetch)
+    tile = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        params={"style_id": explicit_style.id},
+        headers=headers_for(viewer),
     )
     legend = client.get(
         f"/organizations/{organization.id}/reference-layers/{layer.id}"
@@ -1036,7 +1050,22 @@ def test_explicit_style_legend_availability_is_independent_of_default_style(
         params={"style_id": explicit_style.id},
         headers=headers_for(viewer),
     )
+    identify = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/identify",
+        params={
+            "pixel_x": 1,
+            "pixel_y": 1,
+            "style_id": explicit_style.id,
+            "x": 0,
+            "y": 0,
+            "z": 0,
+        },
+        headers=headers_for(viewer),
+    )
+    assert tile.status_code == 200
     assert legend.status_code == 200
+    assert identify.status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -1248,6 +1277,39 @@ def test_tile_route_respects_layer_zoom_and_geographic_bounds(
 
     assert wrong_zoom.status_code == 404
     assert outside_bounds.status_code == 404
+
+
+def test_tile_route_supports_the_catalog_maximum_zoom(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db, min_zoom=24, max_zoom=24)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    disable_test_cache(monkeypatch)
+    captured = []
+
+    def capture(request):
+        captured.append(request)
+        return fake_png_response()
+
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", capture)
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/24/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    assert len(captured) == 1
 
 
 @pytest.mark.parametrize(
@@ -1494,6 +1556,9 @@ def test_wms_builders_validate_tiles_versions_and_parameter_names() -> None:
     )
     with pytest.raises(ValueError, match="tile coordinates"):
         tile_bbox(2, 4, 0)
+    west, south, east, north = tile_bbox(24, 2**24 - 1, 2**24 - 1)
+    assert east > west
+    assert north > south
     request = build_identify_request(
         endpoint_url="https://idecyl.jcyl.es/geoserver/urbanismo/wms",
         version="1.1.1",

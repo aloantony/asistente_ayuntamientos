@@ -273,18 +273,9 @@ def catalog_delivery_availability(
         available_legend_style_ids = (
             available_style_ids if legend_operation_available else ()
         )
-        if not default_available:
-            result[layer.id] = LayerDeliveryAvailability(
-                delivery_available=False,
-                legend_available=False,
-                identify_available=False,
-                delivery_blocker="style_unsupported",
-                available_style_ids=available_style_ids,
-                available_legend_style_ids=available_legend_style_ids,
-            )
-            continue
         identify_available = (
-            layer.queryable
+            (default_available or bool(available_style_ids))
+            and layer.queryable
             and capability_layer.get("queryable") is True
             and cached.capabilities.get_feature_info_endpoint is not None
             and "application/json"
@@ -293,6 +284,16 @@ def catalog_delivery_availability(
                 maximum=100,
             )
         )
+        if not default_available:
+            result[layer.id] = LayerDeliveryAvailability(
+                delivery_available=False,
+                legend_available=False,
+                identify_available=identify_available,
+                delivery_blocker="style_unsupported",
+                available_style_ids=available_style_ids,
+                available_legend_style_ids=available_legend_style_ids,
+            )
+            continue
         result[layer.id] = LayerDeliveryAvailability(
             delivery_available=True,
             legend_available=legend_operation_available,
