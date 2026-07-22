@@ -11,6 +11,7 @@ import type {
   AssistantStreamTranscriptFinal,
   AssistantStreamToolActivity,
   AssistantStreamVoiceState,
+  SidebarShortcutId,
   User,
 } from "../components/types";
 
@@ -347,6 +348,31 @@ export async function fetchCurrentUser(accessToken: string) {
   }
 
   return (await response.json()) as User;
+}
+
+export type SidebarShortcutsResponse = {
+  shortcut_ids: SidebarShortcutId[] | null;
+};
+
+export function putSidebarShortcuts(shortcutIds: readonly SidebarShortcutId[]) {
+  return adminRequest<SidebarShortcutsResponse>(
+    "/auth/me/sidebar-shortcuts",
+    "",
+    "No se pudieron guardar tus accesos directos.",
+    {
+      method: "PUT",
+      body: JSON.stringify({ shortcut_ids: shortcutIds }),
+    },
+  );
+}
+
+export function deleteSidebarShortcuts() {
+  return adminRequest<SidebarShortcutsResponse>(
+    "/auth/me/sidebar-shortcuts",
+    "",
+    "No se pudieron restablecer tus accesos directos.",
+    { method: "DELETE" },
+  );
 }
 
 async function performAdminRequest(

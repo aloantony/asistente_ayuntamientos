@@ -19,6 +19,27 @@ export type OrganizationStatus = "active" | "paused" | "archived";
 
 export type MunicipalityStatus = "active" | "archived";
 
+export type SidebarShortcutId =
+  | "ordinance_library"
+  | "requirements"
+  | "projects"
+  | "inventory"
+  | "maintenance"
+  | "admin"
+  | "municipal_ordinances"
+  | "municipal_facilities"
+  | "municipal_people"
+  | "municipal_roadmap"
+  | "map_municipalities"
+  | "admin_product"
+  | "admin_memory"
+  | "admin_users"
+  | "admin_groups"
+  | "admin_organizations"
+  | "admin_roles"
+  | "admin_municipalities"
+  | "admin_ordinances";
+
 export type OrdinanceType =
   | "ordinance"
   | "regulation"
@@ -230,6 +251,7 @@ export type User = {
   is_active: boolean;
   is_superuser: boolean;
   permissions?: string[];
+  sidebar_shortcut_ids?: SidebarShortcutId[] | null;
   organizations?: OrganizationSummary[];
   groups?: UserGroupSummary[];
 };
