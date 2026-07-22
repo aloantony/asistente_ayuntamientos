@@ -4,6 +4,12 @@ services:
       context: ./backend
     env_file:
       - .env
+    environment:
+      # Publication is worker-only.  Remove its credentials from the web API
+      # even though both services load the shared development env file.
+      GEOSERVER_ADMIN_USER: ""
+      GEOSERVER_ADMIN_PASSWORD: ""
+      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
     network_mode: host
     command:
       ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
