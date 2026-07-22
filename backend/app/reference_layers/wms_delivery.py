@@ -211,6 +211,11 @@ def catalog_delivery_availability(
         }:
             result[layer.id] = _unavailable("not_deliverable")
             continue
+        try:
+            validate_siur_wms_endpoint(service.base_url)
+        except UnsafeWMSEndpointError:
+            result[layer.id] = _unavailable("not_deliverable")
+            continue
         cached = evidence_by_service.get(service.id)
         if cached is None:
             try:

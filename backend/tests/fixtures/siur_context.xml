@@ -1,8 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <ViewContext version="1.1.0" xmlns="http://www.opengis.net/context" id="Contexto_JCYL" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.opengis.net/context http://schemas.opengis.net/context/1.1.0/context.xsd" xmlns:sld="http://www.opengis.net/sld" xmlns:ogc="http://ww.opengis.org/ogc/2.0">
   <General>
-    <BoundingBox SRS="EPSG:25830" minx="56064.16779680218" miny="4429776.974795728" maxx="704964.1684586802" maxy="4801056.975174434"/>
-    <Window width="1545" height="884"/>
+    <BoundingBox SRS="EPSG:25830" minx="130194.16787241478" miny="4438386.97480451" maxx="630834.1683830676" maxy="4792446.975165651"/>
+    <Window width="1192" height="843"/>
     <Title>Sistema de Información Urbanística de Castilla y León</Title>
   </General>
   <LayerList>
@@ -324,7 +324,7 @@
       </MetadataURL>
       <sld:MaxScaleDenominator>501000</sld:MaxScaleDenominator>
     </Layer>
-    <Layer hidden="0" queryable="1">
+    <Layer hidden="1" queryable="1">
       <Server service="OGC:WMS" version="1.1.1">
         <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
       </Server>
@@ -350,7 +350,7 @@
       </MetadataURL>
       <sld:MaxScaleDenominator>2500000</sld:MaxScaleDenominator>
     </Layer>
-    <Layer hidden="0" queryable="1">
+    <Layer hidden="1" queryable="1">
       <Server service="OGC:WMS" version="1.1.1">
         <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
       </Server>
@@ -376,7 +376,7 @@
       </MetadataURL>
       <sld:MaxScaleDenominator>55000</sld:MaxScaleDenominator>
     </Layer>
-    <Layer hidden="0" queryable="1">
+    <Layer hidden="0" queryable="1" active="1">
       <Server service="OGC:WMS" version="1.1.1">
         <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
       </Server>
@@ -403,7 +403,7 @@
       <sld:MinScaleDenominator>500100</sld:MinScaleDenominator>
       <sld:MaxScaleDenominator>20000000</sld:MaxScaleDenominator>
     </Layer>
-    <Layer hidden="0" queryable="1">
+    <Layer hidden="1" queryable="1">
       <Server service="OGC:WMS" version="1.1.1">
         <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
       </Server>

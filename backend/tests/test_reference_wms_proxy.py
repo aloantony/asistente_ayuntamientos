@@ -987,6 +987,39 @@ def test_catalog_does_not_advertise_delivery_for_a_disabled_service(
     assert delivered["delivery_blocker"] == "not_deliverable"
 
 
+def test_catalog_reports_external_wms_not_deliverable_despite_prior_attestation(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    layer = seed_wms_layer(db)
+    layer.service.base_url = (
+        "https://www.ign.es/wms-inspire/unidades-administrativas"
+    )
+    db.commit()
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    response = client.get(
+        "/reference-layers/catalog",
+        params={"organization_id": organization.id, "provider_key": "siur"},
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    delivered = next(
+        item for item in response.json()["layers"] if item["id"] == layer.id
+    )
+    assert delivered["delivery_available"] is False
+    assert delivered["delivery_blocker"] == "not_deliverable"
+
+
 def test_explicit_style_legend_availability_is_independent_of_default_style(
     client,
     db,

@@ -22,33 +22,65 @@ WMC_FIXTURE = Path(__file__).parent / "fixtures" / "siur_context.xml"
 
 def matching_documents() -> tuple[bytes, bytes]:
     settings = {
-        "services": {
-            "urbanismo": {
-                "serviceType": "WMS",
-                "serviceUrl": (
-                    "https://idecyl.jcyl.es/geoserver/urbanismo/wms"
-                ),
-            }
-        },
-        "layerGroups": [
+        "settings": [
             {
-                "key": "planning",
-                "label": "Planeamiento",
-                "layers": [
-                    {
-                        "key": "classification",
-                        "label": "Clasificación",
-                        "serviceId": "urbanismo",
-                        "layerName": (
-                            "urbanismo:plau_cyl_clasificacion"
-                        ),
-                        "styleName": (
-                            "urbanismo:plau_cyl_clasificacion_color"
-                        ),
-                    }
-                ],
+                "name": "fondo_imagen",
+                "wmcUrl": "assets/wmcs/default.xml",
+                "suggestedServices": {"wms": [], "wfs": [], "wmts": []},
+                "groupLayers": {
+                    "name": "root",
+                    "children": [
+                        {
+                            "name": "Planeamiento",
+                            "children": [
+                                {
+                                    "name": "Clasificación",
+                                    "endPoint": {
+                                        "url": (
+                                            "https://idecyl.jcyl.es/geoserver/"
+                                            "urbanismo/wms"
+                                        ),
+                                        "layer": {
+                                            "name": "plau_cyl_clasificacion",
+                                            "extent": {
+                                                "srs": "EPSG:25830",
+                                                "minx": "1",
+                                                "miny": "1",
+                                                "maxx": "2",
+                                                "maxy": "2",
+                                            },
+                                            "styles": [
+                                                {
+                                                    "name": (
+                                                        "urbanismo:"
+                                                        "plau_cyl_"
+                                                        "clasificacion_color"
+                                                    ),
+                                                    "title": (
+                                                        "Clasificación por color"
+                                                    ),
+                                                }
+                                            ],
+                                            "metadata": {
+                                                "url": (
+                                                    "https://idecyl.jcyl.es/"
+                                                    "geonetwork/"
+                                                )
+                                            },
+                                        },
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "favoritesLayers": {"categories": []},
+                "tematicSearch": {"themes": []},
+                "backMaps": [{"name": "SIN FONDO"}],
+                "apps": [],
             }
         ],
+        "selectedSetting": "fondo_imagen",
     }
     wmc = """<?xml version="1.0" encoding="utf-8"?>
 <ViewContext version="1.1.0" xmlns="http://www.opengis.net/context"
@@ -184,6 +216,12 @@ def test_cli_requires_reviewed_definition_and_plan_before_apply(
     manifest = tmp_path / "layers.json"
     settings.write_bytes(settings_document)
     wmc.write_bytes(wmc_document)
+    registrations = []
+    monkeypatch.setattr(
+        siur_sync,
+        "register_all_models",
+        lambda: registrations.append(True),
+    )
 
     discovery_code = main(
         ["--settings", str(settings), "--wmc", str(wmc)]
@@ -291,3 +329,4 @@ def test_cli_requires_reviewed_definition_and_plan_before_apply(
     assert blocked_code == 3
     assert blocked["applied"] is False
     assert len(applied_definitions) == 1
+    assert len(registrations) == 5

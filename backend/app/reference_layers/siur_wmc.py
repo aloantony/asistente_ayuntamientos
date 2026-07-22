@@ -262,25 +262,29 @@ def compare_wmc_to_catalog(
 
         layer = candidates[0]
         matched_layers.append(observed.source_key)
-        declared_styles = {
-            style.source_key: style for style in layer.styles
-        }
         default_styles = {
             style.source_key for style in layer.styles if style.is_default
         }
-        selected_style = observed.selected_style_key
+        _, unique_style_matches = _catalog_style_matches(
+            layer.styles,
+            observed.styles,
+        )
+        selected_style = None
+        for style in observed.styles:
+            identity = f"{observed.source_key}|{style.source_key}"
+            catalog_key = unique_style_matches.get(style.source_key)
+            if catalog_key is not None:
+                matched_styles.append(identity)
+                if style.selected:
+                    selected_style = catalog_key
+            else:
+                unmatched_styles.append(identity)
         if (
             selected_style != layer.style_name
             or default_styles
             != ({selected_style} if selected_style is not None else set())
         ):
             selected_style_mismatches.append(observed.source_key)
-        for style in observed.styles:
-            identity = f"{observed.source_key}|{style.source_key}"
-            if style.source_key in declared_styles:
-                matched_styles.append(identity)
-            else:
-                unmatched_styles.append(identity)
 
     return WmcParityReport(
         provider_mismatch=definition.provider_key != "siur",
@@ -335,16 +339,34 @@ def augment_catalog_with_wmc_evidence(
             continue
         index = indexes[0]
         layer = layers[index]
-        observed_by_key = {
-            style.source_key: style for style in observed.styles
+        candidate_keys, uniquely_matched = _catalog_style_matches(
+            layer.styles,
+            observed.styles,
+        )
+        observed_by_catalog_key = {
+            catalog_key: next(
+                style
+                for style in observed.styles
+                if style.source_key == observed_key
+            )
+            for observed_key, catalog_key in uniquely_matched.items()
         }
         observed_order = {
             style.source_key: sort_order
             for sort_order, style in enumerate(observed.styles)
         }
+        selected_style = next(
+            (style for style in observed.styles if style.selected),
+            None,
+        )
+        selected_style_key = (
+            uniquely_matched.get(selected_style.source_key)
+            if selected_style is not None
+            else None
+        )
         merged_styles: dict[str, ReferenceLayerStyleDefinition] = {}
         for style in layer.styles:
-            observed_style = observed_by_key.get(style.source_key)
+            observed_style = observed_by_catalog_key.get(style.source_key)
             merged_styles[style.source_key] = replace(
                 style,
                 title=(
@@ -360,14 +382,21 @@ def augment_catalog_with_wmc_evidence(
                         else None
                     )
                 ),
+                remote_name=(
+                    observed_style.remote_name
+                    if observed_style is not None
+                    else style.remote_name
+                ),
                 sort_order=observed_order.get(
-                    style.source_key,
+                    observed_style.source_key
+                    if observed_style is not None
+                    else "",
                     style.sort_order,
                 ),
-                is_default=style.source_key == observed.selected_style_key,
+                is_default=style.source_key == selected_style_key,
             )
         for sort_order, style in enumerate(observed.styles):
-            if style.source_key not in merged_styles:
+            if not candidate_keys[style.source_key]:
                 merged_styles[style.source_key] = ReferenceLayerStyleDefinition(
                     source_key=style.source_key,
                     title=style.title,
@@ -376,9 +405,12 @@ def augment_catalog_with_wmc_evidence(
                     sort_order=sort_order,
                     is_default=style.selected,
                 )
+                if style.selected:
+                    selected_style_key = style.source_key
         layers[index] = replace(
             layer,
-            style_name=observed.selected_style_key,
+            style_name=selected_style_key,
+            queryable=observed.queryable,
             styles=tuple(
                 sorted(
                     merged_styles.values(),
@@ -653,6 +685,37 @@ def _remote_names_match(candidate: str | None, observed: str) -> bool:
     return candidate == observed or candidate.rsplit(":", 1)[-1] == observed.rsplit(
         ":", 1
     )[-1]
+
+
+def _matching_catalog_styles(styles: tuple[Any, ...], observed: str) -> list[Any]:
+    return [
+        style
+        for style in styles
+        if _remote_names_match(style.remote_name or style.source_key, observed)
+    ]
+
+
+def _catalog_style_matches(
+    catalog_styles: tuple[Any, ...],
+    observed_styles: tuple[Any, ...],
+) -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
+    candidates = {
+        observed.source_key: tuple(
+            style.source_key
+            for style in _matching_catalog_styles(
+                catalog_styles,
+                observed.remote_name,
+            )
+        )
+        for observed in observed_styles
+    }
+    unique = {
+        observed_key: keys[0]
+        for observed_key, keys in candidates.items()
+        if len(keys) == 1
+        and sum(keys[0] in other for other in candidates.values()) == 1
+    }
+    return candidates, unique
 
 
 def _json_value(value: Any) -> Any:

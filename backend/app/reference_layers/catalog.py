@@ -583,8 +583,8 @@ def validate_catalog_definition(
         service_keys.add(service.source_key)
         if not SOURCE_KEY_RE.fullmatch(service.source_key):
             issues.append(f"Invalid service key: {service.source_key}")
-        if not service.title.strip():
-            issues.append(f"Service title is empty: {service.source_key}")
+        if not service.title.strip() or len(service.title) > 500:
+            issues.append(f"Invalid service title: {service.source_key}")
         if service.upstream_protocol not in PROTOCOLS:
             issues.append(f"Unsupported protocol: {service.source_key}")
         if not _valid_declared_http_url(service.base_url):
@@ -607,6 +607,14 @@ def validate_catalog_definition(
             r"[0-9a-f]{64}", service.capabilities_sha256
         ):
             issues.append(f"Invalid capabilities hash: {service.source_key}")
+        for label, value, maximum in (
+            ("version", service.version, 30),
+            ("default CRS", service.default_crs, 64),
+            ("default format", service.default_format, 100),
+            ("license name", service.license_name, 255),
+        ):
+            if value is not None and len(value) > maximum:
+                issues.append(f"Invalid service {label}: {service.source_key}")
 
     layer_definitions: dict[str, ReferenceLayerDefinition] = {}
     for layer in definition.layers:
@@ -615,8 +623,14 @@ def validate_catalog_definition(
         layer_definitions[layer.source_key] = layer
         if not SOURCE_KEY_RE.fullmatch(layer.source_key):
             issues.append(f"Invalid layer key: {layer.source_key}")
-        if not layer.title.strip():
-            issues.append(f"Layer title is empty: {layer.source_key}")
+        if not layer.title.strip() or len(layer.title) > 500:
+            issues.append(f"Invalid layer title: {layer.source_key}")
+        if layer.remote_name is not None and len(layer.remote_name) > 500:
+            issues.append(f"Invalid remote layer name: {layer.source_key}")
+        if layer.style_name is not None and len(layer.style_name) > 255:
+            issues.append(f"Invalid selected style name: {layer.source_key}")
+        if layer.image_format is not None and len(layer.image_format) > 100:
+            issues.append(f"Invalid layer image format: {layer.source_key}")
         if layer.node_type not in NODE_TYPES:
             issues.append(f"Invalid node type: {layer.source_key}")
         if layer.status not in LAYER_STATUSES:
@@ -673,9 +687,9 @@ def validate_catalog_definition(
                         "Invalid remote style name: "
                         f"{layer.source_key}|{style.source_key}"
                     )
-                if not style.title.strip():
+                if not style.title.strip() or len(style.title) > 500:
                     issues.append(
-                        f"Style title is empty: {layer.source_key}|{style.source_key}"
+                        f"Invalid style title: {layer.source_key}|{style.source_key}"
                     )
                 if style.status not in LAYER_STATUSES:
                     issues.append(
@@ -712,12 +726,13 @@ def validate_catalog_definition(
                 issues.append(
                     f"Default style has no selected style: {layer.source_key}"
                 )
-        for label, url in (
-            ("legend", layer.legend_url),
-            ("metadata", layer.metadata_url),
+        if layer.legend_url and not _valid_declared_http_url(layer.legend_url):
+            issues.append(f"Invalid legend URL: {layer.source_key}")
+        if layer.metadata_url and not _valid_declared_http_url(
+            layer.metadata_url,
+            allow_fragment=True,
         ):
-            if url and not _valid_declared_http_url(url):
-                issues.append(f"Invalid {label} URL: {layer.source_key}")
+            issues.append(f"Invalid metadata URL: {layer.source_key}")
 
     for layer in definition.layers:
         if layer.parent_key is None:
@@ -736,6 +751,7 @@ def _valid_declared_http_url(
     value: str,
     *,
     require_https: bool = False,
+    allow_fragment: bool = False,
 ) -> bool:
     # Persistence-time validation only. Any outbound client must also apply a
     # provider allowlist and validate DNS answers and every redirect target.
@@ -751,7 +767,7 @@ def _valid_declared_http_url(
         and hostname
         and parsed.username is None
         and parsed.password is None
-        and parsed.fragment == ""
+        and (allow_fragment or parsed.fragment == "")
     ):
         return False
     if port is not None and port != {"http": 80, "https": 443}[parsed.scheme]:

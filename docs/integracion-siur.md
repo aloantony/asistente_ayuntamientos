@@ -1,6 +1,6 @@
 # Integración completa con SIUR
 
-Actualizado: 2026-07-17.
+Actualizado: 2026-07-22.
 
 ## Objetivo de producto
 
@@ -35,7 +35,8 @@ El catálogo conserva:
 - snapshots íntegros e inmutables del bruto y de su definición normalizada,
   cada uno con su hash, fecha y conteos;
 - servicios WMS, WFS, WMTS, XYZ, ArcGIS REST o locales;
-- nodos jerárquicos `group | layer` con identidad estable ajena al título visible;
+- nodos jerárquicos `group | layer` con identidad técnica estable cuando el
+  origen la aporta;
 - estilos normalizados por capa, incluido el predeterminado y la disponibilidad
   de leyenda, sin entregar al navegador la URL remota;
 - configuración de representación, escalas, CRS, consulta, descarga y procedencia;
@@ -70,15 +71,19 @@ solo lee archivos locales revisados.
 
 El WMC aportado se conserva como fixture de evidencia independiente. El parser
 acepta únicamente WMC 1.1.0, rechaza DTD y entidades, limita tamaño y número de
-elementos y valida las URL contra el host SIUR. En el archivo recibido comprueba
-11 capas visibles y consultables, 3 servicios WMS, 28 estilos, 11 estilos
-seleccionados y 10 referencias de metadatos en `EPSG:25830`. Esta sonda puede
+elementos y valida las URL contra el host SIUR. El WMC público revisado el 22 de
+julio de 2026, SHA-256
+`9c3571179e8f489daa9b9c4531d99d0e0e612be03b1e269fa38908e72e6aaeb8`,
+comprueba 11 capas —8 visibles y 3 ocultas, todas consultables—, 3 servicios
+WMS, 28 estilos, 11 estilos seleccionados y 10 referencias de metadatos en
+`EPSG:25830`. Esta sonda puede
 bloquear la promoción si el catálogo completo pierde uno de esos elementos,
 pero ignora correctamente todas las capas adicionales del catálogo: nunca se
 aplica el WMC como inventario. En esta entrega la comparación automatizada
 cubre proveedor, protocolo/endpoint/versión WMS, identidad de capa, presencia
-de estilos y selección predeterminada. La paridad visual y funcional de CRS,
-escalas, opacidad, consulta, leyenda y metadatos se mantiene como filas
+de estilos y selección predeterminada; además transfiere la consultabilidad de
+esas 11 coincidencias. La paridad visual y funcional de visibilidad, CRS,
+escalas, opacidad, leyenda y metadatos se mantiene como filas
 separadas de la matriz y no se da por satisfecha solo por superar esta sonda.
 
 El flujo de operador empieza siempre en solo lectura:
@@ -104,9 +109,48 @@ los bytes, el resultado del adaptador o el estado base invalida la aprobación.
 El comando no acepta URL ni descarga nada, por lo que esta fase tampoco
 introduce un proxy abierto.
 
-El WMC puede completar estilos, leyendas y versión WMS únicamente sobre capas
+El adaptador reconoce de forma cerrada el perfil publicado por SIUR: en esta
+primera versión exige exactamente un elemento de `settings`, que debe coincidir
+con `selectedSetting`; el contenedor `groupLayers` aporta el árbol visible y
+`backMaps` aporta los fondos WMTS/XYZ.
+Dentro de este perfil, y solo en él, un `endPoint` sin `type` es WMS, tal como
+lo interpreta el visor SIUR. El wrapper artificial `groupLayers.name = root` y
+el control `SIN FONDO` no se persisten. Los fondos se conservan como capas raíz
+con rol `base`; el primero es el fondo inicialmente seleccionado.
+
+La revisión del fichero público del 22 de julio de 2026, SHA-256
+`950eb0dbfb9226a39257ca61d27ef815353bcad76d00c5c18348489480ba53fc`,
+produce 12 grupos superiores, 70 grupos, 227 capas —224 hojas y 3 fondos—,
+52 servicios y 415 estilos explícitos. El estilo con nombre vacío se conserva
+como default WMS implícito sin crear una fila inválida. Las extensiones
+declaradas están en `EPSG:25830`: se guardan como evidencia interna y no se
+copian a `bounds`, que el mapa interpreta como coordenadas geográficas. Las URL
+de metadatos pueden incluir fragmento de navegación; esa excepción no se aplica
+a endpoints de servicio, licencia o leyenda.
+
+El JSON no publica identificadores para grupos ni colocaciones. Por ello sus
+claves se derivan de la ruta nominal normalizada, además del servicio y nombre
+remoto en las hojas. Son estables frente a reordenación y cambios solo de
+mayúsculas o composición Unicode, pero un renombrado o traslado semántico crea
+una identidad nueva. El manifiesto obligatorio hace que ese cambio requiera
+revisión y evita que se acepte silenciosamente.
+
+`suggestedServices`, favoritos, búsqueda temática y accesos a aplicaciones se
+validan y permanecen íntegros en el snapshot bruto, pero no se convierten en
+nodos del árbol. En particular, la búsqueda temática contiene operaciones y
+capas dinámicas adicionales; esta promoción cubre el árbol visible y los
+fondos, no equivale todavía a paridad funcional completa del buscador SIUR.
+
+El WMC puede completar estilos, leyendas, consultabilidad y versión WMS
+únicamente sobre capas
 que ya existan y coincidan de forma unívoca en el catálogo completo. Nunca crea
 una capa ausente en `settings.json`; esa ausencia sigue siendo un bloqueo.
+
+La promoción del catálogo no exige ni crea una aprobación de licencia. Puede
+listar la jerarquía con cada servicio en estado legal `pending`. La evidencia
+de capacidades, la revisión humana de licencia y la atestación descritas a
+continuación son requisitos separados para habilitar teselas, leyendas o
+identificación mediante el proxy.
 
 ## Evidencia persistente de entrega WMS
 
