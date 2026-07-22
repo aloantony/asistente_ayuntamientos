@@ -37,6 +37,17 @@ const LAYER_BASE: ReferenceLayer = {
   available_style_ids: [],
   legend_available: false,
   metadata_available: false,
+  mirror_status: "not_applicable",
+  active_version_id: null,
+  active_generation: null,
+  active_source_version: null,
+  active_reference_at: null,
+  active_created_at: null,
+  last_run_status: null,
+  last_checked_at: null,
+  last_sync_error_code: null,
+  last_sync_error_summary: null,
+  next_check_at: null,
   status: "active",
   updated_at: "2026-07-17T10:00:00Z",
 };
@@ -57,6 +68,14 @@ function catalogFixture(): ReferenceCatalog {
     identify_available: true,
     available_style_ids: [12],
     legend_available: true,
+    mirror_status: "active",
+    active_version_id: 17,
+    active_generation: 2,
+    active_source_version: "2026-07-23",
+    active_reference_at: LAYER_BASE.updated_at,
+    active_created_at: LAYER_BASE.updated_at,
+    last_run_status: "succeeded",
+    last_checked_at: LAYER_BASE.updated_at,
   };
   const blockedLayer: ReferenceLayer = {
     ...visibleLayer,
@@ -162,5 +181,40 @@ describe("SiurLayerTree", () => {
       }),
     );
     expect(onMove).toHaveBeenCalledWith(2, "forward");
+  });
+
+  it("explains a failed refresh while keeping the previous local version", () => {
+    const catalog = catalogFixture();
+    catalog.layers[2] = {
+      ...catalog.layers[2],
+      delivery_blocker: "local_not_ready",
+      mirror_status: "serving_previous",
+      active_version_id: 19,
+      active_generation: 3,
+      last_run_status: "failed",
+    };
+    const tree = buildReferenceLayerTree(catalog.layers);
+
+    render(
+      <SiurLayerTree
+        catalog={catalog}
+        error=""
+        isLoading={false}
+        onControlChange={vi.fn()}
+        onMove={vi.fn()}
+        preferences={{
+          layers: {
+            "2": { visible: true, opacity: 1, styleId: 12 },
+            "3": { visible: false, opacity: 1, styleId: null },
+          },
+          stackOrder: [2, 3],
+        }}
+        structuralWarnings={[]}
+        tree={tree.roots}
+      />,
+    );
+
+    expect(screen.getByText(/se mantiene la versión local anterior/i)).toBeTruthy();
+    expect(screen.getByText(/copia local todavía no está lista/i)).toBeTruthy();
   });
 });

@@ -6,6 +6,7 @@ import {
   buildSiurMapLayers,
   parseReferenceLayerBounds,
   reconcileSiurPreferences,
+  selectLocalBaseMapLayer,
   selectTopIdentifyLayer,
   tileCoordinatesForProjectedPoint,
   validateReferenceCatalog,
@@ -44,6 +45,17 @@ function makeLayer(overrides: Partial<ReferenceLayer>): ReferenceLayer {
     available_style_ids: [],
     legend_available: true,
     metadata_available: false,
+    mirror_status: "active",
+    active_version_id: 21,
+    active_generation: 1,
+    active_source_version: "v1",
+    active_reference_at: UPDATED_AT,
+    active_created_at: UPDATED_AT,
+    last_run_status: "succeeded",
+    last_checked_at: UPDATED_AT,
+    last_sync_error_code: null,
+    last_sync_error_summary: null,
+    next_check_at: null,
     status: "active",
     updated_at: UPDATED_AT,
     ...overrides,
@@ -105,6 +117,7 @@ function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
   return {
     organizationId: 7,
     layerId: 1,
+    role: "overlay",
     title: "Capa",
     tileUrl: "/api/organizations/7/reference-layers/1/tiles/{z}/{x}/{y}.png",
     styleId: null,
@@ -119,6 +132,36 @@ function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
     ...overrides,
   };
 }
+
+describe("local base map selection", () => {
+  it("selects only internal base descriptors and falls back deterministically", () => {
+    const street = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      zIndex: 1,
+      tileUrl: "/api/local/street/{z}/{x}/{y}.png",
+    });
+    const topographic = makeMapLayer({
+      layerId: 11,
+      role: "base",
+      zIndex: 2,
+      tileUrl: "/api/local/topographic/{z}/{x}/{y}.png",
+    });
+    const overlay = makeMapLayer({ layerId: 12, role: "overlay", zIndex: 3 });
+
+    expect(selectLocalBaseMapLayer([overlay, topographic, street], "street"))
+      .toBe(street);
+    expect(
+      selectLocalBaseMapLayer([overlay, topographic, street], "topographic"),
+    ).toBe(topographic);
+    expect(selectLocalBaseMapLayer([overlay, street], "topographic")).toBe(
+      street,
+    );
+    expect(selectLocalBaseMapLayer([overlay], "street")).toBeNull();
+    expect([street, topographic].every((layer) => layer.tileUrl.startsWith("/")))
+      .toBe(true);
+  });
+});
 
 describe("reference catalog integrity and hierarchy", () => {
   it("fails closed when snapshot counts differ from the returned arrays", () => {
@@ -178,6 +221,9 @@ describe("approved SIUR delivery descriptors", () => {
       node_type: "group",
       source_key: "group:planning",
       title: "Planeamiento",
+      mirror_status: "not_applicable",
+      active_version_id: null,
+      active_generation: null,
     });
     const layer = makeLayer({
       id: 2,

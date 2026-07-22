@@ -52,6 +52,25 @@ export type ReferenceLayer = {
   available_style_ids: number[];
   legend_available: boolean;
   metadata_available: boolean;
+  mirror_status:
+    | "not_applicable"
+    | "legacy"
+    | "pending"
+    | "syncing"
+    | "active"
+    | "serving_previous"
+    | "error"
+    | "disabled";
+  active_version_id: number | null;
+  active_generation: number | null;
+  active_source_version: string | null;
+  active_reference_at: string | null;
+  active_created_at: string | null;
+  last_run_status: string | null;
+  last_checked_at: string | null;
+  last_sync_error_code: string | null;
+  last_sync_error_summary: string | null;
+  next_check_at: string | null;
   status: string;
   updated_at: string;
 };
@@ -108,6 +127,7 @@ export type SiurMapPreferences = {
 export type SiurMapLayer = {
   organizationId: number;
   layerId: number;
+  role: string | null;
   title: string;
   tileUrl: string;
   styleId: number | null;
@@ -235,6 +255,27 @@ export function validateReferenceCatalog(
   }
 
   for (const layer of catalog.layers) {
+    if (
+      (layer.node_type === "group" && layer.mirror_status !== "not_applicable") ||
+      (layer.node_type === "layer" && layer.mirror_status === "not_applicable")
+    ) {
+      throw new ReferenceCatalogIntegrityError(
+        "El estado del espejo local no corresponde al tipo de nodo SIUR.",
+      );
+    }
+    if (
+      (layer.active_version_id === null) !==
+        (layer.active_generation === null) ||
+      (layer.active_version_id !== null &&
+        (!Number.isInteger(layer.active_version_id) ||
+          layer.active_version_id < 1 ||
+          !Number.isInteger(layer.active_generation) ||
+          (layer.active_generation ?? 0) < 1))
+    ) {
+      throw new ReferenceCatalogIntegrityError(
+        "La versión activa del espejo local no es coherente.",
+      );
+    }
     if (layer.service_id !== null && !serviceIds.has(layer.service_id)) {
       throw new ReferenceCatalogIntegrityError(
         "Una capa SIUR referencia un servicio ausente.",
@@ -635,6 +676,7 @@ export function buildSiurMapLayers(
     result.push({
       organizationId,
       layerId: layer.id,
+      role: layer.role,
       title: layer.title,
       tileUrl: buildReferenceTileUrl(
         organizationId,
@@ -653,6 +695,23 @@ export function buildSiurMapLayers(
     });
   });
   return result;
+}
+
+export function selectLocalBaseMapLayer(
+  layers: SiurMapLayer[],
+  preference: "street" | "topographic",
+) {
+  const candidates = layers
+    .filter((layer) => layer.role === "base")
+    .sort(
+      (left, right) =>
+        left.zIndex - right.zIndex || left.layerId - right.layerId,
+    );
+  if (candidates.length === 0) {
+    return null;
+  }
+  const preferredIndex = preference === "topographic" ? 1 : 0;
+  return candidates[preferredIndex] ?? candidates[0];
 }
 
 export function selectTopIdentifyLayer(

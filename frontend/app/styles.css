@@ -1510,12 +1510,18 @@ button:disabled {
 
 .siur-layer-blocker,
 .siur-layer-error,
+.siur-layer-mirror-status,
 .siur-layer-warning,
 .siur-layer-note {
   border-radius: 8px;
   padding: 8px;
   font-size: 11px;
   line-height: 1.4;
+}
+
+.siur-layer-mirror-status {
+  color: var(--text-secondary) !important;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
 }
 
 .siur-layer-blocker,
@@ -1775,6 +1781,26 @@ button:disabled {
   inset: 0;
   min-height: 100%;
   background: var(--surface-muted);
+}
+
+.municipal-map-local-base-note {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 500;
+  width: min(360px, calc(100% - 32px));
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+  box-shadow: 0 12px 32px rgb(32 27 19 / 14%);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+  transform: translate(-50%, -50%);
 }
 
 .municipal-map-canvas .leaflet-tile-pane {

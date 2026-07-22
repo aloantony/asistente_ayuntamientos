@@ -31,12 +31,43 @@ const BLOCKER_LABELS: Record<string, string> = {
   disabled: "La capa está desactivada.",
   layer_missing: "La capa no figura en GetCapabilities.",
   license_not_approved: "La licencia todavía no tiene aprobación humana.",
+  local_disabled: "La réplica local de esta capa está desactivada.",
+  local_identify_unavailable:
+    "La versión local no permite consultar elementos en este punto.",
+  local_legend_unavailable: "La versión local no incluye una leyenda validada.",
+  local_not_ready: "La copia local todavía no está lista.",
+  local_source_changed:
+    "La definición de la fuente ha cambiado y requiere una nueva sincronización.",
+  local_version_invalid: "La versión local activa no ha superado la validación.",
   missing: "La capa ya no está presente en la fuente.",
   not_deliverable: "Este tipo de entrega aún no tiene renderizador.",
   service_mismatch: "El servicio no coincide con la evidencia verificada.",
   style_unsupported: "El estilo predeterminado no está verificado.",
   web_mercator_unsupported: "La capa no declara EPSG:3857 literal.",
 };
+
+function mirrorStatusLabel(layer: ReferenceLayer) {
+  switch (layer.mirror_status) {
+    case "active":
+      return "Copia local activa.";
+    case "syncing":
+      return layer.active_version_id
+        ? "Actualizando la copia local; la versión vigente sigue disponible."
+        : "Sincronizando la copia local por primera vez.";
+    case "serving_previous":
+      return "La última actualización falló; se mantiene la versión local anterior.";
+    case "pending":
+      return "Copia local pendiente de sincronización.";
+    case "error":
+      return "La copia local no está disponible porque la sincronización falló.";
+    case "disabled":
+      return "Sincronización local desactivada.";
+    case "legacy":
+      return "Entrega heredada pendiente de incorporarse al espejo versionado.";
+    case "not_applicable":
+      return null;
+  }
+}
 
 function blockerLabel(blocker: string | null) {
   if (!blocker) {
@@ -88,6 +119,7 @@ export function SiurLayerTree({
         const styles = catalog ? availableStylesForLayer(catalog, layer) : [];
         const blocker = catalog ? referenceLayerBlocker(catalog, layer) : null;
         const blockerText = blockerLabel(blocker);
+        const mirrorText = mirrorStatusLabel(layer);
         const stackIndex = preferences?.stackOrder.indexOf(layer.id) ?? -1;
         const selectedStyle = styles.find(
           (style) => style.id === control?.styleId,
@@ -149,6 +181,11 @@ export function SiurLayerTree({
               </div>
             </div>
             {layer.description ? <p>{layer.description}</p> : null}
+            {mirrorText ? (
+              <p className="siur-layer-mirror-status" role="status">
+                {mirrorText}
+              </p>
+            ) : null}
             {blockerText ? (
               <p className="siur-layer-blocker" role="status">
                 {blockerText}
