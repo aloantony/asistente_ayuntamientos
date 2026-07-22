@@ -2,14 +2,21 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
     apply_catalog_definition,
 )
-from app.reference_layers.source_audit import audit_current_catalog_sources
+from app.reference_layers.models import ReferenceLayer
+from app.reference_layers.source_audit import (
+    _layer_definition,
+    audit_current_catalog_sources,
+)
 from app.reference_layers.source_discovery import (
     SourceDiscoveryError,
     acquisition_candidates,
@@ -74,6 +81,69 @@ def test_geoserver_wms_prefers_data_and_keeps_finite_image_fallback() -> None:
         "format": "image/png",
         "style_name": "default",
         "coverage_required": True,
+    }
+
+
+def test_geoserver_data_candidates_freeze_serviceable_catalog_style_identities() -> None:
+    styled_layer = replace(
+        layer(),
+        styles=(
+            ReferenceLayerStyleDefinition(
+                source_key="style:zoning",
+                title="Zoning",
+                remote_name="Urbanismo:Zoning",
+                status="active",
+            ),
+            ReferenceLayerStyleDefinition(
+                source_key="style:degraded",
+                title="Degraded but serviceable",
+                remote_name="Urbanismo:Degraded",
+                status="degraded",
+            ),
+            ReferenceLayerStyleDefinition(
+                source_key="style:disabled",
+                title="Disabled",
+                remote_name="Urbanismo:Disabled",
+                status="disabled",
+            ),
+            ReferenceLayerStyleDefinition(
+                source_key="style:boundaries",
+                title="Boundaries",
+                remote_name="Urbanismo:Boundaries",
+                status="active",
+            ),
+        ),
+    )
+
+    candidates = acquisition_candidates(service(), styled_layer)
+
+    expected = {
+        "style_endpoint_url": (
+            "https://idecyl.jcyl.es/geoserver/urbanismo/wms"
+        ),
+        "style_layer_name": "urbanismo:plau_cyl_clasificacion",
+        "styles": [
+            {
+                "catalog_style_source_key": "style:boundaries",
+                "remote_name": "Urbanismo:Boundaries",
+            },
+            {
+                "catalog_style_source_key": "style:degraded",
+                "remote_name": "Urbanismo:Degraded",
+            },
+            {
+                "catalog_style_source_key": "style:zoning",
+                "remote_name": "Urbanismo:Zoning",
+            },
+        ],
+    }
+    assert candidates[0].config == {
+        "discovery": "wfs_capabilities",
+        **expected,
+    }
+    assert candidates[1].config == {
+        "discovery": "wcs_capabilities",
+        **expected,
     }
 
 
@@ -324,3 +394,55 @@ def test_current_catalog_audit_requires_a_candidate_for_every_leaf(db) -> None:
         "wms_tiles": 1,
         "wmts": 1,
     }
+
+
+def test_source_audit_reconstructs_persisted_layer_styles(db) -> None:
+    definition = ReferenceCatalogDefinition(
+        provider_key="audit-styles",
+        source_url="https://example.es/catalog.json",
+        raw_catalog={"version": 1},
+        services=(
+            replace(
+                service(),
+                source_key="urbanismo",
+                license_status="pending",
+            ),
+        ),
+        layers=(
+            replace(
+                layer(),
+                source_key="planning",
+                service_key="urbanismo",
+                style_name="style:default",
+                styles=(
+                    ReferenceLayerStyleDefinition(
+                        source_key="style:default",
+                        title="Default",
+                        remote_name="Urbanismo:Default",
+                        is_default=True,
+                    ),
+                ),
+            ),
+        ),
+        retrieved_at=datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    apply_catalog_definition(db, definition)
+    record = db.scalar(
+        select(ReferenceLayer)
+        .options(selectinload(ReferenceLayer.styles))
+        .where(
+            ReferenceLayer.provider_key == "audit-styles",
+            ReferenceLayer.source_key == "planning",
+        )
+    )
+
+    rebuilt = _layer_definition(record)
+
+    assert rebuilt.styles == definition.layers[0].styles
+    candidates = acquisition_candidates(definition.services[0], rebuilt)
+    assert candidates[0].config["styles"] == [
+        {
+            "catalog_style_source_key": "style:default",
+            "remote_name": "Urbanismo:Default",
+        }
+    ]

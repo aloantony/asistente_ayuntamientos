@@ -7,6 +7,7 @@ import io
 import json
 import struct
 from urllib.parse import parse_qs, urlsplit
+from xml.etree import ElementTree
 import zipfile
 
 import pytest
@@ -227,6 +228,60 @@ WFS_CAPABILITIES = b"""<wfs:WFS_Capabilities version="2.0.0"
  </wfs:FeatureType></wfs:FeatureTypeList></wfs:WFS_Capabilities>"""
 
 
+def style_config(
+    *styles: tuple[str, str],
+    endpoint: str = "https://data.example.es/wms",
+    layer_name: str = "workspace:roads",
+):
+    return {
+        "style_endpoint_url": endpoint,
+        "style_layer_name": layer_name,
+        "styles": [
+            {
+                "catalog_style_source_key": source_key,
+                "remote_name": remote_name,
+            }
+            for source_key, remote_name in sorted(styles)
+        ],
+    }
+
+
+def sld_payload(
+    *style_names: str,
+    layer_name: str = "workspace:roads",
+    external_href: str | None = None,
+) -> bytes:
+    rendered_styles = []
+    for name in style_names:
+        graphic = (
+            "<PointSymbolizer><Graphic><ExternalGraphic>"
+            f'<OnlineResource xlink:href="{external_href}" />'
+            "<Format>image/png</Format></ExternalGraphic></Graphic>"
+            "</PointSymbolizer>"
+            if external_href is not None
+            else (
+                "<PolygonSymbolizer><Fill>"
+                '<CssParameter name="fill">#336699</CssParameter>'
+                "</Fill></PolygonSymbolizer>"
+            )
+        )
+        rendered_styles.append(
+            f"<UserStyle><Name>{name}</Name><FeatureTypeStyle><Rule>"
+            f"{graphic}</Rule></FeatureTypeStyle></UserStyle>"
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<StyledLayerDescriptor version="1.0.0" '
+        'xmlns="http://www.opengis.net/sld" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        'xsi:schemaLocation="http://www.opengis.net/sld '
+        'StyledLayerDescriptor.xsd">'
+        f"<NamedLayer><Name>{layer_name}</Name>{''.join(rendered_styles)}"
+        "</NamedLayer></StyledLayerDescriptor>"
+    ).encode()
+
+
 def test_wfs_downloads_bounded_pages_and_builds_ingestion_manifest(store, limits):
     def handler(url, _etag, _modified):
         query = parse_qs(urlsplit(url).query)
@@ -279,6 +334,316 @@ def test_wfs_downloads_bounded_pages_and_builds_ingestion_manifest(store, limits
         for policy in transport.policies
     )
     assert list((store.root / "staging").iterdir()) == []
+
+
+def test_wfs_acquires_exact_standalone_slds_with_bundle_provenance(store, limits):
+    configured_styles = style_config(
+        ("style:blue", "workspace:blue"),
+        ("style:red", "workspace:red"),
+    )
+
+    def handler(url, etag, modified):
+        query = parse_qs(urlsplit(url).query)
+        request = query.get("request", [None])[0]
+        assert etag is None
+        assert modified is None
+        if request == "GetCapabilities":
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if request == "GetFeature":
+            return json_response(
+                {
+                    "type": "FeatureCollection",
+                    "numberMatched": 1,
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "id": "roads.1",
+                            "properties": {},
+                            "geometry": None,
+                        }
+                    ],
+                }
+            )
+        assert request == "GetStyles"
+        assert query["service"] == ["WMS"]
+        assert query["layers"] == ["workspace:roads"]
+        return Response(
+            sld_payload("workspace:blue", "workspace:red"),
+            "application/vnd.ogc.sld+xml",
+        )
+
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+    ).acquire(
+        candidate(
+            "wfs",
+            remote_name="workspace:roads",
+            config=configured_styles,
+        )
+    )
+
+    style_artifacts = [
+        item for item in result.artifacts if item.artifact_kind == "style"
+    ]
+    assert [item.role for item in style_artifacts] == [
+        "observation",
+        "style",
+        "style",
+    ]
+    assert sum(
+        parse_qs(urlsplit(call["url"]).query).get("request") == ["GetStyles"]
+        for call in transport.calls
+    ) == 1
+    standalone = [item for item in style_artifacts if item.role == "style"]
+    assert [item.metadata["catalog_style_source_key"] for item in standalone] == [
+        "style:blue",
+        "style:red",
+    ]
+    bundle = next(item for item in style_artifacts if item.role == "observation")
+    assert bundle.metadata["catalog_style_source_keys"] == [
+        "style:blue",
+        "style:red",
+    ]
+    for item in standalone:
+        assert item.metadata["parent_sha256"] == bundle.blob.sha256
+        with store.open_blob(item.blob.storage_key) as source:
+            root = ElementTree.parse(source).getroot()
+        names = [
+            (element.text or "").strip()
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "UserStyle"
+            for element in element
+            if element.tag.rsplit("}", 1)[-1] == "Name"
+        ]
+        assert names == [item.metadata["remote_name"]]
+        assert all(
+            attribute.rsplit("}", 1)[-1].casefold() != "schemalocation"
+            for element in root.iter()
+            for attribute in element.attrib
+        )
+    manifest = read_json_artifact(store, result, "manifest")
+    assert manifest["materialization"]["style_artifact_sha256"] == {
+        item.metadata["catalog_style_source_key"]: item.blob.sha256
+        for item in standalone
+    }
+
+
+def test_style_acquisition_fails_when_getstyles_omits_exact_remote_name(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        request = parse_qs(urlsplit(url).query).get("request", [None])[0]
+        if request == "GetCapabilities":
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if request == "GetFeature":
+            return json_response(
+                {
+                    "type": "FeatureCollection",
+                    "numberMatched": 0,
+                    "features": [],
+                }
+            )
+        return Response(sld_payload("workspace:other"), "application/xml")
+
+    with pytest.raises(AcquisitionValidationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                remote_name="workspace:roads",
+                config=style_config(("style:blue", "workspace:blue")),
+            )
+        )
+
+    assert error.value.code == "style_unavailable"
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://assets.example.net/symbol.svg",
+        "symbols/symbol.svg",
+        "../symbol.svg",
+    ],
+)
+def test_style_acquisition_rejects_every_auxiliary_resource_reference(
+    store,
+    limits,
+    href,
+):
+    def handler(url, _etag, _modified):
+        request = parse_qs(urlsplit(url).query).get("request", [None])[0]
+        if request == "GetCapabilities":
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if request == "GetFeature":
+            return json_response(
+                {
+                    "type": "FeatureCollection",
+                    "numberMatched": 0,
+                    "features": [],
+                }
+            )
+        return Response(
+            sld_payload("workspace:blue", external_href=href),
+            "application/xml",
+        )
+
+    with pytest.raises(AcquisitionValidationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                remote_name="workspace:roads",
+                config=style_config(("style:blue", "workspace:blue")),
+            )
+        )
+
+    assert error.value.code == "unsafe_sld_reference"
+
+
+def test_style_acquisition_rejects_cross_origin_before_any_request(store, limits):
+    transport = FakeTransport(
+        lambda *_args: pytest.fail("cross-origin style config reached the network")
+    )
+
+    with pytest.raises(AcquisitionConfigurationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        ).acquire(
+            candidate(
+                "wfs",
+                remote_name="workspace:roads",
+                config=style_config(
+                    ("style:blue", "workspace:blue"),
+                    endpoint="https://unreviewed.example.net/wms",
+                ),
+            )
+        )
+
+    assert error.value.code == "cross_origin_url"
+    assert transport.calls == []
+
+
+def test_style_acquisition_enforces_bounded_xml_complexity(store, limits):
+    nested = "<Rule>" * 70 + "<Title>x</Title>" + "</Rule>" * 70
+    unsafe = (
+        '<StyledLayerDescriptor version="1.0.0" '
+        'xmlns="http://www.opengis.net/sld"><NamedLayer>'
+        '<Name>workspace:roads</Name><UserStyle><Name>workspace:blue</Name>'
+        f"<FeatureTypeStyle>{nested}</FeatureTypeStyle>"
+        "</UserStyle></NamedLayer></StyledLayerDescriptor>"
+    ).encode()
+
+    def handler(url, _etag, _modified):
+        request = parse_qs(urlsplit(url).query).get("request", [None])[0]
+        if request == "GetCapabilities":
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if request == "GetFeature":
+            return json_response(
+                {
+                    "type": "FeatureCollection",
+                    "numberMatched": 0,
+                    "features": [],
+                }
+            )
+        return Response(unsafe, "application/xml")
+
+    with pytest.raises(AcquisitionLimitError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                remote_name="workspace:roads",
+                config=style_config(("style:blue", "workspace:blue")),
+            )
+        )
+
+    assert error.value.code == "sld_complexity_limit"
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        b'<!DOCTYPE StyledLayerDescriptor SYSTEM "https://evil.example/sld.dtd">',
+        b'<!DOCTYPE StyledLayerDescriptor [<!ENTITY x "unsafe">]>',
+    ],
+)
+def test_style_acquisition_rejects_dtd_and_entity_declarations(
+    store,
+    limits,
+    declaration,
+):
+    unsafe = declaration + sld_payload("workspace:blue")
+
+    def handler(url, _etag, _modified):
+        request = parse_qs(urlsplit(url).query).get("request", [None])[0]
+        if request == "GetCapabilities":
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if request == "GetFeature":
+            return json_response(
+                {
+                    "type": "FeatureCollection",
+                    "numberMatched": 0,
+                    "features": [],
+                }
+            )
+        return Response(unsafe, "application/xml")
+
+    with pytest.raises(AcquisitionValidationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                remote_name="workspace:roads",
+                config=style_config(("style:blue", "workspace:blue")),
+            )
+        )
+
+    assert error.value.code == "unsafe_sld_xml"
+
+
+def test_style_acquisition_limits_declared_style_count_before_network(store, limits):
+    styles = tuple(
+        (f"style:{index:03d}", f"remote_{index:03d}")
+        for index in range(257)
+    )
+    transport = FakeTransport(
+        lambda *_args: pytest.fail("oversized style config reached the network")
+    )
+
+    with pytest.raises(AcquisitionLimitError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        ).acquire(
+            candidate(
+                "wfs",
+                remote_name="workspace:roads",
+                config=style_config(*styles),
+            )
+        )
+
+    assert error.value.code == "style_count_limit"
+    assert transport.calls == []
 
 
 def test_wfs_repeated_nonempty_page_fails_closed_without_manifest(store, limits):
@@ -574,10 +939,18 @@ def test_wcs_honors_conditional_dataset_response_without_partial_blob(store, lim
         assert modified == "Wed, 22 Jul 2026 10:00:00 GMT"
         return Response(status=304, etag='"prior"', last_modified=modified)
 
+    transport = FakeTransport(handler)
     result = ReferenceAcquisitionPipeline(
-        store, limits=limits, downloader_factory=FakeTransport(handler)
+        store, limits=limits, downloader_factory=transport
     ).acquire(
-        candidate("wcs", remote_name="terrain"),
+        candidate(
+            "wcs",
+            remote_name="terrain",
+            config=style_config(
+                ("style:terrain", "terrain_style"),
+                layer_name="terrain",
+            ),
+        ),
         conditional=ConditionalRequest(
             source_url=(
                 "https://data.example.es/service?service=WCS&request=GetCoverage"
@@ -591,6 +964,10 @@ def test_wcs_honors_conditional_dataset_response_without_partial_blob(store, lim
     assert result.not_modified is True
     assert result.manifest_sha256 is None
     assert [item.artifact_kind for item in result.artifacts] == ["capabilities"]
+    assert [
+        parse_qs(urlsplit(call["url"]).query)["request"][0]
+        for call in transport.calls
+    ] == ["GetCapabilities", "GetCoverage"]
     assert list((store.root / "staging").iterdir()) == []
 
 
@@ -625,6 +1002,58 @@ def test_wcs_commits_a_structurally_georeferenced_tiff(store, limits):
     assert dataset.metadata["data_format"] == "geotiff"
     assert dataset.blob.size_bytes == len(geotiff_payload())
     assert result.observed_etag == '"coverage-v1"'
+
+
+def test_wcs_acquires_styles_after_conditional_dataset_success(store, limits):
+    coverage_url = (
+        "https://data.example.es/service?service=WCS&request=GetCoverage"
+        "&version=2.0.1&coverageId=terrain&format=image/tiff"
+    )
+
+    def handler(url, etag, modified):
+        query = parse_qs(urlsplit(url).query)
+        request = query.get("request", [None])[0]
+        if request == "GetCapabilities":
+            assert etag is None
+            return Response(WCS_CAPABILITIES, "application/xml")
+        if request == "GetCoverage":
+            assert etag == '"coverage-v1"'
+            assert modified is None
+            return Response(geotiff_payload(), "image/tiff", etag='"coverage-v2"')
+        assert request == "GetStyles"
+        assert etag is None
+        assert modified is None
+        assert query["layers"] == ["terrain"]
+        assert "styles" not in query
+        return Response(
+            sld_payload("terrain_style", layer_name="terrain"),
+            "application/vnd.ogc.sld+xml",
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wcs",
+            remote_name="terrain",
+            config=style_config(
+                ("style:terrain", "terrain_style"),
+                layer_name="terrain",
+            ),
+        ),
+        conditional=ConditionalRequest(
+            source_url=coverage_url,
+            etag='"coverage-v1"',
+        ),
+    )
+
+    assert result.not_modified is False
+    assert result.observed_etag == '"coverage-v2"'
+    style = next(item for item in result.artifacts if item.role == "style")
+    assert style.metadata["catalog_style_source_key"] == "style:terrain"
+    assert result.stats["style_count"] == 1
 
 
 def test_direct_download_is_content_addressed_and_records_conditional_headers(store, limits):

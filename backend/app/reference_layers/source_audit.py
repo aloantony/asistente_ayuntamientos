@@ -8,12 +8,13 @@ from dataclasses import dataclass
 import json
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.model_registry import register_all_models
 from app.db.session import SessionLocal
 from app.reference_layers.catalog import (
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
 )
 from app.reference_layers.models import (
@@ -103,6 +104,7 @@ def audit_current_catalog_sources(
     layers = list(
         db.scalars(
             select(ReferenceLayer)
+            .options(selectinload(ReferenceLayer.styles))
             .where(
                 ReferenceLayer.provider_key == provider_key,
                 ReferenceLayer.last_seen_snapshot_id == snapshot.id,
@@ -217,6 +219,19 @@ def _layer_definition(record: ReferenceLayer) -> ReferenceLayerDefinition:
         legend_url=record.legend_url,
         metadata_url=record.metadata_url,
         status=record.status,
+        styles=tuple(
+            ReferenceLayerStyleDefinition(
+                source_key=style.source_key,
+                title=style.title,
+                remote_name=style.remote_name,
+                description=style.description,
+                legend_url=style.legend_url,
+                sort_order=style.sort_order,
+                is_default=style.is_default,
+                status=style.status,
+            )
+            for style in record.styles
+        ),
     )
 
 
