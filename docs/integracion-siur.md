@@ -108,6 +108,66 @@ El WMC puede completar estilos, leyendas y versión WMS únicamente sobre capas
 que ya existan y coincidan de forma unívoca en el catálogo completo. Nunca crea
 una capa ausente en `settings.json`; esa ausencia sigue siendo un bloqueo.
 
+## Evidencia persistente de entrega WMS
+
+La autoridad de entrega se separa del catálogo mutable en tres registros
+inmutables y apend-only:
+
+1. Una instantánea técnica GetCapabilities conserva el XML exacto acotado, su
+   SHA-256 bruto, el SHA-256 de una normalización versionada, la versión WMS,
+   los endpoints GET verificados de GetMap, GetLegendGraphic y GetFeatureInfo,
+   sus formatos y un manifiesto por nombre remoto con CRS literales, estado
+   `queryable` y estilos (incluido `""` para
+   el estilo predeterminado implícito).
+2. Una revisión humana conserva el documento JSON exacto revisado, su hash, el
+   hash de la decisión normalizada, revisor, fecha, información y términos de
+   licencia, decisión, el hash de la revisión humana anterior que sustituye y
+   permisos independientes `allow_proxy` y `allow_cache`.
+3. Una atestación enlaza un snapshot y `definition_sha256` exactos del catálogo
+   con una instantánea de capacidades y una revisión. Las atestaciones forman
+   una cadena no bifurcable, con secuencia y hash de la anterior, y registran
+   una activación técnica o una revocación legal explícita. Su hash cubre la
+   transición, las identidades y todos los hashes de evidencia vinculados.
+
+Las tres tablas rechazan `UPDATE` y `DELETE` en PostgreSQL. Insertar evidencia
+técnica que no coincide con el catálogo no cambia por sí solo la autoridad de
+entrega. Solo el extremo válido de la cadena es actual; esto permite reactivar
+de forma explícita una instantánea técnica anterior sin reutilizar su época de
+caché. Una revisión legal distinta debe enlazar la revisión actual y tener una
+fecha posterior; la cadena de revisiones también impide dos revisiones génesis
+o dos sucesoras del mismo documento. Si una revisión nueva sustituye a la
+anterior pero la evidencia técnica aportada todavía no coincide con el
+catálogo, se añade un extremo de revocación: los permisos anteriores de proxy y
+caché dejan de ser efectivos inmediatamente. La misma revisión puede activarse
+después con una instantánea técnica válida. Así no se puede reproducir una
+aprobación antigua ni conservar su permiso de caché por un fallo técnico. Un
+cambio de catálogo invalida automáticamente el extremo anterior porque el
+runtime exige el ID, el contenido normalizado y el `definition_sha256` del
+snapshot vigente.
+
+El importador solo lee archivos locales y empieza en dry-run:
+
+```bash
+python -m app.reference_layers.siur_delivery_import \
+  --capabilities /ruta/GetCapabilities.xml \
+  --license-review /ruta/license-review.json
+```
+
+El informe produce los hashes bruto, normalizado, de revisión, atestación y
+plan. Para `--apply` se deben repetir exactamente los cinco mediante las
+opciones `--approved-*-sha256`. El comando vuelve a bloquear servicio y
+snapshot, recalcula el plan y confirma una única transacción. No acepta URLs,
+no descarga documentos y no escribe `ReferenceService.license_status`,
+`ReferenceService.capabilities_sha256` ni
+`ReferenceLayer.supported_crs_json`.
+
+Una revisión `restricted`, `rejected` o aprobada sin permiso de proxy genera
+una atestación de revocación que pasa a ser el extremo actual y corta la
+entrega antes de Redis o de la red. Nunca se aprueba automáticamente la
+licencia real de SIUR: una aprobación aplicable exige un documento de revisión
+humana auténtico y hash-aprobado; los fixtures automatizados son sintéticos y
+lo declaran.
+
 ## Matriz de paridad
 
 Antes de considerar completa la integración se mantendrá una matriz versionada con una fila por capa y una fila por función del visor. Cada fila tendrá estado, evidencia automatizada, restricciones de licencia y estrategia de entrega:
@@ -129,9 +189,14 @@ organización e identificador interno de capa:
 
 El navegador no puede indicar una URL, un host, un nombre WMS, un `bbox`, un
 CRS, un formato ni parámetros OGC libres. El backend obtiene servicio, capa y
-estilo del snapshot vigente, comprueba `map.view`, pertenencia a la
-organización, estado, capacidad de consulta, compatibilidad con `EPSG:3857` y
-licencia aprobada. Una licencia `pending` o `restricted` no se sirve.
+estilo por IDs, comprueba `map.view`, pertenencia a la organización y exige la
+atestación actual exacta del snapshot vigente. La entrega vuelve a verificar
+el endpoint y versión del servicio, la presencia exacta de capa y estilo (el
+navegador solo aporta `style_id`), `image/png` y el literal `EPSG:3857` contra
+GetCapabilities. La leyenda exige su propio endpoint GetLegendGraphic y PNG
+atestados. Identify exige además capa consultable, endpoint GetFeatureInfo
+verificado y soporte literal de `application/json`. Los campos de inventario
+que reescribe el sincronizador no actúan como autoridad legal o técnica.
 
 En esta primera política el único origen permitido es HTTPS en
 `idecyl.jcyl.es:443` y las rutas WMS/OWS de sus espacios GeoServer. Cada fallo
@@ -147,15 +212,18 @@ cabecera e integridad IHDR son válidas; las teselas deben medir exactamente
 256×256 y las leyendas tienen límites de dimensiones y píxeles.
 
 Teselas y leyendas usan Redis como caché central solo si la política del
-servicio es `on_demand` o `mirror`. La clave es un SHA-256 opaco de la versión
-normalizada del catálogo y de identificadores internos; no contiene la URL ni
-los nombres remotos. Se conserva una ventana obsoleta acotada para poder servir
-la última imagen válida cuando SIUR falle temporalmente. Las respuestas llevan
-ETag, caché privada y `nosniff`. La identificación no se almacena.
-El espacio WMS mantiene además un presupuesto atómico propio de 128 MiB con
-evicción LRU, aunque comparta la instancia Redis con otros dominios. Así una
-secuencia de coordenadas distintas no puede consumir sin límite la memoria
-reservada para colas y estado de la aplicación.
+servicio es `on_demand` o `mirror` y la revisión humana vigente permite caché.
+La clave es un SHA-256 opaco que incluye el hash de atestación e identificadores
+internos; no contiene la URL ni los nombres remotos. Se conserva una ventana
+obsoleta acotada para poder servir la última imagen válida cuando SIUR falle
+temporalmente. Las respuestas llevan ETag, caché privada y `nosniff`. La
+identificación no se almacena. El espacio WMS mantiene un presupuesto atómico
+propio de 128 MiB, contabiliza el payload más 512 bytes conservadores por
+entrada, limita además el namespace a 50.000 entradas y desaloja por LRU al
+superar cualquiera de los dos límites. El GET, toque LRU y saneamiento de
+miembros expirados son una única operación Lua. Así una secuencia de
+coordenadas distintas no puede consumir sin límite la memoria reservada para
+colas y estado de la aplicación.
 
 Esto no es un modo sin Internet municipal: el ayuntamiento sigue necesitando
 conexión con nuestra aplicación. La caché evita que el navegador dependa de una

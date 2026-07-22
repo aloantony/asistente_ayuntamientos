@@ -5,6 +5,7 @@ import os
 import ssl
 import struct
 import zlib
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from urllib.parse import parse_qs, urlsplit
@@ -25,7 +26,11 @@ from app.reference_layers.catalog import (
     ReferenceServiceDefinition,
     apply_catalog_definition,
 )
-from app.reference_layers.models import ReferenceLayer
+from app.reference_layers.models import (
+    ReferenceDeliveryAttestation,
+    ReferenceLayer,
+    ReferenceLicenseReview,
+)
 from app.reference_layers.wms_cache import (
     CACHE_INDEX_KEY,
     CACHE_SIZES_KEY,
@@ -53,6 +58,11 @@ from app.reference_layers.wms_proxy import (
 from app.reference_layers.wms_schemas import (
     InvalidFeatureInfoError,
     parse_feature_collection,
+)
+from wms_evidence_fixtures import (
+    apply_synthetic_delivery_evidence,
+    make_capabilities_xml,
+    make_license_review_document,
 )
 
 
@@ -128,13 +138,28 @@ def make_wms_definition(
     )
 
 
-def seed_wms_layer(db, **definition_options) -> ReferenceLayer:
+def seed_wms_layer(
+    db,
+    *,
+    with_evidence: bool = True,
+    evidence_options: dict | None = None,
+    license_document: bytes | None = None,
+    **definition_options,
+) -> ReferenceLayer:
     apply_catalog_definition(db, make_wms_definition(**definition_options))
-    return db.scalar(
+    layer = db.scalar(
         select(ReferenceLayer).where(
             ReferenceLayer.source_key == "layer:classification"
         )
     )
+    if with_evidence:
+        apply_synthetic_delivery_evidence(
+            db,
+            layer,
+            license_document=license_document,
+            **(evidence_options or {}),
+        )
+    return layer
 
 
 def prepare_viewer(
@@ -385,7 +410,16 @@ def test_auth_scope_license_and_layer_capabilities_block_before_network(
     grant_permissions,
     monkeypatch,
 ) -> None:
-    layer = seed_wms_layer(db, license_status="pending")
+    layer = seed_wms_layer(
+        db,
+        license_status="approved",
+        license_document=make_license_review_document(
+            "service:wms:idecyl:urbanismo",
+            decision="restricted",
+            allow_proxy=False,
+            allow_cache=False,
+        ),
+    )
     allowed_organization, viewer = prepare_viewer(
         db,
         make_user,
@@ -412,6 +446,746 @@ def test_auth_scope_license_and_layer_capabilities_block_before_network(
     assert cross_scope.status_code == 403
 
 
+def test_favorable_legacy_catalog_fields_cannot_deliver_without_attestation(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(
+        db,
+        with_evidence=False,
+        license_status="approved",
+        supported_crs=("EPSG:3857",),
+    )
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unattested delivery must not reach cache or network")
+
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "store_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden)
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Reference layer delivery is not attested"
+    }
+
+
+def test_attested_evidence_overrides_non_authoritative_catalog_claims(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(
+        db,
+        license_status="pending",
+        supported_crs=(),
+    )
+    assert layer.service.capabilities_sha256 is None
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    disable_test_cache(monkeypatch)
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: fake_png_response(),
+    )
+
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+
+
+def test_catalog_change_makes_old_attestation_unusable_before_cache_or_network(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    changed = replace(
+        make_wms_definition(),
+        raw_catalog={"fixture": "new-current-catalog"},
+    )
+    apply_catalog_definition(db, changed)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("stale attestation must fail before cache or network")
+
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "store_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden)
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 503
+
+
+def test_corrupt_current_catalog_definition_hash_fails_closed(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    layer.last_seen_snapshot.normalized_definition_json = {"tampered": True}
+    db.commit()
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("corrupt catalog must fail before cache or network")
+
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "store_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden)
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 503
+
+
+def test_latest_restrictive_human_review_revokes_older_attestation(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    current_attestation = db.scalar(
+        select(ReferenceDeliveryAttestation).order_by(
+            ReferenceDeliveryAttestation.sequence_number.desc()
+        )
+    )
+    current_review = db.get(
+        ReferenceLicenseReview,
+        current_attestation.license_review_id,
+    )
+    restricted = make_license_review_document(
+        layer.service.source_key,
+        decision="restricted",
+        allow_proxy=False,
+        allow_cache=False,
+        reviewer="Synthetic Revocation Reviewer",
+        reviewed_at="2026-07-17T13:30:00Z",
+        supersedes_review_sha256=current_review.review_sha256,
+    )
+    result, plan, _, _ = apply_synthetic_delivery_evidence(
+        db,
+        layer,
+        license_document=restricted,
+    )
+    assert plan.attestable is True
+    assert plan.attestation_kind == "revocation"
+    assert result.attestation_id is not None
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("revoked delivery must fail before cache or network")
+
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden)
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 451
+
+
+def test_superseding_no_cache_review_fails_closed_until_capabilities_match(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    current_attestation = db.scalar(
+        select(ReferenceDeliveryAttestation).order_by(
+            ReferenceDeliveryAttestation.sequence_number.desc()
+        )
+    )
+    current_review = db.get(
+        ReferenceLicenseReview,
+        current_attestation.license_review_id,
+    )
+    no_cache_document = make_license_review_document(
+        layer.service.source_key,
+        allow_cache=False,
+        reviewer="Synthetic No-Cache Reviewer",
+        reviewed_at="2026-07-17T13:30:00Z",
+        supersedes_review_sha256=current_review.review_sha256,
+    )
+    revoked, revoked_plan, _, _ = apply_synthetic_delivery_evidence(
+        db,
+        layer,
+        capabilities_xml=make_capabilities_xml(
+            endpoint="https://idecyl.jcyl.es/geoserver/otro/wms"
+        ),
+        license_document=no_cache_document,
+    )
+    assert revoked_plan.attestation_kind == "revocation"
+    assert revoked.attestation_id is not None
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("revoked delivery must not use Redis or the network")
+
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "store_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden)
+    path = (
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png"
+    )
+    denied = client.get(path, headers=headers_for(viewer))
+    assert denied.status_code == 451
+
+    restored, restored_plan, _, _ = apply_synthetic_delivery_evidence(
+        db,
+        layer,
+        license_document=no_cache_document,
+    )
+    assert restored_plan.attestation_kind == "delivery"
+    assert restored.attestation_id != revoked.attestation_id
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: fake_png_response(),
+    )
+    delivered = client.get(path, headers=headers_for(viewer))
+
+    assert delivered.status_code == 200
+    assert delivered.headers["x-reference-cache"] == "BYPASS"
+
+
+def test_license_cache_permission_is_required_before_any_redis_access(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(
+        db,
+        license_document=make_license_review_document(
+            "service:wms:idecyl:urbanismo",
+            allow_proxy=True,
+            allow_cache=False,
+        ),
+    )
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    def forbidden_cache(*args, **kwargs):
+        raise AssertionError("license-disabled cache must not be accessed")
+
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden_cache)
+    monkeypatch.setattr(wms_routes, "store_cached_wms_response", forbidden_cache)
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: fake_png_response(),
+    )
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-reference-cache"] == "BYPASS"
+
+
+def test_cache_key_is_bound_to_the_current_attestation_hash(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    attestation = db.scalar(
+        select(ReferenceDeliveryAttestation).order_by(
+            ReferenceDeliveryAttestation.id.desc()
+        )
+    )
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    captured = []
+    real_builder = build_wms_cache_key
+
+    def capture_key(parts):
+        captured.append(parts)
+        return real_builder(parts)
+
+    monkeypatch.setattr(wms_routes, "build_wms_cache_key", capture_key)
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", lambda key: None)
+    monkeypatch.setattr(
+        wms_routes,
+        "store_cached_wms_response",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: fake_png_response(),
+    )
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    assert captured == [
+        {
+            "coordinates": {"x": 0, "y": 0, "z": 0},
+            "attestation_sha256": attestation.attestation_sha256,
+            "layer_id": layer.id,
+            "operation": "tile",
+            "provider_key": "siur",
+            "style_id": layer.styles[0].id,
+        }
+    ]
+
+
+def test_attested_endpoint_version_and_style_must_match_exactly(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    layer.service.version = "1.1.1"
+    db.commit()
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: (_ for _ in ()).throw(
+            AssertionError("mismatched evidence must block upstream")
+        ),
+    )
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+    assert response.status_code == 409
+
+
+def test_style_id_resolves_to_the_exact_case_sensitive_upstream_style(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    definition = make_wms_definition()
+    layer_definition = definition.layers[1]
+    exact_styles = (
+        "Plau_Cyl_Clasificacion_Color",
+        "Plau_Cyl_Clasificacion_Trama",
+    )
+    styled_layer = replace(
+        layer_definition,
+        styles=tuple(
+            replace(style, remote_name=remote_name)
+            for style, remote_name in zip(
+                layer_definition.styles,
+                exact_styles,
+                strict=True,
+            )
+        ),
+    )
+    apply_catalog_definition(
+        db,
+        replace(definition, layers=(definition.layers[0], styled_layer)),
+    )
+    layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.source_key == "layer:classification"
+        )
+    )
+    apply_synthetic_delivery_evidence(db, layer, styles=exact_styles)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    disable_test_cache(monkeypatch)
+    captured = []
+
+    def capture(request):
+        captured.append(request)
+        return fake_png_response()
+
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", capture)
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        params={"style_id": layer.styles[0].id},
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    assert parse_qs(urlsplit(captured[0].target).query)["STYLES"] == [
+        exact_styles[0]
+    ]
+
+
+def test_catalog_exposes_only_attested_effective_delivery_availability(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    layer = seed_wms_layer(db)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    response = client.get(
+        "/reference-layers/catalog",
+        params={"organization_id": organization.id, "provider_key": "siur"},
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    serialized = response.text
+    delivered = next(
+        item for item in response.json()["layers"] if item["id"] == layer.id
+    )
+    assert delivered["delivery_available"] is True
+    assert delivered["legend_available"] is True
+    assert delivered["identify_available"] is True
+    assert delivered["available_style_ids"] == [
+        style.id for style in layer.styles
+    ]
+    for secret in (
+        "remote_name",
+        "attestation_sha256",
+        "reviewer",
+        "get_map_endpoint",
+        "license_status",
+    ):
+        assert secret not in serialized
+
+
+def test_catalog_does_not_advertise_delivery_for_a_disabled_service(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    layer = seed_wms_layer(db)
+    layer.service.status = "disabled"
+    db.commit()
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    response = client.get(
+        "/reference-layers/catalog",
+        params={"organization_id": organization.id, "provider_key": "siur"},
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    delivered = next(
+        item for item in response.json()["layers"] if item["id"] == layer.id
+    )
+    assert delivered["delivery_available"] is False
+    assert delivered["delivery_blocker"] == "not_deliverable"
+
+
+def test_explicit_style_legend_availability_is_independent_of_default_style(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(
+        db,
+        evidence_options={"styles": ("plau_cyl_clasificacion_trama",)},
+    )
+    default_style = next(style for style in layer.styles if style.is_default)
+    explicit_style = next(style for style in layer.styles if not style.is_default)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+
+    response = client.get(
+        "/reference-layers/catalog",
+        params={"organization_id": organization.id, "provider_key": "siur"},
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    delivered = next(item for item in body["layers"] if item["id"] == layer.id)
+    styles = {item["id"]: item for item in body["styles"]}
+    assert delivered["delivery_available"] is False
+    assert delivered["legend_available"] is False
+    assert delivered["available_style_ids"] == [explicit_style.id]
+    assert styles[default_style.id]["legend_available"] is False
+    assert styles[explicit_style.id]["legend_available"] is True
+
+    disable_test_cache(monkeypatch)
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: fake_png_response(),
+    )
+    legend = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/legend.png",
+        params={"style_id": explicit_style.id},
+        headers=headers_for(viewer),
+    )
+    assert legend.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "evidence_options",
+    [
+        {"styles": ()},
+        {"map_formats": ("image/jpeg",)},
+    ],
+)
+def test_attested_getmap_requires_png_and_the_exact_catalog_style(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+    evidence_options,
+) -> None:
+    layer = seed_wms_layer(db, evidence_options=evidence_options)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: (_ for _ in ()).throw(
+            AssertionError("unattested capability must block upstream")
+        ),
+    )
+
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 409
+
+
+def test_legend_requires_its_own_attested_png_operation(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db, evidence_options={"legend_formats": ()})
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    disable_test_cache(monkeypatch)
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: fake_png_response(),
+    )
+    prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
+
+    tile = client.get(f"{prefix}/tiles/0/0/0.png", headers=headers_for(viewer))
+    legend = client.get(f"{prefix}/legend.png", headers=headers_for(viewer))
+
+    assert tile.status_code == 200
+    assert legend.status_code == 409
+
+
+def test_attested_getmap_endpoint_must_match_the_current_service_exactly(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    layer.service.base_url = "https://idecyl.jcyl.es/geoserver/otro/wms"
+    db.commit()
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: (_ for _ in ()).throw(
+            AssertionError("mismatched endpoint must block upstream")
+        ),
+    )
+
+    response = client.get(
+        f"/organizations/{organization.id}/reference-layers/{layer.id}"
+        "/tiles/0/0/0.png",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "evidence_options",
+    [
+        {"queryable": False},
+        {"feature_info_formats": ()},
+    ],
+)
+def test_identify_requires_attested_queryability_endpoint_and_json(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+    evidence_options,
+) -> None:
+    layer = seed_wms_layer(db, evidence_options=evidence_options)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    disable_test_cache(monkeypatch)
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: fake_png_response(),
+    )
+    prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
+
+    tile = client.get(f"{prefix}/tiles/0/0/0.png", headers=headers_for(viewer))
+    identify = client.get(
+        f"{prefix}/identify",
+        params={"pixel_x": 1, "pixel_y": 1, "x": 0, "y": 0, "z": 0},
+        headers=headers_for(viewer),
+    )
+
+    assert tile.status_code == 200
+    assert identify.status_code == 409
+    assert identify.json() == {"detail": "Layer is not queryable"}
+
+
 def test_tile_route_requires_web_mercator_support(
     client,
     db,
@@ -419,7 +1193,11 @@ def test_tile_route_requires_web_mercator_support(
     make_organization,
     grant_permissions,
 ) -> None:
-    layer = seed_wms_layer(db, supported_crs=("EPSG:25830",))
+    layer = seed_wms_layer(
+        db,
+        supported_crs=("EPSG:25830", "EPSG:3857"),
+        evidence_options={"crs": ("EPSG:25830",)},
+    )
     organization, viewer = prepare_viewer(
         db,
         make_user,

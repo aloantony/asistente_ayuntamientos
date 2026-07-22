@@ -28,6 +28,7 @@ from app.reference_layers.schemas import (
     ReferenceLayerStyleRead,
     ReferenceServiceRead,
 )
+from app.reference_layers.wms_delivery import catalog_delivery_availability
 from app.reference_layers.wms_routes import router as wms_router
 from app.users.models import User
 
@@ -104,6 +105,14 @@ def get_reference_catalog(
             )
         }
 
+    delivery_availability = catalog_delivery_availability(
+        db,
+        snapshot=snapshot,
+        services=services,
+        layers=layers,
+        styles=styles,
+    )
+
     layer_reads: list[ReferenceLayerRead] = []
     for layer in layers:
         setting = settings.get(layer.id)
@@ -114,12 +123,25 @@ def get_reference_catalog(
                 effective_visible = setting.visible
             if setting.opacity is not None:
                 effective_opacity = Decimal(setting.opacity)
+        availability = delivery_availability[layer.id]
         layer_reads.append(
             ReferenceLayerRead.model_validate(layer).model_copy(
                 update={
                     "effective_visible": effective_visible,
                     "effective_opacity": float(effective_opacity),
-                    "legend_available": layer.legend_url is not None,
+                    "delivery_available": (
+                        availability.delivery_available
+                    ),
+                    "identify_available": (
+                        availability.identify_available
+                    ),
+                    "delivery_blocker": availability.delivery_blocker,
+                    "available_style_ids": list(
+                        availability.available_style_ids
+                    ),
+                    "legend_available": (
+                        availability.legend_available
+                    ),
                     "metadata_available": layer.metadata_url is not None,
                 }
             )
@@ -132,7 +154,14 @@ def get_reference_catalog(
         layers=layer_reads,
         styles=[
             ReferenceLayerStyleRead.model_validate(item).model_copy(
-                update={"legend_available": item.legend_url is not None}
+                update={
+                    "legend_available": (
+                        item.id
+                        in delivery_availability[
+                            item.layer_id
+                        ].available_legend_style_ids
+                    )
+                }
             )
             for item in styles
         ],

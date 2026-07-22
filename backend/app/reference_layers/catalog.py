@@ -29,6 +29,7 @@ RENDERERS = {"raster_tile", "vector_tile"}
 DELIVERY_MODES = {"proxy", "mirror"}
 PROVIDER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$")
 SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+REMOTE_STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
 _CATALOG_PROVIDER_LOCK_DOMAIN = b"asistente/reference-catalog-apply/v1\0"
 
 
@@ -60,6 +61,7 @@ class ReferenceServiceDefinition:
 class ReferenceLayerStyleDefinition:
     source_key: str
     title: str
+    remote_name: str | None = None
     description: str | None = None
     legend_url: str | None = None
     sort_order: int = 0
@@ -175,7 +177,14 @@ def _lock_catalog_provider(db: Session, provider_key: str) -> None:
 def canonical_definition_sha256(
     definition: ReferenceCatalogDefinition,
 ) -> str:
-    payload = normalized_catalog_definition(definition)
+    return canonical_normalized_definition_sha256(
+        normalized_catalog_definition(definition)
+    )
+
+
+def canonical_normalized_definition_sha256(
+    payload: dict[str, Any],
+) -> str:
     encoded = json.dumps(
         payload,
         allow_nan=False,
@@ -521,6 +530,7 @@ def apply_catalog_definition(
                         provider_key=definition.provider_key,
                         layer_id=layer.id,
                         source_key=item.source_key,
+                        remote_name=item.remote_name or item.source_key,
                         title=item.title,
                         last_seen_snapshot_id=snapshot.id,
                     )
@@ -657,6 +667,12 @@ def validate_catalog_definition(
                     issues.append(
                         f"Invalid style key: {layer.source_key}|{style.source_key}"
                     )
+                remote_style_name = style.remote_name or style.source_key
+                if not REMOTE_STYLE_NAME_RE.fullmatch(remote_style_name):
+                    issues.append(
+                        "Invalid remote style name: "
+                        f"{layer.source_key}|{style.source_key}"
+                    )
                 if not style.title.strip():
                     issues.append(
                         f"Style title is empty: {layer.source_key}|{style.source_key}"
@@ -770,6 +786,8 @@ def _normalized_layer_definition(
         payload["styles"],
         key=lambda style: style["source_key"],
     )
+    for style in payload["styles"]:
+        style["remote_name"] = style["remote_name"] or style["source_key"]
     return payload
 
 
@@ -907,6 +925,7 @@ def _service_definition_signature(item: ReferenceServiceDefinition) -> tuple:
 
 def _style_definition_signature(item: ReferenceLayerStyleDefinition) -> tuple:
     return (
+        item.remote_name or item.source_key,
         item.title,
         item.description,
         item.legend_url,
@@ -918,6 +937,7 @@ def _style_definition_signature(item: ReferenceLayerStyleDefinition) -> tuple:
 
 def _style_signature(item: ReferenceLayerStyle) -> tuple:
     return (
+        item.remote_name,
         item.title,
         item.description,
         item.legend_url,
@@ -1084,6 +1104,7 @@ def _apply_style_definition(
     style.last_seen_snapshot_id = snapshot_id
     style.layer_id = layer.id
     for name, value in (
+        ("remote_name", item.remote_name or item.source_key),
         ("title", item.title),
         ("description", item.description),
         ("legend_url", item.legend_url),

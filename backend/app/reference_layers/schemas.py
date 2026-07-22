@@ -23,16 +23,9 @@ class ReferenceCatalogSnapshotRead(BaseModel):
 
 class ReferenceServiceRead(BaseModel):
     id: int
-    source_key: str
     title: str
     upstream_protocol: str
-    version: str | None
-    default_crs: str | None
-    default_format: str | None
     attribution: str | None
-    license_name: str | None
-    license_status: str
-    cache_policy: str
     status: str
     updated_at: datetime
 
@@ -47,13 +40,9 @@ class ReferenceLayerRead(BaseModel):
     node_type: str
     title: str
     description: str | None
-    remote_name: str | None
     role: str | None
     renderer: str | None
     delivery_mode: str | None
-    style_name: str | None
-    image_format: str | None
-    supported_crs_json: list[str] | None
     bounds_json: dict[str, Any] | None
     sort_order: int
     default_visible: bool
@@ -64,8 +53,11 @@ class ReferenceLayerRead(BaseModel):
     max_zoom: int | None
     min_scale_denominator: Decimal | None
     max_scale_denominator: Decimal | None
-    queryable: bool
     downloadable: bool
+    delivery_available: bool = False
+    identify_available: bool = False
+    delivery_blocker: str | None = None
+    available_style_ids: list[int] = Field(default_factory=list)
     legend_available: bool = False
     metadata_available: bool = False
     status: str
@@ -77,7 +69,6 @@ class ReferenceLayerRead(BaseModel):
 class ReferenceLayerStyleRead(BaseModel):
     id: int
     layer_id: int
-    source_key: str
     title: str
     description: str | None
     sort_order: int

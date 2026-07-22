@@ -52,6 +52,7 @@ class WmcBounds:
 @dataclass(frozen=True)
 class WmcStyleEvidence:
     source_key: str
+    remote_name: str
     title: str
     selected: bool
     legend_url: str | None
@@ -370,6 +371,7 @@ def augment_catalog_with_wmc_evidence(
                 merged_styles[style.source_key] = ReferenceLayerStyleDefinition(
                     source_key=style.source_key,
                     title=style.title,
+                    remote_name=style.remote_name,
                     legend_url=style.legend_url,
                     sort_order=sort_order,
                     is_default=style.selected,
@@ -467,9 +469,10 @@ def _parse_styles(
     style_keys: set[str] = set()
     selected_count = 0
     for style_element in style_list.findall(_tag("Style")):
-        source_key = _required_text(style_element, "Name")
-        if not TECHNICAL_NAME_RE.fullmatch(source_key):
+        remote_name = _required_text(style_element, "Name")
+        if not TECHNICAL_NAME_RE.fullmatch(remote_name):
             raise SiurWmcError(f"Layer {ordinal}: invalid style name")
+        source_key = remote_name.casefold()
         if source_key in style_keys:
             raise SiurWmcError(f"Layer {ordinal}: duplicate style name")
         style_keys.add(source_key)
@@ -484,6 +487,7 @@ def _parse_styles(
         styles.append(
             WmcStyleEvidence(
                 source_key=source_key,
+                remote_name=remote_name,
                 title=_required_text(style_element, "Title"),
                 selected=selected,
                 legend_url=legend_url,

@@ -98,7 +98,23 @@ def test_complete_reviewed_catalog_yields_definition_and_raw_hash() -> None:
     assert [style.source_key for style in layer.styles] == [
         "urbanismo:plau_cyl_clasificacion_color"
     ]
+    assert layer.styles[0].remote_name == (
+        "urbanismo:plau_cyl_clasificacion_color"
+    )
     assert layer.styles[0].is_default is True
+
+
+def test_style_identity_is_stable_but_remote_name_preserves_exact_case() -> None:
+    document = settings_bytes().replace(
+        b"urbanismo:plau_cyl_clasificacion_color",
+        b"Urbanismo:Plau_Cyl_Clasificacion_Color",
+    )
+
+    analysis = analyze_siur_settings(document, baseline=baseline(document))
+    style = analysis.require_definition().layers[1].styles[0]
+
+    assert style.source_key == "urbanismo:plau_cyl_clasificacion_color"
+    assert style.remote_name == "Urbanismo:Plau_Cyl_Clasificacion_Color"
 
 
 def test_identities_do_not_depend_on_titles_or_order() -> None:

@@ -624,13 +624,17 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     overlay = body["layers"][1]
     assert overlay["effective_visible"] is True
     assert overlay["effective_opacity"] == 0.75
-    assert overlay["legend_available"] is True
+    assert overlay["delivery_available"] is False
+    assert overlay["identify_available"] is False
+    assert overlay["delivery_blocker"] == "attestation_missing"
+    assert overlay["available_style_ids"] == []
+    assert overlay["legend_available"] is False
     assert overlay["metadata_available"] is True
-    assert [style["source_key"] for style in body["styles"]] == [
-        "urbanismo:plau_cyl_clasificacion_color",
-        "urbanismo:plau_cyl_clasificacion_trama",
+    assert [style["title"] for style in body["styles"]] == [
+        "Clasificación por color",
+        "Clasificación por trama",
     ]
-    assert body["styles"][0]["legend_available"] is True
+    assert body["styles"][0]["legend_available"] is False
     serialized = response.text
     assert "base_url" not in serialized
     assert "capabilities_url" not in serialized
@@ -638,6 +642,13 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert "last_error" not in serialized
     assert "legend_url" not in serialized
     assert "options_json" not in serialized
+    assert "remote_name" not in serialized
+    assert "style_name" not in serialized
+    assert "supported_crs_json" not in serialized
+    assert "license_status" not in serialized
+    assert "cache_policy" not in serialized
+    assert "reviewer" not in serialized
+    assert "attestation_sha256" not in serialized
     assert "idecyl.jcyl.es" not in serialized
 
 
@@ -724,6 +735,7 @@ def test_database_rejects_cross_provider_service_and_parent_links(db) -> None:
         ReferenceLayerStyle(
             provider_key="siur",
             source_key="style:cross-layer",
+            remote_name="style:cross-layer",
             title="Invalid cross-provider layer",
             last_seen_snapshot_id=siur_snapshot.id,
             layer_id=other_group.id,
@@ -800,6 +812,7 @@ def test_database_allows_only_one_default_style_per_layer(db) -> None:
         ReferenceLayerStyle(
             provider_key="siur",
             source_key="urbanismo:second-default",
+            remote_name="urbanismo:second-default",
             title="Invalid second default",
             last_seen_snapshot_id=snapshot.id,
             layer_id=overlay.id,

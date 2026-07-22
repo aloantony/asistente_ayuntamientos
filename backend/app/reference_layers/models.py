@@ -6,16 +6,20 @@ from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    DDL,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    event,
+    func,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -69,6 +73,14 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
             "provider_key",
             "id",
             name="uq_reference_catalog_snapshots_provider_id",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            "definition_sha256",
+            name=(
+                "uq_reference_catalog_snapshots_provider_id_definition"
+            ),
         ),
         Index(
             "uq_reference_catalog_snapshots_current_provider",
@@ -481,7 +493,7 @@ class ReferenceLayerStyle(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint(
             "btrim(provider_key) <> '' and btrim(source_key) <> '' "
-            "and btrim(title) <> ''",
+            "and btrim(remote_name) <> '' and btrim(title) <> ''",
             name="ck_reference_layer_styles_identity_nonempty",
         ),
         CheckConstraint(
@@ -546,6 +558,7 @@ class ReferenceLayerStyle(TimestampMixin, Base):
     layer_id: Mapped[int] = mapped_column(nullable=False)
     provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
     source_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    remote_name: Mapped[str] = mapped_column(String(255), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     legend_url: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -582,6 +595,387 @@ class ReferenceLayerStyle(TimestampMixin, Base):
         back_populates="styles",
         foreign_keys=[layer_id],
         primaryjoin="ReferenceLayerStyle.layer_id == ReferenceLayer.id",
+    )
+
+
+class ReferenceWMSCapabilitiesSnapshot(Base):
+    __tablename__ = "reference_wms_capabilities_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> ''",
+            name="ck_reference_wms_capabilities_provider_nonempty",
+        ),
+        CheckConstraint(
+            "raw_size_bytes between 1 and 4194304 "
+            "and raw_size_bytes = octet_length(raw_xml)",
+            name="ck_reference_wms_capabilities_raw_size",
+        ),
+        CheckConstraint(
+            "raw_sha256 ~ '^[0-9a-f]{64}$' "
+            "and normalized_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_wms_capabilities_hashes",
+        ),
+        CheckConstraint(
+            "normalization_version = 'siur-wms-capabilities-v1'",
+            name="ck_reference_wms_capabilities_normalization",
+        ),
+        CheckConstraint(
+            "wms_version in ('1.1.1', '1.3.0')",
+            name="ck_reference_wms_capabilities_version",
+        ),
+        CheckConstraint(
+            "get_map_endpoint like 'https://%' and "
+            "(get_legend_endpoint is null or "
+            "get_legend_endpoint like 'https://%') and "
+            "(get_feature_info_endpoint is null or "
+            "get_feature_info_endpoint like 'https://%')",
+            name="ck_reference_wms_capabilities_endpoints",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "service_id",
+            "raw_sha256",
+            "normalized_sha256",
+            name="uq_reference_wms_capabilities_content",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "service_id",
+            "id",
+            name="uq_reference_wms_capabilities_provider_service_id",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "service_id"],
+            ["reference_services.provider_key", "reference_services.id"],
+            name="fk_reference_wms_capabilities_provider_service",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_wms_capabilities_service_created",
+            "provider_key",
+            "service_id",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    service_id: Mapped[int] = mapped_column(nullable=False)
+    raw_xml: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    raw_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    wms_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    get_map_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    get_legend_endpoint: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    get_feature_info_endpoint: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    get_map_formats_json: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    get_legend_formats_json: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    get_feature_info_formats_json: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    layer_manifest_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceLicenseReview(Base):
+    __tablename__ = "reference_license_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> '' and btrim(reviewer) <> '' "
+            "and btrim(license_name) <> '' and btrim(license_terms) <> ''",
+            name="ck_reference_license_reviews_required_text",
+        ),
+        CheckConstraint(
+            "document_size_bytes between 1 and 262144 "
+            "and document_size_bytes = octet_length(reviewed_document)",
+            name="ck_reference_license_reviews_document_size",
+        ),
+        CheckConstraint(
+            "evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "and review_sha256 ~ '^[0-9a-f]{64}$' and "
+            "(supersedes_review_sha256 is null or "
+            "supersedes_review_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_reference_license_reviews_hashes",
+        ),
+        CheckConstraint(
+            "decision in ('approved', 'restricted', 'rejected')",
+            name="ck_reference_license_reviews_decision",
+        ),
+        CheckConstraint(
+            "license_url is null or license_url like 'https://%'",
+            name="ck_reference_license_reviews_license_url",
+        ),
+        CheckConstraint(
+            "not allow_cache or allow_proxy",
+            name="ck_reference_license_reviews_cache_requires_proxy",
+        ),
+        CheckConstraint(
+            "(not allow_proxy and not allow_cache) or decision = 'approved'",
+            name="ck_reference_license_reviews_permissions_approved",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "service_id",
+            "evidence_sha256",
+            "review_sha256",
+            name="uq_reference_license_reviews_content",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "service_id",
+            "id",
+            name="uq_reference_license_reviews_provider_service_id",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "service_id",
+            "review_sha256",
+            name="uq_reference_license_reviews_review_hash",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "service_id"],
+            ["reference_services.provider_key", "reference_services.id"],
+            name="fk_reference_license_reviews_provider_service",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "service_id", "supersedes_review_sha256"],
+            [
+                "reference_license_reviews.provider_key",
+                "reference_license_reviews.service_id",
+                "reference_license_reviews.review_sha256",
+            ],
+            name="fk_reference_license_reviews_supersedes",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_license_reviews_service_reviewed",
+            "provider_key",
+            "service_id",
+            "id",
+        ),
+        Index(
+            "uq_reference_license_reviews_genesis",
+            "provider_key",
+            "service_id",
+            unique=True,
+            postgresql_where=text("supersedes_review_sha256 is null"),
+        ),
+        Index(
+            "uq_reference_license_reviews_successor",
+            "provider_key",
+            "service_id",
+            "supersedes_review_sha256",
+            unique=True,
+            postgresql_where=text("supersedes_review_sha256 is not null"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    service_id: Mapped[int] = mapped_column(nullable=False)
+    reviewed_document: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    document_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    supersedes_review_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    license_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    license_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    license_terms: Mapped[str] = mapped_column(Text, nullable=False)
+    allow_proxy: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default="false",
+        nullable=False,
+    )
+    allow_cache: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default="false",
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceDeliveryAttestation(Base):
+    __tablename__ = "reference_delivery_attestations"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> ''",
+            name="ck_reference_delivery_attestations_provider_nonempty",
+        ),
+        CheckConstraint(
+            "catalog_definition_sha256 ~ '^[0-9a-f]{64}$' "
+            "and attestation_sha256 ~ '^[0-9a-f]{64}$' and "
+            "(previous_attestation_sha256 is null or "
+            "previous_attestation_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_reference_delivery_attestations_hashes",
+        ),
+        CheckConstraint(
+            "attestation_kind in ('delivery', 'revocation')",
+            name="ck_reference_delivery_attestations_kind",
+        ),
+        CheckConstraint(
+            "(sequence_number = 1 and previous_attestation_id is null and "
+            "previous_attestation_sha256 is null) or "
+            "(sequence_number > 1 and previous_attestation_id is not null "
+            "and previous_attestation_sha256 is not null)",
+            name="ck_reference_delivery_attestations_chain",
+        ),
+        UniqueConstraint(
+            "attestation_sha256",
+            name="uq_reference_delivery_attestations_hash",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "service_id",
+            "sequence_number",
+            name="uq_reference_delivery_attestations_sequence",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "service_id",
+            "id",
+            "attestation_sha256",
+            name="uq_reference_delivery_attestations_chain_target",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "service_id"],
+            ["reference_services.provider_key", "reference_services.id"],
+            name="fk_reference_delivery_attestations_provider_service",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "catalog_snapshot_id",
+                "catalog_definition_sha256",
+            ],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+                "reference_catalog_snapshots.definition_sha256",
+            ],
+            name="fk_reference_delivery_attestations_catalog",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "service_id", "capabilities_snapshot_id"],
+            [
+                "reference_wms_capabilities_snapshots.provider_key",
+                "reference_wms_capabilities_snapshots.service_id",
+                "reference_wms_capabilities_snapshots.id",
+            ],
+            name="fk_reference_delivery_attestations_capabilities",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "service_id", "license_review_id"],
+            [
+                "reference_license_reviews.provider_key",
+                "reference_license_reviews.service_id",
+                "reference_license_reviews.id",
+            ],
+            name="fk_reference_delivery_attestations_license",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "service_id",
+                "previous_attestation_id",
+                "previous_attestation_sha256",
+            ],
+            [
+                "reference_delivery_attestations.provider_key",
+                "reference_delivery_attestations.service_id",
+                "reference_delivery_attestations.id",
+                "reference_delivery_attestations.attestation_sha256",
+            ],
+            name="fk_reference_delivery_attestations_previous",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_delivery_attestations_current_lookup",
+            "provider_key",
+            "service_id",
+            "sequence_number",
+        ),
+        Index(
+            "uq_reference_delivery_attestations_genesis",
+            "provider_key",
+            "service_id",
+            unique=True,
+            postgresql_where=text("previous_attestation_id is null"),
+        ),
+        Index(
+            "uq_reference_delivery_attestations_successor",
+            "provider_key",
+            "service_id",
+            "previous_attestation_id",
+            unique=True,
+            postgresql_where=text("previous_attestation_id is not null"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    service_id: Mapped[int] = mapped_column(nullable=False)
+    catalog_snapshot_id: Mapped[int] = mapped_column(nullable=False)
+    catalog_definition_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    capabilities_snapshot_id: Mapped[int] = mapped_column(nullable=False)
+    license_review_id: Mapped[int] = mapped_column(nullable=False)
+    attestation_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_attestation_id: Mapped[int | None] = mapped_column(nullable=True)
+    previous_attestation_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    attestation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
 
@@ -627,3 +1021,68 @@ class OrganizationReferenceLayerSetting(TimestampMixin, Base):
         back_populates="organization_settings",
     )
     updated_by: Mapped["User | None"] = relationship("User")
+
+
+def _install_immutable_evidence_trigger(
+    table: Any,
+    *,
+    function_name: str,
+    trigger_name: str,
+) -> None:
+    event.listen(
+        table,
+        "after_create",
+        DDL(
+            f"""
+            CREATE OR REPLACE FUNCTION {function_name}()
+            RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'reference delivery evidence is immutable'
+                    USING ERRCODE = '55000';
+            END;
+            $$ LANGUAGE plpgsql;
+            """
+        ).execute_if(dialect="postgresql"),
+    )
+    event.listen(
+        table,
+        "after_create",
+        DDL(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE UPDATE OR DELETE ON {table.name}
+            FOR EACH ROW EXECUTE FUNCTION {function_name}();
+            """
+        ).execute_if(dialect="postgresql"),
+    )
+    event.listen(
+        table,
+        "before_drop",
+        DDL(
+            f"DROP TRIGGER IF EXISTS {trigger_name} ON {table.name}"
+        ).execute_if(dialect="postgresql"),
+    )
+    event.listen(
+        table,
+        "after_drop",
+        DDL(
+            f"DROP FUNCTION IF EXISTS {function_name}()"
+        ).execute_if(dialect="postgresql"),
+    )
+
+
+_install_immutable_evidence_trigger(
+    ReferenceWMSCapabilitiesSnapshot.__table__,
+    function_name="prevent_reference_wms_capabilities_mutation",
+    trigger_name="trg_reference_wms_capabilities_immutable",
+)
+_install_immutable_evidence_trigger(
+    ReferenceLicenseReview.__table__,
+    function_name="prevent_reference_license_review_mutation",
+    trigger_name="trg_reference_license_reviews_immutable",
+)
+_install_immutable_evidence_trigger(
+    ReferenceDeliveryAttestation.__table__,
+    function_name="prevent_reference_delivery_attestation_mutation",
+    trigger_name="trg_reference_delivery_attestations_immutable",
+)
