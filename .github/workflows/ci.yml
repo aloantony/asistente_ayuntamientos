@@ -43,6 +43,7 @@ jobs:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
       SECRET_KEY: ci-only-secret-key-with-at-least-32-characters
       DOCUMENT_STORAGE_ROOT: /tmp/asistente-ayuntamientos-ci-documents
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
     defaults:
       run:
         working-directory: backend
@@ -52,8 +53,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build and start PostgreSQL with PostGIS and pgvector
-        run: docker compose -f ../docker-compose.yml up -d --build --wait postgres
+      - name: Build and start PostgreSQL with PostGIS, pgvector, and Redis
+        run: docker compose -f ../docker-compose.yml up -d --build --wait postgres redis
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0

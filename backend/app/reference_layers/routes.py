@@ -28,9 +28,11 @@ from app.reference_layers.schemas import (
     ReferenceLayerStyleRead,
     ReferenceServiceRead,
 )
+from app.reference_layers.wms_routes import router as wms_router
 from app.users.models import User
 
 router = APIRouter(tags=["reference-layers"])
+router.include_router(wms_router)
 
 
 @router.get(
