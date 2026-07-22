@@ -186,6 +186,20 @@ def _validate_image(body: bytes, archive_format: str) -> str:
     return content_type
 
 
+def validate_tile_image(body: bytes, archive_format: str) -> str:
+    """Validate one 256px archive image during ingestion.
+
+    Delivery calls the same implementation after promotion.  Keeping this
+    public wrapper avoids validation drift between the write and read paths.
+    """
+
+    if not isinstance(body, bytes) or not 0 < len(body) <= MAX_TILE_BYTES:
+        raise InvalidLocalTileArchiveError("local tile bytes are invalid")
+    if archive_format not in {"png", "jpg"}:
+        raise InvalidLocalTileArchiveError("local tile format is unsupported")
+    return _validate_image(body, archive_format)
+
+
 def _png_dimensions(body: bytes) -> tuple[int, int]:
     if (
         len(body) < 33
