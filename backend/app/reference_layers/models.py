@@ -1115,8 +1115,18 @@ class ReferenceSyncRun(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint(
             "source_definition_sha256 ~ '^[0-9a-f]{64}$' and attempt_no > 0 "
-            "and expected_active_generation >= 0",
+            "and expected_active_generation >= 0 and fallback_depth >= 0",
             name="ck_reference_sync_runs_identity",
+        ),
+        CheckConstraint(
+            "(parent_run_id is null and fallback_depth = 0) or "
+            "(parent_run_id is not null and fallback_depth > 0 and "
+            "trigger_kind = 'retry')",
+            name="ck_reference_sync_runs_fallback_chain",
+        ),
+        CheckConstraint(
+            "parent_run_id is null or parent_run_id <> id",
+            name="ck_reference_sync_runs_parent_not_self",
         ),
         CheckConstraint(
             "trigger_kind in ('scheduled', 'manual', 'retry', 'backfill')",
@@ -1165,11 +1175,50 @@ class ReferenceSyncRun(TimestampMixin, Base):
             "id",
             name="uq_reference_sync_runs_source_id",
         ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "id",
+            name="uq_reference_sync_runs_layer_id",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id", "source_id"],
+            [
+                "reference_layer_sources.provider_key",
+                "reference_layer_sources.layer_id",
+                "reference_layer_sources.id",
+            ],
+            name="fk_reference_sync_runs_layer_source",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id", "parent_run_id"],
+            [
+                "reference_sync_runs.provider_key",
+                "reference_sync_runs.layer_id",
+                "reference_sync_runs.id",
+            ],
+            name="fk_reference_sync_runs_parent",
+            ondelete="RESTRICT",
+        ),
         Index(
             "uq_reference_sync_runs_open_source",
             "source_id",
             unique=True,
             postgresql_where=text("status in ('queued', 'running')"),
+        ),
+        Index(
+            "uq_reference_sync_runs_open_layer",
+            "provider_key",
+            "layer_id",
+            unique=True,
+            postgresql_where=text("status in ('queued', 'running')"),
+        ),
+        Index(
+            "uq_reference_sync_runs_fallback_child",
+            "parent_run_id",
+            unique=True,
+            postgresql_where=text("parent_run_id is not null"),
         ),
         Index(
             "ix_reference_sync_runs_queued",
@@ -1184,13 +1233,31 @@ class ReferenceSyncRun(TimestampMixin, Base):
             postgresql_where=text("status = 'running'"),
         ),
         Index("ix_reference_sync_runs_source_history", "source_id", "id"),
+        Index(
+            "ix_reference_sync_runs_layer_history",
+            "provider_key",
+            "layer_id",
+            "id",
+        ),
         Index("ix_reference_sync_runs_requested_by", "requested_by_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
     source_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("reference_layer_sources.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    parent_run_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    fallback_depth: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
         nullable=False,
     )
     requested_by_id: Mapped[int | None] = mapped_column(

@@ -43,7 +43,7 @@ from app.reference_layers.source_discovery import (
 )
 
 AUTO_SOURCE_PREFIX = "auto:"
-BOOTSTRAP_PLAN_SCHEMA = "siur-mirror-source-bootstrap-v1"
+BOOTSTRAP_PLAN_SCHEMA = "siur-mirror-source-bootstrap-v2"
 PROMOTION_EVENT_SCHEMA = "siur-mirror-promotion-event-v1"
 _MIRROR_SOURCE_LOCK_DOMAIN = b"asistente/reference-mirror-sources/v1\0"
 _MIRROR_LAYER_LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
@@ -90,6 +90,7 @@ class PlannedMirrorSource:
     config_json: dict[str, Any]
     definition_sha256: str
     priority: int
+    is_primary: bool
 
     def identity(self) -> dict[str, Any]:
         return {
@@ -104,6 +105,7 @@ class PlannedMirrorSource:
             "config_json": self.config_json,
             "definition_sha256": self.definition_sha256,
             "priority": self.priority,
+            "is_primary": self.is_primary,
         }
 
 
@@ -234,6 +236,10 @@ def build_mirror_bootstrap_plan(
             raise MirrorBootstrapError(
                 f"layer {layer.source_key!r} has no acquisition candidate"
             )
+        preferred_source_key = min(
+            candidates,
+            key=lambda item: (item.priority, item.source_key),
+        ).source_key
         for candidate in candidates:
             source_format = candidate.config.get("format")
             if source_format is not None and not isinstance(source_format, str):
@@ -265,6 +271,7 @@ def build_mirror_bootstrap_plan(
                     config_json=candidate.config,
                     definition_sha256=_canonical_sha256(stored_definition),
                     priority=candidate.priority,
+                    is_primary=candidate.source_key == preferred_source_key,
                 )
             )
     planned.sort(key=lambda item: (item.layer_id, item.priority, item.source_key))
@@ -368,6 +375,33 @@ def apply_mirror_bootstrap_plan(
             )
         )
         planned_keys: set[tuple[int, str]] = set()
+        requires_update: set[tuple[int, str]] = set()
+        for item in reviewed_plan.sources:
+            key = (item.layer_id, item.source_key)
+            record = existing.get(key)
+            if record is not None and not _source_matches_plan(
+                record,
+                item,
+                expected_enabled=(
+                    item.layer_id
+                    not in administratively_disabled_layer_ids
+                ),
+            ):
+                requires_update.add(key)
+
+        planned_layer_ids = {item.layer_id for item in reviewed_plan.sources}
+        if planned_layer_ids:
+            db.execute(
+                update(ReferenceLayerSource)
+                .where(
+                    ReferenceLayerSource.provider_key
+                    == reviewed_plan.provider_key,
+                    ReferenceLayerSource.layer_id.in_(planned_layer_ids),
+                    ReferenceLayerSource.is_primary.is_(True),
+                )
+                .values(is_primary=False),
+                execution_options={"synchronize_session": "fetch"},
+            )
         created = 0
         updated_count = 0
         for item in reviewed_plan.sources:
@@ -392,32 +426,32 @@ def apply_mirror_bootstrap_plan(
                             item.layer_id
                             not in administratively_disabled_layer_ids
                         ),
-                        is_primary=False,
+                        is_primary=(
+                            item.is_primary
+                            and item.layer_id
+                            not in administratively_disabled_layer_ids
+                        ),
                         priority=item.priority,
                     )
                 )
                 created += 1
-            elif not _source_matches_plan(
-                record,
-                item,
-                expected_enabled=(
-                    item.layer_id not in administratively_disabled_layer_ids
-                ),
-            ):
-                record.protocol = item.protocol
-                record.target_kind = item.target_kind
-                record.endpoint_url = item.endpoint_url
-                record.remote_name = item.remote_name
-                record.source_format = item.source_format
-                record.sync_strategy = item.sync_strategy
-                record.config_json = item.config_json
-                record.definition_sha256 = item.definition_sha256
-                record.enabled = (
+            else:
+                expected_enabled = (
                     item.layer_id not in administratively_disabled_layer_ids
                 )
-                record.is_primary = False
-                record.priority = item.priority
-                updated_count += 1
+                if key in requires_update:
+                    record.protocol = item.protocol
+                    record.target_kind = item.target_kind
+                    record.endpoint_url = item.endpoint_url
+                    record.remote_name = item.remote_name
+                    record.source_format = item.source_format
+                    record.sync_strategy = item.sync_strategy
+                    record.config_json = item.config_json
+                    record.definition_sha256 = item.definition_sha256
+                    record.enabled = expected_enabled
+                    record.priority = item.priority
+                    updated_count += 1
+                record.is_primary = item.is_primary and expected_enabled
 
         deactivated = 0
         for key, record in existing.items():
@@ -447,14 +481,16 @@ def enqueue_due_sources(
     now: datetime | None = None,
     limit: int = 100,
 ) -> tuple[int, ...]:
-    """Queue due enabled sources once, skipping rows owned by another caller."""
+    """Queue only preferred sources, with at most one open run per layer."""
 
     moment = _moment(now)
     if not 1 <= limit <= 10_000:
         raise MirrorLifecycleError("enqueue limit must be between 1 and 10000")
     open_run = exists(
         select(ReferenceSyncRun.id).where(
-            ReferenceSyncRun.source_id == ReferenceLayerSource.id,
+            ReferenceSyncRun.provider_key
+            == ReferenceLayerSource.provider_key,
+            ReferenceSyncRun.layer_id == ReferenceLayerSource.layer_id,
             ReferenceSyncRun.status.in_(("queued", "running")),
         )
     )
@@ -468,11 +504,12 @@ def enqueue_due_sources(
         )
     )
     try:
-        sources = list(
+        candidate_ids = list(
             db.scalars(
-                select(ReferenceLayerSource)
+                select(ReferenceLayerSource.id)
                 .where(
                     ReferenceLayerSource.enabled.is_(True),
+                    ReferenceLayerSource.is_primary.is_(True),
                     ReferenceLayerSource.sync_strategy != "manual",
                     ReferenceLayerSource.next_check_at <= moment,
                     ~open_run,
@@ -483,47 +520,77 @@ def enqueue_due_sources(
                     ReferenceLayerSource.id,
                 )
                 .limit(limit)
-                .with_for_update(skip_locked=True)
             )
         )
         run_ids: list[int] = []
-        for source in sources:
+        for source_id in candidate_ids:
+            preliminary = db.get(ReferenceLayerSource, source_id)
+            if preliminary is None:
+                continue
+            _lock_delivery_layer(
+                db,
+                preliminary.provider_key,
+                preliminary.layer_id,
+            )
+            source = db.scalar(
+                select(ReferenceLayerSource)
+                .where(ReferenceLayerSource.id == source_id)
+                .with_for_update()
+            )
+            if source is None or (
+                source.provider_key != preliminary.provider_key
+                or source.layer_id != preliminary.layer_id
+                or not source.enabled
+                or not source.is_primary
+                or source.sync_strategy == "manual"
+                or source.next_check_at > moment
+            ):
+                continue
+            state = db.scalar(
+                select(ReferenceLayerDeliveryState)
+                .where(
+                    ReferenceLayerDeliveryState.provider_key
+                    == source.provider_key,
+                    ReferenceLayerDeliveryState.layer_id == source.layer_id,
+                )
+                .with_for_update()
+            )
+            if state is not None and state.status == "disabled":
+                continue
+            layer_has_open_run = bool(
+                db.scalar(
+                    select(
+                        exists().where(
+                            ReferenceSyncRun.provider_key
+                            == source.provider_key,
+                            ReferenceSyncRun.layer_id == source.layer_id,
+                            ReferenceSyncRun.status.in_(("queued", "running")),
+                        )
+                    )
+                )
+            )
+            if layer_has_open_run:
+                continue
             definition = _stored_source_definition(source)
             if _canonical_sha256(definition) != source.definition_sha256:
                 raise MirrorLifecycleError(
                     f"source {source.id} definition hash is invalid"
                 )
-            state_generation = db.scalar(
-                select(ReferenceLayerDeliveryState.generation).where(
-                    ReferenceLayerDeliveryState.provider_key
-                    == source.provider_key,
-                    ReferenceLayerDeliveryState.layer_id == source.layer_id,
-                )
-            )
-            latest_full = db.scalar(
-                select(func.max(ReferenceSyncRun.finished_at)).where(
-                    ReferenceSyncRun.source_id == source.id,
-                    ReferenceSyncRun.check_mode == "full",
-                    ReferenceSyncRun.status.in_(("unchanged", "succeeded")),
-                )
-            )
-            full_cutoff = moment - timedelta(
-                seconds=source.full_refresh_interval_seconds
-            )
-            check_mode = (
-                "full"
-                if latest_full is None or latest_full <= full_cutoff
-                else "conditional"
-            )
             run = ReferenceSyncRun(
+                provider_key=source.provider_key,
+                layer_id=source.layer_id,
                 source_id=source.id,
+                parent_run_id=None,
+                fallback_depth=0,
                 source_definition_json=definition,
                 source_definition_sha256=source.definition_sha256,
                 trigger_kind="scheduled",
-                check_mode=check_mode,
+                check_mode=_check_mode_for_source(db, source, moment),
                 status="queued",
                 attempt_no=1,
-                expected_active_generation=state_generation or 0,
+                expected_active_generation=(
+                    state.generation if state is not None else 0
+                ),
                 queued_at=moment,
                 stats_json={},
             )
@@ -684,7 +751,35 @@ def finish_sync_run(
         _MAX_STATS_JSON_BYTES,
     )
     try:
+        state: ReferenceLayerDeliveryState | None = None
+        layer_sources: list[ReferenceLayerSource] = []
+        preliminary_source: ReferenceLayerSource | None = None
+        if outcome in {"rejected", "failed"}:
+            preliminary_source = db.get(ReferenceLayerSource, lease.source_id)
+            if preliminary_source is None:
+                raise MirrorLeaseLostError(
+                    "sync-run lease source is absent"
+                )
+            _lock_delivery_layer(
+                db,
+                preliminary_source.provider_key,
+                preliminary_source.layer_id,
+            )
         run = _lock_leased_run(db, lease)
+        if outcome in {"rejected", "failed"}:
+            if (
+                preliminary_source is None
+                or run.provider_key != preliminary_source.provider_key
+                or run.layer_id != preliminary_source.layer_id
+            ):
+                raise MirrorLifecycleError(
+                    "sync-run layer identity is inconsistent"
+                )
+            state, layer_sources = _lock_fallback_context(
+                db,
+                provider_key=run.provider_key,
+                layer_id=run.layer_id,
+            )
         moment = _fresh_lease_moment(db, now)
         _require_live_lease(run, lease, moment)
         run.status = outcome
@@ -698,8 +793,75 @@ def finish_sync_run(
         run.error_code = error_code
         run.error_summary = error_summary
         run.stats_json = stats
+        if outcome in {"rejected", "failed"}:
+            db.flush()
+            _enqueue_fallback_for_locked_failure(
+                db,
+                failed_run=run,
+                state=state,
+                layer_sources=layer_sources,
+                queued_at=moment,
+            )
         db.commit()
         return run.id
+    except Exception:
+        db.rollback()
+        raise
+
+
+def enqueue_fallback_source(
+    db: Session,
+    *,
+    failed_run_id: int,
+    now: datetime | None = None,
+) -> int | None:
+    """Queue the next untried source in one failed run's fallback chain.
+
+    The operation is idempotent for ``failed_run_id``.  A concurrent caller
+    returns the already-created child, while a stale generation, disabled
+    layer, open unrelated run, or exhausted candidate list returns ``None``.
+    """
+
+    try:
+        preliminary = db.get(ReferenceSyncRun, failed_run_id)
+        if preliminary is None:
+            raise MirrorLifecycleError("failed sync run does not exist")
+        _lock_delivery_layer(
+            db,
+            preliminary.provider_key,
+            preliminary.layer_id,
+        )
+        failed_run = db.scalar(
+            select(ReferenceSyncRun)
+            .where(ReferenceSyncRun.id == failed_run_id)
+            .with_for_update()
+        )
+        if failed_run is None or (
+            failed_run.provider_key != preliminary.provider_key
+            or failed_run.layer_id != preliminary.layer_id
+        ):
+            raise MirrorLifecycleError(
+                "failed sync-run layer identity changed"
+            )
+        if failed_run.status not in {"rejected", "failed"}:
+            raise MirrorLifecycleError(
+                "fallback requires a rejected or failed sync run"
+            )
+        state, layer_sources = _lock_fallback_context(
+            db,
+            provider_key=failed_run.provider_key,
+            layer_id=failed_run.layer_id,
+        )
+        moment = _fresh_lease_moment(db, now)
+        fallback_id = _enqueue_fallback_for_locked_failure(
+            db,
+            failed_run=failed_run,
+            state=state,
+            layer_sources=layer_sources,
+            queued_at=moment,
+        )
+        db.commit()
+        return fallback_id
     except Exception:
         db.rollback()
         raise
@@ -1092,6 +1254,7 @@ def reactivate_delivery(
             allow_disabled_source=True,
         )
         source.enabled = True
+        source.is_primary = True
         source.next_check_at = moment
         promotion, generation = _append_promotion(
             db,
@@ -1508,7 +1671,8 @@ def _source_matches_plan(
         "config": planned.config_json,
     }
     return (
-        source.enabled is expected_enabled
+        source.enabled == expected_enabled
+        and source.is_primary == (planned.is_primary and expected_enabled)
         and source.protocol == planned.protocol
         and source.target_kind == planned.target_kind
         and source.endpoint_url == planned.endpoint_url
@@ -1519,6 +1683,191 @@ def _source_matches_plan(
         and source.definition_sha256 == planned.definition_sha256
         and source.priority == planned.priority
         and _canonical_sha256(definition) == planned.definition_sha256
+    )
+
+
+def _lock_fallback_context(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+) -> tuple[
+    ReferenceLayerDeliveryState | None,
+    list[ReferenceLayerSource],
+]:
+    state = db.scalar(
+        select(ReferenceLayerDeliveryState)
+        .where(
+            ReferenceLayerDeliveryState.provider_key == provider_key,
+            ReferenceLayerDeliveryState.layer_id == layer_id,
+        )
+        .with_for_update()
+    )
+    sources = list(
+        db.scalars(
+            select(ReferenceLayerSource)
+            .where(
+                ReferenceLayerSource.provider_key == provider_key,
+                ReferenceLayerSource.layer_id == layer_id,
+            )
+            .order_by(
+                ReferenceLayerSource.priority,
+                ReferenceLayerSource.source_key,
+                ReferenceLayerSource.id,
+            )
+            .with_for_update()
+        )
+    )
+    return state, sources
+
+
+def _enqueue_fallback_for_locked_failure(
+    db: Session,
+    *,
+    failed_run: ReferenceSyncRun,
+    state: ReferenceLayerDeliveryState | None,
+    layer_sources: list[ReferenceLayerSource],
+    queued_at: datetime,
+) -> int | None:
+    if failed_run.status not in {"rejected", "failed"}:
+        raise MirrorLifecycleError(
+            "fallback requires a rejected or failed sync run"
+        )
+    if state is not None and state.status == "disabled":
+        return None
+    active_generation = state.generation if state is not None else 0
+    if active_generation != failed_run.expected_active_generation:
+        return None
+    if state is not None and state.status != "active":
+        return None
+
+    existing_child = db.scalar(
+        select(ReferenceSyncRun)
+        .where(ReferenceSyncRun.parent_run_id == failed_run.id)
+        .with_for_update()
+    )
+    if existing_child is not None:
+        if (
+            existing_child.provider_key != failed_run.provider_key
+            or existing_child.layer_id != failed_run.layer_id
+            or existing_child.fallback_depth != failed_run.fallback_depth + 1
+        ):
+            raise MirrorLifecycleError("fallback child lineage is invalid")
+        return existing_child.id
+
+    attempted_source_ids = _fallback_attempted_source_ids(db, failed_run)
+    source_by_id = {source.id: source for source in layer_sources}
+    failed_source = source_by_id.get(failed_run.source_id)
+    if failed_source is None or (
+        failed_source.provider_key != failed_run.provider_key
+        or failed_source.layer_id != failed_run.layer_id
+    ):
+        raise MirrorLifecycleError("failed run source identity is invalid")
+
+    layer_has_open_run = bool(
+        db.scalar(
+            select(
+                exists().where(
+                    ReferenceSyncRun.provider_key == failed_run.provider_key,
+                    ReferenceSyncRun.layer_id == failed_run.layer_id,
+                    ReferenceSyncRun.status.in_(("queued", "running")),
+                )
+            )
+        )
+    )
+    if layer_has_open_run:
+        return None
+
+    candidates = [
+        source
+        for source in layer_sources
+        if source.enabled
+        and source.sync_strategy != "manual"
+        and source.id not in attempted_source_ids
+    ]
+    candidate = next(
+        (
+            source
+            for source in candidates
+            if stored_source_definition_is_valid(source)
+        ),
+        None,
+    )
+    if candidate is None:
+        return None
+    definition = _stored_source_definition(candidate)
+    child = ReferenceSyncRun(
+        provider_key=candidate.provider_key,
+        layer_id=candidate.layer_id,
+        source_id=candidate.id,
+        parent_run_id=failed_run.id,
+        fallback_depth=failed_run.fallback_depth + 1,
+        source_definition_json=definition,
+        source_definition_sha256=candidate.definition_sha256,
+        trigger_kind="retry",
+        check_mode=_check_mode_for_source(db, candidate, queued_at),
+        status="queued",
+        attempt_no=1,
+        expected_active_generation=failed_run.expected_active_generation,
+        queued_at=queued_at,
+        stats_json={},
+    )
+    db.add(child)
+    db.flush()
+    return child.id
+
+
+def _fallback_attempted_source_ids(
+    db: Session,
+    failed_run: ReferenceSyncRun,
+) -> set[int]:
+    attempted: set[int] = set()
+    seen_run_ids: set[int] = set()
+    cursor = failed_run
+    while True:
+        if cursor.id in seen_run_ids:
+            raise MirrorLifecycleError("fallback chain contains a cycle")
+        seen_run_ids.add(cursor.id)
+        if (
+            cursor.provider_key != failed_run.provider_key
+            or cursor.layer_id != failed_run.layer_id
+            or cursor.status not in {"rejected", "failed"}
+        ):
+            raise MirrorLifecycleError("fallback chain lineage is invalid")
+        attempted.add(cursor.source_id)
+        if cursor.parent_run_id is None:
+            if cursor.fallback_depth != 0:
+                raise MirrorLifecycleError("fallback root depth is invalid")
+            return attempted
+        parent = db.scalar(
+            select(ReferenceSyncRun)
+            .where(ReferenceSyncRun.id == cursor.parent_run_id)
+            .with_for_update()
+        )
+        if parent is None or cursor.fallback_depth != parent.fallback_depth + 1:
+            raise MirrorLifecycleError("fallback parent lineage is invalid")
+        cursor = parent
+
+
+def _check_mode_for_source(
+    db: Session,
+    source: ReferenceLayerSource,
+    moment: datetime,
+) -> str:
+    latest_full = db.scalar(
+        select(func.max(ReferenceSyncRun.finished_at)).where(
+            ReferenceSyncRun.source_id == source.id,
+            ReferenceSyncRun.check_mode == "full",
+            ReferenceSyncRun.status.in_(("unchanged", "succeeded")),
+        )
+    )
+    full_cutoff = moment - timedelta(
+        seconds=source.full_refresh_interval_seconds
+    )
+    return (
+        "full"
+        if latest_full is None or latest_full <= full_cutoff
+        else "conditional"
     )
 
 

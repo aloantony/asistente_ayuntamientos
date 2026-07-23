@@ -115,6 +115,8 @@ def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
     source.definition_sha256 = canonical_json_sha256(source_definition)
     finished = datetime(2026, 7, 22, 10, tzinfo=timezone.utc)
     run = ReferenceSyncRun(
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
         source_id=source.id,
         source_definition_json=source_definition,
         source_definition_sha256=source.definition_sha256,
