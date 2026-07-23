@@ -15,13 +15,23 @@ import sqlite3
 import tempfile
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+import warnings
+
+from PIL import Image, UnidentifiedImageError
 
 from app.reference_layers.blob_store import (
     ReferenceBlobStore,
     StoredReferenceBlob,
 )
 from app.reference_layers.local_tile_archive import validate_tile_image
+from app.reference_layers.mirror_coverage import (
+    SIUR_ORTHO_TILE_PROFILE,
+    SIUR_TILE_PROFILE,
+)
 from app.reference_layers.safe_download import (
+    DownloadHTTPError,
+    DownloadIntegrityError,
+    DownloadLimitError,
     HTTPSDownloadPolicy,
     SafeHTTPSDownloader,
 )
@@ -32,6 +42,11 @@ TILE_SOURCE_SCHEMA = "reference-tile-source/v1"
 COORDINATE_HASH_SCHEMA = "xyz-z-x-y-newline-v1"
 MAX_SEED_TILES = 25_000_000
 MAX_TILE_BYTES = 1024 * 1024
+MAX_WMS_SUPERTILE_SIZE = 8
+MAX_WMS_SUPERTILE_BYTES = (
+    MAX_TILE_BYTES * MAX_WMS_SUPERTILE_SIZE * MAX_WMS_SUPERTILE_SIZE
+)
+MAX_INFLIGHT_WMS_BYTES = 128 * 1024 * 1024
 MAX_ZOOM = 22
 DEFAULT_PREFLIGHT_SAMPLES = 64
 PREFLIGHT_FIXED_BYTES = 64 * 1024
@@ -77,6 +92,7 @@ class TileSourceDescriptor:
     payload: Mapping[str, Any]
     matrices: Mapping[int, TileMatrix]
     matrix_limits: Mapping[str, tuple[int, int, int, int]]
+    wms_supertile_size: int
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,27 @@ class _TileWindow:
     @property
     def tile_count(self) -> int:
         return (self.max_x - self.min_x + 1) * (self.max_y - self.min_y + 1)
+
+
+@dataclass(frozen=True, order=True)
+class _WMSSupertile:
+    zoom: int
+    min_x: int
+    max_x: int
+    min_y: int
+    max_y: int
+
+    @property
+    def width(self) -> int:
+        return self.max_x - self.min_x + 1
+
+    @property
+    def height(self) -> int:
+        return self.max_y - self.min_y + 1
+
+    @property
+    def tile_count(self) -> int:
+        return self.width * self.height
 
 
 TileFetcher = Callable[[str, str], bytes]
@@ -161,7 +198,18 @@ def parse_tile_source_document(value: object) -> TileSourceDescriptor:
             "kvp",
         },
     }[protocol]
-    _exact_keys(descriptor, common | protocol_keys, "tile source descriptor")
+    expected_keys = common | protocol_keys
+    if protocol == "wms_tiles":
+        actual_keys = frozenset(descriptor)
+        if actual_keys not in {
+            frozenset(expected_keys),
+            frozenset(
+                expected_keys | {"coverage_profile", "wms_supertile_size"}
+            ),
+        }:
+            raise TileSeedError("tile source descriptor keys are invalid")
+    else:
+        _exact_keys(descriptor, expected_keys, "tile source descriptor")
     if descriptor["coverage_required"] is not True:
         raise TileSeedError("a local tile snapshot requires complete coverage")
     bounds = _bounds(descriptor["bounds"])
@@ -185,10 +233,11 @@ def parse_tile_source_document(value: object) -> TileSourceDescriptor:
     image_format, media_type = _image_format(descriptor["format"])
     matrices: dict[int, TileMatrix] = {}
     limits: dict[str, tuple[int, int, int, int]] = {}
+    wms_supertile_size = 1
     if protocol == "xyz":
         _validate_xyz_descriptor(descriptor)
     elif protocol == "wms_tiles":
-        _validate_wms_descriptor(descriptor, media_type)
+        wms_supertile_size = _validate_wms_descriptor(descriptor, media_type)
     else:
         matrices, limits = _validate_wmts_descriptor(
             descriptor,
@@ -210,6 +259,7 @@ def parse_tile_source_document(value: object) -> TileSourceDescriptor:
         payload=descriptor,
         matrices=matrices,
         matrix_limits=limits,
+        wms_supertile_size=wms_supertile_size,
     )
     actual_count = sum(window.tile_count for window in _tile_windows(parsed))
     if actual_count != estimated:
@@ -435,16 +485,26 @@ def _run_preflight(
     concurrency: int,
 ) -> tuple[TileSeedPreflight, dict[TileCoordinate, bytes]]:
     coordinates = _sample_coordinates(descriptor, sample_limit)
-    with ThreadPoolExecutor(
-        max_workers=concurrency,
-        thread_name_prefix="reference-tile-preflight",
-    ) as executor:
-        bodies = list(
-            executor.map(
-                lambda item: _fetch_validated_tile(descriptor, item, fetcher),
-                coordinates,
-            )
+    if descriptor.protocol == "wms_tiles" and descriptor.wms_supertile_size > 1:
+        prefetched = _fetch_wms_preflight_samples(
+            descriptor,
+            coordinates,
+            fetcher,
+            concurrency=concurrency,
         )
+        bodies = [prefetched[coordinate] for coordinate in coordinates]
+    else:
+        with ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="reference-tile-preflight",
+        ) as executor:
+            bodies = list(
+                executor.map(
+                    lambda item: _fetch_validated_tile(descriptor, item, fetcher),
+                    coordinates,
+                )
+            )
+        prefetched = dict(zip(coordinates, bodies, strict=True))
     if not bodies:
         raise TileSeedError("tile preflight did not select any coverage")
     sizes = [len(body) for body in bodies]
@@ -476,7 +536,42 @@ def _run_preflight(
             "tile archive capacity projection exceeds its byte limit"
         )
     store.ensure_capacity(projected)
-    return result, dict(zip(coordinates, bodies, strict=True))
+    return result, prefetched
+
+
+def _fetch_wms_preflight_samples(
+    descriptor: TileSourceDescriptor,
+    coordinates: tuple[TileCoordinate, ...],
+    fetcher: TileFetcher,
+    *,
+    concurrency: int,
+) -> dict[TileCoordinate, bytes]:
+    samples_by_block: dict[_WMSSupertile, list[TileCoordinate]] = {}
+    for coordinate in coordinates:
+        block = _wms_supertile_for_coordinate(descriptor, coordinate)
+        samples_by_block.setdefault(block, []).append(coordinate)
+    blocks = tuple(sorted(samples_by_block))
+    workers = _wms_worker_count(descriptor, concurrency)
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="reference-wms-preflight",
+    ) as executor:
+        results = list(
+            executor.map(
+                lambda block: _fetch_wms_supertile(descriptor, block, fetcher),
+                blocks,
+            )
+        )
+    prefetched: dict[TileCoordinate, bytes] = {}
+    for block, block_result in zip(blocks, results, strict=True):
+        expected = set(_iter_wms_supertile_coordinates(block))
+        if set(block_result) != expected:
+            raise TileSeedError("WMS preflight supertile coverage is incomplete")
+        for coordinate in samples_by_block[block]:
+            prefetched[coordinate] = block_result[coordinate]
+    if set(prefetched) != set(coordinates):
+        raise TileSeedError("WMS preflight sample coverage is incomplete")
+    return prefetched
 
 
 def _sample_coordinates(
@@ -572,23 +667,16 @@ def tile_url(
         _https_url(result, "XYZ tile URL")
         return result
     if descriptor.protocol == "wms_tiles":
-        kvp = _mapping(payload["kvp"], "WMS KVP descriptor")
-        version = str(kvp["version"])
-        bbox = tile_bbox(coordinate.z, coordinate.x, coordinate.y)
-        parameters = {
-            "SERVICE": "WMS",
-            "REQUEST": "GetMap",
-            "VERSION": version,
-            "LAYERS": descriptor.layer,
-            "STYLES": str(payload["style"]),
-            "FORMAT": descriptor.media_type,
-            "TRANSPARENT": str(kvp["transparent"]),
-            "BBOX": ",".join(format(item, ".12f") for item in bbox),
-            "WIDTH": str(TILE_SIZE),
-            "HEIGHT": str(TILE_SIZE),
-            "CRS" if version == "1.3.0" else "SRS": "EPSG:3857",
-        }
-        return _merge_query(str(kvp["endpoint_url"]), parameters)
+        return _wms_getmap_url(
+            descriptor,
+            _WMSSupertile(
+                zoom=coordinate.z,
+                min_x=coordinate.x,
+                max_x=coordinate.x,
+                min_y=coordinate.y,
+                max_y=coordinate.y,
+            ),
+        )
     matrix_identifier = coordinate.matrix_identifier
     if matrix_identifier is None:
         raise TileSeedError("WMTS coordinate has no matrix identifier")
@@ -622,6 +710,90 @@ def tile_url(
         "TILECOL": str(coordinate.x),
     }
     return _merge_query(str(kvp["endpoint_url"]), parameters)
+
+
+def _wms_getmap_url(
+    descriptor: TileSourceDescriptor,
+    block: _WMSSupertile,
+) -> str:
+    if descriptor.protocol != "wms_tiles":
+        raise TileSeedError("WMS supertile request requires a WMS source")
+    world_size = 2**block.zoom
+    if (
+        block.width > descriptor.wms_supertile_size
+        or block.height > descriptor.wms_supertile_size
+        or not 0 <= block.min_x <= block.max_x < world_size
+        or not 0 <= block.min_y <= block.max_y < world_size
+    ):
+        raise TileSeedError("WMS supertile coordinates are invalid")
+    top_left = tile_bbox(block.zoom, block.min_x, block.min_y)
+    bottom_right = tile_bbox(block.zoom, block.max_x, block.max_y)
+    bbox = (top_left[0], bottom_right[1], bottom_right[2], top_left[3])
+    payload = descriptor.payload
+    kvp = _mapping(payload["kvp"], "WMS KVP descriptor")
+    version = str(kvp["version"])
+    parameters = {
+        "SERVICE": "WMS",
+        "REQUEST": "GetMap",
+        "VERSION": version,
+        "LAYERS": descriptor.layer,
+        "STYLES": str(payload["style"]),
+        "FORMAT": descriptor.media_type,
+        "TRANSPARENT": str(kvp["transparent"]),
+        "BBOX": ",".join(format(item, ".12f") for item in bbox),
+        "WIDTH": str(block.width * TILE_SIZE),
+        "HEIGHT": str(block.height * TILE_SIZE),
+        "CRS" if version == "1.3.0" else "SRS": "EPSG:3857",
+    }
+    return _merge_query(str(kvp["endpoint_url"]), parameters)
+
+
+def _iter_wms_supertile_coordinates(
+    block: _WMSSupertile,
+) -> Iterator[TileCoordinate]:
+    for x in range(block.min_x, block.max_x + 1):
+        for y in range(block.min_y, block.max_y + 1):
+            yield TileCoordinate(block.zoom, x, y)
+
+
+def _iter_wms_supertile_blocks(
+    descriptor: TileSourceDescriptor,
+) -> Iterator[_WMSSupertile]:
+    size = descriptor.wms_supertile_size
+    for window in _tile_windows(descriptor):
+        for min_x in range(window.min_x, window.max_x + 1, size):
+            max_x = min(window.max_x, min_x + size - 1)
+            for min_y in range(window.min_y, window.max_y + 1, size):
+                yield _WMSSupertile(
+                    zoom=window.zoom,
+                    min_x=min_x,
+                    max_x=max_x,
+                    min_y=min_y,
+                    max_y=min(window.max_y, min_y + size - 1),
+                )
+
+
+def _wms_supertile_for_coordinate(
+    descriptor: TileSourceDescriptor,
+    coordinate: TileCoordinate,
+) -> _WMSSupertile:
+    size = descriptor.wms_supertile_size
+    for window in _tile_windows(descriptor):
+        if (
+            window.zoom == coordinate.z
+            and window.min_x <= coordinate.x <= window.max_x
+            and window.min_y <= coordinate.y <= window.max_y
+        ):
+            min_x = window.min_x + ((coordinate.x - window.min_x) // size) * size
+            min_y = window.min_y + ((coordinate.y - window.min_y) // size) * size
+            return _WMSSupertile(
+                zoom=coordinate.z,
+                min_x=min_x,
+                max_x=min(window.max_x, min_x + size - 1),
+                min_y=min_y,
+                max_y=min(window.max_y, min_y + size - 1),
+            )
+    raise TileSeedError("WMS sample coordinate is outside reviewed coverage")
 
 
 def _write_archive(
@@ -664,51 +836,65 @@ def _write_archive(
         completed = 0
         if heartbeat is not None:
             heartbeat(completed, total_tiles)
-        with ThreadPoolExecutor(
-            max_workers=concurrency,
-            thread_name_prefix="reference-tile",
-        ) as executor:
-            while True:
-                batch = list(islice(coordinates, batch_size))
-                if not batch:
-                    break
-                bodies = list(
-                    executor.map(
-                        lambda item: _fetch_validated_tile(
-                            descriptor,
-                            item,
-                            fetcher,
-                        ) if item not in prefetched else prefetched[item],
-                        batch,
-                    )
-                )
-                if (
-                    _sqlite_size(connection) + sum(map(len, bodies))
-                    > max_archive_bytes
-                ):
-                    raise TileSeedError("tile archive exceeds its byte limit")
-                connection.executemany(
-                    "INSERT INTO tiles "
-                    "(zoom_level, tile_column, tile_row, tile_data) "
-                    "VALUES (?, ?, ?, ?)",
-                    [
-                        (
-                            coordinate.z,
-                            coordinate.x,
-                            (2**coordinate.z - 1) - coordinate.y,
-                            body,
+        if descriptor.protocol == "wms_tiles" and descriptor.wms_supertile_size > 1:
+            completed = _write_wms_supertile_rows(
+                store,
+                connection,
+                descriptor,
+                fetcher,
+                total_tiles=total_tiles,
+                max_archive_bytes=max_archive_bytes,
+                heartbeat=heartbeat,
+                concurrency=concurrency,
+                batch_size=batch_size,
+                prefetched=prefetched,
+            )
+        else:
+            with ThreadPoolExecutor(
+                max_workers=concurrency,
+                thread_name_prefix="reference-tile",
+            ) as executor:
+                while True:
+                    batch = list(islice(coordinates, batch_size))
+                    if not batch:
+                        break
+                    bodies = list(
+                        executor.map(
+                            lambda item: _fetch_validated_tile(
+                                descriptor,
+                                item,
+                                fetcher,
+                            ) if item not in prefetched else prefetched[item],
+                            batch,
                         )
-                        for coordinate, body in zip(batch, bodies, strict=True)
-                    ],
-                )
-                connection.commit()
-                if _sqlite_size(connection) > max_archive_bytes:
-                    raise TileSeedError("tile archive exceeds its byte limit")
-                completed += len(batch)
-                if completed == total_tiles or completed % 8192 < len(batch):
-                    store.ensure_capacity(0)
-                if heartbeat is not None:
-                    heartbeat(completed, total_tiles)
+                    )
+                    if (
+                        _sqlite_size(connection) + sum(map(len, bodies))
+                        > max_archive_bytes
+                    ):
+                        raise TileSeedError("tile archive exceeds its byte limit")
+                    connection.executemany(
+                        "INSERT INTO tiles "
+                        "(zoom_level, tile_column, tile_row, tile_data) "
+                        "VALUES (?, ?, ?, ?)",
+                        [
+                            (
+                                coordinate.z,
+                                coordinate.x,
+                                (2**coordinate.z - 1) - coordinate.y,
+                                body,
+                            )
+                            for coordinate, body in zip(batch, bodies, strict=True)
+                        ],
+                    )
+                    connection.commit()
+                    if _sqlite_size(connection) > max_archive_bytes:
+                        raise TileSeedError("tile archive exceeds its byte limit")
+                    completed += len(batch)
+                    if completed == total_tiles or completed % 8192 < len(batch):
+                        store.ensure_capacity(0)
+                    if heartbeat is not None:
+                        heartbeat(completed, total_tiles)
         stored_count = int(
             connection.execute("SELECT count(*) FROM tiles").fetchone()[0]
         )
@@ -727,6 +913,87 @@ def _write_archive(
         raise TileSeedError("tile archive size is unavailable") from error
 
 
+def _write_wms_supertile_rows(
+    store: ReferenceBlobStore,
+    connection: sqlite3.Connection,
+    descriptor: TileSourceDescriptor,
+    fetcher: TileFetcher,
+    *,
+    total_tiles: int,
+    max_archive_bytes: int,
+    heartbeat: Heartbeat | None,
+    concurrency: int,
+    batch_size: int,
+    prefetched: Mapping[TileCoordinate, bytes],
+) -> int:
+    blocks = _iter_wms_supertile_blocks(descriptor)
+    workers = _wms_worker_count(descriptor, concurrency)
+    blocks_per_batch = max(1, min(workers, batch_size))
+    completed = 0
+
+    def load(block: _WMSSupertile) -> dict[TileCoordinate, bytes]:
+        coordinates = tuple(_iter_wms_supertile_coordinates(block))
+        if all(coordinate in prefetched for coordinate in coordinates):
+            return {coordinate: prefetched[coordinate] for coordinate in coordinates}
+        return _fetch_wms_supertile(descriptor, block, fetcher)
+
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="reference-wms-supertile",
+    ) as executor:
+        while True:
+            batch = list(islice(blocks, blocks_per_batch))
+            if not batch:
+                break
+            results = list(executor.map(load, batch))
+            rows: list[tuple[int, int, int, bytes]] = []
+            for block, result in zip(batch, results, strict=True):
+                coordinates = tuple(_iter_wms_supertile_coordinates(block))
+                if set(result) != set(coordinates):
+                    raise TileSeedError("WMS supertile coverage is incomplete")
+                rows.extend(
+                    (
+                        coordinate.z,
+                        coordinate.x,
+                        (2**coordinate.z - 1) - coordinate.y,
+                        result[coordinate],
+                    )
+                    for coordinate in coordinates
+                )
+            if _sqlite_size(connection) + sum(len(row[3]) for row in rows) > max_archive_bytes:
+                raise TileSeedError("tile archive exceeds its byte limit")
+            connection.executemany(
+                "INSERT INTO tiles "
+                "(zoom_level, tile_column, tile_row, tile_data) "
+                "VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            connection.commit()
+            if _sqlite_size(connection) > max_archive_bytes:
+                raise TileSeedError("tile archive exceeds its byte limit")
+            completed += len(rows)
+            if completed > total_tiles:
+                raise TileSeedError("WMS supertile coverage exceeds its estimate")
+            if completed == total_tiles or completed % 8192 < len(rows):
+                store.ensure_capacity(0)
+            if heartbeat is not None:
+                heartbeat(completed, total_tiles)
+    return completed
+
+
+def _wms_worker_count(
+    descriptor: TileSourceDescriptor,
+    concurrency: int,
+) -> int:
+    maximum_block_bytes = (
+        MAX_TILE_BYTES
+        * descriptor.wms_supertile_size
+        * descriptor.wms_supertile_size
+    )
+    memory_bound = max(1, MAX_INFLIGHT_WMS_BYTES // maximum_block_bytes)
+    return max(1, min(concurrency, memory_bound))
+
+
 def _fetch_validated_tile(
     descriptor: TileSourceDescriptor,
     coordinate: TileCoordinate,
@@ -742,13 +1009,178 @@ def _fetch_validated_tile(
     return body
 
 
+def _fetch_wms_supertile(
+    descriptor: TileSourceDescriptor,
+    block: _WMSSupertile,
+    fetcher: TileFetcher,
+) -> dict[TileCoordinate, bytes]:
+    """Fetch one bounded GetMap, reducing its dimensions only when classified.
+
+    A rejected or malformed large GetMap is split along the reviewed power-of-two
+    ladder.  Retryable transport failures are never disguised as a dimension
+    limitation, and a failure at 256px is returned to the caller unchanged.
+    """
+
+    try:
+        body = fetcher(_wms_getmap_url(descriptor, block), descriptor.media_type)
+        return _crop_wms_supertile(descriptor, block, body)
+    except (
+        TileSeedError,
+        DownloadHTTPError,
+        DownloadIntegrityError,
+        DownloadLimitError,
+    ) as error:
+        if block.tile_count == 1 or not _can_reduce_wms_getmap(error):
+            raise
+        next_size = max(
+            size
+            for size in (4, 2, 1)
+            if size < max(block.width, block.height)
+        )
+        result: dict[TileCoordinate, bytes] = {}
+        for child in _split_wms_supertile(block, next_size):
+            child_result = _fetch_wms_supertile(descriptor, child, fetcher)
+            overlap = set(result) & set(child_result)
+            if overlap:
+                raise TileSeedError("WMS supertile fallback overlaps coordinates")
+            result.update(child_result)
+        expected = set(_iter_wms_supertile_coordinates(block))
+        if set(result) != expected:
+            raise TileSeedError("WMS supertile fallback is incomplete") from error
+        return result
+
+
+def _can_reduce_wms_getmap(error: BaseException) -> bool:
+    if isinstance(error, TileSeedError):
+        return True
+    if isinstance(error, DownloadHTTPError):
+        return error.status_code in {400, 413, 414, 422}
+    if isinstance(error, DownloadLimitError):
+        return error.code == "response_too_large"
+    if isinstance(error, DownloadIntegrityError):
+        return error.code == "content_type"
+    return False
+
+
+def _split_wms_supertile(
+    block: _WMSSupertile,
+    size: int,
+) -> Iterator[_WMSSupertile]:
+    for min_x in range(block.min_x, block.max_x + 1, size):
+        for min_y in range(block.min_y, block.max_y + 1, size):
+            yield _WMSSupertile(
+                zoom=block.zoom,
+                min_x=min_x,
+                max_x=min(block.max_x, min_x + size - 1),
+                min_y=min_y,
+                max_y=min(block.max_y, min_y + size - 1),
+            )
+
+
+def _crop_wms_supertile(
+    descriptor: TileSourceDescriptor,
+    block: _WMSSupertile,
+    body: bytes,
+) -> dict[TileCoordinate, bytes]:
+    maximum_bytes = min(
+        MAX_WMS_SUPERTILE_BYTES,
+        MAX_TILE_BYTES * block.tile_count,
+    )
+    if not isinstance(body, bytes) or not 0 < len(body) <= maximum_bytes:
+        raise TileSeedError("WMS supertile returned invalid image bytes")
+    expected_format = "PNG" if descriptor.image_format == "png" else "JPEG"
+    expected_size = (block.width * TILE_SIZE, block.height * TILE_SIZE)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(body)) as image:
+                if image.format != expected_format or image.size != expected_size:
+                    raise TileSeedError(
+                        "WMS supertile image format or dimensions are inconsistent"
+                    )
+                image.verify()
+            with Image.open(BytesIO(body)) as source:
+                if source.format != expected_format or source.size != expected_size:
+                    raise TileSeedError(
+                        "WMS supertile image format or dimensions are inconsistent"
+                    )
+                source.load()
+                result = {
+                    coordinate: _encode_wms_tile(
+                        descriptor,
+                        source.crop(
+                            (
+                                (coordinate.x - block.min_x) * TILE_SIZE,
+                                (coordinate.y - block.min_y) * TILE_SIZE,
+                                (coordinate.x - block.min_x + 1) * TILE_SIZE,
+                                (coordinate.y - block.min_y + 1) * TILE_SIZE,
+                            )
+                        ),
+                    )
+                    for coordinate in _iter_wms_supertile_coordinates(block)
+                }
+    except TileSeedError:
+        raise
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ) as error:
+        raise TileSeedError("WMS supertile image could not be decoded safely") from error
+    if len(result) != block.tile_count:
+        raise TileSeedError("WMS supertile crop is incomplete")
+    return result
+
+
+def _encode_wms_tile(
+    descriptor: TileSourceDescriptor,
+    image: Image.Image,
+) -> bytes:
+    output = BytesIO()
+    if descriptor.image_format == "png":
+        transparent = _mapping(
+            descriptor.payload["kvp"],
+            "WMS KVP descriptor",
+        )["transparent"] == "TRUE"
+        if transparent:
+            rendered = image.convert("RGBA")
+        elif image.mode not in {"RGB", "RGBA"}:
+            rendered = image.convert("RGB")
+        else:
+            rendered = image
+        rendered.save(output, format="PNG", optimize=False, compress_level=6)
+    else:
+        image.convert("RGB").save(
+            output,
+            format="JPEG",
+            quality=85,
+            optimize=False,
+            progressive=False,
+        )
+    payload = output.getvalue()
+    try:
+        validate_tile_image(payload, descriptor.image_format)
+    except Exception as error:
+        raise TileSeedError("WMS supertile crop produced an invalid tile") from error
+    return payload
+
+
 def _https_fetcher(descriptor: TileSourceDescriptor) -> TileFetcher:
     sample = tile_url(descriptor, next(iter_tile_coordinates(descriptor)))
     origin = _origin(sample)
     downloader = SafeHTTPSDownloader(
         HTTPSDownloadPolicy(
             allowed_origins=(origin,),
-            max_response_bytes=MAX_TILE_BYTES,
+            max_response_bytes=(
+                MAX_TILE_BYTES
+                * descriptor.wms_supertile_size
+                * descriptor.wms_supertile_size
+                if descriptor.protocol == "wms_tiles"
+                else MAX_TILE_BYTES
+            ),
             timeout_seconds=90,
             connect_timeout_seconds=10,
             idle_timeout_seconds=30,
@@ -763,10 +1195,12 @@ def _https_fetcher(descriptor: TileSourceDescriptor) -> TileFetcher:
             raise TileSeedError("tile URL changed its reviewed origin")
         sink = BytesIO()
         result = downloader.download(url, sink, accept=media_type)
-        if result.content_type not in {
-            media_type,
-            "image/jpeg" if media_type == "image/jpg" else media_type,
-        }:
+        accepted_types = (
+            {"image/jpeg", "image/jpg"}
+            if media_type in {"image/jpeg", "image/jpg"}
+            else {media_type}
+        )
+        if result.content_type not in accepted_types:
             raise TileSeedError("tile response media type is inconsistent")
         return sink.getvalue()
 
@@ -824,7 +1258,7 @@ def _validate_xyz_descriptor(descriptor: Mapping[str, Any]) -> None:
 def _validate_wms_descriptor(
     descriptor: Mapping[str, Any],
     media_type: str,
-) -> None:
+) -> int:
     if descriptor["crs"] != "EPSG:3857":
         raise TileSeedError("WMS tile source must use EPSG:3857")
     _token(descriptor["style"], "WMS style", allow_empty=True)
@@ -857,6 +1291,21 @@ def _validate_wms_descriptor(
         or kvp[next(iter(coordinate_keys))] != "EPSG:3857"
     ):
         raise TileSeedError("WMS KVP descriptor is inconsistent")
+    supertile_size = descriptor.get("wms_supertile_size", 1)
+    if (
+        isinstance(supertile_size, bool)
+        or not isinstance(supertile_size, int)
+        or supertile_size not in {1, 2, 4, 8}
+    ):
+        raise TileSeedError("WMS supertile size is invalid")
+    if supertile_size > 1 and descriptor.get("coverage_profile") not in {
+        SIUR_TILE_PROFILE,
+        SIUR_ORTHO_TILE_PROFILE,
+    }:
+        raise TileSeedError(
+            "WMS supertiles require a reviewed SIUR coverage profile"
+        )
+    return supertile_size
 
 
 def _validate_wmts_descriptor(

@@ -21,6 +21,7 @@ from app.reference_layers.catalog import (
     ReferenceServiceDefinition,
 )
 from app.reference_layers.mirror_coverage import (
+    SIUR_WMS_SUPERTILE_SIZE,
     reviewed_tile_coverage,
     reviewed_tile_format,
 )
@@ -314,6 +315,8 @@ def _tile_config(
         config["max_tile_count"] = coverage.max_tile_count
     if coverage.profile is not None:
         config["coverage_profile"] = coverage.profile
+        if service.upstream_protocol.casefold() == "wms":
+            config["wms_supertile_size"] = SIUR_WMS_SUPERTILE_SIZE
     return config
 
 

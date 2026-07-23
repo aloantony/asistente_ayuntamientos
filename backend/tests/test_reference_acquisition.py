@@ -1459,6 +1459,64 @@ def test_wms_jpeg_recipe_disables_impossible_transparency(store, limits):
     assert descriptor["kvp"]["transparent"] == "FALSE"
 
 
+def test_wms_supertile_opt_in_requires_and_preserves_reviewed_siur_profile(
+    store,
+    limits,
+):
+    reviewed_config = {
+        **TILE_CONFIG,
+        "coverage_profile": "siur-castilla-y-leon-native-z16-v1",
+        "wms_supertile_size": 8,
+    }
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(
+                WMS_CAPABILITIES,
+                "application/xml",
+            )
+        ),
+    ).acquire(
+        candidate(
+            "wms_tiles",
+            remote_name="workspace:roads",
+            endpoint="https://data.example.es/geoserver/wms",
+            config=reviewed_config,
+        )
+    )
+    descriptor = read_json_artifact(
+        store,
+        result,
+        "metadata",
+        metadata_kind="reference-tile-source/v1",
+    )["descriptor"]
+    assert descriptor["wms_supertile_size"] == 8
+    assert descriptor["coverage_profile"] == reviewed_config["coverage_profile"]
+
+    with pytest.raises(
+        AcquisitionConfigurationError,
+        match="reviewed SIUR coverage profile",
+    ):
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(
+                lambda _url, _etag, _modified: Response(
+                    WMS_CAPABILITIES,
+                    "application/xml",
+                )
+            ),
+        ).acquire(
+            candidate(
+                "wms_tiles",
+                remote_name="workspace:roads",
+                endpoint="https://data.example.es/geoserver/wms",
+                config={**TILE_CONFIG, "wms_supertile_size": 8},
+            )
+        )
+
+
 def test_tile_materialization_rejects_unbounded_or_invalid_coverage(store, limits):
     invalid = {**TILE_CONFIG, "bounds": {"west": -7, "south": 40, "east": -7, "north": 43}}
     with pytest.raises(AcquisitionConfigurationError):

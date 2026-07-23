@@ -45,6 +45,10 @@ from app.reference_layers.models import (
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
 )
+from app.reference_layers.mirror_coverage import (
+    SIUR_ORTHO_TILE_PROFILE,
+    SIUR_TILE_PROFILE,
+)
 from app.reference_layers.safe_download import (
     HTTPSDownloadPolicy,
     HTTPSDownloadResult,
@@ -3373,7 +3377,7 @@ def _wms_tile_descriptor(
             code="wms_not_materializable",
         )
     crs_parameter = "CRS" if version.startswith("1.3") else "SRS"
-    return {
+    descriptor = {
         **common,
         "layer": probe.canonical_name,
         "style": style,
@@ -3397,6 +3401,27 @@ def _wms_tile_descriptor(
             "height_placeholder": "{height}",
         },
     }
+    supertile_size = candidate.config.get("wms_supertile_size")
+    if supertile_size is not None:
+        if (
+            isinstance(supertile_size, bool)
+            or not isinstance(supertile_size, int)
+            or supertile_size not in {1, 2, 4, 8}
+        ):
+            raise AcquisitionConfigurationError(
+                "WMS supertile size is outside its safe reviewed range"
+            )
+        coverage_profile = candidate.config.get("coverage_profile")
+        if coverage_profile not in {
+            SIUR_TILE_PROFILE,
+            SIUR_ORTHO_TILE_PROFILE,
+        }:
+            raise AcquisitionConfigurationError(
+                "WMS supertiles require a reviewed SIUR coverage profile"
+            )
+        descriptor["coverage_profile"] = coverage_profile
+        descriptor["wms_supertile_size"] = supertile_size
+    return descriptor
 
 
 def _select_web_mercator_matrix_set(
