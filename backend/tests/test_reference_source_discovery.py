@@ -28,6 +28,7 @@ from app.reference_layers.mirror_coverage import (
     SIUR_TILE_MAX_ZOOM,
     SIUR_TILE_MIN_ZOOM,
     SIUR_TILE_PROFILE,
+    SIUR_WMS_SUPERTILE_SIZE,
 )
 
 
@@ -236,6 +237,7 @@ def test_siur_tile_fallback_uses_the_reviewed_finite_coverage() -> None:
         "coverage_required": True,
         "max_tile_count": SIUR_TILE_MAX_COUNT,
         "coverage_profile": SIUR_TILE_PROFILE,
+        "wms_supertile_size": SIUR_WMS_SUPERTILE_SIZE,
     }
 
 
@@ -278,6 +280,7 @@ def test_xyz_jpeg_template_uses_matching_archive_format() -> None:
     )[0]
 
     assert candidate.config["format"] == "image/jpeg"
+    assert "wms_supertile_size" not in candidate.config
 
 
 def test_siur_ortho_fallback_uses_reviewed_jpeg_and_z15_profile() -> None:
