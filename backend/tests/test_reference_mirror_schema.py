@@ -86,6 +86,8 @@ def _seed_source(db, layer: ReferenceLayer) -> ReferenceLayerSource:
 def _finished_run(db, source: ReferenceLayerSource, number: int) -> ReferenceSyncRun:
     finished_at = datetime(2026, 7, 22, 10, number, tzinfo=timezone.utc)
     run = ReferenceSyncRun(
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
         source_id=source.id,
         source_definition_json={"revision": number},
         source_definition_sha256=f"{number:x}" * 64,
@@ -312,10 +314,12 @@ def test_mirror_append_only_records_reject_updates_and_deletes(db) -> None:
                 db.execute(statement)
 
 
-def test_sync_run_constraints_allow_only_one_open_run_per_source(db) -> None:
+def test_sync_run_constraints_allow_only_one_open_run_per_layer(db) -> None:
     source = _seed_source(db, _seed_catalog(db))
     db.add(
         ReferenceSyncRun(
+            provider_key=source.provider_key,
+            layer_id=source.layer_id,
             source_id=source.id,
             source_definition_json={},
             source_definition_sha256="f" * 64,
@@ -326,10 +330,46 @@ def test_sync_run_constraints_allow_only_one_open_run_per_source(db) -> None:
     )
     db.commit()
 
+    fallback = ReferenceLayerSource(
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
+        source_key="source:wms-fallback",
+        protocol="wms_tiles",
+        target_kind="tiles",
+        endpoint_url="https://example.test/geoserver/wms",
+        remote_name="test:layer",
+        source_format="image/png",
+        sync_strategy="tile_seed",
+        config_json={"max_zoom": 12},
+        definition_sha256="9" * 64,
+        enabled=True,
+        is_primary=False,
+    )
+    db.add(fallback)
+    db.commit()
+
     with pytest.raises(IntegrityError):
         with db.begin_nested():
             db.add(
                 ReferenceSyncRun(
+                    provider_key=fallback.provider_key,
+                    layer_id=fallback.layer_id,
+                    source_id=fallback.id,
+                    source_definition_json={},
+                    source_definition_sha256="9" * 64,
+                    trigger_kind="retry",
+                    check_mode="full",
+                    status="queued",
+                )
+            )
+            db.flush()
+
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                ReferenceSyncRun(
+                    provider_key=source.provider_key,
+                    layer_id=source.layer_id,
                     source_id=source.id,
                     source_definition_json={},
                     source_definition_sha256="1" * 64,
@@ -344,6 +384,8 @@ def test_sync_run_constraints_allow_only_one_open_run_per_source(db) -> None:
         with db.begin_nested():
             db.add(
                 ReferenceSyncRun(
+                    provider_key=source.provider_key,
+                    layer_id=source.layer_id,
                     source_id=source.id,
                     source_definition_json={},
                     source_definition_sha256="2" * 64,

@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260723_0036"
+HEAD_REVISION = "20260723_0037"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -214,7 +214,11 @@ REFERENCE_MIRROR_COLUMNS = {
     },
     "reference_sync_runs": {
         "id",
+        "provider_key",
+        "layer_id",
         "source_id",
+        "parent_run_id",
+        "fallback_depth",
         "requested_by_id",
         "source_definition_json",
         "source_definition_sha256",
@@ -890,12 +894,21 @@ def assert_reference_mirror_schema(
     *,
     shared_artifact_storage: bool = True,
     hardened: bool = True,
+    fallback_chains: bool = True,
 ) -> None:
     assert REFERENCE_MIRROR_TABLES <= set(inspector.get_table_names())
     for table_name, expected_columns in REFERENCE_MIRROR_COLUMNS.items():
+        expected = expected_columns
+        if table_name == "reference_sync_runs" and not fallback_chains:
+            expected = expected_columns - {
+                "provider_key",
+                "layer_id",
+                "parent_run_id",
+                "fallback_depth",
+            }
         assert {
             column["name"] for column in inspector.get_columns(table_name)
-        } == expected_columns
+        } == expected
 
     expected_indexes = {
         "reference_layer_sources": {
@@ -909,6 +922,15 @@ def assert_reference_mirror_schema(
             "ix_reference_sync_runs_running_lease",
             "ix_reference_sync_runs_source_history",
             "uq_reference_sync_runs_open_source",
+            *(
+                {
+                    "ix_reference_sync_runs_layer_history",
+                    "uq_reference_sync_runs_fallback_child",
+                    "uq_reference_sync_runs_open_layer",
+                }
+                if fallback_chains
+                else set()
+            ),
         },
         "reference_source_artifacts": {
             "ix_reference_source_artifacts_source_history",
@@ -962,6 +984,28 @@ def assert_reference_mirror_schema(
     assert source_foreign_keys[
         "fk_reference_layer_sources_provider_layer"
     ]["constrained_columns"] == ["provider_key", "layer_id"]
+
+    if fallback_chains:
+        sync_run_foreign_keys = {
+            foreign_key["name"]: foreign_key
+            for foreign_key in inspector.get_foreign_keys(
+                "reference_sync_runs"
+            )
+        }
+        assert sync_run_foreign_keys[
+            "fk_reference_sync_runs_layer_source"
+        ]["constrained_columns"] == [
+            "provider_key",
+            "layer_id",
+            "source_id",
+        ]
+        assert sync_run_foreign_keys[
+            "fk_reference_sync_runs_parent"
+        ]["constrained_columns"] == [
+            "provider_key",
+            "layer_id",
+            "parent_run_id",
+        ]
 
     version_foreign_keys = {
         foreign_key["name"]: foreign_key
@@ -2974,6 +3018,233 @@ def test_reference_mirror_hardening_migration_adds_truncate_guards(
         engine.dispose()
 
 
+def test_reference_fallback_chain_migration_upgrades_and_guards_open_layers(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260723_0036")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_snapshots (
+                        provider_key, source_url, content_sha256,
+                        definition_sha256, raw_catalog_json,
+                        normalized_definition_json, retrieved_at,
+                        service_count, group_count, layer_count,
+                        unresolved_count, status, is_current
+                    ) VALUES (
+                        'fallback-migration', 'https://example.test/catalog',
+                        :content, :definition, CAST('{}' AS JSON),
+                        CAST('{}' AS JSON), now(), 1, 0, 1, 0,
+                        'applied', true
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "a" * 64, "definition": "b" * 64},
+            ).scalar_one()
+            service_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_services (
+                        last_seen_snapshot_id, provider_key, source_key,
+                        title, upstream_protocol, base_url, license_status,
+                        cache_policy, status
+                    ) VALUES (
+                        :snapshot_id, 'fallback-migration', 'service:test',
+                        'Fallback test', 'wms',
+                        'https://example.test/geoserver/wms', 'pending',
+                        'mirror', 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id},
+            ).scalar_one()
+            layer_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layers (
+                        last_seen_snapshot_id, service_id, provider_key,
+                        source_key, node_type, title, remote_name, role,
+                        renderer, delivery_mode, sort_order, default_visible,
+                        default_opacity, queryable, downloadable, status
+                    ) VALUES (
+                        :snapshot_id, :service_id, 'fallback-migration',
+                        'layer:test', 'layer', 'Fallback layer', 'test:layer',
+                        'overlay', 'raster_tile', 'mirror', 0, false, 1,
+                        true, true, 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id, "service_id": service_id},
+            ).scalar_one()
+            source_ids = list(
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO reference_layer_sources (
+                            provider_key, layer_id, source_key, protocol,
+                            target_kind, endpoint_url, remote_name,
+                            sync_strategy, config_json, definition_sha256,
+                            enabled, is_primary, priority
+                        ) VALUES
+                          (
+                            'fallback-migration', :layer_id, 'auto:primary',
+                            'wfs', 'vector',
+                            'https://example.test/geoserver/wfs', 'test:layer',
+                            'paged_snapshot', CAST('{}' AS JSON), :primary_hash,
+                            true, false, 10
+                          ),
+                          (
+                            'fallback-migration', :layer_id, 'auto:fallback',
+                            'wms_tiles', 'tiles',
+                            'https://example.test/geoserver/wms', 'test:layer',
+                            'tile_seed', CAST('{}' AS JSON), :fallback_hash,
+                            true, true, 20
+                          )
+                        RETURNING id
+                        """
+                    ),
+                    {
+                        "layer_id": layer_id,
+                        "primary_hash": "c" * 64,
+                        "fallback_hash": "d" * 64,
+                    },
+                ).scalars()
+            )
+            for source_id, source_hash in zip(
+                source_ids,
+                ("c" * 64, "d" * 64),
+                strict=True,
+            ):
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO reference_sync_runs (
+                            source_id, source_definition_json,
+                            source_definition_sha256, trigger_kind,
+                            check_mode, status
+                        ) VALUES (
+                            :source_id, CAST('{}' AS JSON), :source_hash,
+                            'scheduled', 'full', 'queued'
+                        )
+                        """
+                    ),
+                    {"source_id": source_id, "source_hash": source_hash},
+                )
+
+        refused = run_alembic(
+            migration_database_url,
+            "upgrade",
+            "20260723_0037",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "multiple open sync runs" in refused.stderr
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM reference_sync_runs WHERE source_id = :source_id"
+                ),
+                {"source_id": source_ids[1]},
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE reference_sync_runs
+                    SET status = 'succeeded', started_at = now(),
+                        finished_at = now()
+                    WHERE source_id = :source_id
+                    """
+                ),
+                {"source_id": source_ids[0]},
+            )
+
+        run_alembic(migration_database_url, "upgrade", "20260723_0037")
+        assert_reference_mirror_schema(inspect(engine))
+        with engine.connect() as connection:
+            backfilled = connection.execute(
+                text(
+                    """
+                    SELECT provider_key, layer_id, fallback_depth
+                    FROM reference_sync_runs
+                    WHERE source_id = :source_id
+                    """
+                ),
+                {"source_id": source_ids[0]},
+            ).one()
+            assert tuple(backfilled) == ("fallback-migration", layer_id, 0)
+            assert connection.execute(
+                text(
+                    "SELECT id FROM reference_layer_sources "
+                    "WHERE provider_key = 'fallback-migration' "
+                    "AND layer_id = :layer_id AND is_primary"
+                ),
+                {"layer_id": layer_id},
+            ).scalar_one() == source_ids[0]
+
+        open_run = text(
+            """
+            INSERT INTO reference_sync_runs (
+                provider_key, layer_id, source_id,
+                source_definition_json, source_definition_sha256,
+                trigger_kind, check_mode, status
+            ) VALUES (
+                'fallback-migration', :layer_id, :source_id,
+                CAST('{}' AS JSON), :source_hash,
+                'scheduled', 'full', 'queued'
+            )
+            """
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                open_run,
+                {
+                    "layer_id": layer_id,
+                    "source_id": source_ids[0],
+                    "source_hash": "c" * 64,
+                },
+            )
+        with pytest.raises(DBAPIError) as duplicate_layer:
+            with engine.begin() as connection:
+                connection.execute(
+                    open_run,
+                    {
+                        "layer_id": layer_id,
+                        "source_id": source_ids[1],
+                        "source_hash": "d" * 64,
+                    },
+                )
+        assert duplicate_layer.value.orig.sqlstate == "23505"
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM reference_sync_runs WHERE status = 'queued'"
+                )
+            )
+        run_alembic(migration_database_url, "downgrade", "20260723_0036")
+        assert {
+            "provider_key",
+            "layer_id",
+            "parent_run_id",
+            "fallback_depth",
+        }.isdisjoint(
+            {
+                column["name"]
+                for column in inspect(engine).get_columns(
+                    "reference_sync_runs"
+                )
+            }
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+    finally:
+        engine.dispose()
+
+
 def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
     migration_database_url: str,
 ) -> None:
@@ -2989,6 +3260,7 @@ def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
             inspect(engine),
             shared_artifact_storage=False,
             hardened=False,
+            fallback_chains=False,
         )
 
         run_alembic(migration_database_url, "downgrade", "20260717_0033")
@@ -3075,16 +3347,22 @@ def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
                 text(
                     """
                     INSERT INTO reference_sync_runs (
-                        source_id, source_definition_json,
+                        provider_key, layer_id, source_id,
+                        source_definition_json,
                         source_definition_sha256, trigger_kind, check_mode,
                         status, started_at, finished_at
                     ) VALUES (
-                        :source_id, CAST('{}' AS JSON), :source_hash,
+                        'siur', :layer_id, :source_id,
+                        CAST('{}' AS JSON), :source_hash,
                         'manual', 'full', 'succeeded', now(), now()
                     ) RETURNING id
                     """
                 ),
-                {"source_id": source_id, "source_hash": "c" * 64},
+                {
+                    "layer_id": layer_id,
+                    "source_id": source_id,
+                    "source_hash": "c" * 64,
+                },
             ).scalar_one()
             artifact_id = connection.execute(
                 text(

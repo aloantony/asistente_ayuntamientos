@@ -32,6 +32,8 @@ def test_active_status_and_failed_refresh_serve_previous_version(db) -> None:
     failed_at = version.created_at + timedelta(seconds=1)
     db.add(
         ReferenceSyncRun(
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
             source_id=source.id,
             source_definition_json={"source": "test"},
             source_definition_sha256=source.definition_sha256,
@@ -76,6 +78,8 @@ def test_pending_syncing_and_disabled_statuses(db) -> None:
 
     db.add(
         ReferenceSyncRun(
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
             source_id=source.id,
             source_definition_json={"source": "test"},
             source_definition_sha256=source.definition_sha256,
@@ -117,6 +121,8 @@ def test_status_ignores_obsolete_runs_and_fails_closed_on_unservable_state(
     obsolete_at = version.created_at + timedelta(seconds=1)
     db.add(
         ReferenceSyncRun(
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
             source_id=source.id,
             source_definition_json={"obsolete": True},
             source_definition_sha256=source.definition_sha256,

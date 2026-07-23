@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from threading import Barrier
 import time
 
 import pytest
@@ -25,6 +26,7 @@ from app.reference_layers.mirror_lifecycle import (
     claim_next_sync_run,
     deactivate_delivery,
     enqueue_due_sources,
+    enqueue_fallback_source,
     finish_sync_run,
     heartbeat_sync_run,
     promote_delivery_version,
@@ -166,7 +168,10 @@ def _only_source_due(db, source, *, at: datetime = NOW):
         )
     ):
         item.enabled = item.id == source.id
+        item.is_primary = False
         item.next_check_at = at - timedelta(seconds=1)
+    db.flush()
+    source.is_primary = True
     db.commit()
 
 
@@ -281,14 +286,20 @@ def test_bootstrap_is_dry_run_idempotent_and_preserves_manual_sources(db) -> Non
     result = apply_mirror_bootstrap_plan(db, plan)
     assert result.created_count == 3
     assert result.updated_count == 0
-    assert all(
-        source.enabled and not source.is_primary
-        for source in db.scalars(
+    auto_sources = list(
+        db.scalars(
             select(ReferenceLayerSource).where(
                 ReferenceLayerSource.source_key.like("auto:%")
             )
         )
     )
+    assert all(source.enabled for source in auto_sources)
+    primary = [source for source in auto_sources if source.is_primary]
+    assert len(primary) == 1
+    assert primary[0].id == min(
+        auto_sources,
+        key=lambda item: (item.priority, item.source_key),
+    ).id
 
     repeated = build_mirror_bootstrap_plan(
         db,
@@ -350,7 +361,7 @@ def test_due_sources_enqueue_once_with_frozen_definition_and_generation(db) -> N
     db.commit()
 
     run_ids = enqueue_due_sources(db, now=NOW)
-    assert len(run_ids) == 3
+    assert len(run_ids) == 1
     assert enqueue_due_sources(db, now=NOW) == ()
     runs = list(
         db.scalars(
@@ -362,6 +373,12 @@ def test_due_sources_enqueue_once_with_frozen_definition_and_generation(db) -> N
     assert all(run.status == "queued" for run in runs)
     assert all(run.check_mode == "full" for run in runs)
     assert all(run.expected_active_generation == 0 for run in runs)
+    assert all(run.parent_run_id is None for run in runs)
+    assert all(run.fallback_depth == 0 for run in runs)
+    assert all(
+        db.get(ReferenceLayerSource, run.source_id).is_primary
+        for run in runs
+    )
     assert all(
         _canonical_sha256(run.source_definition_json)
         == run.source_definition_sha256
@@ -370,32 +387,273 @@ def test_due_sources_enqueue_once_with_frozen_definition_and_generation(db) -> N
     assert db.get(ReferenceLayer, layer.id) is not None
 
 
+def test_failed_sources_fall_back_in_priority_order_and_exhaust_once(db) -> None:
+    _, _, _, sources, _ = _seed_bootstrap(db)
+    primary = next(source for source in sources if source.is_primary)
+    primary.next_check_at = NOW - timedelta(seconds=1)
+    db.commit()
+
+    [root_id] = enqueue_due_sources(db, now=NOW)
+    root_lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "1" * 64,
+    )
+    finish_sync_run(
+        db,
+        root_lease,
+        outcome="failed",
+        error_code="primary_failed",
+        now=NOW + timedelta(seconds=1),
+    )
+    first_child = db.scalar(
+        select(ReferenceSyncRun).where(
+            ReferenceSyncRun.parent_run_id == root_id
+        )
+    )
+    assert first_child is not None
+    assert first_child.fallback_depth == 1
+    assert db.get(ReferenceLayerSource, first_child.source_id).priority == 30
+    assert enqueue_fallback_source(
+        db,
+        failed_run_id=root_id,
+        now=NOW + timedelta(seconds=2),
+    ) == first_child.id
+
+    first_lease = claim_next_sync_run(
+        db,
+        now=NOW + timedelta(seconds=2),
+        token_factory=lambda: "2" * 64,
+    )
+    assert first_lease.run_id == first_child.id
+    finish_sync_run(
+        db,
+        first_lease,
+        outcome="rejected",
+        error_code="fallback_rejected",
+        now=NOW + timedelta(seconds=3),
+    )
+    second_child = db.scalar(
+        select(ReferenceSyncRun).where(
+            ReferenceSyncRun.parent_run_id == first_child.id
+        )
+    )
+    assert second_child is not None
+    assert second_child.fallback_depth == 2
+    assert db.get(ReferenceLayerSource, second_child.source_id).priority == 90
+
+    second_lease = claim_next_sync_run(
+        db,
+        now=NOW + timedelta(seconds=4),
+        token_factory=lambda: "3" * 64,
+    )
+    assert second_lease.run_id == second_child.id
+    finish_sync_run(
+        db,
+        second_lease,
+        outcome="failed",
+        error_code="fallback_exhausted",
+        now=NOW + timedelta(seconds=5),
+    )
+    assert db.scalar(
+        select(func.count(ReferenceSyncRun.id)).where(
+            ReferenceSyncRun.provider_key == primary.provider_key,
+            ReferenceSyncRun.layer_id == primary.layer_id,
+        )
+    ) == 3
+    assert enqueue_fallback_source(
+        db,
+        failed_run_id=second_child.id,
+        now=NOW + timedelta(seconds=6),
+    ) is None
+    assert next(source for source in sources if source.is_primary).id == primary.id
+
+
+def test_successful_fallback_keeps_preferred_daily_source(db) -> None:
+    _, layer, snapshot, sources, _ = _seed_bootstrap(db)
+    primary = next(source for source in sources if source.is_primary)
+    primary.next_check_at = NOW - timedelta(seconds=1)
+    db.commit()
+
+    enqueue_due_sources(db, now=NOW)
+    primary_lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "4" * 64,
+    )
+    finish_sync_run(
+        db,
+        primary_lease,
+        outcome="failed",
+        error_code="primary_failed",
+        now=NOW + timedelta(seconds=1),
+    )
+    fallback_lease = claim_next_sync_run(
+        db,
+        now=NOW + timedelta(seconds=2),
+        token_factory=lambda: "5" * 64,
+    )
+    fallback_source = db.get(ReferenceLayerSource, fallback_lease.source_id)
+    assert fallback_source.id != primary.id
+    fallback_version = _create_version(
+        db,
+        source=fallback_source,
+        snapshot=snapshot,
+        lease=fallback_lease,
+        sequence_number=1,
+    )
+    promote_delivery_version(
+        db,
+        version_id=fallback_version.id,
+        lease=fallback_lease,
+        expected_generation=0,
+        reason="validated fallback delivery",
+        now=NOW + timedelta(seconds=3),
+    )
+
+    assert db.get(ReferenceLayerSource, primary.id).is_primary is True
+    assert db.get(ReferenceLayerSource, fallback_source.id).is_primary is False
+    [daily_id] = enqueue_due_sources(
+        db,
+        now=NOW + timedelta(days=1, seconds=1),
+    )
+    daily = db.get(ReferenceSyncRun, daily_id)
+    assert daily.source_id == primary.id
+    assert daily.parent_run_id is None
+    assert daily.fallback_depth == 0
+    assert daily.expected_active_generation == 1
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.active_version_id == fallback_version.id
+
+
+def test_concurrent_fallback_enqueue_is_linear_and_idempotent(
+    engine,
+    committed_reference_providers,
+) -> None:
+    provider_key = "mirror-fallback-race-test"
+    committed_reference_providers.append(provider_key)
+    current = datetime.now(timezone.utc)
+    with Session(engine, expire_on_commit=False) as setup:
+        _, _, _, sources, _ = _seed_bootstrap(
+            setup,
+            provider_key=provider_key,
+        )
+        primary = next(source for source in sources if source.is_primary)
+        _only_source_due(setup, primary, at=current)
+        enqueue_due_sources(setup, now=current)
+        lease = claim_next_sync_run(
+            setup,
+            now=current,
+            token_factory=lambda: "6" * 64,
+        )
+        finish_sync_run(
+            setup,
+            lease,
+            outcome="failed",
+            error_code="primary_failed",
+            now=current + timedelta(seconds=1),
+        )
+        assert setup.scalar(
+            select(func.count(ReferenceSyncRun.id)).where(
+                ReferenceSyncRun.parent_run_id == lease.run_id
+            )
+        ) == 0
+        for source in sources:
+            source.enabled = True
+        setup.commit()
+
+    barrier = Barrier(2)
+
+    def enqueue_concurrently() -> int | None:
+        with Session(engine, expire_on_commit=False) as worker:
+            barrier.wait(timeout=5)
+            return enqueue_fallback_source(
+                worker,
+                failed_run_id=lease.run_id,
+                now=current + timedelta(seconds=2),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: enqueue_concurrently(), range(2)))
+    assert results[0] is not None and results[0] == results[1]
+    with Session(engine) as check:
+        assert check.scalar(
+            select(func.count(ReferenceSyncRun.id)).where(
+                ReferenceSyncRun.parent_run_id == lease.run_id
+            )
+        ) == 1
+        assert check.scalar(
+            select(func.count(ReferenceSyncRun.id)).where(
+                ReferenceSyncRun.provider_key == provider_key,
+                ReferenceSyncRun.status.in_(("queued", "running")),
+            )
+        ) == 1
+
+
+def test_concurrent_schedulers_enqueue_only_one_primary_run_per_layer(
+    engine,
+    committed_reference_providers,
+) -> None:
+    provider_key = "mirror-scheduler-race-test"
+    committed_reference_providers.append(provider_key)
+    current = datetime.now(timezone.utc)
+    with Session(engine, expire_on_commit=False) as setup:
+        _, _, _, sources, _ = _seed_bootstrap(
+            setup,
+            provider_key=provider_key,
+        )
+        primary = next(source for source in sources if source.is_primary)
+        primary.next_check_at = current - timedelta(seconds=1)
+        setup.commit()
+
+    barrier = Barrier(2)
+
+    def schedule_concurrently() -> tuple[int, ...]:
+        with Session(engine, expire_on_commit=False) as worker:
+            barrier.wait(timeout=5)
+            return enqueue_due_sources(worker, now=current)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: schedule_concurrently(), range(2)))
+    assert sorted(len(result) for result in results) == [0, 1]
+    with Session(engine) as check:
+        [run] = list(
+            check.scalars(
+                select(ReferenceSyncRun).where(
+                    ReferenceSyncRun.provider_key == provider_key,
+                    ReferenceSyncRun.status.in_(("queued", "running")),
+                )
+            )
+        )
+        assert run.source_id == primary.id
+        assert run.parent_run_id is None
+
+
 def test_claim_skips_a_queued_run_locked_by_another_worker(
     engine,
     committed_reference_providers,
 ) -> None:
-    provider_key = "mirror-skip-locked-test"
-    committed_reference_providers.append(provider_key)
+    provider_keys = (
+        "mirror-skip-locked-test-a",
+        "mirror-skip-locked-test-b",
+    )
+    committed_reference_providers.extend(provider_keys)
     with Session(engine, expire_on_commit=False) as setup:
-        apply_catalog_definition(
-            setup,
-            _definition(provider_key=provider_key),
-        )
-        plan = build_mirror_bootstrap_plan(
-            setup,
-            provider_key=provider_key,
-        )
-        apply_mirror_bootstrap_plan(setup, plan)
-        sources = list(
-            setup.scalars(
-                select(ReferenceLayerSource)
-                .where(ReferenceLayerSource.provider_key == provider_key)
-                .order_by(ReferenceLayerSource.id)
+        for provider_key in provider_keys:
+            _seed_bootstrap(
+                setup,
+                provider_key=provider_key,
             )
-        )
-        for index, source in enumerate(sources):
-            source.enabled = index < 2
-            source.next_check_at = NOW - timedelta(seconds=1)
+        for primary in setup.scalars(
+            select(ReferenceLayerSource).where(
+                ReferenceLayerSource.provider_key.in_(provider_keys),
+                ReferenceLayerSource.is_primary.is_(True),
+            )
+        ):
+            primary.next_check_at = NOW - timedelta(seconds=1)
         setup.commit()
         run_ids = enqueue_due_sources(setup, now=NOW)
         assert len(run_ids) == 2
@@ -982,6 +1240,11 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
         error_code="superseded_by_operator",
         now=NOW + timedelta(seconds=6),
     )
+    assert db.scalar(
+        select(func.count(ReferenceSyncRun.id)).where(
+            ReferenceSyncRun.parent_run_id == second_lease.run_id
+        )
+    ) == 0
     [queued_id] = enqueue_due_sources(
         db,
         now=NOW + timedelta(seconds=6),
