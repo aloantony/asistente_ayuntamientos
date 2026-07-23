@@ -402,8 +402,15 @@ def _wmts_layers(root: ElementTree.Element) -> list[dict[str, Any]]:
                 identifier = _first_child_text(child, {"TileMatrixSet"}, 500)
                 if identifier is None:
                     raise SourceProbeError("WMTS matrix-set link is malformed")
+                try:
+                    limits = _wmts_matrix_limits(child)
+                except SourceProbeError:
+                    # Some public WMTS documents contain an invalid limit in one
+                    # optional CRS while advertising a valid WebMercator link. A
+                    # malformed link is unusable and therefore omitted entirely;
+                    # it must not make unrelated, valid links unavailable.
+                    continue
                 matrix_sets.append(identifier)
-                limits = _wmts_matrix_limits(child)
                 if limits:
                     matrix_limits[identifier] = limits
             elif child_name == "ResourceURL":

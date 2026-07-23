@@ -1290,6 +1290,39 @@ def test_wmts_manifest_keeps_matrix_sets_styles_and_safe_resource_template(store
     assert descriptor["resource_urls"][0]["resource_type"] == "tile"
 
 
+def test_wmts_accepts_empty_style_as_the_advertised_default(store, limits):
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(
+                WMTS_CAPABILITIES,
+                "application/xml",
+            )
+        ),
+    ).acquire(
+        candidate(
+            "wmts",
+            remote_name="ortho",
+            endpoint="https://data.example.es/wmts",
+            config={
+                **TILE_CONFIG,
+                "style_name": "",
+                "min_zoom": 0,
+                "max_zoom": 1,
+            },
+        )
+    )
+
+    descriptor = read_json_artifact(
+        store,
+        result,
+        "metadata",
+        metadata_kind="reference-tile-source/v1",
+    )["descriptor"]
+    assert descriptor["style"] == "default"
+
+
 def test_wmts_estimate_intersects_advertised_matrix_limits(store, limits):
     result = ReferenceAcquisitionPipeline(
         store,
@@ -1431,6 +1464,34 @@ def test_wms_materializes_finite_getmap_recipe_instead_of_runtime_proxy(store, l
     assert descriptor["max_zoom"] == 18
     assert descriptor["estimated_tile_count"] == 16_885_744
     assert descriptor["estimated_tile_count"] < descriptor["max_tile_count"]
+
+
+def test_wms_accepts_empty_style_as_the_layer_default(store, limits):
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(
+                WMS_CAPABILITIES,
+                "application/xml",
+            )
+        ),
+    ).acquire(
+        candidate(
+            "wms_tiles",
+            remote_name="workspace:roads",
+            endpoint="https://data.example.es/geoserver/wms",
+            config={**TILE_CONFIG, "style_name": ""},
+        )
+    )
+
+    descriptor = read_json_artifact(
+        store,
+        result,
+        "metadata",
+        metadata_kind="reference-tile-source/v1",
+    )["descriptor"]
+    assert descriptor["style"] == ""
 
 
 def test_wms_jpeg_recipe_disables_impossible_transparency(store, limits):

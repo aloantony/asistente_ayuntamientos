@@ -2134,18 +2134,20 @@ def _config_optional_text(
     name: str,
     *,
     max_chars: int,
+    allow_empty: bool = False,
 ) -> str | None:
     value = config.get(name)
     if value is None:
         return None
+    normalized = value.strip() if isinstance(value, str) else None
     if (
         not isinstance(value, str)
-        or not value.strip()
+        or (not normalized and not allow_empty)
         or len(value) > max_chars
         or any(ord(character) < 32 for character in value)
     ):
         raise AcquisitionConfigurationError(f"source config {name} is invalid")
-    return value.strip()
+    return normalized
 
 
 def _config_text(
@@ -3251,7 +3253,12 @@ def _wmts_tile_descriptor(
     common["estimated_tile_count"] = exact_tile_count
     styles = metadata.get("styles", [])
     style_names = [item.get("name") for item in styles if isinstance(item, dict)]
-    configured_style = _config_optional_text(candidate.config, "style_name", max_chars=500)
+    configured_style = _config_optional_text(
+        candidate.config,
+        "style_name",
+        max_chars=500,
+        allow_empty=True,
+    )
     if configured_style is not None and configured_style not in {"", *style_names}:
         raise AcquisitionValidationError(
             "configured WMTS style is not advertised",
@@ -3362,7 +3369,15 @@ def _wms_tile_descriptor(
             "WMS layer does not advertise the configured image format",
             code="wms_not_materializable",
         )
-    style = _config_optional_text(candidate.config, "style_name", max_chars=500) or ""
+    style = (
+        _config_optional_text(
+            candidate.config,
+            "style_name",
+            max_chars=500,
+            allow_empty=True,
+        )
+        or ""
+    )
     advertised_styles = probe.metadata.get("styles", [])
     if style and (
         not isinstance(advertised_styles, list)

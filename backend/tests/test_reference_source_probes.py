@@ -169,6 +169,60 @@ def test_wmts_probe_preserves_bounded_seed_metadata() -> None:
     }
 
 
+def test_wmts_probe_omits_one_malformed_matrix_link_but_keeps_valid_link() -> None:
+    document = b"""<Capabilities version="1.0.0"
+      xmlns="http://www.opengis.net/wmts/1.0"
+      xmlns:ows="http://www.opengis.net/ows/1.1">
+      <Contents><Layer><ows:Identifier>base</ows:Identifier>
+        <TileMatrixSetLink><TileMatrixSet>EPSG:25828</TileMatrixSet>
+          <TileMatrixSetLimits><TileMatrixLimits><TileMatrix>11</TileMatrix>
+            <MinTileRow>-1</MinTileRow><MaxTileRow>212</MaxTileRow>
+            <MinTileCol>0</MinTileCol><MaxTileCol>245</MaxTileCol>
+          </TileMatrixLimits></TileMatrixSetLimits>
+        </TileMatrixSetLink>
+        <TileMatrixSetLink><TileMatrixSet>GoogleMapsCompatible</TileMatrixSet>
+          <TileMatrixSetLimits><TileMatrixLimits><TileMatrix>0</TileMatrix>
+            <MinTileRow>0</MinTileRow><MaxTileRow>0</MaxTileRow>
+            <MinTileCol>0</MinTileCol><MaxTileCol>0</MaxTileCol>
+          </TileMatrixLimits></TileMatrixSetLimits>
+        </TileMatrixSetLink>
+      </Layer>
+      <TileMatrixSet><ows:Identifier>EPSG:25828</ows:Identifier>
+        <ows:SupportedCRS>EPSG:25828</ows:SupportedCRS>
+        <TileMatrix><ows:Identifier>11</ows:Identifier>
+          <ScaleDenominator>1000</ScaleDenominator><TopLeftCorner>0 0</TopLeftCorner>
+          <TileWidth>256</TileWidth><TileHeight>256</TileHeight>
+          <MatrixWidth>256</MatrixWidth><MatrixHeight>256</MatrixHeight>
+        </TileMatrix>
+      </TileMatrixSet>
+      <TileMatrixSet><ows:Identifier>GoogleMapsCompatible</ows:Identifier>
+        <ows:SupportedCRS>EPSG:3857</ows:SupportedCRS>
+        <TileMatrix><ows:Identifier>0</ows:Identifier>
+          <ScaleDenominator>559082264.0287178</ScaleDenominator>
+          <TopLeftCorner>-20037508.342789244 20037508.342789244</TopLeftCorner>
+          <TileWidth>256</TileWidth><TileHeight>256</TileHeight>
+          <MatrixWidth>1</MatrixWidth><MatrixHeight>1</MatrixHeight>
+        </TileMatrix>
+      </TileMatrixSet></Contents>
+    </Capabilities>"""
+
+    probe = probe_candidate_document(candidate("wmts", "base"), document)
+
+    assert probe.available is True
+    assert probe.metadata["tile_matrix_sets"] == ["GoogleMapsCompatible"]
+    assert probe.metadata["tile_matrix_set_limits"] == {
+        "GoogleMapsCompatible": [
+            {
+                "tile_matrix": "0",
+                "min_tile_row": 0,
+                "max_tile_row": 0,
+                "min_tile_col": 0,
+                "max_tile_col": 0,
+            }
+        ]
+    }
+
+
 def test_wms_image_fallback_still_proves_the_layer_exists() -> None:
     document = b"""<WMS_Capabilities version="1.3.0">
       <Capability><Request><GetMap><Format>image/png</Format></GetMap></Request>
