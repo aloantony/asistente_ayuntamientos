@@ -26,6 +26,20 @@ class Settings(BaseSettings):
     reference_storage_root: str = (
         "/var/lib/asistente_ayuntamientos/reference-artifacts"
     )
+    reference_blob_max_bytes: int = 256 * 1024 * 1024 * 1024
+    reference_storage_quota_bytes: int | None = 1024 * 1024 * 1024 * 1024
+    reference_storage_min_free_bytes: int = 20 * 1024 * 1024 * 1024
+    reference_mirror_scheduler_poll_seconds: float = 15.0
+    reference_mirror_worker_poll_seconds: float = 2.0
+    reference_mirror_enqueue_limit: int = 100
+    reference_mirror_lease_seconds: int = 600
+    reference_mirror_heartbeat_seconds: float = 60.0
+    reference_tile_archive_max_bytes: int = 256 * 1024 * 1024 * 1024
+    reference_tile_max_count: int = 10_000_000
+    reference_tile_concurrency: int = 4
+    reference_tile_batch_size: int = 64
+    reference_geo_max_source_bytes: int = 20 * 1024 * 1024 * 1024
+    reference_geo_timeout_seconds: int = 3600
     local_geoserver_base_url: str = "http://127.0.0.1:8081/geoserver"
     local_geoserver_workspace: str = "siur"
     local_geoserver_timeout_seconds: float = 8.0
@@ -190,6 +204,131 @@ class Settings(BaseSettings):
         if not path.is_absolute() or path == Path("/"):
             raise ValueError("reference_storage_root must be an absolute directory")
         return str(path.resolve(strict=False))
+
+    @field_validator(
+        "reference_blob_max_bytes",
+        "reference_tile_archive_max_bytes",
+        "reference_geo_max_source_bytes",
+    )
+    @classmethod
+    def validate_reference_large_byte_limits(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1024 * 1024 <= value <= 1024**5:
+            raise ValueError(
+                "reference artifact byte limits must be between 1 MiB and 1 PiB"
+            )
+        return value
+
+    @field_validator("reference_storage_quota_bytes")
+    @classmethod
+    def validate_reference_storage_quota(cls, value: int | None) -> int | None:
+        if value is not None and (
+            isinstance(value, bool) or not 1024 * 1024 <= value <= 1024**5
+        ):
+            raise ValueError(
+                "reference_storage_quota_bytes must be null or between 1 MiB and 1 PiB"
+            )
+        return value
+
+    @field_validator("reference_storage_min_free_bytes")
+    @classmethod
+    def validate_reference_storage_reserve(cls, value: int) -> int:
+        if isinstance(value, bool) or not 0 <= value <= 1024**5:
+            raise ValueError(
+                "reference_storage_min_free_bytes must be between 0 and 1 PiB"
+            )
+        return value
+
+    @field_validator(
+        "reference_mirror_scheduler_poll_seconds",
+        "reference_mirror_worker_poll_seconds",
+        "reference_mirror_heartbeat_seconds",
+    )
+    @classmethod
+    def validate_reference_poll_intervals(cls, value: float) -> float:
+        if not isfinite(value) or not 0.1 <= value <= 3600.0:
+            raise ValueError(
+                "reference mirror poll/heartbeat intervals must be finite and "
+                "between 0.1 and 3600 seconds"
+            )
+        return value
+
+    @field_validator("reference_mirror_enqueue_limit")
+    @classmethod
+    def validate_reference_enqueue_limit(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 10_000:
+            raise ValueError(
+                "reference_mirror_enqueue_limit must be between 1 and 10000"
+            )
+        return value
+
+    @field_validator("reference_mirror_lease_seconds")
+    @classmethod
+    def validate_reference_lease_seconds(cls, value: int) -> int:
+        if isinstance(value, bool) or not 30 <= value <= 86_400:
+            raise ValueError(
+                "reference_mirror_lease_seconds must be between 30 and 86400"
+            )
+        return value
+
+    @field_validator("reference_tile_max_count")
+    @classmethod
+    def validate_reference_tile_count(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 10_000_000:
+            raise ValueError(
+                "reference_tile_max_count must be between 1 and 10000000"
+            )
+        return value
+
+    @field_validator("reference_tile_concurrency")
+    @classmethod
+    def validate_reference_tile_concurrency(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 16:
+            raise ValueError(
+                "reference_tile_concurrency must be between 1 and 16"
+            )
+        return value
+
+    @field_validator("reference_tile_batch_size")
+    @classmethod
+    def validate_reference_tile_batch_size(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 64:
+            raise ValueError(
+                "reference_tile_batch_size must be between 1 and 64"
+            )
+        return value
+
+    @field_validator("reference_geo_timeout_seconds")
+    @classmethod
+    def validate_reference_geo_timeout(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 86_400:
+            raise ValueError(
+                "reference_geo_timeout_seconds must be between 1 and 86400"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_reference_mirror_limits(self):
+        if (
+            self.reference_storage_quota_bytes is not None
+            and self.reference_blob_max_bytes
+            > self.reference_storage_quota_bytes
+        ):
+            raise ValueError(
+                "reference_blob_max_bytes cannot exceed the storage quota"
+            )
+        if self.reference_tile_archive_max_bytes > self.reference_blob_max_bytes:
+            raise ValueError(
+                "reference_tile_archive_max_bytes cannot exceed reference_blob_max_bytes"
+            )
+        if self.reference_mirror_heartbeat_seconds * 2 >= self.reference_mirror_lease_seconds:
+            raise ValueError(
+                "reference_mirror_heartbeat_seconds must be less than half the lease"
+            )
+        if self.reference_tile_batch_size < self.reference_tile_concurrency:
+            raise ValueError(
+                "reference_tile_batch_size cannot be below tile concurrency"
+            )
+        return self
 
     @field_validator("local_geoserver_workspace")
     @classmethod

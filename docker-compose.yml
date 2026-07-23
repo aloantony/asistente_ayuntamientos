@@ -42,6 +42,39 @@ services:
       redis:
         condition: service_started
 
+  reference-worker:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    user: "0:${REFERENCE_STORAGE_GID:-2000}"
+    network_mode: host
+    command:
+      ["python", "-m", "app.reference_layers.mirror_runtime", "worker"]
+    volumes:
+      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      geoserver:
+        condition: service_started
+
+  reference-scheduler:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    environment:
+      GEOSERVER_ADMIN_USER: ""
+      GEOSERVER_ADMIN_PASSWORD: ""
+      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
+    network_mode: host
+    command:
+      ["python", "-m", "app.reference_layers.mirror_runtime", "scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend
