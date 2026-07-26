@@ -15,9 +15,10 @@ remoto.
 - Worktree:
   `/home/dev/proyectos/asistente_ayuntamientos-worktrees/siur-local-mirror`
 - Rama: `codex/siur-local-mirror-20260722`
-- Último commit de producto integrado: `441c226`
-  (`fix: reject implausible reference feature growth`)
-- Primer commit de este handoff actualizado: `20419bc`
+- Último commit de producto integrado: `09aed49`
+  (`feat: persist SIUR mirror strategies`)
+- Este documento debe actualizarse de nuevo al reanudar si se añade la paridad
+  de estilos u otros cierres P0.
 - Comparación: `origin/main`
 - Para obtener la divergencia exacta al retomar:
   `git rev-list --left-right --count origin/main...HEAD`
@@ -58,6 +59,14 @@ Desde el antiguo handoff se integraron además:
   y caída masiva de entidades.
 - `441c226`: gate adicional ante crecimientos de entidades inverosímiles,
   con umbral y evidencia persistida.
+- `86dd75c`: comprobación periódica durable del catálogo, invocada por el
+  runtime cada cinco minutos (el job conserva su propia cadencia y es
+  idempotente).
+- `09aed49`: matriz persistente de estrategia por capa y snapshot. Cada capa
+  queda clasificada como `vector`, `raster`, `tiles`, `composition` o
+  `blocked`, con razón/evidencia/hash canónico; las composiciones guardan sus
+  dependencias y se rechazan ciclos o dependencias bloqueadas. La entrega
+  local falla cerrada cuando existe matriz y falta su estrategia.
 
 ## Pruebas reales acumuladas
 
@@ -72,8 +81,8 @@ Desde el antiguo handoff se integraron además:
 - Frontend lint: 0 errores y 11 avisos preexistentes.
 - Frontend build de producción: correcto, 23 páginas.
 
-La suite backend completa debe repetirse cuando se incorporen los dos cierres
-paralelos descritos abajo. La prueba real de GDAL debe ejecutarse después de
+La suite backend completa debe repetirse cuando se incorporen los cierres
+restantes. La prueba real de GDAL debe ejecutarse después de
 reconstruir la imagen: el contenedor compartido actual procede de una rama
 anterior y no contiene aún los binarios que sí instala el Dockerfile integrado.
 
@@ -169,12 +178,15 @@ pruebas sobre la combinación.
 
 P0 antes de considerar la entrega terminada:
 
-1. Integrar y revisar los dos cierres paralelos.
-2. Persistir una estrategia exacta para cada una de las 227 capas hoja:
+1. Integrar y revisar los dos cierres paralelos si siguen sin integrar.
+2. Persistir y verificar una estrategia exacta para cada una de las 227 capas hoja:
    `vector`, `raster`, `tiles`, `composition` o `blocked`; las composiciones
    deben declarar dependencias sin ciclos y todo bloqueo debe tener evidencia.
 3. Persistir paridad de estilo `exact`, `adapted`, `baked` o `missing`; copiar
-   símbolos a almacenamiento local y bloquear la entrega si falta un recurso.
+   símbolos a almacenamiento local, incorporar su hash/proveniencia al
+   conjunto de artefactos de entrada y bloquear la entrega si falta un recurso.
+   El código actual aún publica SLD crudo y no tiene esta matriz: es el
+   siguiente bloque P0.
 4. Ejecutar migraciones fresh y desde las dos cabezas hermanas, y después
    actualizar la base real desde `20260722_0034`.
 5. Ejecutar bootstrap, sincronizar, validar y promover las 227 capas. El estado
@@ -195,6 +207,33 @@ P1 operativo:
 - cuantificar geometrías reparadas y documentar contratos por fuente;
 - limitar explícitamente la cuota de GeoWebCache y comprobar margen de
   almacenamiento/carga.
+
+### Diseño ya auditado para el siguiente bloque de estilos
+
+La auditoría de `mirror_orchestrator.py`, `acquisition.py` y
+`delivery_builder.py` confirmó estos puntos de entrada: `style_sld` se guarda
+como artefacto independiente, `_input_artifact_ids()` solo incluye artefactos
+con rol `input`, y `complete_style_coverage` está fijado a `True`. La siguiente
+revisión debe añadir una migración posterior a `20260726_0040` con una matriz
+inmutable por versión/estilo (`exact`, `adapted`, `baked`, `missing`) y sus
+recursos locales versionados. Debe:
+
+- analizar cada SLD, resolver referencias relativas y `https` de mismo origen,
+  guardar cada símbolo/imagen en CAS y registrar hash, URL final y media type;
+- rechazar recursos remotos no descargables o referencias no resolubles, sin
+  publicar un estilo que dependa de red;
+- producir un SLD empaquetado/local o una variante adaptada; para estilos que
+  no puedan expresarse en GeoServer, exigir un derivado `baked` con evidencia
+  de cobertura y leyenda;
+- incluir estilos explícitos e implícitos/defaults, y hacer que el builder,
+  lifecycle, rutas y frontend traten cualquier `missing`, `unverified` o
+  cobertura parcial como no servible;
+- incorporar los artefactos de estilo y recursos al hash/proveniencia de la
+  entrega, y añadir regresiones para SVG/PNG externos, URLs relativas,
+  múltiples estilos y modo offline.
+
+No se debe marcar `complete_style_coverage` como satisfecho por una bandera
+estática: debe derivarse de la matriz persistida y de los recursos presentes.
 
 ## Orden exacto al reanudar
 
@@ -220,8 +259,9 @@ P1 operativo:
 4. Ejecutar focales, suite de referencia, suite backend completa y matriz de
    migraciones desde fresh, desde `20260723_0037` y desde
    `20260722_0034`.
-5. Implementar matriz de estrategias, paridad de estilos y los P0 restantes en
-   ramas/worktrees nuevos.
+5. Completar la matriz de paridad de estilos (incluidos recursos externos y
+   leyendas), añadir sus gates a adquisición/build/publicación/local delivery,
+   y después abordar métricas, rollback, retención y recuperación.
 6. Solo con código y pruebas limpios adquirir el runtime:
 
    ```bash
