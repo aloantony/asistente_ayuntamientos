@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260726_0041"
+HEAD_REVISION = "20260726_0042"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -195,6 +195,37 @@ REFERENCE_STYLE_PARITY_TABLES = {
     "reference_style_parity_plan_resources",
     "reference_delivery_style_parities",
     "reference_delivery_style_resources",
+}
+REFERENCE_MIRROR_AUTHORIZATION_COLUMNS = {
+    "id",
+    "provider_key",
+    "service_id",
+    "layer_id",
+    "source_id",
+    "source_definition_sha256",
+    "protocol",
+    "target_kind",
+    "canonical_origin",
+    "allowed_origins_json",
+    "reviewed_document",
+    "document_size_bytes",
+    "document_sha256",
+    "review_sha256",
+    "supersedes_review_id",
+    "supersedes_review_sha256",
+    "decision",
+    "reviewer",
+    "reviewed_at",
+    "license_name",
+    "license_url",
+    "license_terms",
+    "attribution",
+    "allow_metadata_probe",
+    "allow_dataset_download",
+    "allow_local_storage",
+    "allow_local_service",
+    "allow_bulk_tile_seed",
+    "created_at",
 }
 REFERENCE_STYLE_PARITY_COLUMNS = {
     "reference_style_parity_plans": {
@@ -828,13 +859,18 @@ def assert_reference_catalog_schema(inspector: Inspector) -> None:
         "uq_reference_services_provider_id",
         "uq_reference_services_provider_source",
     }
-    assert {
-        constraint["name"]
-        for constraint in inspector.get_unique_constraints("reference_layers")
-    } == {
+    expected_layer_uniques = {
         "uq_reference_layers_provider_id",
         "uq_reference_layers_provider_source",
     }
+    if "reference_mirror_authorization_reviews" in table_names:
+        expected_layer_uniques.add(
+            "uq_reference_layers_provider_id_service"
+        )
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("reference_layers")
+    } == expected_layer_uniques
     assert {
         constraint["name"]
         for constraint in inspector.get_unique_constraints(
@@ -1072,9 +1108,10 @@ def assert_reference_mirror_schema(
     hardened: bool = True,
     fallback_chains: bool = True,
 ) -> None:
-    assert REFERENCE_MIRROR_TABLES <= set(inspector.get_table_names())
+    table_names = set(inspector.get_table_names())
+    assert REFERENCE_MIRROR_TABLES <= table_names
     for table_name, expected_columns in REFERENCE_MIRROR_COLUMNS.items():
-        expected = expected_columns
+        expected = set(expected_columns)
         if table_name == "reference_sync_runs" and not fallback_chains:
             expected = expected_columns - {
                 "provider_key",
@@ -1082,6 +1119,15 @@ def assert_reference_mirror_schema(
                 "parent_run_id",
                 "fallback_depth",
             }
+        if "reference_mirror_authorization_reviews" in table_names:
+            if table_name in {
+                "reference_sync_runs",
+                "reference_delivery_versions",
+            }:
+                expected = expected | {
+                    "mirror_authorization_review_id",
+                    "mirror_authorization_review_sha256",
+                }
         assert {
             column["name"] for column in inspector.get_columns(table_name)
         } == expected
@@ -1260,6 +1306,101 @@ def assert_reference_mirror_schema(
                 item["name"]
                 for item in inspector.get_check_constraints(table_name)
             }
+
+
+def assert_reference_mirror_authorization_schema(
+    inspector: Inspector,
+    engine: Engine,
+) -> None:
+    table_name = "reference_mirror_authorization_reviews"
+    assert {
+        column["name"] for column in inspector.get_columns(table_name)
+    } == REFERENCE_MIRROR_AUTHORIZATION_COLUMNS
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(table_name)
+    } == {
+        "uq_reference_mirror_authorizations_chain_target",
+        "uq_reference_mirror_authorizations_content",
+        "uq_reference_mirror_authorizations_review_hash",
+        "uq_reference_mirror_authorizations_run_target",
+    }
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(table_name)
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_mirror_authorizations_source_reviewed",
+        "uq_reference_mirror_authorizations_genesis",
+        "uq_reference_mirror_authorizations_successor",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(table_name)
+    } == {
+        "ck_reference_mirror_authorizations_approved_permissions",
+        "ck_reference_mirror_authorizations_chain_shape",
+        "ck_reference_mirror_authorizations_decision",
+        "ck_reference_mirror_authorizations_document_size",
+        "ck_reference_mirror_authorizations_hashes",
+        "ck_reference_mirror_authorizations_required_text",
+        "ck_reference_mirror_authorizations_service_attribution",
+        "ck_reference_mirror_authorizations_service_storage",
+        "ck_reference_mirror_authorizations_source_kind",
+        "ck_reference_mirror_authorizations_storage_download",
+        "ck_reference_mirror_authorizations_tiles_seed",
+        "ck_reference_mirror_authorizations_urls",
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(table_name)
+    } == {
+        ("provider_key", "layer_id", "service_id"),
+        ("provider_key", "layer_id", "source_id"),
+        (
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "supersedes_review_id",
+            "supersedes_review_sha256",
+        ),
+    }
+    assert {
+        "mirror_authorization_review_id",
+        "mirror_authorization_review_sha256",
+    } <= {
+        column["name"]
+        for column in inspector.get_columns("reference_sync_runs")
+    }
+    assert {
+        "mirror_authorization_review_id",
+        "mirror_authorization_review_sha256",
+    } <= {
+        column["name"]
+        for column in inspector.get_columns("reference_delivery_versions")
+    }
+    with engine.connect() as connection:
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    """
+                    SELECT trigger.tgname
+                    FROM pg_trigger AS trigger
+                    JOIN pg_class AS relation
+                      ON relation.oid = trigger.tgrelid
+                    WHERE NOT trigger.tgisinternal
+                      AND relation.relname
+                          = 'reference_mirror_authorization_reviews'
+                    """
+                )
+            )
+        }
+    assert triggers == {
+        "trg_reference_mirror_authorizations_immutable",
+        "trg_reference_mirror_authorizations_truncate_immutable",
+        "trg_reference_mirror_authorizations_validate",
+    }
 
 
 def assert_reference_style_parity_schema(
@@ -1685,6 +1826,235 @@ def test_reference_style_parity_backfill_is_missing_and_fail_closed(
         )
         assert refused.returncode != 0
         assert "style parity evidence exists" in refused.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_reference_mirror_authorization_migration_is_fail_closed(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0041")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            version_id = connection.execute(
+                text(
+                    """
+                    WITH snapshot AS (
+                        INSERT INTO reference_catalog_snapshots (
+                            provider_key, source_url, content_sha256,
+                            definition_sha256, raw_catalog_json,
+                            normalized_definition_json, retrieved_at,
+                            service_count, group_count, layer_count,
+                            unresolved_count, status, is_current
+                        ) VALUES (
+                            'authorization-migration',
+                            'https://example.test/settings.json',
+                            repeat('a', 64), repeat('b', 64),
+                            CAST('{}' AS JSON), CAST('{}' AS JSON), now(),
+                            1, 0, 1, 0, 'applied', true
+                        ) RETURNING id, definition_sha256
+                    ),
+                    service AS (
+                        INSERT INTO reference_services (
+                            last_seen_snapshot_id, provider_key, source_key,
+                            title, upstream_protocol, base_url, license_status,
+                            cache_policy, status
+                        )
+                        SELECT
+                            id, 'authorization-migration',
+                            'service:authorization-migration',
+                            'Authorization migration', 'wfs',
+                            'https://example.test/wfs',
+                            'pending', 'mirror', 'active'
+                        FROM snapshot
+                        RETURNING id, last_seen_snapshot_id
+                    ),
+                    layer AS (
+                        INSERT INTO reference_layers (
+                            last_seen_snapshot_id, service_id, provider_key,
+                            source_key, node_type, title, remote_name, role,
+                            renderer, delivery_mode, sort_order,
+                            default_visible, default_opacity, queryable,
+                            downloadable, status
+                        )
+                        SELECT
+                            service.last_seen_snapshot_id, service.id,
+                            'authorization-migration',
+                            'layer:authorization-migration', 'layer',
+                            'Authorization migration layer',
+                            'test:authorization', 'overlay',
+                            'vector_tile', 'mirror', 0, false, 1,
+                            true, true, 'active'
+                        FROM service
+                        RETURNING id
+                    ),
+                    source AS (
+                        INSERT INTO reference_layer_sources (
+                            provider_key, layer_id, source_key, protocol,
+                            target_kind, endpoint_url, remote_name,
+                            sync_strategy, config_json, definition_sha256,
+                            enabled, is_primary
+                        )
+                        SELECT
+                            'authorization-migration', layer.id,
+                            'source:authorization-migration', 'wfs',
+                            'vector', 'https://example.test/wfs',
+                            'test:authorization', 'paged_snapshot',
+                            CAST('{}' AS JSON), repeat('c', 64), true, true
+                        FROM layer
+                        RETURNING id, layer_id
+                    ),
+                    run AS (
+                        INSERT INTO reference_sync_runs (
+                            provider_key, layer_id, source_id,
+                            source_definition_json,
+                            source_definition_sha256, trigger_kind,
+                            check_mode, status, started_at, finished_at
+                        )
+                        SELECT
+                            'authorization-migration', source.layer_id,
+                            source.id, CAST('{}' AS JSON), repeat('c', 64),
+                            'manual', 'full', 'succeeded', now(), now()
+                        FROM source
+                        RETURNING id, source_id, layer_id
+                    )
+                    INSERT INTO reference_delivery_versions (
+                        provider_key, layer_id, source_id, sync_run_id,
+                        catalog_snapshot_id, catalog_definition_sha256,
+                        sequence_number, delivery_kind, source_version,
+                        content_sha256, manifest_sha256, validation_sha256,
+                        reference_at, crs, bounds_json, feature_count,
+                        validation_json
+                    )
+                    SELECT
+                        'authorization-migration', run.layer_id,
+                        run.source_id, run.id, snapshot.id,
+                        snapshot.definition_sha256, 1, 'vector', 'legacy',
+                        repeat('d', 64), repeat('e', 64), repeat('f', 64),
+                        now(), 'EPSG:3857',
+                        CAST(:bounds AS JSON),
+                        1, CAST(:validation AS JSON)
+                    FROM run CROSS JOIN snapshot
+                    RETURNING id
+                    """
+                ),
+                {
+                    "bounds": json.dumps(
+                        {
+                            "west": -7,
+                            "south": 40,
+                            "east": -1,
+                            "north": 44,
+                        }
+                    ),
+                    "validation": json.dumps({"passed": True}),
+                },
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_mirror_authorization_schema(
+            inspect(engine),
+            engine,
+        )
+        with engine.connect() as connection:
+            legacy_links = connection.execute(
+                text(
+                    """
+                    SELECT
+                        run.mirror_authorization_review_id,
+                        run.mirror_authorization_review_sha256,
+                        version.mirror_authorization_review_id,
+                        version.mirror_authorization_review_sha256
+                    FROM reference_delivery_versions AS version
+                    JOIN reference_sync_runs AS run
+                      ON run.id = version.sync_run_id
+                    WHERE version.id = :version_id
+                    """
+                ),
+                {"version_id": version_id},
+            ).one()
+        assert tuple(legacy_links) == (None, None, None, None)
+
+        run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260726_0041",
+        )
+        assert "reference_mirror_authorization_reviews" not in {
+            table for table in inspect(engine).get_table_names()
+        }
+        run_alembic(migration_database_url, "upgrade", "head")
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_mirror_authorization_reviews (
+                        provider_key, service_id, layer_id, source_id,
+                        source_definition_sha256, protocol, target_kind,
+                        canonical_origin, allowed_origins_json,
+                        reviewed_document, document_size_bytes,
+                        document_sha256, review_sha256, decision, reviewer,
+                        reviewed_at, license_name, license_url, license_terms,
+                        attribution, allow_metadata_probe,
+                        allow_dataset_download, allow_local_storage,
+                        allow_local_service, allow_bulk_tile_seed
+                    )
+                    SELECT
+                        source.provider_key, layer.service_id,
+                        source.layer_id, source.id,
+                        source.definition_sha256, source.protocol,
+                        source.target_kind, 'https://example.test',
+                        CAST('["https://example.test"]' AS JSON),
+                        CAST('{}' AS bytea), 2, repeat('1', 64),
+                        repeat('2', 64), 'approved', 'migration-test',
+                        now(), 'Test license',
+                        'https://example.test/license',
+                        'Explicit migration test terms',
+                        'Test attribution', true, true, true, true, false
+                    FROM reference_layer_sources AS source
+                    JOIN reference_layers AS layer
+                      ON layer.provider_key = source.provider_key
+                     AND layer.id = source.layer_id
+                    WHERE source.provider_key = 'authorization-migration'
+                    """
+                )
+            )
+
+        with pytest.raises(DBAPIError) as immutable:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE reference_mirror_authorization_reviews
+                        SET reviewer = 'changed'
+                        """
+                    )
+                )
+        assert immutable.value.orig.sqlstate == "55000"
+        with pytest.raises(DBAPIError) as truncate:
+            with engine.begin() as connection:
+                connection.execute(
+                        text(
+                            "TRUNCATE "
+                            "reference_mirror_authorization_reviews CASCADE"
+                        )
+                )
+        assert truncate.value.orig.sqlstate == "55000"
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260726_0041",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "immutable mirror authorizations exist" in refused.stderr
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")

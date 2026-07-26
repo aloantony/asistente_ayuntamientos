@@ -17,6 +17,10 @@ from app.reference_layers.mirror_lifecycle import (
     stored_catalog_snapshot_is_valid,
     sync_run_source_definition_is_valid,
 )
+from app.reference_layers.mirror_authorization import (
+    source_authorization_blocker,
+    version_authorization_blocker,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -108,16 +112,36 @@ def resolve_local_delivery(
     if state is None:
         configured = list(
             db.scalars(
-                select(ReferenceLayerSource.enabled).where(
+                select(ReferenceLayerSource)
+                .where(
                     ReferenceLayerSource.provider_key
                     == current_layer.provider_key,
                     ReferenceLayerSource.layer_id == current_layer.id,
                 )
+                .order_by(
+                    ReferenceLayerSource.is_primary.desc(),
+                    ReferenceLayerSource.priority,
+                    ReferenceLayerSource.id,
+                )
             )
         )
         if configured:
+            enabled = [source for source in configured if source.enabled]
+            blockers = [
+                source_authorization_blocker(db, source=source)
+                for source in enabled
+            ]
+            authorization_blocker = next(
+                (blocker for blocker in blockers if blocker is not None),
+                None,
+            )
+            if enabled and all(blockers):
+                raise LocalDeliveryError(
+                    authorization_blocker
+                    or "mirror_authorization_missing"
+                )
             raise LocalDeliveryError(
-                "local_not_ready" if any(configured) else "local_disabled"
+                "local_not_ready" if enabled else "local_disabled"
             )
         return None
     head = db.scalar(
@@ -177,6 +201,14 @@ def resolve_local_delivery(
     if row is None:
         raise LocalDeliveryError("local_version_invalid")
     version, source, run, snapshot = row
+    authorization_blocker = version_authorization_blocker(
+        db,
+        version=version,
+        source=source,
+        run=run,
+    )
+    if authorization_blocker is not None:
+        raise LocalDeliveryError(authorization_blocker)
     configured_style_versions = _configured_style_parity_versions(
         db,
         [version.id],
@@ -284,14 +316,21 @@ def catalog_local_delivery_availability(
             )
         )
     }
-    source_enabled_by_layer: dict[int, list[bool]] = {}
-    for layer_id, enabled in db.execute(
-        select(ReferenceLayerSource.layer_id, ReferenceLayerSource.enabled).where(
+    sources_by_layer: dict[int, list[ReferenceLayerSource]] = {}
+    for source in db.scalars(
+        select(ReferenceLayerSource)
+        .where(
             ReferenceLayerSource.provider_key == provider_key,
             ReferenceLayerSource.layer_id.in_(leaf_ids),
         )
+        .order_by(
+            ReferenceLayerSource.layer_id,
+            ReferenceLayerSource.is_primary.desc(),
+            ReferenceLayerSource.priority,
+            ReferenceLayerSource.id,
+        )
     ):
-        source_enabled_by_layer.setdefault(layer_id, []).append(enabled)
+        sources_by_layer.setdefault(source.layer_id, []).append(source)
     active_ids = [
         state.active_version_id
         for state in states.values()
@@ -310,6 +349,7 @@ def catalog_local_delivery_availability(
         active_ids,
     )
     active_records: dict[int, _ActiveRecord] = {}
+    active_authorization_blockers: dict[int, str] = {}
     if active_ids:
         rows = db.execute(
             select(
@@ -351,6 +391,16 @@ def catalog_local_delivery_availability(
             state = states.get(version.layer_id)
             head = heads.get(version.layer_id)
             layer = layers_by_id.get(version.layer_id)
+            authorization_blocker = version_authorization_blocker(
+                db,
+                version=version,
+                source=source,
+                run=run,
+            )
+            if authorization_blocker is not None:
+                active_authorization_blockers[
+                    version.layer_id
+                ] = authorization_blocker
             if (
                 state is not None
                 and head is not None
@@ -361,6 +411,7 @@ def catalog_local_delivery_availability(
                     version.id not in configured_style_versions
                     or version.id in complete_style_versions
                 )
+                and authorization_blocker is None
                 and state.active_version_id == version.id
                 and delivery_state_matches_promotion_head(state, head)
             ):
@@ -404,14 +455,35 @@ def catalog_local_delivery_availability(
         state = states.get(layer.id)
         layer_blocker = layer_blockers.get(layer.id)
         if layer_blocker is not None:
-            if state is not None or source_enabled_by_layer.get(layer.id):
+            if state is not None or sources_by_layer.get(layer.id):
                 result[layer.id] = _unavailable(layer_blocker)
             continue
         if state is None:
-            configured = source_enabled_by_layer.get(layer.id)
+            configured = sources_by_layer.get(layer.id)
             if configured:
+                enabled_sources = [
+                    source for source in configured if source.enabled
+                ]
+                authorization_blockers = [
+                    source_authorization_blocker(
+                        db,
+                        source=source,
+                    )
+                    for source in enabled_sources
+                ]
+                if enabled_sources and all(authorization_blockers):
+                    result[layer.id] = _unavailable(
+                        next(
+                            blocker
+                            for blocker in authorization_blockers
+                            if blocker is not None
+                        )
+                    )
+                    continue
                 result[layer.id] = _unavailable(
-                    "local_not_ready" if any(configured) else "local_disabled"
+                    "local_not_ready"
+                    if enabled_sources
+                    else "local_disabled"
                 )
             continue
         if not delivery_state_matches_promotion_head(
@@ -426,10 +498,13 @@ def catalog_local_delivery_availability(
         record = active_records.get(layer.id)
         if record is None:
             blocker = (
-                "style_parity_incomplete"
+                active_authorization_blockers.get(layer.id)
+                or (
+                    "style_parity_incomplete"
                 if state.active_version_id in configured_style_versions
                 and state.active_version_id not in complete_style_versions
                 else "local_version_invalid"
+                )
             )
             result[layer.id] = _unavailable(blocker)
             continue

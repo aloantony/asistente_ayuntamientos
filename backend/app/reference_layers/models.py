@@ -605,6 +605,12 @@ class ReferenceLayer(TimestampMixin, Base):
             "id",
             name="uq_reference_layers_provider_id",
         ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            "service_id",
+            name="uq_reference_layers_provider_id_service",
+        ),
         ForeignKeyConstraint(
             ["provider_key", "last_seen_snapshot_id"],
             [
@@ -1378,6 +1384,252 @@ class ReferenceLayerSource(TimestampMixin, Base):
     )
 
 
+class ReferenceMirrorAuthorizationReview(Base):
+    """Append-only human authorization for one exact local-mirror source."""
+
+    __tablename__ = "reference_mirror_authorization_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> '' and btrim(reviewer) <> '' and "
+            "btrim(license_name) <> '' and btrim(license_terms) <> ''",
+            name="ck_reference_mirror_authorizations_required_text",
+        ),
+        CheckConstraint(
+            "document_size_bytes between 1 and 262144 and "
+            "document_size_bytes = octet_length(reviewed_document)",
+            name="ck_reference_mirror_authorizations_document_size",
+        ),
+        CheckConstraint(
+            "document_sha256 ~ '^[0-9a-f]{64}$' and "
+            "review_sha256 ~ '^[0-9a-f]{64}$' and "
+            "source_definition_sha256 ~ '^[0-9a-f]{64}$' and "
+            "(supersedes_review_sha256 is null or "
+            "supersedes_review_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_reference_mirror_authorizations_hashes",
+        ),
+        CheckConstraint(
+            "decision in ('approved', 'restricted', 'rejected')",
+            name="ck_reference_mirror_authorizations_decision",
+        ),
+        CheckConstraint(
+            "protocol in ('wfs', 'ogc_api_features', 'wcs', "
+            "'arcgis_rest', 'atom', 'download', 'wmts', 'xyz', "
+            "'wms_tiles', 'local') and "
+            "target_kind in ('vector', 'raster', 'tiles')",
+            name="ck_reference_mirror_authorizations_source_kind",
+        ),
+        CheckConstraint(
+            "canonical_origin like 'https://%' and "
+            "license_url like 'https://%' and "
+            "json_typeof(allowed_origins_json) = 'array' and "
+            "json_array_length(allowed_origins_json) between 1 and 32",
+            name="ck_reference_mirror_authorizations_urls",
+        ),
+        CheckConstraint(
+            "(supersedes_review_id is null and "
+            "supersedes_review_sha256 is null) or "
+            "(supersedes_review_id is not null and "
+            "supersedes_review_sha256 is not null)",
+            name="ck_reference_mirror_authorizations_chain_shape",
+        ),
+        CheckConstraint(
+            "(not allow_metadata_probe and not allow_dataset_download and "
+            "not allow_local_storage and not allow_local_service and "
+            "not allow_bulk_tile_seed) or decision = 'approved'",
+            name="ck_reference_mirror_authorizations_approved_permissions",
+        ),
+        CheckConstraint(
+            "not allow_local_storage or allow_dataset_download",
+            name="ck_reference_mirror_authorizations_storage_download",
+        ),
+        CheckConstraint(
+            "not allow_local_service or allow_local_storage",
+            name="ck_reference_mirror_authorizations_service_storage",
+        ),
+        CheckConstraint(
+            "not allow_local_service or "
+            "(attribution is not null and btrim(attribution) <> '')",
+            name="ck_reference_mirror_authorizations_service_attribution",
+        ),
+        CheckConstraint(
+            "target_kind <> 'tiles' or not allow_local_service or "
+            "allow_bulk_tile_seed",
+            name="ck_reference_mirror_authorizations_tiles_seed",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "document_sha256",
+            "review_sha256",
+            name="uq_reference_mirror_authorizations_content",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "review_sha256",
+            name="uq_reference_mirror_authorizations_review_hash",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "id",
+            "review_sha256",
+            name="uq_reference_mirror_authorizations_chain_target",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "source_definition_sha256",
+            "id",
+            "review_sha256",
+            name="uq_reference_mirror_authorizations_run_target",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id", "service_id"],
+            [
+                "reference_layers.provider_key",
+                "reference_layers.id",
+                "reference_layers.service_id",
+            ],
+            name="fk_reference_mirror_authorizations_layer_service",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "layer_id",
+                "source_id",
+            ],
+            [
+                "reference_layer_sources.provider_key",
+                "reference_layer_sources.layer_id",
+                "reference_layer_sources.id",
+            ],
+            name="fk_reference_mirror_authorizations_source",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "layer_id",
+                "source_id",
+                "supersedes_review_id",
+                "supersedes_review_sha256",
+            ],
+            [
+                "reference_mirror_authorization_reviews.provider_key",
+                "reference_mirror_authorization_reviews.layer_id",
+                "reference_mirror_authorization_reviews.source_id",
+                "reference_mirror_authorization_reviews.id",
+                "reference_mirror_authorization_reviews.review_sha256",
+            ],
+            name="fk_reference_mirror_authorizations_supersedes",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_mirror_authorizations_source_reviewed",
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "reviewed_at",
+            "id",
+        ),
+        Index(
+            "uq_reference_mirror_authorizations_genesis",
+            "provider_key",
+            "layer_id",
+            "source_id",
+            unique=True,
+            postgresql_where=text("supersedes_review_id is null"),
+        ),
+        Index(
+            "uq_reference_mirror_authorizations_successor",
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "supersedes_review_id",
+            unique=True,
+            postgresql_where=text("supersedes_review_id is not null"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    service_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_definition_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    protocol: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    canonical_origin: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed_origins_json: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    reviewed_document: Mapped[bytes] = mapped_column(
+        LargeBinary,
+        nullable=False,
+    )
+    document_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    supersedes_review_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    supersedes_review_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    license_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    license_url: Mapped[str] = mapped_column(Text, nullable=False)
+    license_terms: Mapped[str] = mapped_column(Text, nullable=False)
+    attribution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allow_metadata_probe: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default="false",
+        nullable=False,
+    )
+    allow_dataset_download: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default="false",
+        nullable=False,
+    )
+    allow_local_storage: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default="false",
+        nullable=False,
+    )
+    allow_local_service: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default="false",
+        nullable=False,
+    )
+    allow_bulk_tile_seed: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default="false",
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class ReferenceSyncRun(TimestampMixin, Base):
     __tablename__ = "reference_sync_runs"
     __table_args__ = (
@@ -1449,6 +1701,20 @@ class ReferenceSyncRun(TimestampMixin, Base):
             "id",
             name="uq_reference_sync_runs_layer_id",
         ),
+        UniqueConstraint(
+            "source_id",
+            "id",
+            "mirror_authorization_review_id",
+            "mirror_authorization_review_sha256",
+            name="uq_reference_sync_runs_authorization",
+        ),
+        CheckConstraint(
+            "(mirror_authorization_review_id is null and "
+            "mirror_authorization_review_sha256 is null) or "
+            "(mirror_authorization_review_id is not null and "
+            "mirror_authorization_review_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_reference_sync_runs_authorization",
+        ),
         ForeignKeyConstraint(
             ["provider_key", "layer_id", "source_id"],
             [
@@ -1467,6 +1733,26 @@ class ReferenceSyncRun(TimestampMixin, Base):
                 "reference_sync_runs.id",
             ],
             name="fk_reference_sync_runs_parent",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "layer_id",
+                "source_id",
+                "source_definition_sha256",
+                "mirror_authorization_review_id",
+                "mirror_authorization_review_sha256",
+            ],
+            [
+                "reference_mirror_authorization_reviews.provider_key",
+                "reference_mirror_authorization_reviews.layer_id",
+                "reference_mirror_authorization_reviews.source_id",
+                "reference_mirror_authorization_reviews.source_definition_sha256",
+                "reference_mirror_authorization_reviews.id",
+                "reference_mirror_authorization_reviews.review_sha256",
+            ],
+            name="fk_reference_sync_runs_mirror_authorization",
             ondelete="RESTRICT",
         ),
         Index(
@@ -1539,6 +1825,14 @@ class ReferenceSyncRun(TimestampMixin, Base):
     source_definition_sha256: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+    )
+    mirror_authorization_review_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    mirror_authorization_review_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
     )
     trigger_kind: Mapped[str] = mapped_column(String(20), nullable=False)
     check_mode: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -2052,6 +2346,13 @@ class ReferenceDeliveryVersion(Base):
             "sync_run_id",
             name="uq_reference_delivery_versions_sync_run",
         ),
+        CheckConstraint(
+            "(mirror_authorization_review_id is null and "
+            "mirror_authorization_review_sha256 is null) or "
+            "(mirror_authorization_review_id is not null and "
+            "mirror_authorization_review_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_reference_delivery_versions_authorization",
+        ),
         ForeignKeyConstraint(
             ["provider_key", "layer_id", "source_id"],
             [
@@ -2066,6 +2367,40 @@ class ReferenceDeliveryVersion(Base):
             ["source_id", "sync_run_id"],
             ["reference_sync_runs.source_id", "reference_sync_runs.id"],
             name="fk_reference_delivery_versions_source_run",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "source_id",
+                "sync_run_id",
+                "mirror_authorization_review_id",
+                "mirror_authorization_review_sha256",
+            ],
+            [
+                "reference_sync_runs.source_id",
+                "reference_sync_runs.id",
+                "reference_sync_runs.mirror_authorization_review_id",
+                "reference_sync_runs.mirror_authorization_review_sha256",
+            ],
+            name="fk_reference_delivery_versions_run_authorization",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "layer_id",
+                "source_id",
+                "mirror_authorization_review_id",
+                "mirror_authorization_review_sha256",
+            ],
+            [
+                "reference_mirror_authorization_reviews.provider_key",
+                "reference_mirror_authorization_reviews.layer_id",
+                "reference_mirror_authorization_reviews.source_id",
+                "reference_mirror_authorization_reviews.id",
+                "reference_mirror_authorization_reviews.review_sha256",
+            ],
+            name="fk_reference_delivery_versions_mirror_authorization",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -2102,6 +2437,14 @@ class ReferenceDeliveryVersion(Base):
     catalog_definition_sha256: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+    )
+    mirror_authorization_review_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    mirror_authorization_review_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
     )
     sequence_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     delivery_kind: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -2878,6 +3221,17 @@ _install_immutable_reference_trigger(
     function_name="prevent_reference_delivery_attestation_mutation",
     trigger_name="trg_reference_delivery_attestations_immutable",
     error_message="reference delivery evidence is immutable",
+)
+_install_immutable_reference_trigger(
+    ReferenceMirrorAuthorizationReview.__table__,
+    function_name="prevent_reference_mirror_authorization_mutation",
+    trigger_name="trg_reference_mirror_authorizations_immutable",
+    error_message="reference mirror authorization is immutable",
+)
+_install_immutable_reference_truncate_trigger(
+    ReferenceMirrorAuthorizationReview.__table__,
+    function_name="prevent_reference_mirror_authorization_mutation",
+    trigger_name="trg_reference_mirror_authorizations_truncate_immutable",
 )
 _install_immutable_reference_trigger(
     ReferenceCatalogObservedVersion.__table__,

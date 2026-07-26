@@ -34,6 +34,7 @@ from app.reference_layers.models import (
     ReferenceStyleParityPlanItem,
     ReferenceSyncRun,
 )
+from support_reference_mirror_authorization import authorize_mirror_source
 
 
 def _catalog_definition(
@@ -139,6 +140,17 @@ def seed_local_delivery(
         "config": source.config_json,
     }
     source.definition_sha256 = canonical_json_sha256(source_definition)
+    review = authorize_mirror_source(
+        db,
+        source,
+        reviewed_at=datetime(
+            2026,
+            7,
+            22,
+            9,
+            tzinfo=timezone.utc,
+        ),
+    )
     finished = datetime(2026, 7, 22, 10, tzinfo=timezone.utc)
     run = ReferenceSyncRun(
         provider_key=layer.provider_key,
@@ -146,6 +158,8 @@ def seed_local_delivery(
         source_id=source.id,
         source_definition_json=source_definition,
         source_definition_sha256=source.definition_sha256,
+        mirror_authorization_review_id=review.id,
+        mirror_authorization_review_sha256=review.review_sha256,
         trigger_kind="manual",
         check_mode="full",
         status="succeeded",
@@ -162,6 +176,8 @@ def seed_local_delivery(
         sync_run_id=run.id,
         catalog_snapshot_id=snapshot.id,
         catalog_definition_sha256=snapshot.definition_sha256,
+        mirror_authorization_review_id=review.id,
+        mirror_authorization_review_sha256=review.review_sha256,
         sequence_number=1,
         delivery_kind=kind,
         content_sha256="e" * 64,
@@ -386,20 +402,20 @@ def test_incomplete_style_parity_blocks_an_active_legacy_delivery(db) -> None:
     assert raised.value.blocker == "style_parity_incomplete"
 
 
-def test_changed_mutable_source_does_not_invalidate_frozen_delivery(db) -> None:
+def test_changed_mutable_source_requires_new_authorization(db) -> None:
     layer, styles, source, _, _, _ = seed_local_delivery(db)
     source.definition_sha256 = "9" * 64
     db.commit()
 
-    selection = resolve_local_delivery(
-        db,
-        layer=layer,
-        style=styles[0],
-        operation="tile",
-    )
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
 
-    assert selection is not None
-    assert selection.version_id is not None
+    assert raised.value.blocker == "mirror_authorization_source_changed"
 
 
 def test_changed_frozen_run_definition_blocks_without_remote_fallback(db) -> None:
@@ -418,7 +434,7 @@ def test_changed_frozen_run_definition_blocks_without_remote_fallback(db) -> Non
             operation="tile",
         )
 
-    assert raised.value.blocker == "local_source_changed"
+    assert raised.value.blocker == "mirror_authorization_source_changed"
 
 
 def test_catalog_v2_keeps_v1_servable_until_v2_is_promoted(db) -> None:
@@ -460,12 +476,13 @@ def test_catalog_v2_keeps_v1_servable_until_v2_is_promoted(db) -> None:
     )
     db.commit()
 
-    selection = resolve_local_delivery(
-        db,
-        layer=current_layer,
-        style=current_styles[0],
-        operation="tile",
-    )
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=current_layer,
+            style=current_styles[0],
+            operation="tile",
+        )
     availability = catalog_local_delivery_availability(
         db,
         provider_key=current_layer.provider_key,
@@ -481,11 +498,14 @@ def test_catalog_v2_keeps_v1_servable_until_v2_is_promoted(db) -> None:
     )[current_layer.id]
 
     assert snapshot_v2.id != version.catalog_snapshot_id
-    assert selection is not None
-    assert selection.version_id == version.id
+    assert raised.value.blocker == "mirror_authorization_source_changed"
     assert availability is not None
-    assert availability.delivery_available is True
-    assert status.status == "serving_previous"
+    assert availability.delivery_available is False
+    assert (
+        availability.delivery_blocker
+        == "mirror_authorization_source_changed"
+    )
+    assert status.status == "error"
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,10 @@ from app.reference_layers.mirror_strategy import (
     apply_mirror_strategy_plan,
     build_mirror_strategy_plan,
 )
+from app.reference_layers.mirror_authorization import (
+    MirrorAuthorizationError,
+    require_version_local_service_authorization,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -1039,6 +1043,12 @@ def promote_delivery_version(
             raise MirrorPromotionConflict(
                 "delivery kind does not match the acquisition source"
             )
+        _validate_version_mirror_authorization(
+            db,
+            version=version,
+            source=source,
+            run=run,
+        )
         _validate_current_version_catalog(db, version)
         _validate_version_ready(db, version)
         from_version_id = (
@@ -1917,8 +1927,34 @@ def _validate_stored_version_servability(
         raise MirrorPromotionConflict(
             "delivery version catalog evidence is invalid"
         )
+    _validate_version_mirror_authorization(
+        db,
+        version=version,
+        source=source,
+        run=run,
+    )
     _validate_version_ready(db, version)
     return source
+
+
+def _validate_version_mirror_authorization(
+    db: Session,
+    *,
+    version: ReferenceDeliveryVersion,
+    source: ReferenceLayerSource,
+    run: ReferenceSyncRun,
+) -> None:
+    try:
+        require_version_local_service_authorization(
+            db,
+            version=version,
+            source=source,
+            run=run,
+        )
+    except MirrorAuthorizationError as error:
+        raise MirrorPromotionConflict(
+            f"mirror authorization rejected delivery transition: {error.code}"
+        ) from error
 
 
 def _locked_current_layer_catalog(

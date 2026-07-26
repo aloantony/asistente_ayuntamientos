@@ -65,6 +65,12 @@ from app.reference_layers.local_tile_archive import (
     LocalTileArchiveError,
     LocalTileArchiveRenderer,
 )
+from app.reference_layers.mirror_authorization import (
+    MirrorAuthorizationError,
+    bind_sync_run_authorization,
+    require_bound_sync_run_authorization,
+    require_version_local_service_authorization,
+)
 from app.reference_layers.mirror_lifecycle import (
     AppliedMirrorBootstrap,
     MirrorLeaseLostError,
@@ -483,15 +489,27 @@ class MirrorRunProcessor:
             ) as supervisor:
                 current_lease = supervisor.lease
                 if context.existing_version_id is not None:
+                    revalidate_run_authorization(
+                        self.session_factory,
+                        context,
+                    )
                     publication = load_existing_publication(
                         self.session_factory,
                         context,
                         context.existing_version_id,
                     )
+                    revalidate_run_authorization(
+                        self.session_factory,
+                        context,
+                    )
                     publication_stats = (
                         self.publisher(context, publication, supervisor) or {}
                     )
                     supervisor.pulse(force=True)
+                    revalidate_run_authorization(
+                        self.session_factory,
+                        context,
+                    )
                     promote_existing_delivery(
                         self.session_factory,
                         context,
@@ -521,12 +539,21 @@ class MirrorRunProcessor:
                         version_id=context.existing_version_id,
                     )
 
+                revalidate_run_authorization(
+                    self.session_factory,
+                    context,
+                )
                 acquired = self.acquisition.acquire(
                     context.source,
                     run=context.run,
                     conditional=context.conditional,
                 )
                 supervisor.pulse(force=True)
+                revalidate_run_authorization(
+                    self.session_factory,
+                    context,
+                    acquired=acquired,
+                )
                 persisted = persist_run_acquisition(
                     self.session_factory,
                     supervisor.lease,
@@ -555,6 +582,11 @@ class MirrorRunProcessor:
                     persisted,
                     acquired,
                 )
+                revalidate_run_authorization(
+                    self.session_factory,
+                    context,
+                    acquired=acquired,
+                )
 
                 if (
                     context.source.target_kind == "tiles"
@@ -579,11 +611,21 @@ class MirrorRunProcessor:
                     )
                     tile_check_stats = content_check.stats()
                     if content_check.unchanged:
+                        revalidate_run_authorization(
+                            self.session_factory,
+                            context,
+                            acquired=acquired,
+                        )
                         publication_stats = (
                             self.publisher(context, publication, supervisor)
                             or {}
                         )
                         supervisor.pulse(force=True)
+                        revalidate_run_authorization(
+                            self.session_factory,
+                            context,
+                            acquired=acquired,
+                        )
                         finish_unchanged(
                             self.session_factory,
                             supervisor.lease,
@@ -607,10 +649,20 @@ class MirrorRunProcessor:
                     supervisor,
                 )
                 supervisor.pulse(force=True)
+                revalidate_run_authorization(
+                    self.session_factory,
+                    context,
+                    acquired=acquired,
+                )
                 built = persist_delivery_version(
                     self.session_factory,
                     supervisor.lease,
                     materialized.prepared,
+                )
+                revalidate_run_authorization(
+                    self.session_factory,
+                    context,
+                    acquired=acquired,
                 )
                 publication_stats = (
                     self.publisher(
@@ -621,6 +673,11 @@ class MirrorRunProcessor:
                     or {}
                 )
                 supervisor.pulse(force=True)
+                revalidate_run_authorization(
+                    self.session_factory,
+                    context,
+                    acquired=acquired,
+                )
                 promote_existing_delivery(
                     self.session_factory,
                     context,
@@ -865,15 +922,21 @@ def load_run_context(
 
     with session_factory() as db:
         run = db.scalar(
-            select(ReferenceSyncRun).where(
+            select(ReferenceSyncRun)
+            .where(
                 ReferenceSyncRun.id == lease.run_id,
                 ReferenceSyncRun.source_id == lease.source_id,
                 ReferenceSyncRun.status == "running",
                 ReferenceSyncRun.lease_token == lease.token,
                 ReferenceSyncRun.attempt_no == lease.attempt_no,
             )
+            .with_for_update()
         )
-        source = db.get(ReferenceLayerSource, lease.source_id)
+        source = db.scalar(
+            select(ReferenceLayerSource)
+            .where(ReferenceLayerSource.id == lease.source_id)
+            .with_for_update()
+        )
         if run is None or source is None:
             raise MirrorLeaseLostError("sync-run lease is no longer current")
         if not source.enabled:
@@ -886,6 +949,12 @@ def load_run_context(
                 "reference source changed after the run was queued",
                 code="source_definition_changed",
             )
+        bind_sync_run_authorization(
+            db,
+            run=run,
+            source=source,
+        )
+        db.commit()
         layer = db.scalar(
             select(ReferenceLayer).where(
                 ReferenceLayer.id == source.layer_id,
@@ -1019,6 +1088,35 @@ def load_run_context(
         )
         db.expunge_all()
         return context
+
+
+def revalidate_run_authorization(
+    session_factory: SessionFactory,
+    context: RunContext,
+    *,
+    acquired: AcquisitionResult | None = None,
+) -> None:
+    """Fail closed between every network, materialization and publish stage."""
+
+    with session_factory() as db:
+        run = db.scalar(
+            select(ReferenceSyncRun).where(
+                ReferenceSyncRun.id == context.run.id,
+                ReferenceSyncRun.source_id == context.source.id,
+                ReferenceSyncRun.status == "running",
+                ReferenceSyncRun.lease_token == context.lease.token,
+                ReferenceSyncRun.attempt_no == context.lease.attempt_no,
+            )
+        )
+        source = db.get(ReferenceLayerSource, context.source.id)
+        if run is None or source is None:
+            raise MirrorLeaseLostError("sync-run lease is no longer current")
+        require_bound_sync_run_authorization(
+            db,
+            run=run,
+            source=source,
+            acquired=acquired,
+        )
 
 
 def persist_run_acquisition(
@@ -1204,6 +1302,13 @@ def classify_worker_failure(error: BaseException) -> ClassifiedFailure:
             _safe_summary(str(error)),
             error.retryable,
             "failed" if error.retryable else "rejected",
+        )
+    if isinstance(error, MirrorAuthorizationError):
+        return ClassifiedFailure(
+            error.code[:64],
+            _safe_summary(str(error)),
+            False,
+            "rejected",
         )
     if isinstance(error, ReferenceAcquisitionError):
         return ClassifiedFailure(
@@ -2105,6 +2210,24 @@ def load_existing_publication(
                 "existing delivery version does not belong to the leased run",
                 code="existing_delivery_invalid",
             )
+        source = db.get(ReferenceLayerSource, version.source_id)
+        version_run = db.scalar(
+            select(ReferenceSyncRun).where(
+                ReferenceSyncRun.id == version.sync_run_id,
+                ReferenceSyncRun.source_id == version.source_id,
+            )
+        )
+        if source is None or version_run is None:
+            raise MirrorOrchestrationError(
+                "existing delivery authorization context is incomplete",
+                code="existing_delivery_invalid",
+            )
+        require_version_local_service_authorization(
+            db,
+            version=version,
+            source=source,
+            run=version_run,
+        )
         assets = tuple(
             db.scalars(
                 select(ReferenceDeliveryAsset)

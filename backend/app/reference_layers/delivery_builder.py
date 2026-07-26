@@ -27,6 +27,10 @@ from app.reference_layers.mirror_lifecycle import (
     stored_source_definition_is_valid,
     sync_run_source_definition_is_valid,
 )
+from app.reference_layers.mirror_authorization import (
+    MirrorAuthorizationError,
+    require_bound_sync_run_authorization,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -212,6 +216,16 @@ def create_delivery_version(
             raise DeliveryBuildError("sync-run source definition is invalid")
         if source.definition_sha256 != run.source_definition_sha256:
             raise DeliveryBuildError("delivery source changed during the run")
+        try:
+            authorization = require_bound_sync_run_authorization(
+                db,
+                run=run,
+                source=source,
+            )
+        except MirrorAuthorizationError as error:
+            raise DeliveryBuildError(
+                f"mirror authorization rejected version creation: {error.code}"
+            ) from error
         if source.target_kind != prepared.delivery_kind:
             raise DeliveryBuildError("prepared delivery kind does not match source")
         active_generation = state.generation if state is not None else 0
@@ -352,6 +366,10 @@ def create_delivery_version(
                 "plan_id": plan.id,
                 "evidence_sha256": plan.evidence_sha256,
             },
+            "mirror_authorization": {
+                "review_id": authorization.id,
+                "review_sha256": authorization.review_sha256,
+            },
         }
         manifest_sha256 = canonical_json_sha256(manifest)
         version = ReferenceDeliveryVersion(
@@ -361,6 +379,10 @@ def create_delivery_version(
             sync_run_id=run.id,
             catalog_snapshot_id=snapshot.id,
             catalog_definition_sha256=snapshot.definition_sha256,
+            mirror_authorization_review_id=authorization.id,
+            mirror_authorization_review_sha256=(
+                authorization.review_sha256
+            ),
             sequence_number=sequence_number,
             delivery_kind=prepared.delivery_kind,
             source_version=prepared.source_version,
