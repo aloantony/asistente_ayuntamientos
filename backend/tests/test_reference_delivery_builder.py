@@ -1,11 +1,18 @@
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 from types import SimpleNamespace
 
 import pytest
+from conftest import headers_for
 from sqlalchemy import select
 
+from app.reference_layers import (
+    local_metadata as reference_local_metadata,
+)
+from app.reference_layers import routes as reference_layer_routes
+from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
@@ -21,6 +28,11 @@ from app.reference_layers.delivery_builder import (
     canonical_json_sha256,
     create_delivery_version,
     evaluate_delivery_continuity,
+    local_metadata_asset_descriptor,
+    local_metadata_binding,
+)
+from app.reference_layers.local_metadata import (
+    attach_local_metadata_asset,
 )
 from app.reference_layers.mirror_lifecycle import (
     MirrorLeaseLostError,
@@ -36,6 +48,7 @@ from app.reference_layers.models import (
     ReferenceLayerSource,
     ReferenceLayer,
     ReferenceLayerStyle,
+    ReferenceMirrorAuthorizationReview,
     ReferenceSourceArtifact,
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
@@ -44,6 +57,7 @@ from app.reference_layers.style_parity import persist_style_parity_plan
 from support_reference_mirror_authorization import (
     authorize_mirror_source,
     bind_run_authorization,
+    supersede_mirror_authorization,
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=timezone.utc)
@@ -113,7 +127,7 @@ def _lease_and_input(db):
         item.is_primary = item.id == source.id
         item.next_check_at = NOW - timedelta(seconds=1)
     db.commit()
-    authorize_mirror_source(db, source, reviewed_at=NOW)
+    review = authorize_mirror_source(db, source, reviewed_at=NOW)
     enqueue_due_sources(db, now=NOW)
     lease = claim_next_sync_run(
         db,
@@ -154,6 +168,11 @@ def _lease_and_input(db):
         input_artifact=artifact,
         now=NOW,
     )
+    layer = db.get(ReferenceLayer, source.layer_id)
+    fixture.source = source
+    fixture.lease = lease
+    fixture.snapshot = layer.last_seen_snapshot
+    fixture.review = review
     db.commit()
     return source, lease, fixture
 
@@ -277,7 +296,7 @@ def _prepared(fixture, *, input_artifact_id: int | None = None) -> PreparedDeliv
             "srid": 3857,
         },
     }
-    return PreparedDelivery(
+    prepared = PreparedDelivery(
         delivery_kind="vector",
         source_version="2026-07-23",
         content_sha256="b" * 64,
@@ -333,6 +352,123 @@ def _prepared(fixture, *, input_artifact_id: int | None = None) -> PreparedDeliv
         ),
         supporting_artifacts=((fixture.style_artifact_id, "style"),),
     )
+    return _with_metadata_asset(prepared, fixture)
+
+
+def _with_metadata_asset(
+    prepared: PreparedDelivery,
+    fixture,
+) -> PreparedDelivery:
+    assets = tuple(
+        asset
+        for asset in prepared.assets
+        if asset.asset_kind != "metadata"
+    )
+    digest = hashlib.sha256(
+        (
+            f"metadata:{fixture.lease.run_id}:"
+            f"{prepared.content_sha256}:"
+            f"{canonical_json_sha256(prepared.validation_json)}"
+        ).encode()
+    ).hexdigest()
+    binding = local_metadata_binding(
+        provider_key=fixture.source.provider_key,
+        layer_id=fixture.source.layer_id,
+        source_id=fixture.source.id,
+        sync_run_id=fixture.lease.run_id,
+        catalog_snapshot_id=fixture.snapshot.id,
+        catalog_definition_sha256=(
+            fixture.snapshot.definition_sha256
+        ),
+        source_definition_sha256=fixture.source.definition_sha256,
+        authorization_review_id=fixture.review.id,
+        authorization_review_sha256=fixture.review.review_sha256,
+        authorization_document_sha256=(
+            fixture.review.document_sha256
+        ),
+        delivery_kind=prepared.delivery_kind,
+        content_sha256=prepared.content_sha256,
+        prepared_validation_sha256=canonical_json_sha256(
+            prepared.validation_json
+        ),
+    )
+    size_bytes = 512
+    metadata = PreparedDeliveryAsset(
+        asset_key="metadata",
+        asset_kind="metadata",
+        is_primary=False,
+        storage_backend="filesystem",
+        storage_key=f"blobs/sha256/{digest[:2]}/{digest}",
+        media_type="application/json",
+        sha256=digest,
+        size_bytes=size_bytes,
+        metadata_json=local_metadata_asset_descriptor(
+            document_sha256=digest,
+            document_size_bytes=size_bytes,
+            binding=binding,
+        ),
+    )
+    return PreparedDelivery(
+        **{
+            **prepared.__dict__,
+            "assets": (*assets, metadata),
+        }
+    )
+
+
+def _promoted_local_metadata_delivery(db, storage_root):
+    source, lease, fixture = _lease_and_input(db)
+    prepared = _prepared(fixture)
+    prepared = PreparedDelivery(
+        **{
+            **prepared.__dict__,
+            "assets": tuple(
+                asset
+                for asset in prepared.assets
+                if asset.asset_kind != "metadata"
+            ),
+        }
+    )
+    with ReferenceBlobStore(storage_root) as store:
+        prepared = attach_local_metadata_asset(
+            lambda: nullcontext(db),
+            store,
+            lease,
+            prepared,
+        )
+    built = create_delivery_version(
+        db,
+        lease=lease,
+        prepared=prepared,
+        now=NOW + timedelta(seconds=1),
+    )
+    promote_delivery_version(
+        db,
+        version_id=built.version_id,
+        lease=lease,
+        expected_generation=0,
+        reason="Publish canonical local metadata",
+        now=NOW + timedelta(seconds=2),
+    )
+    return SimpleNamespace(
+        source=source,
+        layer=db.get(ReferenceLayer, source.layer_id),
+        review=fixture.review,
+        version=db.get(ReferenceDeliveryVersion, built.version_id),
+        metadata_asset=db.scalar(
+            select(ReferenceDeliveryAsset).where(
+                ReferenceDeliveryAsset.version_id == built.version_id,
+                ReferenceDeliveryAsset.asset_kind == "metadata",
+            )
+        ),
+    )
+
+
+def _metadata_route(layer_id: int, organization_id: int) -> str:
+    return (
+        f"/organizations/{organization_id}/reference-layers/"
+        f"{layer_id}/metadata.json"
+    )
 
 
 def test_create_delivery_version_links_inputs_and_assets(db) -> None:
@@ -349,7 +485,8 @@ def test_create_delivery_version_links_inputs_and_assets(db) -> None:
     version = db.get(ReferenceDeliveryVersion, built.version_id)
     asset = db.scalar(
         select(ReferenceDeliveryAsset).where(
-            ReferenceDeliveryAsset.version_id == version.id
+            ReferenceDeliveryAsset.version_id == version.id,
+            ReferenceDeliveryAsset.is_primary.is_(True),
         )
     )
     assert version.source_id == source.id
@@ -365,6 +502,286 @@ def test_create_delivery_version_links_inputs_and_assets(db) -> None:
     assert built.manifest_sha256 == version.manifest_sha256
     assert asset.storage_key == "reference_data.siur_layer_1_run_1"
     assert asset.metadata_json["renderer"] == "geoserver"
+
+
+def test_builder_requires_one_exact_version_bound_metadata_asset(db) -> None:
+    _, lease, fixture = _lease_and_input(db)
+    prepared = _prepared(fixture)
+    without_metadata = PreparedDelivery(
+        **{
+            **prepared.__dict__,
+            "assets": tuple(
+                asset
+                for asset in prepared.assets
+                if asset.asset_kind != "metadata"
+            ),
+        }
+    )
+    with pytest.raises(
+        DeliveryBuildError,
+        match="exactly one local metadata asset",
+    ):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=without_metadata,
+            now=NOW + timedelta(seconds=1),
+        )
+
+    metadata = next(
+        asset
+        for asset in prepared.assets
+        if asset.asset_kind == "metadata"
+    )
+    duplicate = PreparedDeliveryAsset(
+        **{**metadata.__dict__, "asset_key": "metadata-copy"}
+    )
+    with pytest.raises(
+        DeliveryBuildError,
+        match="exactly one local metadata asset",
+    ):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=PreparedDelivery(
+                **{
+                    **prepared.__dict__,
+                    "assets": (*prepared.assets, duplicate),
+                }
+            ),
+            now=NOW + timedelta(seconds=1),
+        )
+
+    changed_descriptor = deepcopy(metadata.metadata_json)
+    changed_descriptor["binding"]["source_id"] += 1
+    changed = PreparedDeliveryAsset(
+        **{
+            **metadata.__dict__,
+            "metadata_json": changed_descriptor,
+        }
+    )
+    with pytest.raises(
+        DeliveryBuildError,
+        match="binding changed before version creation",
+    ):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=PreparedDelivery(
+                **{
+                    **prepared.__dict__,
+                    "assets": tuple(
+                        changed
+                        if asset.asset_kind == "metadata"
+                        else asset
+                        for asset in prepared.assets
+                    ),
+                }
+            ),
+            now=NOW + timedelta(seconds=1),
+        )
+
+
+def test_local_metadata_endpoint_is_authenticated_local_and_exact(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    delivery = _promoted_local_metadata_delivery(db, tmp_path)
+    monkeypatch.setattr(
+        reference_layer_routes,
+        "_reference_blob_store",
+        lambda: ReferenceBlobStore(tmp_path),
+    )
+    viewer = make_user()
+    organization = make_organization()
+    path = _metadata_route(delivery.layer.id, organization.id)
+
+    denied = client.get(path, headers=headers_for(viewer))
+    assert denied.status_code == 403
+    grant_permissions(viewer, organization, ["map.view"])
+
+    token = headers_for(viewer)["Authorization"].removeprefix("Bearer ")
+    client.cookies.set("access_token", token)
+    response = client.get(path)
+    assert response.status_code == 200
+    repeated = client.get(path)
+    assert repeated.status_code == 200
+    assert repeated.content == response.content
+    assert repeated.headers["etag"] == response.headers["etag"]
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["cache-control"] == (
+        "private, no-store, max-age=0"
+    )
+    assert response.headers["etag"] == (
+        f'"{delivery.metadata_asset.sha256}"'
+    )
+    assert response.headers["vary"] == "Authorization, Cookie"
+    document = response.json()
+    assert document["schema_version"] == (
+        "siur-local-delivery-metadata/v1"
+    )
+    assert document["binding"]["sync_run_id"] == (
+        delivery.version.sync_run_id
+    )
+    assert document["provenance"]["upstream_metadata"] == []
+    serialized = response.text
+    for internal_key in (
+        "source_url",
+        "final_url",
+        "storage_key",
+        "base_url",
+        "remote_name",
+        "allowed_origins",
+    ):
+        assert f'"{internal_key}"' not in serialized
+
+    catalog = client.get(
+        "/reference-layers/catalog"
+        f"?provider_key={delivery.source.provider_key}"
+        f"&organization_id={organization.id}",
+    )
+    assert catalog.status_code == 200
+    catalog_layer = next(
+        layer
+        for layer in catalog.json()["layers"]
+        if layer["id"] == delivery.layer.id
+    )
+    assert catalog_layer["metadata_available"] is True
+
+
+@pytest.mark.parametrize("tamper_kind", ["sha256", "size", "body"])
+def test_local_metadata_tampering_fails_closed_in_endpoint_and_catalog(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+    make_user,
+    make_organization,
+    grant_permissions,
+    tamper_kind,
+) -> None:
+    delivery = _promoted_local_metadata_delivery(db, tmp_path)
+    monkeypatch.setattr(
+        reference_layer_routes,
+        "_reference_blob_store",
+        lambda: ReferenceBlobStore(tmp_path),
+    )
+    with ReferenceBlobStore(tmp_path) as store:
+        path = store.resolve_blob(delivery.metadata_asset.storage_key)
+        body = path.read_bytes()
+        if tamper_kind == "sha256":
+            path.write_bytes(
+                bytes([body[0] ^ 1]) + body[1:]
+            )
+        elif tamper_kind == "size":
+            path.write_bytes(body[:-1])
+        else:
+            path.write_bytes(
+                b"{" + (b" " * (len(body) - 2)) + b"}"
+            )
+
+    viewer = make_user()
+    organization = make_organization()
+    grant_permissions(viewer, organization, ["map.view"])
+    headers = headers_for(viewer)
+    response = client.get(
+        _metadata_route(delivery.layer.id, organization.id),
+        headers=headers,
+    )
+    assert response.status_code == 409
+    catalog = client.get(
+        "/reference-layers/catalog"
+        f"?provider_key={delivery.source.provider_key}"
+        f"&organization_id={organization.id}",
+        headers=headers,
+    )
+    assert catalog.status_code == 200
+    catalog_layer = next(
+        layer
+        for layer in catalog.json()["layers"]
+        if layer["id"] == delivery.layer.id
+    )
+    assert catalog_layer["metadata_available"] is False
+
+
+def test_catalog_does_not_announce_incomplete_metadata_evidence(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    delivery = _promoted_local_metadata_delivery(db, tmp_path)
+    monkeypatch.setattr(
+        reference_local_metadata,
+        "_expected_documents_for_versions",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        reference_layer_routes,
+        "_reference_blob_store",
+        lambda: ReferenceBlobStore(tmp_path),
+    )
+    viewer = make_user()
+    organization = make_organization()
+    grant_permissions(viewer, organization, ["map.view"])
+    headers = headers_for(viewer)
+
+    endpoint = client.get(
+        _metadata_route(delivery.layer.id, organization.id),
+        headers=headers,
+    )
+    assert endpoint.status_code == 409
+    catalog = client.get(
+        "/reference-layers/catalog"
+        f"?provider_key={delivery.source.provider_key}"
+        f"&organization_id={organization.id}",
+        headers=headers,
+    )
+    catalog_layer = next(
+        layer
+        for layer in catalog.json()["layers"]
+        if layer["id"] == delivery.layer.id
+    )
+    assert catalog_layer["metadata_available"] is False
+
+
+def test_revoked_authorization_disables_local_metadata(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    delivery = _promoted_local_metadata_delivery(db, tmp_path)
+    supersede_mirror_authorization(
+        db,
+        delivery.source,
+        delivery.review,
+        decision="rejected",
+    )
+    monkeypatch.setattr(
+        reference_layer_routes,
+        "_reference_blob_store",
+        lambda: ReferenceBlobStore(tmp_path),
+    )
+    viewer = make_user()
+    organization = make_organization()
+    grant_permissions(viewer, organization, ["map.view"])
+    response = client.get(
+        _metadata_route(delivery.layer.id, organization.id),
+        headers=headers_for(viewer),
+    )
+    assert response.status_code == 409
 
 
 def test_builder_rejects_unlinked_input_and_expired_lease(db) -> None:
@@ -410,6 +827,7 @@ def test_builder_rejects_unsafe_or_inconsistent_primary_asset(db) -> None:
     mismatch = PreparedDelivery(
         **{**prepared.__dict__, "content_sha256": "c" * 64}
     )
+    mismatch = _with_metadata_asset(mismatch, artifact)
     with pytest.raises(DeliveryBuildError, match="content hash"):
         create_delivery_version(db, lease=lease, prepared=mismatch, now=NOW)
 
@@ -678,6 +1096,17 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
         input_artifact=second_artifact,
         now=due_at,
     )
+    second_fixture.source = source
+    second_fixture.lease = second_lease
+    second_fixture.snapshot = db.get(
+        ReferenceLayer,
+        source.layer_id,
+    ).last_seen_snapshot
+    second_run = db.get(ReferenceSyncRun, second_lease.run_id)
+    second_fixture.review = db.get(
+        ReferenceMirrorAuthorizationReview,
+        second_run.mirror_authorization_review_id,
+    )
     db.commit()
     collapsed = _prepared(second_fixture)
     collapsed = PreparedDelivery(
@@ -695,9 +1124,11 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
                         "sha256": "c" * 64,
                     }
                 ),
+                *collapsed.assets[1:],
             ),
         }
     )
+    collapsed = _with_metadata_asset(collapsed, second_fixture)
 
     with pytest.raises(DeliveryContinuityError) as raised:
         create_delivery_version(

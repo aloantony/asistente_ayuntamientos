@@ -41,6 +41,7 @@ from app.reference_layers.models import (
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerSource,
+    ReferenceMirrorAuthorizationReview,
     ReferenceSourceArtifact,
     ReferenceStyleParityPlan,
     ReferenceStyleParityPlanItem,
@@ -68,6 +69,9 @@ _LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
 _MAX_SOURCE_VERSION_LENGTH = 2_048
 _VALIDATION_SCHEMA = "reference-delivery-validation/v1"
 _CONTINUITY_SCHEMA = "reference-delivery-continuity/v1"
+LOCAL_METADATA_DOCUMENT_SCHEMA = "siur-local-delivery-metadata/v1"
+LOCAL_METADATA_ASSET_SCHEMA = "reference-local-metadata-asset/v1"
+LOCAL_METADATA_ASSET_KEY = "metadata"
 _MIN_FEATURE_BASELINE = 100
 _MIN_FEATURE_RETAINED_RATIO = 0.10
 _MAX_FEATURE_GROWTH_RATIO = 10.0
@@ -80,6 +84,32 @@ _DATA_SCHEMA_BY_KIND = {
     "raster": "reference-raster-schema/v1",
     "tiles": "reference-tiles-schema/v1",
 }
+_LOCAL_METADATA_BINDING_KEYS = frozenset(
+    {
+        "provider_key",
+        "layer_id",
+        "source_id",
+        "sync_run_id",
+        "catalog_snapshot_id",
+        "catalog_definition_sha256",
+        "source_definition_sha256",
+        "authorization_review_id",
+        "authorization_review_sha256",
+        "authorization_document_sha256",
+        "delivery_kind",
+        "content_sha256",
+        "prepared_validation_sha256",
+    }
+)
+_LOCAL_METADATA_DESCRIPTOR_KEYS = frozenset(
+    {
+        "schema_version",
+        "document_schema_version",
+        "document_sha256",
+        "document_size_bytes",
+        "binding",
+    }
+)
 
 
 class DeliveryBuildError(MirrorLifecycleError):
@@ -287,13 +317,23 @@ def create_delivery_version(
             raise DeliveryBuildError(
                 "prepared provenance artifact identity is invalid"
             )
-        plan, plan_items = _complete_style_parity_plan(
+        plan, plan_items = require_complete_delivery_style_plan(
             db,
             source=source,
             run=run,
             snapshot=snapshot,
             delivery_kind=prepared.delivery_kind,
             artifact_links=artifact_links,
+        )
+        _validate_local_metadata_asset_binding(
+            prepared,
+            source=source,
+            run=run,
+            snapshot=snapshot,
+            authorization=authorization,
+            prepared_validation_sha256=normalized[
+                "validation_sha256"
+            ],
         )
 
         active_version = _active_delivery_version(
@@ -447,7 +487,7 @@ def create_delivery_version(
         raise
 
 
-def _complete_style_parity_plan(
+def require_complete_delivery_style_plan(
     db: Session,
     *,
     source: ReferenceLayerSource,
@@ -650,7 +690,7 @@ def _asset_style_source_key(asset: ReferenceDeliveryAsset) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def canonical_json_sha256(value: Any) -> str:
+def canonical_json_bytes(value: Any) -> bytes:
     try:
         encoded = json.dumps(
             value,
@@ -663,6 +703,11 @@ def canonical_json_sha256(value: Any) -> str:
         raise DeliveryBuildError("delivery metadata is not canonical JSON") from error
     if len(encoded) > 4 * 1024 * 1024:
         raise DeliveryBuildError("delivery metadata is too large")
+    return encoded
+
+
+def canonical_json_sha256(value: Any) -> str:
+    encoded = canonical_json_bytes(value)
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -913,6 +958,12 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
         raise DeliveryBuildError("prepared delivery requires one primary asset")
     for asset in prepared.assets:
         _validate_asset(asset, prepared.delivery_kind)
+    _validate_local_metadata_asset_shape(
+        prepared,
+        prepared_validation_sha256=canonical_json_sha256(
+            prepared.validation_json
+        ),
+    )
     expected_kind = {
         "vector": "vector_table",
         "raster": "raster_cog",
@@ -955,6 +1006,184 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
             for asset in prepared.assets
         ],
     }
+
+
+def local_metadata_binding(
+    *,
+    provider_key: str,
+    layer_id: int,
+    source_id: int,
+    sync_run_id: int,
+    catalog_snapshot_id: int,
+    catalog_definition_sha256: str,
+    source_definition_sha256: str,
+    authorization_review_id: int,
+    authorization_review_sha256: str,
+    authorization_document_sha256: str,
+    delivery_kind: str,
+    content_sha256: str,
+    prepared_validation_sha256: str,
+) -> dict[str, Any]:
+    """Return the exact non-recursive identity bound by a metadata asset."""
+
+    return {
+        "provider_key": provider_key,
+        "layer_id": layer_id,
+        "source_id": source_id,
+        "sync_run_id": sync_run_id,
+        "catalog_snapshot_id": catalog_snapshot_id,
+        "catalog_definition_sha256": catalog_definition_sha256,
+        "source_definition_sha256": source_definition_sha256,
+        "authorization_review_id": authorization_review_id,
+        "authorization_review_sha256": authorization_review_sha256,
+        "authorization_document_sha256": authorization_document_sha256,
+        "delivery_kind": delivery_kind,
+        "content_sha256": content_sha256,
+        "prepared_validation_sha256": prepared_validation_sha256,
+    }
+
+
+def local_metadata_asset_descriptor(
+    *,
+    document_sha256: str,
+    document_size_bytes: int,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the manifest-side descriptor for canonical metadata bytes."""
+
+    return {
+        "schema_version": LOCAL_METADATA_ASSET_SCHEMA,
+        "document_schema_version": LOCAL_METADATA_DOCUMENT_SCHEMA,
+        "document_sha256": document_sha256,
+        "document_size_bytes": document_size_bytes,
+        "binding": binding,
+    }
+
+
+def _validate_local_metadata_asset_shape(
+    prepared: PreparedDelivery,
+    *,
+    prepared_validation_sha256: str,
+) -> None:
+    metadata_assets = [
+        asset
+        for asset in prepared.assets
+        if asset.asset_kind == "metadata"
+    ]
+    if len(metadata_assets) != 1:
+        raise DeliveryBuildError(
+            "prepared delivery requires exactly one local metadata asset"
+        )
+    asset = metadata_assets[0]
+    if (
+        asset.asset_key != LOCAL_METADATA_ASSET_KEY
+        or asset.is_primary
+        or asset.storage_backend != "filesystem"
+        or asset.media_type != "application/json"
+    ):
+        raise DeliveryBuildError(
+            "prepared local metadata asset shape is invalid"
+        )
+    descriptor = asset.metadata_json
+    if set(descriptor) != _LOCAL_METADATA_DESCRIPTOR_KEYS:
+        raise DeliveryBuildError(
+            "prepared local metadata descriptor is invalid"
+        )
+    if (
+        descriptor.get("schema_version") != LOCAL_METADATA_ASSET_SCHEMA
+        or descriptor.get("document_schema_version")
+        != LOCAL_METADATA_DOCUMENT_SCHEMA
+        or descriptor.get("document_sha256") != asset.sha256
+        or descriptor.get("document_size_bytes") != asset.size_bytes
+    ):
+        raise DeliveryBuildError(
+            "prepared local metadata descriptor does not match its asset"
+        )
+    binding = descriptor.get("binding")
+    if (
+        not isinstance(binding, dict)
+        or set(binding) != _LOCAL_METADATA_BINDING_KEYS
+    ):
+        raise DeliveryBuildError(
+            "prepared local metadata binding is invalid"
+        )
+    for key in (
+        "layer_id",
+        "source_id",
+        "sync_run_id",
+        "catalog_snapshot_id",
+        "authorization_review_id",
+    ):
+        value = binding.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+        ):
+            raise DeliveryBuildError(
+                "prepared local metadata binding is invalid"
+            )
+    provider_key = binding.get("provider_key")
+    if (
+        not isinstance(provider_key, str)
+        or not 1 <= len(provider_key) <= 64
+    ):
+        raise DeliveryBuildError(
+            "prepared local metadata binding is invalid"
+        )
+    for key in (
+        "catalog_definition_sha256",
+        "source_definition_sha256",
+        "authorization_review_sha256",
+        "authorization_document_sha256",
+        "content_sha256",
+        "prepared_validation_sha256",
+    ):
+        _sha(binding.get(key), f"local metadata {key}")
+    if (
+        binding.get("delivery_kind") != prepared.delivery_kind
+        or binding.get("content_sha256") != prepared.content_sha256
+        or binding.get("prepared_validation_sha256")
+        != prepared_validation_sha256
+    ):
+        raise DeliveryBuildError(
+            "prepared local metadata binding does not match delivery"
+        )
+
+
+def _validate_local_metadata_asset_binding(
+    prepared: PreparedDelivery,
+    *,
+    source: ReferenceLayerSource,
+    run: ReferenceSyncRun,
+    snapshot: ReferenceCatalogSnapshot,
+    authorization: ReferenceMirrorAuthorizationReview,
+    prepared_validation_sha256: str,
+) -> None:
+    asset = next(
+        item
+        for item in prepared.assets
+        if item.asset_kind == "metadata"
+    )
+    expected = local_metadata_binding(
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
+        source_id=source.id,
+        sync_run_id=run.id,
+        catalog_snapshot_id=snapshot.id,
+        catalog_definition_sha256=snapshot.definition_sha256,
+        source_definition_sha256=run.source_definition_sha256,
+        authorization_review_id=authorization.id,
+        authorization_review_sha256=authorization.review_sha256,
+        authorization_document_sha256=authorization.document_sha256,
+        delivery_kind=prepared.delivery_kind,
+        content_sha256=prepared.content_sha256,
+        prepared_validation_sha256=prepared_validation_sha256,
+    )
+    if asset.metadata_json.get("binding") != expected:
+        raise DeliveryBuildError(
+            "prepared local metadata binding changed before version creation"
+        )
 
 
 def _semantic_schema_sha256(

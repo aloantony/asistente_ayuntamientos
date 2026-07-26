@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import {
   availableStylesForLayer,
   buildReferenceLegendUrl,
+  buildReferenceMetadataUrl,
   referenceLayerBlocker,
   type ReferenceCatalog,
   type ReferenceLayer,
@@ -172,6 +173,13 @@ export function SiurLayerTree({
                 control?.styleId,
               )
             : null;
+        const metadataUrl =
+          layer.metadata_available && catalog?.organization_id
+            ? buildReferenceMetadataUrl(
+                catalog.organization_id,
+                layer.id,
+              )
+            : null;
 
         return (
           <li className="siur-layer-leaf" key={layer.id}>
@@ -230,6 +238,16 @@ export function SiurLayerTree({
                   Motivo técnico: <code>{blocker}</code>
                 </small>
               </p>
+            ) : null}
+            {metadataUrl ? (
+              <a
+                className="siur-layer-metadata-link"
+                href={metadataUrl}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                Metadatos
+              </a>
             ) : null}
             {control && !blocker ? (
               <div className="siur-layer-controls">

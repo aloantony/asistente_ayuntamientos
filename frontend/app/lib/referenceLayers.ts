@@ -363,6 +363,17 @@ export function buildReferenceLegendUrl(
   );
 }
 
+export function buildReferenceMetadataUrl(
+  organizationId: number,
+  layerId: number,
+) {
+  return (
+    `${API_BASE_URL}/organizations/${requirePositiveInteger(organizationId, "organizationId")}` +
+    `/reference-layers/${requirePositiveInteger(layerId, "layerId")}` +
+    "/metadata.json"
+  );
+}
+
 export function buildReferenceIdentifyPath(point: SiurIdentifyPoint) {
   const { layer } = point;
   const query = new URLSearchParams({

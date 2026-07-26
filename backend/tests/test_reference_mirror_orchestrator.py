@@ -973,6 +973,11 @@ def test_operation_smoke_evidence_is_finalized_with_the_promoted_run(
     )
     monkeypatch.setattr(
         mirror_orchestrator,
+        "attach_local_metadata_asset",
+        lambda factory, store, lease, prepared: prepared,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
         "persist_delivery_version",
         lambda factory, lease, prepared: SimpleNamespace(version_id=88),
     )
@@ -1064,6 +1069,11 @@ def test_operation_smoke_failure_prevents_promotion_and_preserves_active(
         lambda factory, context, artifacts, acquired: SimpleNamespace(
             complete=True
         ),
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "attach_local_metadata_asset",
+        lambda factory, store, lease, prepared: prepared,
     )
     monkeypatch.setattr(
         mirror_orchestrator,
@@ -1299,6 +1309,25 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
         first = processor.process_next()
         assert first.state == "succeeded"
         assert len(materialized) == 1
+        metadata_asset = db.scalar(
+            select(ReferenceDeliveryAsset).where(
+                ReferenceDeliveryAsset.version_id == first.version_id,
+                ReferenceDeliveryAsset.asset_kind == "metadata",
+            )
+        )
+        assert metadata_asset is not None
+        with store.open_blob(metadata_asset.storage_key) as stream:
+            metadata_document = json.load(stream)
+        assert metadata_document["schema_version"] == (
+            "siur-local-delivery-metadata/v1"
+        )
+        assert metadata_document["delivery"]["kind"] == "tiles"
+        assert len(
+            metadata_document["provenance"]["upstream_metadata"]
+        ) == 1
+        assert "source_url" not in metadata_document["provenance"][
+            "upstream_metadata"
+        ][0]
 
         current_source = db.get(ReferenceLayerSource, source_id)
         current_source.next_check_at = NOW
