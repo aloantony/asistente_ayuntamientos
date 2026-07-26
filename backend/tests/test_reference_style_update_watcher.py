@@ -12,7 +12,10 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 
 import app.reference_layers.style_update_admin as style_update_admin
-from app.reference_layers.blob_store import ReferenceBlobStore
+from app.reference_layers.blob_store import (
+    ReferenceBlobStore,
+    ReferenceBlobStoreError,
+)
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
@@ -377,6 +380,141 @@ def test_orphan_304_is_persisted_as_error_evidence(
     assert check.http_status == 304
     assert check.error_code == "style_download_result_mismatch"
     assert check.not_modified is False
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_code"),
+    [
+        ("parse", "style_check_error"),
+        ("storage", "style_candidate_storage"),
+    ],
+)
+def test_conclusive_changed_200_failure_blocks_through_later_404(
+    db,
+    tmp_path: Path,
+    monkeypatch,
+    failure_mode: str,
+    expected_code: str,
+) -> None:
+    source = _seed_source(
+        db,
+        provider_key=f"style-watch-conclusive-{failure_mode}",
+    )
+    target = style_watch_target_for_source(source)
+    baseline = _baseline_body()
+    changed = (
+        b'{"version":8,"version":9}'
+        if failure_mode == "parse"
+        else _changed_body()
+    )
+    store = ReferenceBlobStore(tmp_path / f"conclusive-{failure_mode}")
+    try:
+        check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW,
+            downloader=FakeDownloader(
+                body=baseline,
+                result=_result(target.official_url, baseline),
+            ),
+        )
+        if failure_mode == "storage":
+            def fail_storage(*args, **kwargs):
+                del args, kwargs
+                raise ReferenceBlobStoreError("injected CAS failure")
+
+            monkeypatch.setattr(store, "put_stream", fail_storage)
+        changed_outcome = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW + timedelta(days=1),
+            downloader=FakeDownloader(
+                body=changed,
+                result=_result(target.official_url, changed),
+            ),
+        )
+        changed_check = db.get(
+            ReferenceStyleUpdateCheck,
+            changed_outcome.check_id,
+        )
+        assert changed_check.error_code == expected_code
+        assert changed_check.http_status == 200
+        assert changed_check.response_raw_sha256 != (
+            changed_check.baseline_raw_sha256
+        )
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
+
+        transient = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW + timedelta(days=2),
+            downloader=FakeDownloader(
+                error=DownloadHTTPError(404, retry_after_seconds=None)
+            ),
+        )
+        assert transient.status == "error"
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
+        recovered = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW + timedelta(days=3),
+            downloader=FakeDownloader(
+                body=baseline,
+                result=_result(target.official_url, baseline),
+            ),
+        )
+        assert recovered.status == "unchanged"
+        require_official_style_promotion_allowed(
+            db,
+            source=source,
+            store=store,
+        )
+    finally:
+        store.close()
+
+
+def test_empty_http_200_is_persisted_as_error_evidence(
+    db,
+    tmp_path: Path,
+) -> None:
+    source = _seed_source(db, provider_key="style-watch-empty-200")
+    target = style_watch_target_for_source(source)
+    body = b""
+    store = ReferenceBlobStore(tmp_path / "empty-200")
+    try:
+        outcome = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW,
+            downloader=FakeDownloader(
+                body=body,
+                result=_result(target.official_url, body),
+            ),
+        )
+    finally:
+        store.close()
+
+    check = db.get(ReferenceStyleUpdateCheck, outcome.check_id)
+    assert outcome.status == "error"
+    assert check.http_status == 200
+    assert check.response_size_bytes == 0
+    assert check.response_raw_sha256 is None
+    assert check.error_code == "style_download_result_mismatch"
 
 
 @pytest.mark.parametrize("semantic_change", [False, True])

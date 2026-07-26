@@ -1799,6 +1799,7 @@ class ReferenceStyleUpdateCheck(Base):
             name="ck_reference_style_checks_not_modified",
         ),
         CheckConstraint(
+            "status = 'error' or "
             "(http_status = 200 and response_size_bytes > 0 and "
             "response_raw_sha256 is not null) or "
             "(http_status is null or http_status <> 200)",
