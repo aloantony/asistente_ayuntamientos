@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260726_0044"
+HEAD_REVISION = "20260726_0045"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -777,6 +777,42 @@ def assert_pgvector_extension(engine: Engine) -> None:
                 ")"
             )
         ).scalar_one() is True
+
+
+def assert_pgvector_082_runtime(engine: Engine) -> None:
+    with engine.connect() as connection:
+        extension_state = connection.execute(
+            text(
+                """
+                SELECT
+                    extension.extversion,
+                    available.default_version,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_available_extension_versions AS version
+                        WHERE version.name = 'vector'
+                          AND version.version = '0.8.2'
+                    ) AS target_available
+                FROM pg_extension AS extension
+                JOIN pg_available_extensions AS available
+                  ON available.name = extension.extname
+                WHERE extension.extname = 'vector'
+                """
+            )
+        ).mappings().one()
+        distance = connection.execute(
+            text(
+                "SELECT '[1,2,3]'::vector(3) "
+                "<-> '[1,2,4]'::vector(3)"
+            )
+        ).scalar_one()
+
+    assert extension_state == {
+        "extversion": "0.8.2",
+        "default_version": "0.8.2",
+        "target_available": True,
+    }
+    assert float(distance) == pytest.approx(1.0)
 
 
 def assert_postgis_extension(engine: Engine) -> None:
@@ -2138,6 +2174,250 @@ def test_official_style_watcher_schema_is_reversible(
         engine.dispose()
 
 
+def test_pgvector_082_migration_creates_exact_extension_when_absent(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0044")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP EXTENSION vector"))
+            assert connection.execute(
+                text(
+                    "SELECT extversion FROM pg_extension "
+                    "WHERE extname = 'vector'"
+                )
+            ).scalar_one_or_none() is None
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_pgvector_082_runtime(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_pgvector_082_migration_preserves_080_table_data_and_index(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0044")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE SCHEMA pgvector_migration_fixture "
+                    "AUTHORIZATION CURRENT_USER"
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE pgvector_migration_fixture.embeddings (
+                        id integer PRIMARY KEY,
+                        embedding vector(3) NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO pgvector_migration_fixture.embeddings (
+                        id, embedding
+                    ) VALUES
+                        (1, '[1,2,3]'),
+                        (2, '[1,2,4]')
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX embeddings_embedding_hnsw_idx
+                    ON pgvector_migration_fixture.embeddings
+                    USING hnsw (embedding vector_l2_ops)
+                    """
+                )
+            )
+            before = connection.execute(
+                text(
+                    """
+                    SELECT
+                        namespace.oid AS schema_oid,
+                        relation.oid AS table_oid,
+                        index_relation.oid AS index_oid,
+                        pg_get_userbyid(namespace.nspowner) AS schema_owner,
+                        pg_get_userbyid(relation.relowner) AS table_owner,
+                        pg_get_indexdef(index_relation.oid) AS index_definition
+                    FROM pg_namespace AS namespace
+                    JOIN pg_class AS relation
+                      ON relation.relnamespace = namespace.oid
+                     AND relation.relname = 'embeddings'
+                    JOIN pg_index AS index_state
+                      ON index_state.indrelid = relation.oid
+                    JOIN pg_class AS index_relation
+                      ON index_relation.oid = index_state.indexrelid
+                     AND index_relation.relname =
+                         'embeddings_embedding_hnsw_idx'
+                    WHERE namespace.nspname =
+                        'pgvector_migration_fixture'
+                    """
+                )
+            ).mappings().one()
+            # The reviewed 0.8.2 image intentionally exposes only 0.8.2 as a
+            # fresh install, while retaining the 0.8.0 -> 0.8.2 update
+            # scripts needed by persistent databases.  Mark this disposable
+            # database as the supported predecessor to exercise Alembic's
+            # real ALTER EXTENSION path in the regular migration suite.  A
+            # separate container drill starts from the actual 0.8.0 image.
+            connection.execute(
+                text(
+                    "UPDATE pg_extension "
+                    "SET extversion = '0.8.0' "
+                    "WHERE extname = 'vector'"
+                )
+            )
+            assert connection.execute(
+                text(
+                    "SELECT extversion FROM pg_extension "
+                    "WHERE extname = 'vector'"
+                )
+            ).scalar_one() == "0.8.0"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_pgvector_082_runtime(engine)
+
+        with engine.connect() as connection:
+            after = connection.execute(
+                text(
+                    """
+                    SELECT
+                        namespace.oid AS schema_oid,
+                        relation.oid AS table_oid,
+                        index_relation.oid AS index_oid,
+                        pg_get_userbyid(namespace.nspowner) AS schema_owner,
+                        pg_get_userbyid(relation.relowner) AS table_owner,
+                        pg_get_indexdef(index_relation.oid) AS index_definition,
+                        index_state.indisvalid,
+                        index_state.indisready
+                    FROM pg_namespace AS namespace
+                    JOIN pg_class AS relation
+                      ON relation.relnamespace = namespace.oid
+                     AND relation.relname = 'embeddings'
+                    JOIN pg_index AS index_state
+                      ON index_state.indrelid = relation.oid
+                    JOIN pg_class AS index_relation
+                      ON index_relation.oid = index_state.indexrelid
+                     AND index_relation.relname =
+                         'embeddings_embedding_hnsw_idx'
+                    WHERE namespace.nspname =
+                        'pgvector_migration_fixture'
+                    """
+                )
+            ).mappings().one()
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, embedding::text
+                    FROM pgvector_migration_fixture.embeddings
+                    ORDER BY id
+                    """
+                )
+            ).all()
+            distance = connection.execute(
+                text(
+                    """
+                    SELECT first.embedding <-> second.embedding
+                    FROM pgvector_migration_fixture.embeddings AS first
+                    JOIN pgvector_migration_fixture.embeddings AS second
+                      ON first.id = 1 AND second.id = 2
+                    """
+                )
+            ).scalar_one()
+
+        assert {
+            key: after[key]
+            for key in (
+                "schema_oid",
+                "table_oid",
+                "index_oid",
+                "schema_owner",
+                "table_owner",
+                "index_definition",
+            )
+        } == dict(before)
+        assert after["indisvalid"] is True
+        assert after["indisready"] is True
+        assert rows == [(1, "[1,2,3]"), (2, "[1,2,4]")]
+        assert float(distance) == pytest.approx(1.0)
+    finally:
+        engine.dispose()
+
+
+def test_pgvector_082_migration_rejects_unexpected_installed_version(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0044")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE pg_extension "
+                    "SET extversion = '0.7.4' "
+                    "WHERE extname = 'vector'"
+                )
+            )
+
+        result = run_alembic(
+            migration_database_url,
+            "upgrade",
+            "head",
+            check=False,
+        )
+        assert result.returncode != 0
+        assert (
+            "Unsupported installed pgvector version '0.7.4'"
+            in result.stderr
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT extversion FROM pg_extension "
+                    "WHERE extname = 'vector'"
+                )
+            ).scalar_one() == "0.7.4"
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260726_0044"
+    finally:
+        engine.dispose()
+
+
+def test_pgvector_082_downgrade_retains_shared_extension(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "head")
+    engine = create_engine(migration_database_url)
+    try:
+        assert_pgvector_082_runtime(engine)
+        run_alembic(migration_database_url, "downgrade", "20260726_0044")
+        assert_pgvector_082_runtime(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260726_0044"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_pgvector_082_runtime(engine)
+    finally:
+        engine.dispose()
+
+
 def test_resource_free_adapted_style_evidence_blocks_unsafe_downgrade(
     migration_database_url: str,
 ) -> None:
@@ -2318,7 +2598,7 @@ def test_resource_free_adapted_style_evidence_blocks_unsafe_downgrade(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260726_0043"
+            ).scalar_one() == HEAD_REVISION
     finally:
         engine.dispose()
 
