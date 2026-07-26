@@ -185,6 +185,7 @@ def catalog_mirror_statuses(
         )
     }
 
+    layers_by_id = {layer.id: layer for layer in layers}
     for layer_id in leaf_ids:
         source_row = source_rows.get(layer_id)
         if source_row is None:
@@ -207,6 +208,11 @@ def catalog_mirror_statuses(
             version=version,
             run=run,
             servable=servable,
+            serving_historical_catalog=bool(
+                version is not None
+                and version.catalog_snapshot_id
+                != layers_by_id[layer_id].last_seen_snapshot_id
+            ),
         )
         expose_active = status in {
             "active",
@@ -252,6 +258,7 @@ def _derive_status(
     version: ReferenceDeliveryVersion | None,
     run: ReferenceSyncRun | None,
     servable: bool,
+    serving_historical_catalog: bool,
 ) -> MirrorStatus:
     if state is not None and state.status == "disabled":
         return "disabled"
@@ -268,6 +275,8 @@ def _derive_status(
     if run is not None and run.status in {"queued", "running"}:
         return "syncing"
     if active:
+        if serving_historical_catalog:
+            return "serving_previous"
         if (
             run is not None
             and run.status in {"failed", "rejected"}

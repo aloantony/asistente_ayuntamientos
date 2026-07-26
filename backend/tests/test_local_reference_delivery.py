@@ -19,7 +19,9 @@ from app.reference_layers.delivery_builder import canonical_json_sha256
 from app.reference_layers.mirror_lifecycle import (
     canonical_promotion_event_sha256,
 )
+from app.reference_layers.mirror_status import catalog_mirror_statuses
 from app.reference_layers.models import (
+    ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
     ReferenceDeliveryPromotion,
     ReferenceDeliveryVersion,
@@ -31,49 +33,64 @@ from app.reference_layers.models import (
 )
 
 
-def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
-    definition = ReferenceCatalogDefinition(
+def _catalog_definition(
+    *,
+    revision: int = 1,
+    remote_name: str = "source:layer",
+    layer_status: str = "active",
+    include_layer: bool = True,
+) -> ReferenceCatalogDefinition:
+    layer = ReferenceLayerDefinition(
+        source_key="layer",
+        node_type="layer",
+        title=f"Layer v{revision}",
+        service_key="service",
+        remote_name=remote_name,
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        queryable=True,
+        styles=(
+            ReferenceLayerStyleDefinition(
+                source_key="default",
+                remote_name="default",
+                title="Default",
+                is_default=True,
+            ),
+            ReferenceLayerStyleDefinition(
+                source_key="alternate",
+                remote_name="alternate",
+                title="Alternate",
+            ),
+        ),
+        style_name="default",
+        status=layer_status,
+    )
+    return ReferenceCatalogDefinition(
         provider_key="local-delivery-test",
         source_url="https://example.test/settings.json",
-        raw_catalog={"version": 1},
+        raw_catalog={"version": revision},
         services=(
             ReferenceServiceDefinition(
                 source_key="service",
-                title="Service",
+                title=f"Service v{revision}",
                 upstream_protocol="wms",
                 base_url="https://example.test/geoserver/wms",
                 license_status="pending",
             ),
         ),
-        layers=(
-            ReferenceLayerDefinition(
-                source_key="layer",
-                node_type="layer",
-                title="Layer",
-                service_key="service",
-                remote_name="source:layer",
-                role="overlay",
-                renderer="raster_tile",
-                delivery_mode="mirror",
-                queryable=True,
-                styles=(
-                    ReferenceLayerStyleDefinition(
-                        source_key="default",
-                        remote_name="default",
-                        title="Default",
-                        is_default=True,
-                    ),
-                    ReferenceLayerStyleDefinition(
-                        source_key="alternate",
-                        remote_name="alternate",
-                        title="Alternate",
-                    ),
-                ),
-                style_name="default",
-            ),
+        layers=(layer,) if include_layer else (),
+        retrieved_at=datetime(
+            2026,
+            7,
+            21 + revision,
+            tzinfo=timezone.utc,
         ),
-        retrieved_at=datetime(2026, 7, 22, tzinfo=timezone.utc),
     )
+
+
+def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
+    definition = _catalog_definition()
     snapshot, _ = apply_catalog_definition(db, definition)
     layer = db.scalar(
         select(ReferenceLayer).where(
@@ -270,9 +287,28 @@ def test_catalog_local_availability_exposes_only_published_styles(db) -> None:
     assert availability.available_style_ids == tuple(style.id for style in styles)
 
 
-def test_changed_source_definition_blocks_without_remote_fallback(db) -> None:
+def test_changed_mutable_source_does_not_invalidate_frozen_delivery(db) -> None:
     layer, styles, source, _, _, _ = seed_local_delivery(db)
     source.definition_sha256 = "9" * 64
+    db.commit()
+
+    selection = resolve_local_delivery(
+        db,
+        layer=layer,
+        style=styles[0],
+        operation="tile",
+    )
+
+    assert selection is not None
+    assert selection.version_id is not None
+
+
+def test_changed_frozen_run_definition_blocks_without_remote_fallback(db) -> None:
+    layer, styles, _, run, _, _ = seed_local_delivery(db)
+    run.source_definition_json = {
+        **run.source_definition_json,
+        "endpoint_url": "https://attacker.invalid/source",
+    }
     db.commit()
 
     with pytest.raises(LocalDeliveryError) as raised:
@@ -284,6 +320,144 @@ def test_changed_source_definition_blocks_without_remote_fallback(db) -> None:
         )
 
     assert raised.value.blocker == "local_source_changed"
+
+
+def test_catalog_v2_keeps_v1_servable_until_v2_is_promoted(db) -> None:
+    layer, _, source, _, version, _ = seed_local_delivery(db)
+    snapshot_v2, _ = apply_catalog_definition(
+        db,
+        _catalog_definition(
+            revision=2,
+            remote_name="source:layer-v2",
+        ),
+    )
+    current_layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == layer.provider_key,
+            ReferenceLayer.source_key == layer.source_key,
+        )
+    )
+    current_styles = list(
+        db.scalars(
+            select(ReferenceLayerStyle)
+            .where(ReferenceLayerStyle.layer_id == layer.id)
+            .order_by(ReferenceLayerStyle.id)
+        )
+    )
+    source.endpoint_url = "https://example.test/source-v2"
+    source.remote_name = "source:layer-v2"
+    source.enabled = False
+    source.is_primary = False
+    source.definition_sha256 = canonical_json_sha256(
+        {
+            "protocol": source.protocol,
+            "target_kind": source.target_kind,
+            "endpoint_url": source.endpoint_url,
+            "remote_name": source.remote_name,
+            "sync_strategy": source.sync_strategy,
+            "priority": source.priority,
+            "config": source.config_json,
+        }
+    )
+    db.commit()
+
+    selection = resolve_local_delivery(
+        db,
+        layer=current_layer,
+        style=current_styles[0],
+        operation="tile",
+    )
+    availability = catalog_local_delivery_availability(
+        db,
+        provider_key=current_layer.provider_key,
+        layers=[current_layer],
+        styles=current_styles,
+    )[current_layer.id]
+    status = catalog_mirror_statuses(
+        db,
+        provider_key=current_layer.provider_key,
+        layers=[current_layer],
+        styles=current_styles,
+        local_availability={current_layer.id: availability},
+    )[current_layer.id]
+
+    assert snapshot_v2.id != version.catalog_snapshot_id
+    assert selection is not None
+    assert selection.version_id == version.id
+    assert availability is not None
+    assert availability.delivery_available is True
+    assert status.status == "serving_previous"
+
+
+@pytest.mark.parametrize(
+    ("layer_status", "include_layer"),
+    (("disabled", True), ("active", False)),
+)
+def test_removed_or_disabled_current_layer_is_never_exposed(
+    db,
+    layer_status: str,
+    include_layer: bool,
+) -> None:
+    layer, styles, _, _, _, _ = seed_local_delivery(db)
+    apply_catalog_definition(
+        db,
+        _catalog_definition(
+            revision=2,
+            layer_status=layer_status,
+            include_layer=include_layer,
+        ),
+    )
+    db.refresh(layer)
+    for style in styles:
+        db.refresh(style)
+
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+    assert raised.value.blocker == "local_disabled"
+
+    availability = catalog_local_delivery_availability(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        styles=styles,
+    )[layer.id]
+    assert availability is not None
+    assert availability.delivery_available is False
+    assert availability.delivery_blocker == "local_disabled"
+
+
+@pytest.mark.parametrize("corruption", ("snapshot", "asset"))
+def test_frozen_snapshot_or_asset_corruption_is_fail_closed(
+    db,
+    corruption: str,
+) -> None:
+    layer, styles, _, _, version, asset = seed_local_delivery(db)
+    if corruption == "snapshot":
+        snapshot = db.get(
+            ReferenceCatalogSnapshot,
+            version.catalog_snapshot_id,
+        )
+        snapshot.normalized_definition_json = {
+            **snapshot.normalized_definition_json,
+            "unresolved_count": 999,
+        }
+    else:
+        asset.sha256 = "f" * 64
+    db.commit()
+
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+    assert raised.value.blocker == "local_version_invalid"
 
 
 @pytest.mark.parametrize("corruption", ["generation", "unprojected_head"])

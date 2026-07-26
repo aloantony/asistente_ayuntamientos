@@ -242,6 +242,92 @@ def _create_version(db, *, source, snapshot, lease, sequence_number: int):
     return version
 
 
+def _promote_cross_snapshot_versions(db):
+    _, layer, snapshot_v1, sources, _ = _seed_bootstrap(db)
+    source_v1 = next(item for item in sources if item.target_kind == "vector")
+    _only_source_due(db, source_v1)
+    enqueue_due_sources(db, now=NOW)
+    lease_v1 = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "1" * 64,
+    )
+    version_v1 = _create_version(
+        db,
+        source=source_v1,
+        snapshot=snapshot_v1,
+        lease=lease_v1,
+        sequence_number=1,
+    )
+    promote_delivery_version(
+        db,
+        version_id=version_v1.id,
+        lease=lease_v1,
+        expected_generation=0,
+        reason="catalog v1",
+        now=NOW + timedelta(seconds=1),
+    )
+
+    snapshot_v2, _ = apply_catalog_definition(
+        db,
+        _definition(remote_name="planning:zones-v2"),
+    )
+    apply_mirror_bootstrap_plan(
+        db,
+        build_mirror_bootstrap_plan(
+            db,
+            provider_key=layer.provider_key,
+        ),
+    )
+    source_v2 = db.scalar(
+        select(ReferenceLayerSource)
+        .where(
+            ReferenceLayerSource.provider_key == layer.provider_key,
+            ReferenceLayerSource.target_kind == "vector",
+            ReferenceLayerSource.enabled.is_(True),
+        )
+        .order_by(
+            ReferenceLayerSource.is_primary.desc(),
+            ReferenceLayerSource.priority,
+            ReferenceLayerSource.id,
+        )
+    )
+    assert source_v2 is not None
+    _only_source_due(
+        db,
+        source_v2,
+        at=NOW + timedelta(seconds=2),
+    )
+    enqueue_due_sources(db, now=NOW + timedelta(seconds=2))
+    lease_v2 = claim_next_sync_run(
+        db,
+        now=NOW + timedelta(seconds=2),
+        token_factory=lambda: "2" * 64,
+    )
+    version_v2 = _create_version(
+        db,
+        source=source_v2,
+        snapshot=snapshot_v2,
+        lease=lease_v2,
+        sequence_number=2,
+    )
+    promote_delivery_version(
+        db,
+        version_id=version_v2.id,
+        lease=lease_v2,
+        expected_generation=1,
+        reason="catalog v2",
+        now=NOW + timedelta(seconds=3),
+    )
+    return (
+        layer,
+        snapshot_v1,
+        snapshot_v2,
+        version_v1,
+        version_v2,
+    )
+
+
 def test_bootstrap_is_dry_run_idempotent_and_preserves_manual_sources(db) -> None:
     definition = _definition()
     apply_catalog_definition(db, definition)
@@ -1302,6 +1388,99 @@ def test_rollback_revalidates_the_original_run_and_current_source(db) -> None:
             reason="must not revive invalid evidence",
             now=NOW + timedelta(seconds=5),
         )
+
+
+def test_rollback_can_select_a_valid_version_from_a_previous_catalog_snapshot(
+    db,
+) -> None:
+    (
+        layer,
+        snapshot_v1,
+        snapshot_v2,
+        version_v1,
+        version_v2,
+    ) = _promote_cross_snapshot_versions(db)
+    run_v1 = db.get(ReferenceSyncRun, version_v1.sync_run_id)
+    run_v2 = db.get(ReferenceSyncRun, version_v2.sync_run_id)
+
+    rolled_back = rollback_delivery_version(
+        db,
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        to_version_id=version_v1.id,
+        expected_generation=2,
+        reason="catalog v2 renderer regression",
+        now=NOW + timedelta(seconds=4),
+    )
+
+    assert snapshot_v1.id != snapshot_v2.id
+    assert snapshot_v1.is_current is False
+    assert snapshot_v2.is_current is True
+    assert run_v1.source_definition_sha256 != run_v2.source_definition_sha256
+    assert rolled_back.action == "rollback"
+    assert rolled_back.from_version_id == version_v2.id
+    assert rolled_back.to_version_id == version_v1.id
+    assert rolled_back.generation == 3
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.active_version_id == version_v1.id
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("run_definition", "catalog_snapshot", "primary_asset"),
+)
+def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
+    db,
+    corruption: str,
+) -> None:
+    (
+        layer,
+        snapshot_v1,
+        _,
+        version_v1,
+        version_v2,
+    ) = _promote_cross_snapshot_versions(db)
+    if corruption == "run_definition":
+        run = db.get(ReferenceSyncRun, version_v1.sync_run_id)
+        run.source_definition_json = {
+            **run.source_definition_json,
+            "remote_name": "tampered:layer",
+        }
+    elif corruption == "catalog_snapshot":
+        snapshot_v1.normalized_definition_json = {
+            **snapshot_v1.normalized_definition_json,
+            "unresolved_count": 99,
+        }
+    else:
+        asset = db.scalar(
+            select(ReferenceDeliveryAsset).where(
+                ReferenceDeliveryAsset.version_id == version_v1.id,
+                ReferenceDeliveryAsset.is_primary.is_(True),
+            )
+        )
+        asset.sha256 = "f" * 64
+    db.commit()
+
+    with pytest.raises(MirrorPromotionConflict):
+        rollback_delivery_version(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=version_v1.id,
+            expected_generation=2,
+            reason="corrupt historical evidence must never reactivate",
+            now=NOW + timedelta(seconds=4),
+        )
+
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.generation == 2
+    assert state.active_version_id == version_v2.id
 
 
 def test_worker_observation_metadata_is_bounded(db) -> None:

@@ -1248,11 +1248,7 @@ def reactivate_delivery(
             raise MirrorPromotionConflict(
                 "reactivation target was never an active delivery"
             )
-        source = _validate_stored_version_servability(
-            db,
-            version,
-            allow_disabled_source=True,
-        )
+        source = _validate_stored_version_servability(db, version)
         source.enabled = True
         source.is_primary = True
         source.next_check_at = moment
@@ -1485,20 +1481,37 @@ def _validate_current_version_catalog(
     db: Session,
     version: ReferenceDeliveryVersion,
 ) -> None:
-    snapshot = db.scalar(
-        select(ReferenceCatalogSnapshot).where(
+    row = db.execute(
+        select(ReferenceLayer, ReferenceCatalogSnapshot)
+        .join(
+            ReferenceCatalogSnapshot,
+            and_(
+                ReferenceCatalogSnapshot.id
+                == ReferenceLayer.last_seen_snapshot_id,
+                ReferenceCatalogSnapshot.provider_key
+                == ReferenceLayer.provider_key,
+            ),
+        )
+        .where(
+            ReferenceLayer.id == version.layer_id,
+            ReferenceLayer.provider_key == version.provider_key,
+            ReferenceLayer.node_type == "layer",
+            ReferenceLayer.status.in_(("active", "degraded")),
             ReferenceCatalogSnapshot.id == version.catalog_snapshot_id,
-            ReferenceCatalogSnapshot.provider_key == version.provider_key,
             ReferenceCatalogSnapshot.is_current.is_(True),
             ReferenceCatalogSnapshot.status == "applied",
         )
-    )
-    if snapshot is None or (
-        snapshot.definition_sha256 != version.catalog_definition_sha256
-        or canonical_normalized_definition_sha256(
-            snapshot.normalized_definition_json
+        .with_for_update(of=ReferenceLayer)
+    ).one_or_none()
+    if row is None:
+        raise MirrorPromotionConflict(
+            "delivery version is not bound to the current valid catalog"
         )
-        != snapshot.definition_sha256
+    layer, snapshot = row
+    if (
+        snapshot.definition_sha256 != version.catalog_definition_sha256
+        or not stored_catalog_snapshot_is_valid(snapshot)
+        or not catalog_snapshot_contains_active_layer(snapshot, layer)
     ):
         raise MirrorPromotionConflict(
             "delivery version is not bound to the current valid catalog"
@@ -1544,8 +1557,6 @@ def _validate_version_ready(
 def _validate_stored_version_servability(
     db: Session,
     version: ReferenceDeliveryVersion,
-    *,
-    allow_disabled_source: bool = False,
 ) -> ReferenceLayerSource:
     source = db.scalar(
         select(ReferenceLayerSource)
@@ -1557,12 +1568,6 @@ def _validate_stored_version_servability(
         or source.layer_id != version.layer_id
     ):
         raise MirrorPromotionConflict("delivery source identity is invalid")
-    if not allow_disabled_source and not source.enabled:
-        raise MirrorPromotionConflict("delivery source is disabled")
-    if not stored_source_definition_is_valid(source):
-        raise MirrorPromotionConflict(
-            "current delivery source-definition hash is invalid"
-        )
     run = db.scalar(
         select(ReferenceSyncRun).where(
             ReferenceSyncRun.id == version.sync_run_id,
@@ -1577,17 +1582,82 @@ def _validate_stored_version_servability(
         raise MirrorPromotionConflict(
             "delivery sync-run source-definition hash is invalid"
         )
-    if run.source_definition_sha256 != source.definition_sha256:
+    if (
+        run.provider_key != version.provider_key
+        or run.layer_id != version.layer_id
+        or not isinstance(run.source_definition_json, dict)
+        or run.source_definition_json.get("target_kind")
+        != version.delivery_kind
+    ):
         raise MirrorPromotionConflict(
-            "delivery source changed since the version was published"
+            "delivery sync-run identity is invalid"
         )
-    if source.target_kind != version.delivery_kind:
+    layer, current_snapshot = _locked_current_layer_catalog(
+        db,
+        provider_key=version.provider_key,
+        layer_id=version.layer_id,
+    )
+    frozen_snapshot = db.scalar(
+        select(ReferenceCatalogSnapshot).where(
+            ReferenceCatalogSnapshot.id == version.catalog_snapshot_id,
+            ReferenceCatalogSnapshot.provider_key == version.provider_key,
+            ReferenceCatalogSnapshot.status == "applied",
+        )
+    )
+    if (
+        frozen_snapshot is None
+        or frozen_snapshot.definition_sha256
+        != version.catalog_definition_sha256
+        or not stored_catalog_snapshot_is_valid(frozen_snapshot)
+        or not catalog_snapshot_contains_active_layer(
+            frozen_snapshot,
+            layer,
+        )
+        or not stored_catalog_snapshot_is_valid(current_snapshot)
+        or not catalog_snapshot_contains_active_layer(
+            current_snapshot,
+            layer,
+        )
+    ):
         raise MirrorPromotionConflict(
-            "delivery kind does not match the acquisition source"
+            "delivery version catalog evidence is invalid"
         )
-    _validate_current_version_catalog(db, version)
     _validate_version_ready(db, version)
     return source
+
+
+def _locked_current_layer_catalog(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+) -> tuple[ReferenceLayer, ReferenceCatalogSnapshot]:
+    row = db.execute(
+        select(ReferenceLayer, ReferenceCatalogSnapshot)
+        .join(
+            ReferenceCatalogSnapshot,
+            and_(
+                ReferenceCatalogSnapshot.id
+                == ReferenceLayer.last_seen_snapshot_id,
+                ReferenceCatalogSnapshot.provider_key
+                == ReferenceLayer.provider_key,
+            ),
+        )
+        .where(
+            ReferenceLayer.id == layer_id,
+            ReferenceLayer.provider_key == provider_key,
+            ReferenceLayer.node_type == "layer",
+            ReferenceLayer.status.in_(("active", "degraded")),
+            ReferenceCatalogSnapshot.is_current.is_(True),
+            ReferenceCatalogSnapshot.status == "applied",
+        )
+        .with_for_update(of=ReferenceLayer)
+    ).one_or_none()
+    if row is None:
+        raise MirrorPromotionConflict(
+            "delivery layer is not present and active in the current catalog"
+        )
+    return row
 
 
 def _promotion_result(
@@ -1634,7 +1704,86 @@ def sync_run_source_definition_is_valid(run: ReferenceSyncRun) -> bool:
         return _canonical_sha256(run.source_definition_json) == (
             run.source_definition_sha256
         )
-    except (MirrorLifecycleError, TypeError, ValueError):
+    except (MirrorLifecycleError, TypeError, ValueError, RecursionError):
+        return False
+
+
+def stored_catalog_snapshot_is_valid(
+    snapshot: ReferenceCatalogSnapshot,
+) -> bool:
+    """Validate one immutable catalog snapshot without requiring it be current."""
+
+    try:
+        normalized = snapshot.normalized_definition_json
+        raw_catalog = snapshot.raw_catalog_json
+        if (
+            snapshot.status != "applied"
+            or not isinstance(normalized, dict)
+            or not isinstance(raw_catalog, dict)
+            or normalized.get("provider_key") != snapshot.provider_key
+            or normalized.get("source_url") != snapshot.source_url
+            or normalized.get("unresolved_count") != snapshot.unresolved_count
+        ):
+            return False
+        services = normalized.get("services")
+        layers = normalized.get("layers")
+        if not isinstance(services, list) or not isinstance(layers, list):
+            return False
+        if (
+            len(services) != snapshot.service_count
+            or sum(
+                isinstance(item, dict) and item.get("node_type") == "group"
+                for item in layers
+            )
+            != snapshot.group_count
+            or sum(
+                isinstance(item, dict) and item.get("node_type") == "layer"
+                for item in layers
+            )
+            != snapshot.layer_count
+        ):
+            return False
+        return (
+            _canonical_sha256(raw_catalog) == snapshot.content_sha256
+            and canonical_normalized_definition_sha256(normalized)
+            == snapshot.definition_sha256
+        )
+    except (
+        MirrorLifecycleError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ):
+        return False
+
+
+def catalog_snapshot_contains_active_layer(
+    snapshot: ReferenceCatalogSnapshot,
+    layer: ReferenceLayer,
+) -> bool:
+    """Return whether a valid snapshot froze this logical layer as deliverable."""
+
+    try:
+        if (
+            snapshot.provider_key != layer.provider_key
+            or not stored_catalog_snapshot_is_valid(snapshot)
+        ):
+            return False
+        layers = snapshot.normalized_definition_json.get("layers")
+        if not isinstance(layers, list):
+            return False
+        matches = [
+            item
+            for item in layers
+            if isinstance(item, dict)
+            and item.get("source_key") == layer.source_key
+        ]
+        return (
+            len(matches) == 1
+            and matches[0].get("node_type") == "layer"
+            and matches[0].get("status") in {"active", "degraded"}
+        )
+    except (TypeError, ValueError, RecursionError):
         return False
 
 
