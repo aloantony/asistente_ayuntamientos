@@ -400,7 +400,7 @@ def check_official_style_update(
         except MirrorAuthorizationError as error:
             authorization_failure = error
 
-        validator = _latest_successful_check(db, target)
+        validator = _current_conditional_validator(db, target)
         request_etag = validator.response_etag if validator is not None else None
         request_last_modified = (
             validator.response_last_modified
@@ -550,6 +550,16 @@ def check_official_style_update(
         assert response is not None and binding is not None
         observed: ReferenceStyleObservedVersion | None
         if response.not_modified:
+            current_validator = _current_conditional_validator(db, target)
+            if (
+                current_validator is None
+                or current_validator.id != validator_id
+            ):
+                raise OfficialStyleWatcherError(
+                    "HTTP 304 validator became stale during the style check",
+                    code="stale_not_modified",
+                    retryable=False,
+                )
             validator = (
                 db.get(ReferenceStyleUpdateCheck, validator_id)
                 if validator_id is not None
@@ -1633,6 +1643,25 @@ def _latest_conclusive_check(
         )
         .limit(1)
     )
+
+
+def _current_conditional_validator(
+    db: Session,
+    target: StyleWatchTarget,
+) -> ReferenceStyleUpdateCheck | None:
+    """Return evidence that can still justify a conditional HTTP request."""
+
+    latest = _latest_conclusive_check(db, target)
+    if (
+        latest is None
+        or latest.status not in _SUCCESS_STATUSES
+        or (
+            latest.response_etag is None
+            and latest.response_last_modified is None
+        )
+    ):
+        return None
+    return latest
 
 
 def _check_by_key(
