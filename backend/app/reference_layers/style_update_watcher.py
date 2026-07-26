@@ -19,7 +19,7 @@ from time import monotonic
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, settings
@@ -678,9 +678,14 @@ def require_official_style_promotion_allowed(
     target = style_watch_target_for_source(source)
     if target is None:
         return
-    latest = _latest_successful_check(db, target)
+    latest = _latest_conclusive_check(db, target)
     if latest is None:
         return
+    if latest.status == "error":
+        raise OfficialStyleReviewRequiredError(
+            "official style changed but its candidate could not be validated "
+            "and retained"
+        )
     if latest.observed_version_id is None:
         if latest.status == "unchanged":
             return
@@ -1578,6 +1583,49 @@ def _latest_successful_check(
             == target.source_definition_sha256,
             ReferenceStyleUpdateCheck.source_url == target.official_url,
             ReferenceStyleUpdateCheck.status.in_(_SUCCESS_STATUSES),
+        )
+        .order_by(
+            ReferenceStyleUpdateCheck.checked_at.desc(),
+            ReferenceStyleUpdateCheck.id.desc(),
+        )
+        .limit(1)
+    )
+
+
+def _latest_conclusive_check(
+    db: Session,
+    target: StyleWatchTarget,
+) -> ReferenceStyleUpdateCheck | None:
+    """Ignore transient failures but preserve any conclusive raw change."""
+
+    return db.scalar(
+        select(ReferenceStyleUpdateCheck)
+        .where(
+            ReferenceStyleUpdateCheck.source_id == target.source_id,
+            ReferenceStyleUpdateCheck.source_definition_sha256
+            == target.source_definition_sha256,
+            ReferenceStyleUpdateCheck.profile == target.profile,
+            ReferenceStyleUpdateCheck.source_url == target.official_url,
+            ReferenceStyleUpdateCheck.baseline_raw_sha256
+            == target.baseline_raw_sha256,
+            ReferenceStyleUpdateCheck.baseline_semantic_sha256
+            == target.baseline_semantic_sha256,
+            or_(
+                ReferenceStyleUpdateCheck.status.in_(_SUCCESS_STATUSES),
+                and_(
+                    ReferenceStyleUpdateCheck.status == "error",
+                    ReferenceStyleUpdateCheck.http_status == 200,
+                    ReferenceStyleUpdateCheck.not_modified.is_(False),
+                    ReferenceStyleUpdateCheck.response_final_url
+                    == target.official_url,
+                    ReferenceStyleUpdateCheck.response_size_bytes > 0,
+                    ReferenceStyleUpdateCheck.response_raw_sha256.is_not(
+                        None
+                    ),
+                    ReferenceStyleUpdateCheck.response_raw_sha256
+                    != target.baseline_raw_sha256,
+                ),
+            ),
         )
         .order_by(
             ReferenceStyleUpdateCheck.checked_at.desc(),

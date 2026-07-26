@@ -170,3 +170,55 @@ def test_scheduler_once_checks_catalog_reconciles_styles_and_enqueues(
         "styles",
         ("enqueue", False),
     ]
+
+
+def test_scheduler_runs_style_watcher_when_source_reconcile_fails(
+    monkeypatch,
+    caplog,
+) -> None:
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        mirror_runtime,
+        "run_siur_catalog_update_check_job",
+        lambda: calls.append("catalog")
+        or {
+            "disposition": "not_due",
+            "status": "unchanged",
+            "check_id": 3,
+            "next_check_at": "2026-07-27T18:00:00+00:00",
+        },
+    )
+
+    def fail_reconcile():
+        calls.append("reconcile")
+        raise RuntimeError("persistent reconcile failure")
+
+    monkeypatch.setattr(
+        mirror_runtime,
+        "reconcile_reference_sources_once",
+        fail_reconcile,
+    )
+    monkeypatch.setattr(
+        mirror_runtime,
+        "run_official_style_update_check_job",
+        lambda: calls.append("styles")
+        or {
+            "source_count": 5,
+            "recorded_count": 5,
+            "review_required_count": 0,
+            "error_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        mirror_runtime,
+        "enqueue_reference_sources_once",
+        lambda *, reconcile: calls.append(("enqueue", reconcile)) or [],
+    )
+    caplog.set_level(logging.ERROR)
+
+    mirror_runtime.run_scheduler(threading.Event(), once=True)
+
+    assert calls == ["catalog", "reconcile", "styles"]
+    assert "RuntimeError" in caplog.text
+    assert "persistent reconcile failure" not in caplog.text

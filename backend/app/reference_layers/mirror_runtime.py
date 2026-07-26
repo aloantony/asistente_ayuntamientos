@@ -108,6 +108,7 @@ def run_scheduler(
         next_catalog_poll_at = _poll_catalog_watcher_if_due(
             next_catalog_poll_at,
         )
+        reconcile_succeeded = False
         try:
             reconciled = reconcile_reference_sources_once()
             for item in reconciled:
@@ -127,21 +128,29 @@ def run_scheduler(
                             "deactivated_count": item.deactivated_count,
                         },
                     )
-            next_style_poll_at = _poll_style_watcher_if_due(
-                next_style_poll_at,
-            )
-            run_ids = enqueue_reference_sources_once(reconcile=False)
-            if run_ids:
-                logger.info(
-                    "Reference mirror scheduler queued runs",
-                    extra={"run_count": len(run_ids)},
-                )
-            first_poll = False
+            reconcile_succeeded = True
         except Exception as error:
             logger.error(
                 "Reference mirror scheduler poll failed (%s)",
                 type(error).__name__,
             )
+        next_style_poll_at = _poll_style_watcher_if_due(
+            next_style_poll_at,
+        )
+        if reconcile_succeeded:
+            try:
+                run_ids = enqueue_reference_sources_once(reconcile=False)
+                if run_ids:
+                    logger.info(
+                        "Reference mirror scheduler queued runs",
+                        extra={"run_count": len(run_ids)},
+                    )
+                first_poll = False
+            except Exception as error:
+                logger.error(
+                    "Reference mirror scheduler poll failed (%s)",
+                    type(error).__name__,
+                )
         if once:
             return
         stop_event.wait(settings.reference_mirror_scheduler_poll_seconds)

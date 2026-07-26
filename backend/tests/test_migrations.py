@@ -1764,6 +1764,211 @@ def assert_reference_style_watcher_schema(
         }
         for table_name in REFERENCE_STYLE_WATCHER_TABLES
     } == expected_triggers
+    checks = {
+        constraint["name"]: constraint["sqltext"]
+        for constraint in inspector.get_check_constraints(
+            "reference_style_update_checks"
+        )
+    }
+    http_200_check = checks["ck_reference_style_checks_http_200"]
+    normalized_http_200_check = http_200_check.replace("::text", "")
+    assert "status = 'error'" in normalized_http_200_check
+    assert "response_size_bytes > 0" in http_200_check
+    assert "RESPONSE_RAW_SHA256 IS NOT NULL" in http_200_check.upper()
+
+
+def assert_reference_style_http_200_error_shape(engine: Engine) -> None:
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            source_id, layer_id, service_id = connection.execute(
+                text(
+                    """
+                    WITH snapshot AS (
+                        INSERT INTO reference_catalog_snapshots (
+                            provider_key, source_url, content_sha256,
+                            definition_sha256, raw_catalog_json,
+                            normalized_definition_json, retrieved_at,
+                            service_count, group_count, layer_count,
+                            unresolved_count, status, is_current
+                        ) VALUES (
+                            'style-http-200',
+                            'https://example.test/catalog.json',
+                            repeat('a', 64), repeat('b', 64),
+                            CAST('{}' AS JSON), CAST('{}' AS JSON), now(),
+                            1, 0, 1, 0, 'applied', true
+                        ) RETURNING id
+                    ),
+                    service AS (
+                        INSERT INTO reference_services (
+                            last_seen_snapshot_id, provider_key, source_key,
+                            title, upstream_protocol, base_url,
+                            license_status, cache_policy, status
+                        )
+                        SELECT
+                            id, 'style-http-200', 'service:style-http-200',
+                            'Style HTTP 200', 'wms',
+                            'https://example.test/wms', 'pending',
+                            'mirror', 'active'
+                        FROM snapshot
+                        RETURNING id, last_seen_snapshot_id
+                    ),
+                    layer AS (
+                        INSERT INTO reference_layers (
+                            last_seen_snapshot_id, service_id, provider_key,
+                            source_key, node_type, title, remote_name, role,
+                            renderer, delivery_mode, sort_order,
+                            default_visible, default_opacity, queryable,
+                            downloadable, status
+                        )
+                        SELECT
+                            last_seen_snapshot_id, id, 'style-http-200',
+                            'layer:style-http-200', 'layer',
+                            'Style HTTP 200 layer', 'style:http-200',
+                            'overlay', 'vector_tile', 'mirror', 0, false, 1,
+                            true, true, 'active'
+                        FROM service
+                        RETURNING id, service_id
+                    ),
+                    source AS (
+                        INSERT INTO reference_layer_sources (
+                            provider_key, layer_id, source_key, protocol,
+                            target_kind, endpoint_url, remote_name,
+                            sync_strategy, config_json, definition_sha256,
+                            enabled, is_primary
+                        )
+                        SELECT
+                            'style-http-200', id,
+                            'source:style-http-200', 'wfs', 'vector',
+                            'https://example.test/wfs', 'style:http-200',
+                            'paged_snapshot', CAST('{}' AS JSON),
+                            repeat('c', 64), true, true
+                        FROM layer
+                        RETURNING id, layer_id
+                    )
+                    SELECT source.id, source.layer_id, layer.service_id
+                    FROM source
+                    JOIN layer ON layer.id = source.layer_id
+                    """
+                )
+            ).one()
+            authorization_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_mirror_authorization_reviews (
+                        provider_key, service_id, layer_id, source_id,
+                        source_definition_sha256, protocol, target_kind,
+                        canonical_origin, allowed_origins_json,
+                        reviewed_document, document_size_bytes,
+                        document_sha256, review_sha256, decision, reviewer,
+                        reviewed_at, license_name, license_url, license_terms,
+                        allow_metadata_probe, allow_dataset_download,
+                        allow_local_storage, allow_local_service,
+                        allow_bulk_tile_seed
+                    ) VALUES (
+                        'style-http-200', :service_id, :layer_id, :source_id,
+                        repeat('c', 64), 'wfs', 'vector',
+                        'https://example.test',
+                        CAST('["https://example.test"]' AS JSON),
+                        decode('7b7d', 'hex'), 2, repeat('d', 64),
+                        repeat('e', 64), 'approved', 'Migration test',
+                        now(), 'Test license',
+                        'https://example.test/license', 'Test terms',
+                        true, false, false, false, false
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "service_id": service_id,
+                    "layer_id": layer_id,
+                    "source_id": source_id,
+                },
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_style_update_checks (
+                        provider_key, layer_id, source_id,
+                        source_definition_sha256, profile, idempotency_key,
+                        trigger_kind, source_url, baseline_raw_sha256,
+                        baseline_semantic_sha256, status, checked_at,
+                        next_check_at, duration_ms, http_status, not_modified,
+                        response_final_url, response_size_bytes,
+                        response_redirect_chain_json, error_code,
+                        error_message, error_retryable
+                    ) VALUES (
+                        'style-http-200', :layer_id, :source_id,
+                        repeat('c', 64), 'test-profile', 'error-empty-200',
+                        'scheduled', 'https://example.test/style.json',
+                        repeat('a', 64), repeat('b', 64), 'error', now(),
+                        now() + interval '1 day', 0, 200, false,
+                        'https://example.test/style.json', 0,
+                        CAST('["https://example.test/style.json"]' AS JSON),
+                        'empty_http_200', 'empty response', false
+                    )
+                    """
+                ),
+                {"layer_id": layer_id, "source_id": source_id},
+            )
+            assert connection.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM reference_style_update_checks
+                    WHERE idempotency_key = 'error-empty-200'
+                    """
+                )
+            ).scalar_one() == 1
+
+            savepoint = connection.begin_nested()
+            try:
+                with pytest.raises(DBAPIError) as caught:
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO reference_style_update_checks (
+                                provider_key, layer_id, source_id,
+                                source_definition_sha256, profile,
+                                idempotency_key, trigger_kind, source_url,
+                                baseline_raw_sha256,
+                                baseline_semantic_sha256,
+                                authorization_review_id,
+                                authorization_review_sha256, status,
+                                checked_at, next_check_at, duration_ms,
+                                http_status, not_modified,
+                                response_final_url, response_size_bytes,
+                                response_redirect_chain_json
+                            ) VALUES (
+                                'style-http-200', :layer_id, :source_id,
+                                repeat('c', 64), 'test-profile',
+                                'success-empty-200', 'scheduled',
+                                'https://example.test/style.json',
+                                repeat('a', 64), repeat('b', 64),
+                                :authorization_id, repeat('e', 64),
+                                'unchanged', now(),
+                                now() + interval '1 day', 0, 200, false,
+                                'https://example.test/style.json', 0,
+                                CAST(
+                                    '["https://example.test/style.json"]'
+                                    AS JSON
+                                )
+                            )
+                            """
+                        ),
+                        {
+                            "authorization_id": authorization_id,
+                            "layer_id": layer_id,
+                            "source_id": source_id,
+                        },
+                    )
+                assert (
+                    "ck_reference_style_checks_http_200"
+                    in str(caught.value)
+                )
+            finally:
+                savepoint.rollback()
+        finally:
+            transaction.rollback()
 
 
 def assert_reference_mirror_strategy_schema(inspector: Inspector) -> None:
@@ -1915,6 +2120,7 @@ def test_official_style_watcher_schema_is_reversible(
         )
         run_alembic(migration_database_url, "upgrade", "20260726_0044")
         assert_reference_style_watcher_schema(inspect(engine), engine)
+        assert_reference_style_http_200_error_shape(engine)
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
@@ -1926,6 +2132,7 @@ def test_official_style_watcher_schema_is_reversible(
         )
         run_alembic(migration_database_url, "upgrade", "head")
         assert_reference_style_watcher_schema(inspect(engine), engine)
+        assert_reference_style_http_200_error_shape(engine)
         run_alembic(migration_database_url, "check")
     finally:
         engine.dispose()
