@@ -451,11 +451,40 @@ def test_conclusive_changed_200_failure_blocks_through_later_404(
                 store=store,
             )
 
-        transient = check_official_style_update(
+        unexpected_304_downloader = FakeDownloader(
+            result=_not_modified(target.official_url)
+        )
+        unexpected_304 = check_official_style_update(
             db,
             source_id=source.id,
             store=store,
             checked_at=NOW + timedelta(days=2),
+            downloader=unexpected_304_downloader,
+        )
+        unexpected_304_check = db.get(
+            ReferenceStyleUpdateCheck,
+            unexpected_304.check_id,
+        )
+        assert unexpected_304.status == "error"
+        assert unexpected_304_check.error_code == (
+            "style_download_result_mismatch"
+        )
+        assert unexpected_304_downloader.calls[0]["etag"] is None
+        assert (
+            unexpected_304_downloader.calls[0]["last_modified"] is None
+        )
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
+
+        transient = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW + timedelta(days=3),
             downloader=FakeDownloader(
                 error=DownloadHTTPError(404, retry_after_seconds=None)
             ),
@@ -471,7 +500,94 @@ def test_conclusive_changed_200_failure_blocks_through_later_404(
             db,
             source_id=source.id,
             store=store,
+            checked_at=NOW + timedelta(days=4),
+            downloader=FakeDownloader(
+                body=baseline,
+                result=_result(target.official_url, baseline),
+            ),
+        )
+        assert recovered.status == "unchanged"
+        require_official_style_promotion_allowed(
+            db,
+            source=source,
+            store=store,
+        )
+    finally:
+        store.close()
+
+
+def test_304_validator_is_revalidated_after_concurrent_changed_error(
+    db,
+    tmp_path: Path,
+) -> None:
+    source = _seed_source(db, provider_key="style-watch-stale-304")
+    target = style_watch_target_for_source(source)
+    baseline = _baseline_body()
+    changed = b'{"version":8,"version":9}'
+    store = ReferenceBlobStore(tmp_path / "stale-304")
+
+    class InterleavingDownloader(FakeDownloader):
+        def download(self, *args, **kwargs):
+            concurrent = check_official_style_update(
+                db,
+                source_id=source.id,
+                store=store,
+                checked_at=NOW + timedelta(days=2),
+                idempotency_key="manual:concurrent-changed-error",
+                trigger_kind="manual",
+                force=True,
+                downloader=FakeDownloader(
+                    body=changed,
+                    result=_result(target.official_url, changed),
+                ),
+            )
+            assert concurrent.status == "error"
+            return super().download(*args, **kwargs)
+
+    try:
+        check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW,
+            downloader=FakeDownloader(
+                body=baseline,
+                result=_result(target.official_url, baseline),
+            ),
+        )
+        stale_downloader = InterleavingDownloader(
+            result=_not_modified(target.official_url)
+        )
+        stale = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW + timedelta(days=1),
+            idempotency_key="manual:stale-304",
+            trigger_kind="manual",
+            force=True,
+            downloader=stale_downloader,
+        )
+        stale_check = db.get(ReferenceStyleUpdateCheck, stale.check_id)
+        assert stale.status == "error"
+        assert stale_check.error_code == "stale_not_modified"
+        assert stale_downloader.calls[0]["etag"] == '"style-v1"'
+        assert stale_downloader.calls[0]["last_modified"] is not None
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
+
+        recovered = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
             checked_at=NOW + timedelta(days=3),
+            idempotency_key="manual:baseline-recovery",
+            trigger_kind="manual",
+            force=True,
             downloader=FakeDownloader(
                 body=baseline,
                 result=_result(target.official_url, baseline),
