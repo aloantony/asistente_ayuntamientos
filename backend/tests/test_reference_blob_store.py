@@ -70,6 +70,58 @@ def test_put_stream_is_bounded_and_validates_expected_identity(store) -> None:
     assert store.resolve_blob(stored.storage_key).read_bytes() == payload
 
 
+def test_read_only_store_opens_existing_blobs_without_mutating_root(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "read-only"
+    writer = ReferenceBlobStore(root, max_blob_bytes=1024)
+    stored = writer.put_stream(io.BytesIO(b"immutable local metadata"))
+    writer.close()
+    (root / ".reference-blob-store.lock").unlink()
+    staging = root / "staging"
+    staging.rmdir()
+
+    real_open = os.open
+
+    def reject_write_open(path, flags, *args, **kwargs):
+        if flags & (os.O_CREAT | os.O_RDWR | os.O_WRONLY):
+            raise AssertionError(
+                f"read-only store tried to open {path!s} for writing"
+            )
+        return real_open(path, flags, *args, **kwargs)
+
+    def reject_chmod(*_args, **_kwargs):
+        raise AssertionError("read-only store tried to change permissions")
+
+    monkeypatch.setattr(blob_store_module.os, "open", reject_write_open)
+    monkeypatch.setattr(blob_store_module.os, "chmod", reject_chmod)
+
+    with ReferenceBlobStore(
+        root,
+        max_blob_bytes=1024,
+        read_only=True,
+    ) as reader:
+        with reader.open_blob(stored.storage_key) as stream:
+            assert stream.read() == b"immutable local metadata"
+        with pytest.raises(ReferenceBlobStoreError, match="read-only"):
+            reader.put_stream(io.BytesIO(b"forbidden"))
+        with pytest.raises(ReferenceBlobStoreError, match="read-only"):
+            reader.cleanup_staging(older_than_seconds=0)
+
+    assert not (root / ".reference-blob-store.lock").exists()
+    assert not staging.exists()
+
+
+def test_read_only_store_requires_an_existing_root(tmp_path) -> None:
+    root = tmp_path / "absent"
+
+    with pytest.raises(ReferenceBlobStoreError, match="initialize"):
+        ReferenceBlobStore(root, read_only=True)
+
+    assert not root.exists()
+
+
 def test_completed_staging_file_is_adopted_without_copying(store) -> None:
     directory = store.root / "staging" / "derived"
     directory.mkdir(mode=0o700)

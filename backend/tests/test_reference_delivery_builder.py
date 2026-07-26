@@ -75,6 +75,25 @@ from support_reference_mirror_authorization import (
 NOW = datetime(2026, 7, 23, 8, tzinfo=timezone.utc)
 
 
+def test_web_reference_blob_store_is_strictly_read_only(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def build_store(root, **kwargs):
+        captured["root"] = root
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        reference_layer_routes,
+        "ReferenceBlobStore",
+        build_store,
+    )
+
+    assert reference_layer_routes._reference_blob_store() is sentinel
+    assert captured["read_only"] is True
+
+
 def _lease_and_input(db, storage_root):
     definition = ReferenceCatalogDefinition(
         provider_key="delivery-builder-test",

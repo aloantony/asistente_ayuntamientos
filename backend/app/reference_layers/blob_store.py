@@ -100,7 +100,11 @@ class ReferenceBlobStore:
         quota_bytes: int | None = None,
         min_free_bytes: int = 0,
         chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+        read_only: bool = False,
     ) -> None:
+        if not isinstance(read_only, bool):
+            raise ValueError("read_only must be a boolean")
+        self.read_only = read_only
         self.max_blob_bytes = _positive_integer(max_blob_bytes, "max_blob_bytes")
         self.chunk_bytes = _positive_integer(chunk_bytes, "chunk_bytes")
         self.quota_bytes = _optional_positive_integer(quota_bytes, "quota_bytes")
@@ -113,20 +117,25 @@ class ReferenceBlobStore:
 
         configured = Path(root).expanduser()
         try:
-            configured.mkdir(parents=True, exist_ok=True)
+            if not self.read_only:
+                configured.mkdir(parents=True, exist_ok=True)
             self.root = configured.resolve(strict=True)
         except OSError as error:
             raise ReferenceBlobStoreError("could not initialize blob store root") from error
         if not self.root.is_dir():
             raise ReferenceBlobStoreError("blob store root is not a directory")
 
+        self._thread_lock = threading.RLock()
+        self._lock_fd: int | None = None
+        if self.read_only:
+            self._staging_dir = self.root / "staging"
+            return
+
         self._staging_dir = self._ensure_directory_tree(
             ("staging",),
             leaf_mode=0o700,
         )
         self._ensure_directory_tree(("blobs", "sha256"), leaf_mode=0o750)
-        self._thread_lock = threading.RLock()
-        self._lock_fd: int | None = None
         lock_fd: int | None = None
         try:
             os.chmod(self._staging_dir, 0o700)
@@ -172,6 +181,8 @@ class ReferenceBlobStore:
         self.close()
 
     def stage(self, *, max_bytes: int | None = None) -> "ReferenceStagingWriter":
+        if self.read_only:
+            raise ReferenceBlobStoreError("blob store is read-only")
         if self._lock_fd is None:
             raise ReferenceBlobStoreError("blob store is closed")
         limit = self.max_blob_bytes
@@ -220,6 +231,8 @@ class ReferenceBlobStore:
         """
 
         amount = _non_negative_integer(additional_bytes, "additional_bytes")
+        if self.read_only:
+            raise ReferenceBlobStoreError("blob store is read-only")
         if self._lock_fd is None:
             raise ReferenceBlobStoreError("blob store is closed")
         with self._exclusive_lock():
@@ -242,6 +255,8 @@ class ReferenceBlobStore:
         file lock and then moves the same inode into the CAS.
         """
 
+        if self.read_only:
+            raise ReferenceBlobStoreError("blob store is read-only")
         if self._lock_fd is None:
             raise ReferenceBlobStoreError("blob store is closed")
         limit = self.max_blob_bytes
@@ -388,6 +403,8 @@ class ReferenceBlobStore:
         older_than_seconds: float,
         now: float | None = None,
     ) -> StagingCleanupResult:
+        if self.read_only:
+            raise ReferenceBlobStoreError("blob store is read-only")
         plan = self._process_staging(
             older_than_seconds=older_than_seconds,
             now=now,

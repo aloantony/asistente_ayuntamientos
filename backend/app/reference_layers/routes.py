@@ -412,4 +412,5 @@ def _reference_blob_store() -> ReferenceBlobStore:
         max_blob_bytes=app_settings.reference_blob_max_bytes,
         quota_bytes=app_settings.reference_storage_quota_bytes,
         min_free_bytes=app_settings.reference_storage_min_free_bytes,
+        read_only=True,
     )
