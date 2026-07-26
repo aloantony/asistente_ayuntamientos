@@ -117,7 +117,7 @@ def test_pending_syncing_and_disabled_statuses(db) -> None:
 def test_status_ignores_obsolete_runs_and_fails_closed_on_unservable_state(
     db,
 ) -> None:
-    layer, _, source, _, version, _ = seed_local_delivery(db)
+    layer, _, source, active_run, version, _ = seed_local_delivery(db)
     obsolete_at = version.created_at + timedelta(seconds=1)
     db.add(
         ReferenceSyncRun(
@@ -146,7 +146,10 @@ def test_status_ignores_obsolete_runs_and_fails_closed_on_unservable_state(
     assert status.status == "active"
     assert status.last_error_code is None
 
-    source.definition_sha256 = "9" * 64
+    active_run.source_definition_json = {
+        **active_run.source_definition_json,
+        "endpoint_url": "https://tampered.invalid/source",
+    }
     db.commit()
     status = catalog_mirror_statuses(
         db,
