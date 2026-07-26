@@ -2959,7 +2959,7 @@ def preserve_manual_sync_audit(
         or not isinstance(expected["requested_by_id"], int)
         or isinstance(expected["requested_by_id"], bool)
         or expected["requested_by_id"] <= 0
-        or run.requested_by_id != expected["requested_by_id"]
+        or run.requested_by_id not in {None, expected["requested_by_id"]}
     ):
         raise MirrorLifecycleError(
             "manual enqueue audit evidence is invalid"

@@ -72,6 +72,7 @@ from app.reference_layers.models import (
 )
 from app.reference_layers.source_probes import SourceProbe
 from app.reference_layers.style_parity import persist_style_parity_plan
+from app.users.models import User
 from support_reference_mirror_authorization import (
     bind_run_authorization,
     ensure_authorized_mirror_source,
@@ -1024,6 +1025,58 @@ def test_manual_sync_rejects_stale_unauthorized_and_open_requests(
         failed_run_id=first.run_id,
         now=NOW + timedelta(seconds=2),
     ) is None
+
+
+def test_manual_sync_actor_deletion_keeps_durable_audit_and_liveness(
+    db,
+    make_user,
+) -> None:
+    _, _, _, sources, _ = _seed_bootstrap(
+        db,
+        provider_key="manual-sync-deleted-actor-test",
+    )
+    source = next(item for item in sources if item.is_primary)
+    ensure_authorized_mirror_source(db, source, reviewed_at=NOW)
+    actor_id = make_user().id
+    queued = enqueue_manual_sync_run(
+        db,
+        provider_key=source.provider_key,
+        source_id=source.id,
+        expected_source_definition_sha256=source.definition_sha256,
+        expected_generation=0,
+        check_mode="full",
+        requested_by_id=actor_id,
+        reason="audit survives actor deletion",
+        now=NOW,
+    )
+    db.execute(delete(User).where(User.id == actor_id))
+    db.commit()
+    run = db.get(ReferenceSyncRun, queued.run_id)
+    assert run.requested_by_id is None
+
+    lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "a" * 64,
+    )
+    finish_sync_run(
+        db,
+        lease,
+        outcome="unchanged",
+        stats_json={"result": "not_modified"},
+        now=NOW + timedelta(seconds=1),
+    )
+
+    terminal = db.get(ReferenceSyncRun, queued.run_id)
+    assert terminal.status == "unchanged"
+    assert terminal.requested_by_id is None
+    assert terminal.stats_json == {
+        "manual_enqueue": {
+            "reason": "audit survives actor deletion",
+            "requested_by_id": actor_id,
+        },
+        "result": "not_modified",
+    }
 
 
 def test_failed_sources_fall_back_in_priority_order_and_exhaust_once(db) -> None:
