@@ -2220,6 +2220,153 @@ class ReferenceLayerDeliveryState(Base):
     )
 
 
+class ReferenceLayerMirrorStrategy(Base):
+    __tablename__ = "reference_layer_mirror_strategies"
+    __table_args__ = (
+        CheckConstraint(
+            "strategy in ('vector', 'raster', 'tiles', 'composition', 'blocked')",
+            name="ck_reference_layer_mirror_strategies_strategy",
+        ),
+        CheckConstraint(
+            "btrim(provider_key) <> '' and strategy_reason_code is not null "
+            "and btrim(strategy_reason_code) <> ''",
+            name="ck_reference_layer_mirror_strategies_reason_code",
+        ),
+        CheckConstraint(
+            "evidence_sha256 ~ '^[0-9a-f]{64}$' and generation > 0",
+            name="ck_reference_layer_mirror_strategies_evidence_generation",
+        ),
+        CheckConstraint(
+            "(strategy in ('vector', 'raster', 'tiles') and source_id is not null) "
+            "or (strategy in ('composition', 'blocked') and source_id is null)",
+            name="ck_reference_layer_mirror_strategies_source_shape",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id"],
+            ["reference_layers.provider_key", "reference_layers.id"],
+            name="fk_reference_layer_mirror_strategies_provider_layer",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "catalog_snapshot_id"],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+            ],
+            name="fk_reference_layer_mirror_strategies_provider_snapshot",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_id"],
+            ["reference_layer_sources.id"],
+            name="fk_reference_layer_mirror_strategies_provider_source",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "catalog_snapshot_id",
+            name="uq_reference_layer_mirror_strategies_snapshot_layer",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_layer_mirror_strategies_provider_id",
+        ),
+        Index(
+            "ix_reference_layer_mirror_strategies_current",
+            "provider_key",
+            "catalog_snapshot_id",
+            "layer_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    catalog_snapshot_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    catalog_definition_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    strategy: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    strategy_reason_code: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    strategy_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    validated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceLayerMirrorStrategyDependency(Base):
+    __tablename__ = "reference_layer_mirror_strategy_dependencies"
+    __table_args__ = (
+        CheckConstraint(
+            "dependency_order >= 0 and dependency_layer_id <> strategy_layer_id",
+            name="ck_reference_layer_mirror_strategy_dependencies_shape",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "strategy_id"],
+            [
+                "reference_layer_mirror_strategies.provider_key",
+                "reference_layer_mirror_strategies.id",
+            ],
+            name="fk_reference_layer_mirror_strategy_dependencies_strategy",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "dependency_layer_id"],
+            ["reference_layers.provider_key", "reference_layers.id"],
+            name="fk_reference_layer_mirror_strategy_dependencies_layer",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "strategy_id",
+            "dependency_layer_id",
+            name="uq_reference_layer_mirror_strategy_dependencies_item",
+        ),
+        Index(
+            "ix_reference_layer_mirror_strategy_dependencies_order",
+            "strategy_id",
+            "dependency_order",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    strategy_layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    dependency_layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    dependency_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class OrganizationReferenceLayerSetting(TimestampMixin, Base):
     __tablename__ = "organization_reference_layer_settings"
     __table_args__ = (

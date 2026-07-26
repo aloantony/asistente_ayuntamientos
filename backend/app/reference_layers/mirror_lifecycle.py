@@ -22,6 +22,10 @@ from sqlalchemy.orm import Session
 from app.reference_layers.catalog import (
     canonical_normalized_definition_sha256,
 )
+from app.reference_layers.mirror_strategy import (
+    apply_mirror_strategy_plan,
+    build_mirror_strategy_plan,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -232,22 +236,16 @@ def build_mirror_bootstrap_plan(
     for layer in layers:
         service = services.get(layer.service_id or -1)
         if service is None:
-            raise MirrorBootstrapError(
-                f"layer {layer.source_key!r} has no current catalog service"
-            )
+            continue
         try:
             candidates = acquisition_candidates(
                 _service_definition(service),
                 _layer_definition(layer),
             )
-        except SourceDiscoveryError as exc:
-            raise MirrorBootstrapError(
-                f"cannot discover source for {layer.source_key!r}: {exc}"
-            ) from exc
+        except SourceDiscoveryError:
+            continue
         if not candidates:
-            raise MirrorBootstrapError(
-                f"layer {layer.source_key!r} has no acquisition candidate"
-            )
+            continue
         preferred_source_key = min(
             candidates,
             key=lambda item: (item.priority, item.source_key),
@@ -493,6 +491,11 @@ def apply_mirror_bootstrap_plan(
                 record.enabled = False
                 record.is_primary = False
                 deactivated += 1
+        strategy_plan = build_mirror_strategy_plan(
+            db,
+            provider_key=reviewed_plan.provider_key,
+        )
+        apply_mirror_strategy_plan(db, strategy_plan)
         db.commit()
         return AppliedMirrorBootstrap(
             plan_sha256=reviewed_plan.plan_sha256,

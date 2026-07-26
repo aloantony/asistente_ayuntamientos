@@ -24,6 +24,7 @@ from app.reference_layers.models import (
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
+    ReferenceLayerMirrorStrategy,
     ReferenceLayerSource,
     ReferenceLayerStyle,
     ReferenceSyncRun,
@@ -223,6 +224,19 @@ def catalog_local_delivery_availability(
             ReferenceCatalogSnapshot.status == "applied",
         )
     )
+    strategy_rows = {}
+    if current_snapshot is not None:
+        strategy_rows = {
+            row.layer_id: row
+            for row in db.scalars(
+                select(ReferenceLayerMirrorStrategy).where(
+                    ReferenceLayerMirrorStrategy.provider_key == provider_key,
+                    ReferenceLayerMirrorStrategy.catalog_snapshot_id
+                    == current_snapshot.id,
+                )
+            )
+        }
+    strategy_matrix_configured = bool(strategy_rows)
     layer_blockers = {
         layer.id: _current_layer_blocker(
             layer,
@@ -351,6 +365,16 @@ def catalog_local_delivery_availability(
     for layer in layers:
         if layer.node_type != "layer":
             continue
+        strategy = strategy_rows.get(layer.id)
+        if strategy_matrix_configured and strategy is None:
+            result[layer.id] = _unavailable("strategy_missing")
+            continue
+        if strategy is not None and strategy.strategy == "blocked":
+            result[layer.id] = _unavailable(strategy.strategy_reason_code)
+            continue
+        if strategy is not None and strategy.strategy == "composition":
+            result[layer.id] = _unavailable("composition_not_materialized")
+            continue
         state = states.get(layer.id)
         layer_blocker = layer_blockers.get(layer.id)
         if layer_blocker is not None:
@@ -376,6 +400,9 @@ def catalog_local_delivery_availability(
         record = active_records.get(layer.id)
         if record is None:
             result[layer.id] = _unavailable("local_version_invalid")
+            continue
+        if strategy is not None and record.version.delivery_kind != strategy.strategy:
+            result[layer.id] = _unavailable("strategy_delivery_kind_mismatch")
             continue
         assets = assets_by_version.get(record.version.id, [])
         layer_styles = styles_by_layer.get(layer.id, [])

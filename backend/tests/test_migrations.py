@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260726_0039"
+HEAD_REVISION = "20260726_0040"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -192,6 +192,37 @@ REFERENCE_MIRROR_TABLES = {
 REFERENCE_CATALOG_WATCHER_TABLES = {
     "reference_catalog_observed_versions",
     "reference_catalog_update_checks",
+}
+REFERENCE_MIRROR_STRATEGY_TABLES = {
+    "reference_layer_mirror_strategies",
+    "reference_layer_mirror_strategy_dependencies",
+}
+REFERENCE_MIRROR_STRATEGY_COLUMNS = {
+    "reference_layer_mirror_strategies": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "catalog_snapshot_id",
+        "catalog_definition_sha256",
+        "strategy",
+        "source_id",
+        "strategy_reason_code",
+        "strategy_reason",
+        "evidence_json",
+        "evidence_sha256",
+        "generation",
+        "validated_at",
+        "created_at",
+    },
+    "reference_layer_mirror_strategy_dependencies": {
+        "id",
+        "provider_key",
+        "strategy_id",
+        "strategy_layer_id",
+        "dependency_layer_id",
+        "dependency_order",
+        "created_at",
+    },
 }
 REFERENCE_CATALOG_WATCHER_COLUMNS = {
     "reference_catalog_observed_versions": {
@@ -1200,6 +1231,88 @@ def assert_reference_catalog_watcher_schema(inspector: Inspector) -> None:
         "ck_reference_catalog_update_checks_trigger_kind",
         "ck_reference_catalog_update_checks_urls_https",
     }
+
+
+def assert_reference_mirror_strategy_schema(inspector: Inspector) -> None:
+    assert REFERENCE_MIRROR_STRATEGY_TABLES <= set(inspector.get_table_names())
+    for table_name, expected_columns in REFERENCE_MIRROR_STRATEGY_COLUMNS.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_layer_mirror_strategies"
+        )
+    } == {
+        "uq_reference_layer_mirror_strategies_snapshot_layer",
+        "uq_reference_layer_mirror_strategies_provider_id",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_layer_mirror_strategy_dependencies"
+        )
+    } == {"uq_reference_layer_mirror_strategy_dependencies_item"}
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_layer_mirror_strategies"
+        )
+    } == {
+        "ck_reference_layer_mirror_strategies_strategy",
+        "ck_reference_layer_mirror_strategies_reason_code",
+        "ck_reference_layer_mirror_strategies_identity",
+        "ck_reference_layer_mirror_strategies_source_shape",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_layer_mirror_strategy_dependencies"
+        )
+    } == {"ck_reference_layer_mirror_strategy_dependencies_shape"}
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_mirror_strategies"
+        )
+    } == {
+        ("provider_key", "layer_id"),
+        ("provider_key", "catalog_snapshot_id"),
+        ("source_id",),
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_mirror_strategy_dependencies"
+        )
+    } == {
+        ("provider_key", "strategy_id"),
+        ("provider_key", "dependency_layer_id"),
+    }
+
+
+def test_reference_strategy_matrix_schema_is_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "head")
+    engine = create_engine(migration_database_url)
+    try:
+        assert_reference_mirror_strategy_schema(inspect(engine))
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM reference_layer_mirror_strategies"
+                )
+            ).scalar_one() == 0
+        run_alembic(migration_database_url, "downgrade", "20260726_0039")
+        assert REFERENCE_MIRROR_STRATEGY_TABLES.isdisjoint(
+            set(inspect(engine).get_table_names())
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_mirror_strategy_schema(inspect(engine))
+    finally:
+        engine.dispose()
 
 
 def assert_assistant_attachment_schema(inspector: Inspector) -> None:

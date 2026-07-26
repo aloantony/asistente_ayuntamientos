@@ -42,6 +42,8 @@ from app.reference_layers.models import (
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
+    ReferenceLayerMirrorStrategy,
+    ReferenceLayerMirrorStrategyDependency,
     ReferenceLayerSource,
     ReferenceService,
     ReferenceSyncRun,
@@ -65,6 +67,19 @@ def committed_reference_providers(engine):
         cleanup.execute(
             delete(ReferenceSyncRun).where(
                 ReferenceSyncRun.source_id.in_(source_ids)
+            )
+        )
+        strategy_ids = select(ReferenceLayerMirrorStrategy.id).where(
+            ReferenceLayerMirrorStrategy.provider_key.in_(provider_keys)
+        )
+        cleanup.execute(
+            delete(ReferenceLayerMirrorStrategyDependency).where(
+                ReferenceLayerMirrorStrategyDependency.strategy_id.in_(strategy_ids)
+            )
+        )
+        cleanup.execute(
+            delete(ReferenceLayerMirrorStrategy).where(
+                ReferenceLayerMirrorStrategy.provider_key.in_(provider_keys)
             )
         )
         cleanup.execute(
