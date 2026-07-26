@@ -22,6 +22,7 @@ from app.reference_layers.catalog import (
     apply_catalog_definition,
 )
 from app.reference_layers.delivery_builder import (
+    DeliveryContinuityError,
     PreparedDelivery,
     PreparedDeliveryAsset,
 )
@@ -38,10 +39,12 @@ from app.reference_layers.mirror_orchestrator import (
     MirrorRunProcessor,
     PersistedRunArtifact,
     RunContext,
+    TileContentCheck,
     TilePublicationPlan,
     _resolve_local_sld_artifacts,
     _tile_documents_for_catalog_styles,
     enqueue_reference_sources_once,
+    classify_worker_failure,
     handle_run_failure,
     load_run_context,
     materialize_tile_delivery,
@@ -131,7 +134,7 @@ def _source(layer: ReferenceLayer, candidate: SourceCandidate) -> ReferenceLayer
         config_json=dict(candidate.config),
         definition_sha256=candidate.definition_sha256,
         enabled=True,
-        is_primary=False,
+        is_primary=candidate.priority == 0,
         priority=candidate.priority,
         next_check_at=NOW - timedelta(seconds=1),
     )
@@ -354,6 +357,9 @@ def test_baked_styles_are_verified_and_seeded_as_distinct_local_assets(tmp_path)
                 min_zoom=0,
                 max_zoom=0,
                 image_format="png",
+                coordinate_sha256=kwargs[
+                    "expected_coordinate_sha256"
+                ],
                 bounds_json=document["descriptor"]["bounds"],
                 validation_json={"passed": True, "checks": kwargs},
             )
@@ -438,17 +444,6 @@ def test_failure_handler_uses_lifecycle_followup_after_terminal_finish(db) -> No
         lease_seconds=3600,
         token_factory=lambda: "e" * 64,
     )
-    observed_statuses = []
-
-    def enqueue_followup(session, failed_run_id):
-        observed_statuses.append(session.get(ReferenceSyncRun, failed_run_id).status)
-        return session.scalar(
-            select(ReferenceSyncRun.id).where(
-                ReferenceSyncRun.source_id == fallback_source_id,
-                ReferenceSyncRun.status.in_(("queued", "running")),
-            )
-        )
-
     result = handle_run_failure(
         lambda: nullcontext(db),
         lease,
@@ -457,16 +452,38 @@ def test_failure_handler_uses_lifecycle_followup_after_terminal_finish(db) -> No
             summary="Local style is unavailable.",
             retryable=False,
             outcome="rejected",
+            stats_json={"continuity_audit": {"passed": False}},
         ),
-        followup_enqueuer=enqueue_followup,
     )
 
-    assert observed_statuses == ["rejected"]
     assert result.followup == "fallback"
     assert result.source_id == fallback_source_id
     assert db.get(ReferenceSyncRun, lease.run_id).stats_json == {
-        "retryable_classification": False
+        "retryable_classification": False,
+        "continuity_audit": {"passed": False},
     }
+    child = db.scalar(
+        select(ReferenceSyncRun).where(
+            ReferenceSyncRun.parent_run_id == lease.run_id
+        )
+    )
+    assert child is not None
+    assert child.source_id == fallback_source_id
+
+
+def test_continuity_rejection_classification_preserves_audit_evidence() -> None:
+    evidence = {
+        "schema_version": "reference-delivery-continuity/v1",
+        "passed": False,
+        "failed_checks": ["feature_count"],
+    }
+
+    failure = classify_worker_failure(DeliveryContinuityError(evidence))
+
+    assert failure.code == "delivery_continuity_rejected"
+    assert failure.outcome == "rejected"
+    assert failure.retryable is False
+    assert failure.stats_json == {"delivery_continuity": evidence}
 
 
 def test_scheduler_reconciles_sources_before_enqueue_on_fresh_catalog(db) -> None:
@@ -552,7 +569,24 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
             crs="EPSG:3857",
             bounds_json={"west": -7, "south": 40, "east": -1, "north": 44},
             feature_count=None,
-            validation_json={"passed": True},
+            validation_json={
+                "schema_version": "reference-delivery-validation/v1",
+                "passed": True,
+                "kind": "tiles",
+                "checks": {
+                    "data_schema": {
+                        "schema_version": "reference-tiles-schema/v1",
+                        "archives": [
+                            {
+                                "catalog_style_source_key": None,
+                                "image_format": "png",
+                                "min_zoom": 0,
+                                "max_zoom": 0,
+                            }
+                        ],
+                    }
+                },
+            },
             input_artifact_ids=tuple(
                 item.artifact_id for item in artifacts if "input" in item.roles
             ),
@@ -593,6 +627,12 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
         materializer=materializer,
         publisher=lambda context, plan, supervisor: published.append(
             (context, plan)
+        ),
+        tile_content_checker=lambda *args: TileContentCheck(
+            unchanged=True,
+            sample_count=1,
+            remote_sha256="d" * 64,
+            local_sha256="d" * 64,
         ),
     )
     try:
@@ -655,6 +695,18 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
 
 
 def test_reference_settings_reject_incoherent_lease_and_quota(tmp_path) -> None:
+    defaults = Settings(
+        reference_storage_root=str(tmp_path),
+        _env_file=None,
+    )
+    opted_in = Settings(
+        reference_storage_root=str(tmp_path),
+        reference_remote_proxy_enabled=True,
+        _env_file=None,
+    )
+    assert defaults.reference_remote_proxy_enabled is False
+    assert opted_in.reference_remote_proxy_enabled is True
+
     with pytest.raises(ValueError, match="half the lease"):
         Settings(
             reference_storage_root=str(tmp_path),

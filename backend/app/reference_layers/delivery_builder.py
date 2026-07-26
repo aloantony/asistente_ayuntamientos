@@ -8,6 +8,7 @@ cross-table identity so an obsolete worker cannot attach assets to a new run.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -53,10 +54,40 @@ _BLOB_KEY_RE = re.compile(
 )
 _LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
 _MAX_SOURCE_VERSION_LENGTH = 2_048
+_VALIDATION_SCHEMA = "reference-delivery-validation/v1"
+_CONTINUITY_SCHEMA = "reference-delivery-continuity/v1"
+_MIN_FEATURE_BASELINE = 100
+_MIN_FEATURE_RETAINED_RATIO = 0.10
+_MIN_BOUNDS_OVERLAP_RATIO = 0.80
+_MIN_BOUNDS_AREA_RATIO = 0.50
+_MAX_BOUNDS_AREA_RATIO = 2.00
+_DATA_SCHEMA_BY_KIND = {
+    "vector": "reference-vector-schema/v1",
+    "raster": "reference-raster-schema/v1",
+    "tiles": "reference-tiles-schema/v1",
+}
 
 
 class DeliveryBuildError(MirrorLifecycleError):
     """A prepared delivery cannot safely become an immutable version."""
+
+
+class DeliveryContinuityError(DeliveryBuildError):
+    """A candidate is structurally incompatible with the active version."""
+
+    def __init__(self, evidence: dict[str, Any]) -> None:
+        canonical_json_sha256(evidence)
+        failed = evidence.get("failed_checks")
+        labels = (
+            ", ".join(failed)
+            if isinstance(failed, list)
+            and all(isinstance(item, str) for item in failed)
+            else "unknown"
+        )
+        super().__init__(
+            f"delivery continuity check rejected: {labels}"
+        )
+        self.evidence = evidence
 
 
 @dataclass(frozen=True)
@@ -172,6 +203,11 @@ def create_delivery_version(
             raise DeliveryBuildError("delivery source changed during the run")
         if source.target_kind != prepared.delivery_kind:
             raise DeliveryBuildError("prepared delivery kind does not match source")
+        active_generation = state.generation if state is not None else 0
+        if run.expected_active_generation != active_generation:
+            raise DeliveryBuildError(
+                "active delivery generation changed during version creation"
+            )
         layer = db.scalar(
             select(ReferenceLayer).where(
                 ReferenceLayer.id == source.layer_id,
@@ -219,6 +255,23 @@ def create_delivery_version(
         if {item.id for item in artifact_rows} != artifact_ids:
             raise DeliveryBuildError("prepared input artifact identity is invalid")
 
+        active_version = _active_delivery_version(
+            db,
+            state=state,
+            provider_key=source.provider_key,
+            layer_id=source.layer_id,
+        )
+        continuity = evaluate_delivery_continuity(
+            active_version=active_version,
+            candidate=prepared,
+        )
+        if not continuity["passed"]:
+            raise DeliveryContinuityError(continuity)
+        stored_validation = deepcopy(prepared.validation_json)
+        stored_validation["continuity_gate"] = continuity
+        validation_sha256 = canonical_json_sha256(stored_validation)
+        normalized["validation_sha256"] = validation_sha256
+
         sequence_number = int(
             db.scalar(
                 select(func.coalesce(func.max(ReferenceDeliveryVersion.sequence_number), 0))
@@ -248,7 +301,6 @@ def create_delivery_version(
             ],
         }
         manifest_sha256 = canonical_json_sha256(manifest)
-        validation_sha256 = canonical_json_sha256(prepared.validation_json)
         version = ReferenceDeliveryVersion(
             provider_key=source.provider_key,
             layer_id=source.layer_id,
@@ -266,7 +318,7 @@ def create_delivery_version(
             crs=prepared.crs,
             bounds_json=prepared.bounds_json,
             feature_count=prepared.feature_count,
-            validation_json=prepared.validation_json,
+            validation_json=stored_validation,
             created_at=moment,
         )
         db.add(version)
@@ -328,6 +380,143 @@ def canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def evaluate_delivery_continuity(
+    *,
+    active_version: ReferenceDeliveryVersion | None,
+    candidate: PreparedDelivery,
+) -> dict[str, Any]:
+    """Build the canonical, auditable active-to-candidate safety report."""
+
+    candidate_bounds = _bounds(candidate.bounds_json)
+    candidate_schema_sha256 = _semantic_schema_sha256(
+        candidate.delivery_kind,
+        candidate.validation_json,
+    )
+    candidate_snapshot = {
+        "delivery_kind": candidate.delivery_kind,
+        "crs": candidate.crs,
+        "bounds": candidate_bounds,
+        "feature_count": candidate.feature_count,
+        "data_schema_sha256": candidate_schema_sha256,
+    }
+    if active_version is None:
+        checks = {
+            name: {
+                "passed": True,
+                "status": "no_active_baseline",
+            }
+            for name in (
+                "delivery_kind",
+                "crs",
+                "bounds",
+                "data_schema",
+                "feature_count",
+            )
+        }
+        return {
+            "schema_version": _CONTINUITY_SCHEMA,
+            "passed": True,
+            "baseline_version_id": None,
+            "candidate": candidate_snapshot,
+            "checks": checks,
+            "failed_checks": [],
+        }
+
+    active_snapshot, baseline_error = _active_continuity_snapshot(
+        active_version
+    )
+    if baseline_error is not None:
+        checks = {
+            "active_baseline": {
+                "passed": False,
+                "reason": baseline_error,
+            }
+        }
+    else:
+        assert active_snapshot is not None
+        kind_matches = (
+            active_snapshot["delivery_kind"]
+            == candidate_snapshot["delivery_kind"]
+        )
+        crs_matches = active_snapshot["crs"] == candidate_snapshot["crs"]
+        bounds_check = _bounds_continuity_check(
+            delivery_kind=candidate.delivery_kind,
+            active=active_snapshot["bounds"],
+            candidate=candidate_snapshot["bounds"],
+        )
+        schema_matches = (
+            active_snapshot["data_schema_sha256"]
+            == candidate_snapshot["data_schema_sha256"]
+        )
+        active_count = active_snapshot["feature_count"]
+        candidate_count = candidate_snapshot["feature_count"]
+        feature_applies = candidate.delivery_kind == "vector"
+        retained_ratio = (
+            round(candidate_count / active_count, 12)
+            if feature_applies
+            and isinstance(active_count, int)
+            and active_count > 0
+            and isinstance(candidate_count, int)
+            else None
+        )
+        feature_matches = bool(
+            not feature_applies
+            or (
+                isinstance(active_count, int)
+                and isinstance(candidate_count, int)
+                and (
+                    active_count < _MIN_FEATURE_BASELINE
+                    or candidate_count
+                    >= active_count * _MIN_FEATURE_RETAINED_RATIO
+                )
+            )
+        )
+        checks = {
+            "delivery_kind": {
+                "passed": kind_matches,
+                "active": active_snapshot["delivery_kind"],
+                "candidate": candidate_snapshot["delivery_kind"],
+            },
+            "crs": {
+                "passed": crs_matches,
+                "active": active_snapshot["crs"],
+                "candidate": candidate_snapshot["crs"],
+            },
+            "bounds": {
+                **bounds_check,
+            },
+            "data_schema": {
+                "passed": schema_matches,
+                "active_sha256": active_snapshot["data_schema_sha256"],
+                "candidate_sha256": candidate_snapshot[
+                    "data_schema_sha256"
+                ],
+            },
+            "feature_count": {
+                "passed": feature_matches,
+                "applies": feature_applies,
+                "active": active_count,
+                "candidate": candidate_count,
+                "minimum_baseline": _MIN_FEATURE_BASELINE,
+                "minimum_retained_ratio": _MIN_FEATURE_RETAINED_RATIO,
+                "retained_ratio": retained_ratio,
+            },
+        }
+    failed_checks = sorted(
+        name
+        for name, check in checks.items()
+        if check.get("passed") is not True
+    )
+    return {
+        "schema_version": _CONTINUITY_SCHEMA,
+        "passed": not failed_checks,
+        "baseline_version_id": active_version.id,
+        "candidate": candidate_snapshot,
+        "checks": checks,
+        "failed_checks": failed_checks,
+    }
+
+
 def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
     if not isinstance(prepared, PreparedDelivery):
         raise DeliveryBuildError("prepared delivery has an invalid type")
@@ -348,6 +537,20 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
         or prepared.feature_count < 0
     ):
         raise DeliveryBuildError("prepared feature count is invalid")
+    if (
+        prepared.delivery_kind == "vector"
+        and (
+            not isinstance(prepared.feature_count, int)
+            or isinstance(prepared.feature_count, bool)
+            or prepared.feature_count < 1
+        )
+    ) or (
+        prepared.delivery_kind != "vector"
+        and prepared.feature_count is not None
+    ):
+        raise DeliveryBuildError(
+            "prepared feature count is incompatible with delivery kind"
+        )
     if prepared.reference_at is not None:
         _aware_moment(prepared.reference_at)
     if (
@@ -355,6 +558,14 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
         or prepared.validation_json.get("passed") is not True
     ):
         raise DeliveryBuildError("prepared delivery did not pass validation")
+    if "continuity_gate" in prepared.validation_json:
+        raise DeliveryBuildError(
+            "prepared delivery cannot provide its own continuity evidence"
+        )
+    _semantic_schema_sha256(
+        prepared.delivery_kind,
+        prepared.validation_json,
+    )
     canonical_json_sha256(prepared.validation_json)
     if (
         not prepared.input_artifact_ids
@@ -413,6 +624,293 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
             for asset in prepared.assets
         ],
     }
+
+
+def _semantic_schema_sha256(
+    delivery_kind: str,
+    validation: dict[str, Any],
+) -> str:
+    if (
+        not isinstance(validation, dict)
+        or validation.get("schema_version") != _VALIDATION_SCHEMA
+        or validation.get("kind") != delivery_kind
+    ):
+        raise DeliveryBuildError(
+            "prepared delivery validation schema is invalid"
+        )
+    checks = validation.get("checks")
+    data_schema = checks.get("data_schema") if isinstance(checks, dict) else None
+    expected = _DATA_SCHEMA_BY_KIND.get(delivery_kind)
+    if (
+        not isinstance(data_schema, dict)
+        or expected is None
+        or data_schema.get("schema_version") != expected
+    ):
+        raise DeliveryBuildError(
+            "prepared delivery data schema is invalid"
+        )
+    _validate_data_schema(delivery_kind, data_schema)
+    return canonical_json_sha256(data_schema)
+
+
+def _active_delivery_version(
+    db: Session,
+    *,
+    state: ReferenceLayerDeliveryState | None,
+    provider_key: str,
+    layer_id: int,
+) -> ReferenceDeliveryVersion | None:
+    if state is None:
+        return None
+    if state.status != "active" or state.active_version_id is None:
+        raise DeliveryBuildError("active delivery state is invalid")
+    version = db.scalar(
+        select(ReferenceDeliveryVersion).where(
+            ReferenceDeliveryVersion.id == state.active_version_id,
+            ReferenceDeliveryVersion.provider_key == provider_key,
+            ReferenceDeliveryVersion.layer_id == layer_id,
+        )
+    )
+    if version is None:
+        raise DeliveryBuildError("active delivery version is unavailable")
+    return version
+
+
+def _active_continuity_snapshot(
+    version: ReferenceDeliveryVersion,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        if (
+            not isinstance(version.validation_sha256, str)
+            or canonical_json_sha256(version.validation_json)
+            != version.validation_sha256
+        ):
+            return None, "active_validation_hash_invalid"
+        bounds = _bounds(version.bounds_json)
+        schema_sha256 = _semantic_schema_sha256(
+            version.delivery_kind,
+            version.validation_json,
+        )
+        if _CRS_RE.fullmatch(version.crs) is None:
+            return None, "active_crs_invalid"
+        if version.delivery_kind == "vector":
+            if (
+                isinstance(version.feature_count, bool)
+                or not isinstance(version.feature_count, int)
+                or version.feature_count < 1
+            ):
+                return None, "active_feature_count_invalid"
+        elif version.feature_count is not None:
+            return None, "active_feature_count_invalid"
+    except (DeliveryBuildError, TypeError, ValueError):
+        return None, "active_validation_schema_invalid"
+    return (
+        {
+            "delivery_kind": version.delivery_kind,
+            "crs": version.crs,
+            "bounds": bounds,
+            "feature_count": version.feature_count,
+            "data_schema_sha256": schema_sha256,
+        },
+        None,
+    )
+
+
+def _bounds_continuity_check(
+    *,
+    delivery_kind: str,
+    active: dict[str, float],
+    candidate: dict[str, float],
+) -> dict[str, Any]:
+    if delivery_kind == "tiles":
+        return {
+            "passed": active == candidate,
+            "mode": "exact_tile_coverage",
+            "active": active,
+            "candidate": candidate,
+        }
+
+    active_area = (
+        (active["east"] - active["west"])
+        * (active["north"] - active["south"])
+    )
+    candidate_area = (
+        (candidate["east"] - candidate["west"])
+        * (candidate["north"] - candidate["south"])
+    )
+    intersection_width = max(
+        0.0,
+        min(active["east"], candidate["east"])
+        - max(active["west"], candidate["west"]),
+    )
+    intersection_height = max(
+        0.0,
+        min(active["north"], candidate["north"])
+        - max(active["south"], candidate["south"]),
+    )
+    intersection_area = intersection_width * intersection_height
+    overlap_ratio = intersection_area / min(active_area, candidate_area)
+    area_ratio = candidate_area / active_area
+    passed = (
+        overlap_ratio >= _MIN_BOUNDS_OVERLAP_RATIO
+        and _MIN_BOUNDS_AREA_RATIO
+        <= area_ratio
+        <= _MAX_BOUNDS_AREA_RATIO
+    )
+    return {
+        "passed": passed,
+        "mode": "overlap_and_area_ratio",
+        "active": active,
+        "candidate": candidate,
+        "intersection_area": round(intersection_area, 12),
+        "active_area": round(active_area, 12),
+        "candidate_area": round(candidate_area, 12),
+        "overlap_ratio": round(overlap_ratio, 12),
+        "area_ratio": round(area_ratio, 12),
+        "minimum_overlap_ratio": _MIN_BOUNDS_OVERLAP_RATIO,
+        "minimum_area_ratio": _MIN_BOUNDS_AREA_RATIO,
+        "maximum_area_ratio": _MAX_BOUNDS_AREA_RATIO,
+    }
+
+
+def _validate_data_schema(
+    delivery_kind: str,
+    data_schema: dict[str, Any],
+) -> None:
+    if delivery_kind == "vector":
+        if set(data_schema) != {"schema_version", "columns"}:
+            raise DeliveryBuildError(
+                "prepared vector data schema is invalid"
+            )
+        columns = data_schema["columns"]
+        if (
+            not isinstance(columns, list)
+            or not 2 <= len(columns) <= 512
+        ):
+            raise DeliveryBuildError(
+                "prepared vector data schema is invalid"
+            )
+        for column in columns:
+            if (
+                not isinstance(column, dict)
+                or set(column) != {"name", "data_type", "not_null"}
+                or not isinstance(column["name"], str)
+                or not 1 <= len(column["name"]) <= 255
+                or not isinstance(column["data_type"], str)
+                or not 1 <= len(column["data_type"]) <= 255
+                or not isinstance(column["not_null"], bool)
+            ):
+                raise DeliveryBuildError(
+                    "prepared vector data schema is invalid"
+                )
+        if len({column["name"] for column in columns}) != len(columns):
+            raise DeliveryBuildError(
+                "prepared vector data schema is invalid"
+            )
+        return
+    if delivery_kind == "raster":
+        if set(data_schema) != {
+            "schema_version",
+            "driver",
+            "band_types",
+            "nodata_values",
+            "pixel_size",
+        }:
+            raise DeliveryBuildError(
+                "prepared raster data schema is invalid"
+            )
+        driver = data_schema["driver"]
+        band_types = data_schema["band_types"]
+        nodata_values = data_schema["nodata_values"]
+        pixel_size = data_schema["pixel_size"]
+        if (
+            not isinstance(driver, str)
+            or not 1 <= len(driver) <= 64
+            or not isinstance(band_types, list)
+            or not 1 <= len(band_types) <= 64
+            or any(
+                not isinstance(item, str) or not 1 <= len(item) <= 64
+                for item in band_types
+            )
+            or not isinstance(nodata_values, list)
+            or len(nodata_values) != len(band_types)
+            or any(
+                item is not None
+                and (
+                    isinstance(item, bool)
+                    or not isinstance(item, (int, float))
+                    or not isfinite(float(item))
+                )
+                for item in nodata_values
+            )
+            or not isinstance(pixel_size, dict)
+            or set(pixel_size) != {"x", "y"}
+            or any(
+                isinstance(pixel_size[axis], bool)
+                or not isinstance(pixel_size[axis], (int, float))
+                or not isfinite(float(pixel_size[axis]))
+                or float(pixel_size[axis]) <= 0
+                for axis in ("x", "y")
+            )
+        ):
+            raise DeliveryBuildError(
+                "prepared raster data schema is invalid"
+            )
+        return
+    if delivery_kind == "tiles":
+        if set(data_schema) != {"schema_version", "archives"}:
+            raise DeliveryBuildError(
+                "prepared tile data schema is invalid"
+            )
+        archives = data_schema["archives"]
+        if (
+            not isinstance(archives, list)
+            or not 1 <= len(archives) <= 512
+        ):
+            raise DeliveryBuildError(
+                "prepared tile data schema is invalid"
+            )
+        style_keys: set[str | None] = set()
+        for archive in archives:
+            if (
+                not isinstance(archive, dict)
+                or set(archive)
+                != {
+                    "catalog_style_source_key",
+                    "image_format",
+                    "min_zoom",
+                    "max_zoom",
+                }
+            ):
+                raise DeliveryBuildError(
+                    "prepared tile data schema is invalid"
+                )
+            style_key = archive["catalog_style_source_key"]
+            image_format = archive["image_format"]
+            min_zoom = archive["min_zoom"]
+            max_zoom = archive["max_zoom"]
+            if (
+                (
+                    style_key is not None
+                    and (
+                        not isinstance(style_key, str)
+                        or not 1 <= len(style_key) <= 500
+                    )
+                )
+                or style_key in style_keys
+                or image_format not in {"png", "jpg"}
+                or isinstance(min_zoom, bool)
+                or not isinstance(min_zoom, int)
+                or isinstance(max_zoom, bool)
+                or not isinstance(max_zoom, int)
+                or not 0 <= min_zoom <= max_zoom <= 22
+            ):
+                raise DeliveryBuildError(
+                    "prepared tile data schema is invalid"
+                )
+            style_keys.add(style_key)
+        return
+    raise DeliveryBuildError("prepared delivery data schema is invalid")
 
 
 def _validate_asset(asset: PreparedDeliveryAsset, delivery_kind: str) -> None:

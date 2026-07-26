@@ -39,6 +39,7 @@ from app.reference_layers.blob_store import (
 from app.reference_layers.delivery_builder import (
     BuiltDeliveryVersion,
     DeliveryBuildError,
+    DeliveryContinuityError,
     PreparedDelivery,
     PreparedDeliveryAsset,
     create_delivery_version,
@@ -241,6 +242,7 @@ class ClassifiedFailure:
     summary: str
     retryable: bool
     outcome: Literal["failed", "rejected"]
+    stats_json: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1177,6 +1179,15 @@ def classify_worker_failure(error: BaseException) -> ClassifiedFailure:
             True,
             "failed",
         )
+    if isinstance(error, DeliveryContinuityError):
+        return ClassifiedFailure(
+            "delivery_continuity_rejected",
+            "The candidate delivery is structurally incompatible with the "
+            "active local version.",
+            False,
+            "rejected",
+            {"delivery_continuity": error.evidence},
+        )
     if isinstance(error, (DeliveryBuildError, MirrorPromotionConflict)):
         return ClassifiedFailure(
             "delivery_integrity_rejected",
@@ -1213,7 +1224,12 @@ def handle_run_failure(
             outcome=failure.outcome,
             error_code=failure.code,
             error_summary=failure.summary,
-            stats_json={"retryable_classification": failure.retryable},
+            stats_json=_bounded_stats(
+                {
+                    "retryable_classification": failure.retryable,
+                    **(failure.stats_json or {}),
+                }
+            ),
         )
     with session_factory() as db:
         child = db.scalar(
@@ -1596,6 +1612,7 @@ def materialize_tile_delivery(
     prepared_assets: list[PreparedDeliveryAsset] = []
     publication_assets: list[TilePublicationAsset] = []
     validations: list[dict[str, Any]] = []
+    archive_schemas: list[dict[str, Any]] = []
     primary_index = None
     for index, (style, document) in enumerate(documents):
         descriptor = parse_tile_source_document(document)
@@ -1677,6 +1694,16 @@ def materialize_tile_delivery(
             )
         )
         validations.append(inspection.validation_json)
+        archive_schemas.append(
+            {
+                "catalog_style_source_key": (
+                    style.source_key if style is not None else None
+                ),
+                "image_format": inspection.image_format,
+                "min_zoom": inspection.min_zoom,
+                "max_zoom": inspection.max_zoom,
+            }
+        )
     if primary_index is None:
         raise MirrorOrchestrationError(
             "tile delivery has no unique default style",
@@ -1684,6 +1711,7 @@ def materialize_tile_delivery(
         )
     primary = prepared_assets[primary_index]
     validation = {
+        "schema_version": "reference-delivery-validation/v1",
         "passed": True,
         "kind": "tiles",
         "checks": {
@@ -1691,6 +1719,10 @@ def materialize_tile_delivery(
             "catalog_style_count": len(context.styles),
             "complete_style_coverage": True,
             "archives": validations,
+            "data_schema": {
+                "schema_version": "reference-tiles-schema/v1",
+                "archives": archive_schemas,
+            },
         },
     }
     prepared = PreparedDelivery(

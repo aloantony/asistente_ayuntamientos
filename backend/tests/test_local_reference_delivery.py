@@ -146,6 +146,7 @@ def seed_local_delivery(
         trigger_kind="manual",
         check_mode="full",
         status="succeeded",
+        queued_at=finished,
         started_at=finished,
         finished_at=finished,
     )

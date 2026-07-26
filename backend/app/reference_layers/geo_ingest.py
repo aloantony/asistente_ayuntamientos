@@ -594,6 +594,7 @@ def ingest_vector_artifacts(
             if row["geometry_type"] != row["max_geometry_type"]:
                 raise GeoIngestError("vector table mixes geometry families")
             bounds = _postgis_extent(row["extent"])
+            data_schema = _vector_table_schema(db, table_name)
             if not reuse_existing:
                 _install_table_guards(db, table_name)
             transform_identity = {
@@ -604,10 +605,12 @@ def ingest_vector_artifacts(
                 "make_valid": True,
                 "feature_count": feature_count,
                 "geometry_type": row["geometry_type"],
+                "data_schema": data_schema,
                 "bounds": bounds,
             }
             content_sha256 = canonical_json_sha256(transform_identity)
             validation = {
+                "schema_version": "reference-delivery-validation/v1",
                 "passed": True,
                 "kind": "vector",
                 "checks": {
@@ -628,6 +631,7 @@ def ingest_vector_artifacts(
                     "invalid_geometries": int(row["invalid_count"]),
                     "srid": int(row["srid"]),
                     "geometry_type": row["geometry_type"],
+                    "data_schema": data_schema,
                     "immutable_guards": True,
                 },
             }
@@ -783,6 +787,7 @@ def ingest_raster_artifact(
         with output.open("rb") as stream:
             blob = store.put_stream(stream, max_bytes=max_output_bytes)
     validation = {
+        "schema_version": "reference-delivery-validation/v1",
         "passed": True,
         "kind": "raster",
         "checks": {
@@ -805,6 +810,16 @@ def ingest_raster_artifact(
             "resolution_preserved": True,
             "overviews_validated": True,
             "crs": inspection.crs,
+            "data_schema": {
+                "schema_version": "reference-raster-schema/v1",
+                "driver": inspection.driver,
+                "band_types": list(inspection.band_types),
+                "nodata_values": list(inspection.nodata_values),
+                "pixel_size": {
+                    "x": inspection.pixel_size_x,
+                    "y": inspection.pixel_size_y,
+                },
+            },
             "input_sha256": snapshot.sha256,
             "input_driver": driver,
             "standalone_snapshot": True,
@@ -920,6 +935,7 @@ def inspect_tile_archive(
     ):
         raise GeoIngestError("tile archive changed during validation")
     validation = {
+        "schema_version": "reference-delivery-validation/v1",
         "passed": True,
         "kind": "tiles",
         "checks": {
@@ -1514,6 +1530,64 @@ def _table_has_immutable_guards(db: Session, table_name: str) -> bool:
         },
     ).scalar_one()
     return count == 2
+
+
+def _vector_table_schema(
+    db: Session,
+    table_name: str,
+) -> dict[str, Any]:
+    """Return a bounded semantic fingerprint of the normalized table."""
+
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                attribute.attname AS name,
+                pg_catalog.format_type(
+                    attribute.atttypid,
+                    attribute.atttypmod
+                ) AS data_type,
+                attribute.attnotnull AS not_null
+            FROM pg_catalog.pg_attribute AS attribute
+            JOIN pg_catalog.pg_class AS relation
+              ON relation.oid = attribute.attrelid
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'reference_data'
+              AND relation.relname = :table_name
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+            ORDER BY attribute.attnum
+            """
+        ),
+        {"table_name": table_name},
+    ).mappings().all()
+    if not 2 <= len(rows) <= 512:
+        raise GeoIngestError("vector table schema is outside its safe limits")
+    columns: list[dict[str, Any]] = []
+    for row in rows:
+        name = row["name"]
+        data_type = row["data_type"]
+        not_null = row["not_null"]
+        if (
+            not isinstance(name, str)
+            or not 1 <= len(name) <= 255
+            or not isinstance(data_type, str)
+            or not 1 <= len(data_type) <= 255
+            or not isinstance(not_null, bool)
+        ):
+            raise GeoIngestError("vector table schema is invalid")
+        columns.append(
+            {
+                "name": name,
+                "data_type": data_type,
+                "not_null": not_null,
+            }
+        )
+    return {
+        "schema_version": "reference-vector-schema/v1",
+        "columns": columns,
+    }
 
 
 def _require_mbtiles_schema(connection: sqlite3.Connection) -> None:
