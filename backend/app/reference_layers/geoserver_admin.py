@@ -31,6 +31,7 @@ from app.reference_layers.local_geoserver import (
     UnsafeLocalGeoServerConfigurationError,
     validate_local_geoserver_base_url,
 )
+from app.reference_layers.wms_schemas import parse_feature_collection
 
 JSON_CONTENT_TYPE = "application/json"
 SLD_CONTENT_TYPE = "application/vnd.ogc.sld+xml"
@@ -116,6 +117,19 @@ class LayerSmokeResult:
     style_name: str | None
     image_sha256: str
     image_bytes: int
+    image_content_type: str
+    z: int
+    x: int
+    y: int
+    legend_sha256: str | None = None
+    legend_bytes: int | None = None
+    legend_content_type: str | None = None
+    identify_sha256: str | None = None
+    identify_bytes: int | None = None
+    identify_content_type: str | None = None
+    identify_feature_count: int | None = None
+    pixel_x: int | None = None
+    pixel_y: int | None = None
 
 
 @dataclass(frozen=True)
@@ -675,9 +689,13 @@ class GeoServerAdminClient:
         *,
         layer_name: str,
         style_name: str | None,
+        legend_available: bool = False,
+        identify_available: bool = False,
         z: int = 0,
         x: int = 0,
         y: int = 0,
+        pixel_x: int = 128,
+        pixel_y: int = 128,
     ) -> LayerSmokeResult:
         layer = _validate_versioned_name(layer_name, "versioned layer")
         style = (
@@ -709,15 +727,81 @@ class GeoServerAdminClient:
                 x=x,
                 y=y,
             )
+            legend_response = (
+                renderer.render_legend(
+                    layer_name=layer,
+                    style_name=style,
+                )
+                if legend_available
+                else None
+            )
+            identify_response = (
+                renderer.get_feature_info(
+                    layer_name=layer,
+                    style_name=style,
+                    z=z,
+                    x=x,
+                    y=y,
+                    pixel_x=pixel_x,
+                    pixel_y=pixel_y,
+                    feature_count=1,
+                )
+                if identify_available
+                else None
+            )
         except LocalGeoServerError as error:
             raise GeoServerLayerSmokeError(
-                "local GeoServer layer render smoke failed"
+                "local GeoServer layer operation smoke failed"
             ) from error
+        identify_feature_count = None
+        if identify_response is not None:
+            feature_collection = parse_feature_collection(
+                identify_response.body,
+                max_features=1,
+            )
+            identify_feature_count = len(feature_collection["features"])
         return LayerSmokeResult(
             layer_name=layer,
             style_name=style,
             image_sha256=hashlib.sha256(response.body).hexdigest(),
             image_bytes=len(response.body),
+            image_content_type=response.content_type,
+            z=z,
+            x=x,
+            y=y,
+            legend_sha256=(
+                hashlib.sha256(legend_response.body).hexdigest()
+                if legend_response is not None
+                else None
+            ),
+            legend_bytes=(
+                len(legend_response.body)
+                if legend_response is not None
+                else None
+            ),
+            legend_content_type=(
+                legend_response.content_type
+                if legend_response is not None
+                else None
+            ),
+            identify_sha256=(
+                hashlib.sha256(identify_response.body).hexdigest()
+                if identify_response is not None
+                else None
+            ),
+            identify_bytes=(
+                len(identify_response.body)
+                if identify_response is not None
+                else None
+            ),
+            identify_content_type=(
+                identify_response.content_type
+                if identify_response is not None
+                else None
+            ),
+            identify_feature_count=identify_feature_count,
+            pixel_x=pixel_x if identify_response is not None else None,
+            pixel_y=pixel_y if identify_response is not None else None,
         )
 
     def _require_postgis_password(self) -> str:
