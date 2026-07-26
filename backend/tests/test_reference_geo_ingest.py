@@ -10,6 +10,7 @@ import zipfile
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
 
 from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.delivery_builder import canonical_json_sha256
@@ -205,6 +206,7 @@ def test_vector_ingest_validates_table_and_installs_guards(db, tmp_path) -> None
     def runner(argv, environment, timeout):
         assert argv[0] == "/usr/bin/ogr2ogr"
         assert argv[1:3] == ["-if", "GeoJSON"]
+        assert "-makevalid" not in argv
         assert "secret" not in " ".join(argv)
         assert environment["PGPASSWORD"] == "secret"
         assert environment["PROJ_NETWORK"] == "OFF"
@@ -215,12 +217,18 @@ def test_vector_ingest_validates_table_and_installs_guards(db, tmp_path) -> None
         source.write_bytes(b"{}")
         assert source_argument.read_bytes() == b'{"type":"FeatureCollection","features":[]}'
         assert timeout == 30
+        staging_key = argv[argv.index("-nln") + 1]
+        assert staging_key.startswith(
+            "reference_data_staging."
+            f"s_v_{table_name.rsplit('_v_', 1)[1]}_"
+        )
+        staging_table = staging_key.split(".", 1)[1]
         db.execute(
             text(
                 f"""
-                CREATE TABLE reference_data.{table_name} (
+                CREATE TABLE reference_data_staging.{staging_table} (
                     source_fid bigint PRIMARY KEY,
-                    geom geometry(MultiPolygon, 3857) NOT NULL
+                    geom geometry(MultiPolygon, 3857)
                 )
                 """
             )
@@ -228,7 +236,8 @@ def test_vector_ingest_validates_table_and_installs_guards(db, tmp_path) -> None
         db.execute(
             text(
                 f"""
-                INSERT INTO reference_data.{table_name} (source_fid, geom)
+                INSERT INTO reference_data_staging.{staging_table}
+                    (source_fid, geom)
                 VALUES (
                     1,
                     ST_Multi(ST_GeomFromText(
@@ -282,15 +291,16 @@ def test_rejected_vector_import_drops_only_its_unpublished_table(db, tmp_path) -
     )
 
     def runner(argv, environment, timeout):
+        staging_table = argv[argv.index("-nln") + 1].split(".", 1)[1]
         db.execute(
             text(
-                f"CREATE TABLE reference_data.{table_name} "
+                f"CREATE TABLE reference_data_staging.{staging_table} "
                 "(source_fid bigint, geom geometry(MultiPolygon, 3857))"
             )
         )
         return GeoCommandResult(b"", b"")
 
-    with pytest.raises(GeoIngestError, match="feature count"):
+    with pytest.raises(GeoIngestError, match="no usable geometry"):
         ingest_vector_artifact(
             db,
             database=GeoDatabaseTarget.from_url(
@@ -321,17 +331,19 @@ def test_vector_ingest_appends_ordered_pages_with_regenerated_fids(db, tmp_path)
 
     def runner(argv, environment, timeout):
         storage_key = argv[argv.index("-nln") + 1]
+        assert storage_key.startswith("reference_data_staging.")
         table_name = storage_key.split(".", 1)[1]
         imported_snapshots.append(Path(argv[-1]).read_bytes())
         assert "-unsetFid" in argv
+        assert "-makevalid" not in argv
         if "-append" not in argv:
             assert "-update" not in argv
             db.execute(
                 text(
                     f"""
-                    CREATE TABLE reference_data.{table_name} (
+                    CREATE TABLE reference_data_staging.{table_name} (
                         source_fid bigserial PRIMARY KEY,
-                        geom geometry(MultiPolygon, 3857) NOT NULL
+                        geom geometry(MultiPolygon, 3857)
                     )
                     """
                 )
@@ -342,7 +354,7 @@ def test_vector_ingest_appends_ordered_pages_with_regenerated_fids(db, tmp_path)
         db.execute(
             text(
                 f"""
-                INSERT INTO reference_data.{table_name} (geom)
+                INSERT INTO reference_data_staging.{table_name} (geom)
                 VALUES (ST_Multi(ST_GeomFromText(
                     'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
                     3857
@@ -371,6 +383,434 @@ def test_vector_ingest_appends_ordered_pages_with_regenerated_fids(db, tmp_path)
     assert checks["artifact_feature_counts"] == [1, 1]
     assert [item["input_sha256"] for item in checks["input_manifest"]] == digests
     assert checks["source_fids_regenerated"] is True
+
+
+def test_vector_ingest_persists_quantified_pre_and_post_repair_evidence(
+    db,
+    tmp_path,
+) -> None:
+    pages = [
+        Path(tmp_path, "geometry-page-1.geojson"),
+        Path(tmp_path, "geometry-page-2.geojson"),
+    ]
+    for ordinal, path in enumerate(pages):
+        path.write_bytes(
+            (
+                '{"type":"FeatureCollection","features":[],'
+                f'"page":{ordinal + 1}}}'
+            ).encode()
+        )
+    digests = [
+        hashlib.sha256(path.read_bytes()).hexdigest() for path in pages
+    ]
+    calls = 0
+
+    stale_final = versioned_vector_table_name(
+        provider_key="siur",
+        layer_id=998,
+        run_id=999,
+        input_sha256="b" * 64,
+    )
+    stale_staging = (
+        f"s_v_{stale_final.rsplit('_v_', 1)[1]}_{'a' * 16}"
+    )
+    db.execute(text("CREATE SCHEMA IF NOT EXISTS reference_data_staging"))
+    db.execute(
+        text(
+            f"CREATE TABLE reference_data_staging.{stale_staging} "
+            "(orphaned boolean)"
+        )
+    )
+    db.commit()
+
+    def runner(argv, environment, timeout):
+        nonlocal calls
+        del environment, timeout
+        calls += 1
+        assert "-makevalid" not in argv
+        storage_key = argv[argv.index("-nln") + 1]
+        assert storage_key.startswith("reference_data_staging.")
+        staging_table = storage_key.split(".", 1)[1]
+        if "-append" not in argv:
+            db.execute(
+                text(
+                    f"""
+                    CREATE TABLE reference_data_staging.{staging_table} (
+                        source_fid bigserial PRIMARY KEY,
+                        label text NOT NULL,
+                        geom geometry(MultiPolygon, 3857)
+                    )
+                    """
+                )
+            )
+            db.execute(
+                text(
+                    f"""
+                    INSERT INTO reference_data_staging.{staging_table}
+                        (label, geom)
+                    VALUES
+                        (
+                            'multipart',
+                            ST_GeomFromText(
+                                'MULTIPOLYGON('
+                                '((0 0,1000 0,1000 1000,0 1000,0 0)),'
+                                '((2000 0,3000 0,3000 1000,2000 1000,2000 0))'
+                                ')',
+                                3857
+                            )
+                        ),
+                        (
+                            'invalid-bow-tie',
+                            ST_Multi(ST_GeomFromText(
+                                'POLYGON(('
+                                '4000 0,5000 1000,4000 1000,5000 0,4000 0'
+                                '))',
+                                3857
+                            ))
+                        ),
+                        ('null', NULL),
+                        (
+                            'empty',
+                            ST_GeomFromText('MULTIPOLYGON EMPTY', 3857)
+                        )
+                    """
+                )
+            )
+        else:
+            db.execute(
+                text(
+                    f"""
+                    INSERT INTO reference_data_staging.{staging_table}
+                        (label, geom)
+                    VALUES (
+                        'second-page',
+                        ST_Multi(ST_GeomFromText(
+                            'POLYGON(('
+                            '6000 0,7000 0,7000 1000,6000 1000,6000 0'
+                            '))',
+                            3857
+                        ))
+                    )
+                    """
+                )
+            )
+        return GeoCommandResult(b"", b"")
+
+    arguments = {
+        "database": GeoDatabaseTarget.from_url(
+            "postgresql+psycopg://app:app@127.0.0.1:5432/app"
+        ),
+        "artifacts": list(zip(pages, digests, strict=True)),
+        "provider_key": "siur",
+        "layer_id": 901,
+        "run_id": 902,
+        "runner": runner,
+    }
+    first = ingest_vector_artifacts(db, **arguments)
+    checks = first.validation_json["checks"]
+    evidence = checks["geometry_evidence"]
+    source = evidence["source"]
+    normalization = evidence["normalization"]
+    result = evidence["result"]
+
+    assert calls == 2
+    assert checks["geometry_evidence_sha256"] == canonical_json_sha256(
+        evidence
+    )
+    assert source["total"] == {
+        "feature_count": 5,
+        "source_fid_count": 5,
+        "max_source_fid": 5,
+        "null_geometry_count": 1,
+        "empty_geometry_count": 1,
+        "invalid_geometry_count": 1,
+        "valid_geometry_count": 2,
+        "multi_geometry_count": 3,
+        "multiple_part_geometry_count": 1,
+        "geometry_part_count": 4,
+        "srid_count": 1,
+        "srid": 3857,
+        "geometry_types": ["MULTIPOLYGON"],
+    }
+    assert [
+        {
+            key: artifact[key]
+            for key in (
+                "feature_count",
+                "null_geometry_count",
+                "empty_geometry_count",
+                "invalid_geometry_count",
+            )
+        }
+        for artifact in source["artifacts"]
+    ] == [
+        {
+            "feature_count": 4,
+            "null_geometry_count": 1,
+            "empty_geometry_count": 1,
+            "invalid_geometry_count": 1,
+        },
+        {
+            "feature_count": 1,
+            "null_geometry_count": 0,
+            "empty_geometry_count": 0,
+            "invalid_geometry_count": 0,
+        },
+    ]
+    assert normalization == {
+        "algorithm": (
+            "postgis-st-makevalid-collectionextract-promote-to-multi/v1"
+        ),
+        "target_crs": "EPSG:3857",
+        "geometry_family": "polygon",
+        "target_geometry_type": "MULTIPOLYGON",
+        "repaired_geometry_count": 1,
+        "retained_valid_geometry_count": 2,
+        "discarded_null_geometry_count": 1,
+        "discarded_empty_geometry_count": 1,
+        "discarded_unrepairable_geometry_count": 0,
+        "discarded_geometry_count": 2,
+        "result_feature_count": 3,
+    }
+    assert result["feature_count"] == 3
+    assert result["source_fid_count"] == 3
+    assert result["null_geometry_count"] == 0
+    assert result["empty_geometry_count"] == 0
+    assert result["invalid_geometry_count"] == 0
+    assert result["valid_geometry_count"] == 3
+    assert result["geometry_type"] == "MULTIPOLYGON"
+    assert result["geometry_family"] == "polygon"
+    assert result["srid"] == 3857
+    assert result["multiple_part_geometry_count"] == 2
+
+    columns = db.execute(
+        text(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'reference_data'
+              AND table_name = :table_name
+            ORDER BY ordinal_position
+            """
+        ),
+        {"table_name": first.table_name},
+    ).scalars().all()
+    assert columns == ["source_fid", "label", "geom"]
+    assert db.execute(
+        text(
+            f"SELECT label FROM {first.storage_key} "
+            "ORDER BY source_fid"
+        )
+    ).scalars().all() == ["multipart", "invalid-bow-tie", "second-page"]
+    table_attestation = json.loads(
+        db.execute(
+            text(
+                "SELECT obj_description(to_regclass(:key), 'pg_class')"
+            ),
+            {"key": first.storage_key},
+        ).scalar_one()
+    )
+    attestation_core = {
+        key: value
+        for key, value in table_attestation.items()
+        if key != "attestation_sha256"
+    }
+    assert table_attestation["attestation_sha256"] == canonical_json_sha256(
+        attestation_core
+    )
+    assert table_attestation["content_sha256"] == first.content_sha256
+    assert table_attestation["geometry_evidence_sha256"] == checks[
+        "geometry_evidence_sha256"
+    ]
+    assert table_attestation["validation_sha256"] == canonical_json_sha256(
+        first.validation_json
+    )
+    assert db.execute(
+        text(
+            "SELECT to_regclass(:key)"
+        ),
+        {"key": f"reference_data_staging.{stale_staging}"},
+    ).scalar_one() is None
+    assert db.execute(
+        text(
+            """
+            SELECT count(*)
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'reference_data_staging'
+              AND relation.relkind IN ('r', 'p')
+            """
+        )
+    ).scalar_one() == 0
+
+    second = ingest_vector_artifacts(db, **arguments)
+    assert calls == 2
+    assert second.content_sha256 == first.content_sha256
+    assert second.validation_json == first.validation_json
+    assert second.validation_json["checks"]["artifact_feature_counts"] == [4, 1]
+
+
+def test_vector_ingest_with_real_ogr_uses_isolated_staging_and_repairs(
+    engine,
+    tmp_path,
+) -> None:
+    if not Path("/usr/bin/ogr2ogr").is_file():
+        pytest.skip("requires the current GDAL-enabled backend image")
+    source = Path(tmp_path, "real-ogr.geojson")
+    source.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"label": "valid-multipart"},
+                        "geometry": {
+                            "type": "MultiPolygon",
+                            "coordinates": [
+                                [
+                                    [
+                                        [-4.0, 42.0],
+                                        [-3.99, 42.0],
+                                        [-3.99, 42.01],
+                                        [-4.0, 42.01],
+                                        [-4.0, 42.0],
+                                    ]
+                                ],
+                                [
+                                    [
+                                        [-3.98, 42.0],
+                                        [-3.97, 42.0],
+                                        [-3.97, 42.01],
+                                        [-3.98, 42.01],
+                                        [-3.98, 42.0],
+                                    ]
+                                ],
+                            ],
+                        },
+                    },
+                    {
+                        "type": "Feature",
+                        "properties": {"label": "invalid-bow-tie"},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [
+                                    [-3.96, 42.0],
+                                    [-3.95, 42.01],
+                                    [-3.96, 42.01],
+                                    [-3.95, 42.0],
+                                    [-3.96, 42.0],
+                                ]
+                            ],
+                        },
+                    },
+                    {
+                        "type": "Feature",
+                        "properties": {"label": "null"},
+                        "geometry": None,
+                    },
+                    {
+                        "type": "Feature",
+                        "properties": {"label": "empty"},
+                        "geometry": {
+                            "type": "MultiPolygon",
+                            "coordinates": [],
+                        },
+                    },
+                ],
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    expected_table = versioned_vector_table_name(
+        provider_key="siur",
+        layer_id=951,
+        run_id=952,
+        input_sha256=_vector_manifest_sha256(source, source_sha256),
+    )
+    staging_prefix = f"s_v_{expected_table.rsplit('_v_', 1)[1]}_"
+    database_url = engine.url.render_as_string(hide_password=False)
+    result = None
+    with Session(engine) as real_db:
+        try:
+            result = ingest_vector_artifact(
+                real_db,
+                database=GeoDatabaseTarget.from_url(database_url),
+                source_path=source,
+                input_sha256=source_sha256,
+                provider_key="siur",
+                layer_id=951,
+                run_id=952,
+            )
+            evidence = result.validation_json["checks"][
+                "geometry_evidence"
+            ]
+            source_total = evidence["source"]["total"]
+            normalization = evidence["normalization"]
+            assert source_total["feature_count"] == 4
+            assert (
+                source_total["null_geometry_count"]
+                + source_total["empty_geometry_count"]
+                == 2
+            )
+            assert source_total["invalid_geometry_count"] == 1
+            assert normalization["repaired_geometry_count"] == 1
+            assert normalization["discarded_geometry_count"] == 2
+            assert result.feature_count == 2
+            assert real_db.execute(
+                text(
+                    f"SELECT count(*) FROM {result.storage_key} "
+                    "WHERE geom IS NULL OR ST_IsEmpty(geom) "
+                    "OR NOT ST_IsValid(geom)"
+                )
+            ).scalar_one() == 0
+            assert real_db.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM pg_catalog.pg_class AS relation
+                    JOIN pg_catalog.pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    WHERE namespace.nspname = 'reference_data_staging'
+                      AND relation.relkind IN ('r', 'p')
+                    """
+                )
+            ).scalar_one() == 0
+        finally:
+            real_db.rollback()
+            staging_tables = real_db.execute(
+                text(
+                    """
+                    SELECT relation.relname
+                    FROM pg_catalog.pg_class AS relation
+                    JOIN pg_catalog.pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    WHERE namespace.nspname = 'reference_data_staging'
+                      AND relation.relkind IN ('r', 'p')
+                      AND relation.relname LIKE :prefix
+                    """
+                ),
+                {"prefix": f"{staging_prefix}%"},
+            ).scalars().all()
+            for staging_table in staging_tables:
+                assert staging_table.startswith(staging_prefix)
+                real_db.execute(
+                    text(
+                        "DROP TABLE IF EXISTS "
+                        f"reference_data_staging.{staging_table}"
+                    )
+                )
+            real_db.execute(
+                text(
+                    "DROP TABLE IF EXISTS "
+                    f"reference_data.{expected_table}"
+                )
+            )
+            real_db.commit()
 
 
 def test_cadastral_gml_zip_ingest_appends_in_order_with_unique_fids(
@@ -409,14 +849,15 @@ def test_cadastral_gml_zip_ingest_appends_in_order_with_unique_fids(
         )
         imported_members.append(source_argument.rsplit("/", 1)[-1])
         storage_key = argv[argv.index("-nln") + 1]
+        assert storage_key.startswith("reference_data_staging.")
         table_name = storage_key.split(".", 1)[1]
         if "-append" not in argv:
             db.execute(
                 text(
                     f"""
-                    CREATE TABLE reference_data.{table_name} (
+                    CREATE TABLE reference_data_staging.{table_name} (
                         source_fid bigserial PRIMARY KEY,
-                        geom geometry(MultiPolygon, 3857) NOT NULL
+                        geom geometry(MultiPolygon, 3857)
                     )
                     """
                 )
@@ -427,7 +868,7 @@ def test_cadastral_gml_zip_ingest_appends_in_order_with_unique_fids(
         db.execute(
             text(
                 f"""
-                INSERT INTO reference_data.{table_name} (geom)
+                INSERT INTO reference_data_staging.{table_name} (geom)
                 VALUES (ST_Multi(ST_GeomFromText(
                     'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
                     3857
@@ -506,6 +947,26 @@ def test_vector_multipage_failure_drops_the_whole_unpublished_table(db, tmp_path
         (path, hashlib.sha256(path.read_bytes()).hexdigest()) for path in pages
     ]
     imported_table: str | None = None
+    final_table = versioned_vector_table_name(
+        provider_key="siur",
+        layer_id=601,
+        run_id=602,
+        input_sha256=canonical_json_sha256(
+            {
+                "schema_version": "reference-vector-input-manifest-v1",
+                "artifacts": [
+                    {
+                        "ordinal": ordinal,
+                        "input_sha256": digest,
+                        "input_driver": "GeoJSON",
+                        "input_layer": None,
+                        "size_bytes": path.stat().st_size,
+                    }
+                    for ordinal, (path, digest) in enumerate(artifacts)
+                ],
+            }
+        ),
+    )
     calls = 0
 
     def runner(argv, environment, timeout):
@@ -518,9 +979,9 @@ def test_vector_multipage_failure_drops_the_whole_unpublished_table(db, tmp_path
         db.execute(
             text(
                 f"""
-                CREATE TABLE reference_data.{imported_table} (
+                CREATE TABLE reference_data_staging.{imported_table} (
                     source_fid bigserial PRIMARY KEY,
-                    geom geometry(MultiPolygon, 3857) NOT NULL
+                    geom geometry(MultiPolygon, 3857)
                 )
                 """
             )
@@ -528,7 +989,7 @@ def test_vector_multipage_failure_drops_the_whole_unpublished_table(db, tmp_path
         db.execute(
             text(
                 f"""
-                INSERT INTO reference_data.{imported_table} (geom)
+                INSERT INTO reference_data_staging.{imported_table} (geom)
                 VALUES (ST_Multi(ST_GeomFromText(
                     'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
                     3857
@@ -536,7 +997,6 @@ def test_vector_multipage_failure_drops_the_whole_unpublished_table(db, tmp_path
                 """
             )
         )
-        db.commit()
         return GeoCommandResult(b"", b"")
 
     with pytest.raises(GeoIngestError, match="simulated append"):
@@ -555,7 +1015,90 @@ def test_vector_multipage_failure_drops_the_whole_unpublished_table(db, tmp_path
     assert imported_table is not None
     assert db.execute(
         text("SELECT to_regclass(:name)"),
-        {"name": f"reference_data.{imported_table}"},
+        {"name": f"reference_data_staging.{imported_table}"},
+    ).scalar_one() is None
+    assert db.execute(
+        text("SELECT to_regclass(:name)"),
+        {"name": f"reference_data.{final_table}"},
+    ).scalar_one() is None
+
+
+def test_vector_failure_after_normalization_cleans_final_and_staging(
+    db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app.reference_layers import geo_ingest
+
+    source = Path(tmp_path, "normalize-then-fail.geojson")
+    source.write_bytes(b'{"type":"FeatureCollection","features":[]}')
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest_sha256 = _vector_manifest_sha256(source, source_sha256)
+    final_table = versioned_vector_table_name(
+        provider_key="siur",
+        layer_id=611,
+        run_id=612,
+        input_sha256=manifest_sha256,
+    )
+    staging_table: str | None = None
+
+    def runner(argv, environment, timeout):
+        nonlocal staging_table
+        del environment, timeout
+        staging_table = argv[argv.index("-nln") + 1].split(".", 1)[1]
+        db.execute(
+            text(
+                f"""
+                CREATE TABLE reference_data_staging.{staging_table} (
+                    source_fid bigserial PRIMARY KEY,
+                    geom geometry(MultiPolygon, 3857)
+                )
+                """
+            )
+        )
+        db.execute(
+            text(
+                f"""
+                INSERT INTO reference_data_staging.{staging_table} (geom)
+                VALUES (ST_Multi(ST_GeomFromText(
+                    'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
+                    3857
+                )))
+                """
+            )
+        )
+        return GeoCommandResult(b"", b"")
+
+    def reject_attestation(*_args, **_kwargs):
+        raise GeoIngestError("simulated attestation failure")
+
+    monkeypatch.setattr(
+        geo_ingest,
+        "_persist_vector_table_attestation",
+        reject_attestation,
+    )
+    with pytest.raises(GeoIngestError, match="attestation failure"):
+        ingest_vector_artifact(
+            db,
+            database=GeoDatabaseTarget.from_url(
+                "postgresql+psycopg://app:app@127.0.0.1:5432/app"
+            ),
+            source_path=source,
+            input_sha256=source_sha256,
+            provider_key="siur",
+            layer_id=611,
+            run_id=612,
+            runner=runner,
+        )
+
+    assert staging_table is not None
+    assert db.execute(
+        text("SELECT to_regclass(:name)"),
+        {"name": f"reference_data_staging.{staging_table}"},
+    ).scalar_one() is None
+    assert db.execute(
+        text("SELECT to_regclass(:name)"),
+        {"name": f"reference_data.{final_table}"},
     ).scalar_one() is None
 
 
@@ -570,12 +1113,13 @@ def test_vector_ingest_revalidates_identical_immutable_table_on_retry(db, tmp_pa
         calls += 1
         storage_key = argv[argv.index("-nln") + 1]
         table_name = storage_key.split(".", 1)[1]
+        assert storage_key.startswith("reference_data_staging.")
         db.execute(
             text(
                 f"""
-                CREATE TABLE reference_data.{table_name} (
+                CREATE TABLE reference_data_staging.{table_name} (
                     source_fid bigserial PRIMARY KEY,
-                    geom geometry(MultiPolygon, 3857) NOT NULL
+                    geom geometry(MultiPolygon, 3857)
                 )
                 """
             )
@@ -583,7 +1127,7 @@ def test_vector_ingest_revalidates_identical_immutable_table_on_retry(db, tmp_pa
         db.execute(
             text(
                 f"""
-                INSERT INTO reference_data.{table_name} (geom)
+                INSERT INTO reference_data_staging.{table_name} (geom)
                 VALUES (ST_Multi(ST_GeomFromText(
                     'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
                     3857
@@ -610,8 +1154,70 @@ def test_vector_ingest_revalidates_identical_immutable_table_on_retry(db, tmp_pa
     assert calls == 1
     assert second.storage_key == first.storage_key
     assert second.content_sha256 == first.content_sha256
+    assert second.validation_json == first.validation_json
     assert second.validation_json["checks"]["idempotent_reuse"] is True
-    assert second.validation_json["checks"]["artifact_feature_counts"] is None
+    assert second.validation_json["checks"]["artifact_feature_counts"] == [1]
+
+
+def test_vector_reuse_rejects_tampered_persisted_attestation(db, tmp_path) -> None:
+    source = Path(tmp_path, "tampered-attestation.geojson")
+    source.write_bytes(b'{"type":"FeatureCollection","features":[]}')
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    calls = 0
+
+    def runner(argv, environment, timeout):
+        nonlocal calls
+        del environment, timeout
+        calls += 1
+        staging_table = argv[argv.index("-nln") + 1].split(".", 1)[1]
+        db.execute(
+            text(
+                f"""
+                CREATE TABLE reference_data_staging.{staging_table} (
+                    source_fid bigserial PRIMARY KEY,
+                    geom geometry(MultiPolygon, 3857)
+                )
+                """
+            )
+        )
+        db.execute(
+            text(
+                f"""
+                INSERT INTO reference_data_staging.{staging_table} (geom)
+                VALUES (ST_Multi(ST_GeomFromText(
+                    'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
+                    3857
+                )))
+                """
+            )
+        )
+        return GeoCommandResult(b"", b"")
+
+    arguments = {
+        "database": GeoDatabaseTarget.from_url(
+            "postgresql+psycopg://app:app@127.0.0.1:5432/app"
+        ),
+        "source_path": source,
+        "input_sha256": source_sha256,
+        "provider_key": "siur",
+        "layer_id": 711,
+        "run_id": 712,
+        "runner": runner,
+    }
+    first = ingest_vector_artifact(db, **arguments)
+    db.connection().exec_driver_sql(
+        f"COMMENT ON TABLE {first.storage_key} "
+        "IS '{\"schema_version\":\"tampered\"}'"
+    )
+    db.commit()
+
+    with pytest.raises(GeoIngestError, match="attestation is malformed"):
+        ingest_vector_artifact(db, **arguments)
+    assert calls == 1
+    assert db.execute(
+        text("SELECT to_regclass(:name)"),
+        {"name": first.storage_key},
+    ).scalar_one() == first.storage_key
 
 
 def test_vector_ingest_rebuilds_partial_table_without_immutable_guards(db, tmp_path) -> None:
@@ -639,21 +1245,24 @@ def test_vector_ingest_rebuilds_partial_table_without_immutable_guards(db, tmp_p
     def runner(argv, environment, timeout):
         nonlocal calls
         calls += 1
+        staging_key = argv[argv.index("-nln") + 1]
+        staging_table = staging_key.split(".", 1)[1]
+        assert staging_key.startswith("reference_data_staging.")
         assert db.execute(
             text("SELECT to_regclass(:name)"),
             {"name": f"reference_data.{table_name}"},
         ).scalar_one() is None
         db.execute(
             text(
-                f"CREATE TABLE reference_data.{table_name} ("
+                f"CREATE TABLE reference_data_staging.{staging_table} ("
                 "source_fid bigserial PRIMARY KEY, "
-                "geom geometry(MultiPolygon, 3857) NOT NULL)"
+                "geom geometry(MultiPolygon, 3857))"
             )
         )
         db.execute(
             text(
                 f"""
-                INSERT INTO reference_data.{table_name} (geom)
+                INSERT INTO reference_data_staging.{staging_table} (geom)
                 VALUES (ST_Multi(ST_GeomFromText(
                     'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
                     3857
@@ -678,7 +1287,7 @@ def test_vector_ingest_rebuilds_partial_table_without_immutable_guards(db, tmp_p
 
     assert calls == 1
     assert result.table_name == table_name
-    assert result.validation_json["checks"]["idempotent_reuse"] is False
+    assert result.validation_json["checks"]["idempotent_reuse"] is True
 
 
 def test_raster_ingest_creates_content_addressed_cog(tmp_path) -> None:
