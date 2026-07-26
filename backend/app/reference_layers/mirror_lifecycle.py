@@ -33,6 +33,7 @@ from app.reference_layers.mirror_strategy import (
 )
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
+    require_current_source_authorization,
     require_version_local_service_authorization,
 )
 from app.reference_layers.models import (
@@ -70,12 +71,14 @@ DEFAULT_SOURCE_FULL_REFRESH_INTERVAL_SECONDS = 30 * 24 * 60 * 60
 TILE_SOURCE_FULL_REFRESH_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 _MIRROR_SOURCE_LOCK_DOMAIN = b"asistente/reference-mirror-sources/v1\0"
 _MIRROR_LAYER_LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
+_PROVIDER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _LEASE_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_ETAG_LENGTH = 4_096
 _MAX_VERSION_LENGTH = 2_048
 _MAX_ERROR_SUMMARY_LENGTH = 4_096
 _MAX_STATS_JSON_BYTES = 1_048_576
+_MANUAL_SYNC_AUDIT_KEY = "manual_enqueue"
 
 TerminalOutcome = Literal["unchanged", "succeeded", "rejected", "failed"]
 
@@ -184,6 +187,19 @@ class SyncRunLease:
     token: str
     attempt_no: int
     lease_expires_at: datetime
+
+
+@dataclass(frozen=True)
+class ManualSyncEnqueueResult:
+    provider_key: str
+    layer_id: int
+    source_id: int
+    source_definition_sha256: str
+    expected_generation: int
+    check_mode: Literal["conditional", "full"]
+    requested_by_id: int
+    reason: str
+    run_id: int | None
 
 
 @dataclass(frozen=True)
@@ -679,6 +695,100 @@ def enqueue_due_sources(
         raise
 
 
+def preview_manual_sync_run(
+    db: Session,
+    *,
+    provider_key: str,
+    source_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    check_mode: Literal["conditional", "full"],
+    requested_by_id: int,
+    reason: str,
+) -> ManualSyncEnqueueResult:
+    """Validate one exact operator-selected source without queuing it."""
+
+    try:
+        arguments = _validated_manual_sync_arguments(
+            provider_key=provider_key,
+            source_id=source_id,
+            expected_source_definition_sha256=(
+                expected_source_definition_sha256
+            ),
+            expected_generation=expected_generation,
+            check_mode=check_mode,
+            requested_by_id=requested_by_id,
+            reason=reason,
+        )
+        source = _lock_and_validate_manual_sync_source(db, **arguments)
+        return _manual_sync_result(source, run_id=None, **arguments)
+    finally:
+        db.rollback()
+
+
+def enqueue_manual_sync_run(
+    db: Session,
+    *,
+    provider_key: str,
+    source_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    check_mode: Literal["conditional", "full"],
+    requested_by_id: int,
+    reason: str,
+    now: datetime | None = None,
+) -> ManualSyncEnqueueResult:
+    """Queue one exact reviewed source, independent of its due timestamp."""
+
+    try:
+        arguments = _validated_manual_sync_arguments(
+            provider_key=provider_key,
+            source_id=source_id,
+            expected_source_definition_sha256=(
+                expected_source_definition_sha256
+            ),
+            expected_generation=expected_generation,
+            check_mode=check_mode,
+            requested_by_id=requested_by_id,
+            reason=reason,
+        )
+        source = _lock_and_validate_manual_sync_source(db, **arguments)
+        run = ReferenceSyncRun(
+            provider_key=source.provider_key,
+            layer_id=source.layer_id,
+            source_id=source.id,
+            parent_run_id=None,
+            fallback_depth=0,
+            requested_by_id=requested_by_id,
+            source_definition_json=_stored_source_definition(source),
+            source_definition_sha256=source.definition_sha256,
+            trigger_kind="manual",
+            check_mode=check_mode,
+            status="queued",
+            attempt_no=1,
+            expected_active_generation=expected_generation,
+            queued_at=_moment(now),
+            stats_json={
+                _MANUAL_SYNC_AUDIT_KEY: {
+                    "reason": reason,
+                    "requested_by_id": requested_by_id,
+                }
+            },
+        )
+        db.add(run)
+        db.flush()
+        result = _manual_sync_result(
+            source,
+            run_id=run.id,
+            **arguments,
+        )
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
 def claim_next_sync_run(
     db: Session,
     *,
@@ -864,7 +974,7 @@ def finish_sync_run(
         run.observed_manifest_sha256 = observed_manifest_sha256
         run.error_code = error_code
         run.error_summary = error_summary
-        run.stats_json = stats
+        run.stats_json = preserve_manual_sync_audit(run, stats)
         if outcome in {"rejected", "failed"}:
             db.flush()
             _enqueue_fallback_for_locked_failure(
@@ -1110,7 +1220,7 @@ def promote_delivery_version(
         run.observed_manifest_sha256 = observed_manifest_sha256
         run.error_code = None
         run.error_summary = None
-        run.stats_json = stats
+        run.stats_json = preserve_manual_sync_audit(run, stats)
         db.commit()
         return _promotion_result(promotion, new_generation)
     except Exception:
@@ -2150,6 +2260,188 @@ def _locked_current_layer_catalog(
     return row
 
 
+def _validated_manual_sync_arguments(
+    *,
+    provider_key: str,
+    source_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    check_mode: Literal["conditional", "full"],
+    requested_by_id: int,
+    reason: str,
+) -> dict[str, Any]:
+    if (
+        not isinstance(provider_key, str)
+        or _PROVIDER_KEY_RE.fullmatch(provider_key) is None
+    ):
+        raise MirrorLifecycleError("provider key is invalid")
+    if (
+        not isinstance(source_id, int)
+        or isinstance(source_id, bool)
+        or source_id <= 0
+    ):
+        raise MirrorLifecycleError("source id must be a positive integer")
+    if (
+        not isinstance(expected_source_definition_sha256, str)
+        or _SHA256_RE.fullmatch(expected_source_definition_sha256) is None
+    ):
+        raise MirrorLifecycleError(
+            "expected source-definition hash is invalid"
+        )
+    _validate_expected_generation(expected_generation)
+    if check_mode not in {"conditional", "full"}:
+        raise MirrorLifecycleError("manual check mode is invalid")
+    if (
+        not isinstance(requested_by_id, int)
+        or isinstance(requested_by_id, bool)
+        or requested_by_id <= 0
+    ):
+        raise MirrorLifecycleError(
+            "requesting actor id must be a positive integer"
+        )
+    return {
+        "provider_key": provider_key,
+        "source_id": source_id,
+        "expected_source_definition_sha256": (
+            expected_source_definition_sha256
+        ),
+        "expected_generation": expected_generation,
+        "check_mode": check_mode,
+        "requested_by_id": requested_by_id,
+        "reason": _bounded_required_text(reason, "reason", 1_024),
+    }
+
+
+def _lock_and_validate_manual_sync_source(
+    db: Session,
+    *,
+    provider_key: str,
+    source_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    check_mode: Literal["conditional", "full"],
+    requested_by_id: int,
+    reason: str,
+) -> ReferenceLayerSource:
+    del check_mode, requested_by_id, reason
+    preliminary = db.get(ReferenceLayerSource, source_id)
+    if preliminary is None or preliminary.provider_key != provider_key:
+        raise MirrorLifecycleError(
+            "manual sync source is unavailable for this provider"
+        )
+    _lock_delivery_layer(db, provider_key, preliminary.layer_id)
+    source = db.scalar(
+        select(ReferenceLayerSource)
+        .where(
+            ReferenceLayerSource.id == source_id,
+            ReferenceLayerSource.provider_key == provider_key,
+        )
+        .with_for_update()
+    )
+    if source is None or source.layer_id != preliminary.layer_id:
+        raise MirrorLifecycleError("manual sync source identity changed")
+    if (
+        not source.enabled
+        or source.protocol == "local"
+        or source.sync_strategy == "manual"
+    ):
+        raise MirrorLifecycleError(
+            "manual sync source is disabled or not worker-supported"
+        )
+    if (
+        source.definition_sha256
+        != expected_source_definition_sha256
+        or not stored_source_definition_is_valid(source)
+    ):
+        raise MirrorLifecycleError(
+            "manual sync source-definition hash is stale or invalid"
+        )
+    layer, snapshot = _locked_current_layer_catalog(
+        db,
+        provider_key=provider_key,
+        layer_id=source.layer_id,
+    )
+    if (
+        not stored_catalog_snapshot_is_valid(snapshot)
+        or not catalog_snapshot_contains_active_layer(snapshot, layer)
+    ):
+        raise MirrorLifecycleError(
+            "manual sync current catalog evidence is invalid"
+        )
+    state, _ = _locked_delivery_state_and_chain(
+        db,
+        provider_key=provider_key,
+        layer_id=source.layer_id,
+    )
+    generation = state.generation if state is not None else 0
+    if state is not None and state.status == "disabled":
+        raise MirrorLifecycleError(
+            "manual sync delivery is administratively disabled"
+        )
+    if generation != expected_generation:
+        raise MirrorPromotionConflict(
+            "manual sync expected generation is stale"
+        )
+    layer_has_open_run = bool(
+        db.scalar(
+            select(
+                exists().where(
+                    ReferenceSyncRun.provider_key == provider_key,
+                    ReferenceSyncRun.layer_id == source.layer_id,
+                    ReferenceSyncRun.status.in_(("queued", "running")),
+                )
+            )
+        )
+    )
+    if layer_has_open_run:
+        raise MirrorLifecycleError(
+            "manual sync layer already has an open run"
+        )
+    try:
+        require_current_source_authorization(
+            db,
+            source=source,
+            require_acquisition=True,
+        )
+    except MirrorAuthorizationError as error:
+        raise MirrorLifecycleError(
+            f"manual sync authorization rejected: {error.code}"
+        ) from error
+    return source
+
+
+def _manual_sync_result(
+    source: ReferenceLayerSource,
+    *,
+    provider_key: str,
+    source_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    check_mode: Literal["conditional", "full"],
+    requested_by_id: int,
+    reason: str,
+    run_id: int | None,
+) -> ManualSyncEnqueueResult:
+    if (
+        source.provider_key != provider_key
+        or source.id != source_id
+        or source.definition_sha256
+        != expected_source_definition_sha256
+    ):
+        raise MirrorLifecycleError("manual sync result identity is invalid")
+    return ManualSyncEnqueueResult(
+        provider_key=provider_key,
+        layer_id=source.layer_id,
+        source_id=source_id,
+        source_definition_sha256=expected_source_definition_sha256,
+        expected_generation=expected_generation,
+        check_mode=check_mode,
+        requested_by_id=requested_by_id,
+        reason=reason,
+        run_id=run_id,
+    )
+
+
 def _promotion_result(
     promotion: ReferenceDeliveryPromotion,
     generation: int,
@@ -2375,6 +2667,8 @@ def _enqueue_fallback_for_locked_failure(
         raise MirrorLifecycleError(
             "fallback requires a rejected or failed sync run"
         )
+    if failed_run.trigger_kind == "manual":
+        return None
     if state is not None and state.status == "disabled":
         return None
     active_generation = state.generation if state is not None else 0
@@ -2622,6 +2916,65 @@ def _bounded_json_object(
     if len(encoded) > maximum_bytes:
         raise MirrorLifecycleError(f"{field} is too large")
     return value
+
+
+def preserve_manual_sync_audit(
+    run: ReferenceSyncRun,
+    replacement: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep operator identity/reason immutable across run checkpoints."""
+
+    result = dict(replacement)
+    if run.trigger_kind != "manual":
+        if _MANUAL_SYNC_AUDIT_KEY in result:
+            raise MirrorLifecycleError(
+                "manual enqueue audit key is reserved"
+            )
+        return _bounded_json_object(
+            result,
+            "stats_json",
+            _MAX_STATS_JSON_BYTES,
+        )
+    existing = (
+        run.stats_json.get(_MANUAL_SYNC_AUDIT_KEY)
+        if isinstance(run.stats_json, dict)
+        else None
+    )
+    expected = {
+        "reason": (
+            existing.get("reason")
+            if isinstance(existing, dict)
+            else None
+        ),
+        "requested_by_id": (
+            existing.get("requested_by_id")
+            if isinstance(existing, dict)
+            else None
+        ),
+    }
+    if (
+        not isinstance(expected["reason"], str)
+        or not expected["reason"].strip()
+        or len(expected["reason"]) > 1_024
+        or not isinstance(expected["requested_by_id"], int)
+        or isinstance(expected["requested_by_id"], bool)
+        or expected["requested_by_id"] <= 0
+        or run.requested_by_id != expected["requested_by_id"]
+    ):
+        raise MirrorLifecycleError(
+            "manual enqueue audit evidence is invalid"
+        )
+    supplied = result.get(_MANUAL_SYNC_AUDIT_KEY)
+    if supplied is not None and supplied != expected:
+        raise MirrorLifecycleError(
+            "manual enqueue audit evidence cannot be replaced"
+        )
+    result[_MANUAL_SYNC_AUDIT_KEY] = expected
+    return _bounded_json_object(
+        result,
+        "stats_json",
+        _MAX_STATS_JSON_BYTES,
+    )
 
 
 def _lock_source_provider(db: Session, provider_key: str) -> None:

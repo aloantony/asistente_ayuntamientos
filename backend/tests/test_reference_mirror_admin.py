@@ -11,6 +11,7 @@ from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.mirror_admin import (
     MirrorAdminInputError,
     _parser,
+    execute_manual_enqueue,
     execute_transition,
     operational_status,
     staging_gc,
@@ -25,6 +26,10 @@ from app.reference_layers.models import (
 )
 from test_reference_mirror_lifecycle import (
     _promote_cross_snapshot_versions,
+    _seed_bootstrap,
+)
+from support_reference_mirror_authorization import (
+    ensure_authorized_mirror_source,
 )
 
 
@@ -70,6 +75,12 @@ def test_operational_status_uses_explicit_local_mirror_authorization(
         "pending": 1
     }
     row = report["layers"][0]
+    assert all(
+        source["definition_sha256"]
+        and source["expected_active_generation"]
+        == row["delivery_state_integrity"]["generation"]
+        for source in row["sources"]
+    )
     assert row["active"]["version_id"] == version_v2.id
     assert row["active"]["uses_current_catalog_snapshot"] is True
     assert row["active"]["size_bytes"] is None
@@ -331,6 +342,69 @@ def test_transition_cli_requires_exactly_one_explicit_mode() -> None:
     parsed = _parser().parse_args([*base, "--dry-run"])
     assert parsed.dry_run is True
     assert parsed.apply is False
+
+
+def test_manual_enqueue_cli_and_active_actor_gate(
+    db,
+    make_user,
+) -> None:
+    _, _, _, sources, _ = _seed_bootstrap(
+        db,
+        provider_key="mirror-admin-enqueue-test",
+    )
+    source = next(item for item in sources if item.is_primary)
+    ensure_authorized_mirror_source(db, source)
+    actor = make_user()
+    base = [
+        "enqueue",
+        "--provider-key",
+        source.provider_key,
+        "--source-id",
+        str(source.id),
+        "--expected-source-definition-sha256",
+        source.definition_sha256,
+        "--expected-generation",
+        "0",
+        "--actor-user-id",
+        str(actor.id),
+        "--reason",
+        "representative vector acceptance check",
+    ]
+    with pytest.raises(SystemExit):
+        _parser().parse_args(base)
+    parsed = _parser().parse_args([*base, "--dry-run"])
+    assert parsed.check_mode == "full"
+    assert parsed.apply is False
+
+    result = execute_manual_enqueue(
+        db,
+        provider_key=source.provider_key,
+        source_id=source.id,
+        expected_source_definition_sha256=source.definition_sha256,
+        expected_generation=0,
+        check_mode="conditional",
+        actor_user_id=actor.id,
+        reason="representative vector acceptance check",
+        apply=False,
+    )
+
+    assert result["applied"] is False
+    assert result["manual_sync"]["run_id"] is None
+    assert result["manual_sync"]["check_mode"] == "conditional"
+
+    inactive = make_user(is_active=False)
+    with pytest.raises(MirrorAdminInputError, match="inactive"):
+        execute_manual_enqueue(
+            db,
+            provider_key=source.provider_key,
+            source_id=source.id,
+            expected_source_definition_sha256=source.definition_sha256,
+            expected_generation=0,
+            check_mode="full",
+            actor_user_id=inactive.id,
+            reason="must be rejected",
+            apply=True,
+        )
 
 
 @pytest.mark.parametrize("seconds", (0, 3_599, 2_592_001, True))

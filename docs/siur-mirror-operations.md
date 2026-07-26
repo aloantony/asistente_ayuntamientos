@@ -34,6 +34,33 @@ Un servicio con catálogo `pending`, sin revisión, sin atestación o sin permis
 explícito figura como `mirror_authorized=false`. Este comando no crea ni
 aprueba evidencia legal.
 
+## Sincronización manual acotada
+
+Para comprobar de inmediato una fuente concreta sin esperar a su programación
+diaria, primero se copian del informe de estado `source_id`,
+`definition_sha256` y `expected_active_generation`:
+
+```bash
+python -m app.reference_layers.mirror_admin enqueue \
+  --provider-key siur \
+  --source-id 321 \
+  --expected-source-definition-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --expected-generation 8 \
+  --check-mode full \
+  --actor-user-id 7 \
+  --reason "comprobación de aceptación del raster representativo" \
+  --dry-run
+```
+
+Tras revisar el JSON se repite exactamente con `--apply`. El comando solo
+acepta una fuente habilitada y procesable por el worker, evidencia de catálogo
+y autorización vigentes, una generación y hash exactos y ninguna ejecución
+abierta para la misma capa. El dry-run no inserta filas. El apply crea una sola
+ejecución `manual`, conserva la próxima fecha programada y registra actor y
+motivo durante toda la ejecución. Si esa fuente falla, el comando no prueba
+otra automáticamente: la selección exacta solo cambia mediante una nueva
+orden explícita.
+
 ## Rollback
 
 Primero se revisa un dry-run:

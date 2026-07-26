@@ -38,6 +38,7 @@ from app.reference_layers.mirror_lifecycle import (
     SyncRunLease,
     claim_next_sync_run,
     enqueue_due_sources,
+    enqueue_manual_sync_run,
 )
 from app.reference_layers.local_style_adaptation import (
     generate_reviewed_local_style,
@@ -920,6 +921,60 @@ def test_failure_handler_uses_lifecycle_followup_after_terminal_finish(db) -> No
     )
     assert child is not None
     assert child.source_id == fallback_source_id
+
+
+def test_failure_handler_preserves_exact_manual_request_without_fallback(
+    db,
+    make_user,
+) -> None:
+    _, sources = _seed_source(db, two_sources=True)
+    selected = sources[0]
+    actor_id = make_user().id
+    queued = enqueue_manual_sync_run(
+        db,
+        provider_key=selected.provider_key,
+        source_id=selected.id,
+        expected_source_definition_sha256=selected.definition_sha256,
+        expected_generation=0,
+        check_mode="full",
+        requested_by_id=actor_id,
+        reason="operator-selected acceptance source",
+        now=NOW,
+    )
+    lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        lease_seconds=3600,
+        token_factory=lambda: "f" * 64,
+    )
+    assert lease.run_id == queued.run_id
+
+    result = handle_run_failure(
+        lambda: nullcontext(db),
+        lease,
+        ClassifiedFailure(
+            code="manual_source_failed",
+            summary="The selected source failed.",
+            retryable=False,
+            outcome="failed",
+        ),
+    )
+
+    assert result.followup == "none"
+    assert result.source_id is None
+    run = db.get(ReferenceSyncRun, lease.run_id)
+    assert run.stats_json == {
+        "manual_enqueue": {
+            "reason": "operator-selected acceptance source",
+            "requested_by_id": actor_id,
+        },
+        "retryable_classification": False,
+    }
+    assert db.scalar(
+        select(ReferenceSyncRun.id).where(
+            ReferenceSyncRun.parent_run_id == lease.run_id
+        )
+    ) is None
 
 
 def test_operation_smoke_evidence_is_finalized_with_the_promoted_run(

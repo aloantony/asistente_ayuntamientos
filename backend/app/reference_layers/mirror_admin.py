@@ -43,9 +43,12 @@ from app.reference_layers.mirror_authorization import (
 )
 from app.reference_layers.mirror_lifecycle import (
     DeliveryTransitionPreview,
+    ManualSyncEnqueueResult,
     MirrorLifecycleError,
     PromotionResult,
     delivery_state_matches_promotion_head,
+    enqueue_manual_sync_run,
+    preview_manual_sync_run,
     preview_reactivate_delivery,
     preview_rollback_delivery_version,
     reactivate_delivery,
@@ -299,6 +302,9 @@ def operational_status(
                     _source_summary(
                         source,
                         latest_source_runs.get(source.id),
+                        expected_generation=(
+                            state.generation if state is not None else 0
+                        ),
                     )
                     for source in sources_by_layer.get(layer.id, [])
                 ],
@@ -653,12 +659,17 @@ def _version_summary(
 def _source_summary(
     source: ReferenceLayerSource,
     run: ReferenceSyncRun | None,
+    *,
+    expected_generation: int,
 ) -> dict[str, Any]:
     return {
         "source_id": source.id,
         "source_key": source.source_key,
         "protocol": source.protocol,
         "target_kind": source.target_kind,
+        "sync_strategy": source.sync_strategy,
+        "definition_sha256": source.definition_sha256,
+        "expected_active_generation": expected_generation,
         "enabled": source.enabled,
         "is_primary": source.is_primary,
         "priority": source.priority,
@@ -838,6 +849,48 @@ def execute_transition(
     }
 
 
+def execute_manual_enqueue(
+    db: Session,
+    *,
+    provider_key: str,
+    source_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    check_mode: str,
+    actor_user_id: int,
+    reason: str,
+    apply: bool,
+) -> dict[str, Any]:
+    """Validate and optionally queue one exact operator-selected source."""
+
+    _validate_provider_key(provider_key)
+    actor = _require_active_actor(db, actor_user_id)
+    actor_id = actor.id
+    arguments = {
+        "provider_key": provider_key,
+        "source_id": source_id,
+        "expected_source_definition_sha256": (
+            expected_source_definition_sha256
+        ),
+        "expected_generation": expected_generation,
+        "check_mode": check_mode,
+        "requested_by_id": actor_id,
+        "reason": reason,
+    }
+    result: ManualSyncEnqueueResult
+    if apply:
+        result = enqueue_manual_sync_run(db, **arguments)
+    else:
+        result = preview_manual_sync_run(db, **arguments)
+    return {
+        "ok": True,
+        "mode": "apply" if apply else "dry-run",
+        "applied": apply,
+        "actor_user_id": actor_id,
+        "manual_sync": asdict(result),
+    }
+
+
 def staging_gc(
     *,
     apply: bool,
@@ -944,6 +997,36 @@ def _parser() -> argparse.ArgumentParser:
         mode.add_argument("--dry-run", action="store_true")
         mode.add_argument("--apply", action="store_true")
 
+    enqueue_parser = commands.add_parser(
+        "enqueue",
+        help="validate or queue one exact source independently of its schedule",
+    )
+    enqueue_parser.add_argument("--provider-key", default="siur")
+    enqueue_parser.add_argument("--source-id", type=int, required=True)
+    enqueue_parser.add_argument(
+        "--expected-source-definition-sha256",
+        required=True,
+    )
+    enqueue_parser.add_argument(
+        "--expected-generation",
+        type=int,
+        required=True,
+    )
+    enqueue_parser.add_argument(
+        "--check-mode",
+        choices=("conditional", "full"),
+        default="full",
+    )
+    enqueue_parser.add_argument(
+        "--actor-user-id",
+        type=int,
+        required=True,
+    )
+    enqueue_parser.add_argument("--reason", required=True)
+    enqueue_mode = enqueue_parser.add_mutually_exclusive_group(required=True)
+    enqueue_mode.add_argument("--dry-run", action="store_true")
+    enqueue_mode.add_argument("--apply", action="store_true")
+
     gc_parser = commands.add_parser(
         "staging-gc",
         help="inspect or delete stale unlocked staging partials only",
@@ -994,6 +1077,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                         db,
                         provider_key=arguments.provider_key,
                         layer_id=arguments.layer_id,
+                    )
+                elif arguments.command == "enqueue":
+                    result = execute_manual_enqueue(
+                        db,
+                        provider_key=arguments.provider_key,
+                        source_id=arguments.source_id,
+                        expected_source_definition_sha256=(
+                            arguments.expected_source_definition_sha256
+                        ),
+                        expected_generation=(
+                            arguments.expected_generation
+                        ),
+                        check_mode=arguments.check_mode,
+                        actor_user_id=arguments.actor_user_id,
+                        reason=arguments.reason,
+                        apply=arguments.apply,
                     )
                 else:
                     with ReferenceBlobStore(

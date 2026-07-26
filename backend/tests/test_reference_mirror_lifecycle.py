@@ -34,8 +34,10 @@ from app.reference_layers.mirror_lifecycle import (
     deactivate_delivery,
     enqueue_due_sources,
     enqueue_fallback_source,
+    enqueue_manual_sync_run,
     finish_sync_run,
     heartbeat_sync_run,
+    preview_manual_sync_run,
     promote_delivery_version,
     reactivate_delivery,
     rollback_delivery_version,
@@ -888,6 +890,140 @@ def test_due_sources_enqueue_once_with_frozen_definition_and_generation(db) -> N
         for run in runs
     )
     assert db.get(ReferenceLayer, layer.id) is not None
+
+
+def test_manual_sync_preview_is_read_only_and_apply_is_exact(
+    db,
+    make_user,
+) -> None:
+    _, _, _, sources, _ = _seed_bootstrap(db)
+    source = next(item for item in sources if item.is_primary)
+    ensure_authorized_mirror_source(db, source, reviewed_at=NOW)
+    actor = make_user()
+    actor_id = actor.id
+    source_id = source.id
+    source_hash = source.definition_sha256
+    scheduled_at = source.next_check_at
+    arguments = {
+        "provider_key": source.provider_key,
+        "source_id": source_id,
+        "expected_source_definition_sha256": source_hash,
+        "expected_generation": 0,
+        "check_mode": "full",
+        "requested_by_id": actor_id,
+        "reason": "representative raster acceptance check",
+    }
+
+    preview = preview_manual_sync_run(db, **arguments)
+
+    assert preview.run_id is None
+    assert preview.layer_id == source.layer_id
+    assert db.scalar(
+        select(func.count(ReferenceSyncRun.id)).where(
+            ReferenceSyncRun.source_id == source_id
+        )
+    ) == 0
+    assert db.get(ReferenceLayerSource, source_id).next_check_at == scheduled_at
+
+    applied = enqueue_manual_sync_run(db, now=NOW, **arguments)
+
+    assert applied.run_id is not None
+    run = db.get(ReferenceSyncRun, applied.run_id)
+    assert run is not None
+    assert run.trigger_kind == "manual"
+    assert run.check_mode == "full"
+    assert run.requested_by_id == actor_id
+    assert run.expected_active_generation == 0
+    assert run.source_definition_sha256 == source_hash
+    assert run.stats_json == {
+        "manual_enqueue": {
+            "reason": "representative raster acceptance check",
+            "requested_by_id": actor_id,
+        }
+    }
+    assert db.get(ReferenceLayerSource, source_id).next_check_at == scheduled_at
+
+
+def test_manual_sync_rejects_stale_unauthorized_and_open_requests(
+    db,
+    make_user,
+) -> None:
+    _, _, _, sources, _ = _seed_bootstrap(db)
+    source = next(item for item in sources if item.is_primary)
+    actor_id = make_user().id
+    base = {
+        "provider_key": source.provider_key,
+        "source_id": source.id,
+        "expected_source_definition_sha256": source.definition_sha256,
+        "expected_generation": 0,
+        "check_mode": "full",
+        "requested_by_id": actor_id,
+        "reason": "bounded operator request",
+    }
+
+    with pytest.raises(
+        MirrorLifecycleError,
+        match="mirror_authorization_missing",
+    ):
+        enqueue_manual_sync_run(db, **base)
+    ensure_authorized_mirror_source(db, source, reviewed_at=NOW)
+
+    with pytest.raises(MirrorLifecycleError, match="hash is stale"):
+        enqueue_manual_sync_run(
+            db,
+            **{
+                **base,
+                "expected_source_definition_sha256": "0" * 64,
+            },
+        )
+    with pytest.raises(MirrorPromotionConflict, match="generation is stale"):
+        enqueue_manual_sync_run(
+            db,
+            **{**base, "expected_generation": 1},
+        )
+
+    first = enqueue_manual_sync_run(db, now=NOW, **base)
+    assert first.run_id is not None
+    with pytest.raises(MirrorLifecycleError, match="already has an open run"):
+        enqueue_manual_sync_run(db, **base)
+    assert db.scalar(
+        select(func.count(ReferenceSyncRun.id)).where(
+            ReferenceSyncRun.source_id == source.id
+        )
+    ) == 1
+
+    lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "9" * 64,
+    )
+    assert lease.run_id == first.run_id
+    finish_sync_run(
+        db,
+        lease,
+        outcome="failed",
+        error_code="manual_probe_failed",
+        stats_json={"probe_phase": "download"},
+        now=NOW + timedelta(seconds=1),
+    )
+    terminal = db.get(ReferenceSyncRun, first.run_id)
+    assert terminal.stats_json == {
+        "manual_enqueue": {
+            "reason": "bounded operator request",
+            "requested_by_id": actor_id,
+        },
+        "probe_phase": "download",
+    }
+    assert db.scalar(
+        select(func.count(ReferenceSyncRun.id)).where(
+            ReferenceSyncRun.parent_run_id == first.run_id
+        )
+    ) == 0
+    assert enqueue_fallback_source(
+        db,
+        failed_run_id=first.run_id,
+        now=NOW + timedelta(seconds=2),
+    ) is None
 
 
 def test_failed_sources_fall_back_in_priority_order_and_exhaust_once(db) -> None:

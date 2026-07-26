@@ -92,6 +92,7 @@ from app.reference_layers.mirror_lifecycle import (
     enqueue_due_sources,
     finish_sync_run,
     heartbeat_sync_run,
+    preserve_manual_sync_audit,
     promote_delivery_version,
 )
 from app.reference_layers.models import (
@@ -1178,11 +1179,14 @@ def persist_run_acquisition(
         run.observed_last_modified = result.observed_last_modified
         run.observed_version = result.observed_version
         run.observed_manifest_sha256 = result.manifest_sha256
-        run.stats_json = _bounded_stats(
-            {
-                **result.stats,
-                "total_bytes": result.total_bytes,
-            }
+        run.stats_json = preserve_manual_sync_audit(
+            run,
+            _bounded_stats(
+                {
+                    **result.stats,
+                    "total_bytes": result.total_bytes,
+                }
+            ),
         )
         db.commit()
         rows = db.execute(
