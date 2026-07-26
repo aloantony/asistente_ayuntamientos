@@ -139,6 +139,40 @@ services:
       timeout: 5s
       retries: 10
 
+  gwc-ops:
+    profiles: ["operations"]
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    environment:
+      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
+    network_mode: host
+    command:
+      [
+        "python",
+        "-m",
+        "app.reference_layers.gwc_quota",
+        "--cache-path",
+        "/var/lib/geowebcache",
+      ]
+    volumes:
+      - geowebcache_data:/var/lib/geowebcache:ro
+
+  siur-recovery:
+    profiles: ["operations"]
+    build:
+      context: .
+      dockerfile: ops/siur-disaster-recovery.Dockerfile
+    # The sources are private root/group-owned volumes. They remain read-only;
+    # the only writable mount is an explicit operator-provided backup/drill
+    # destination.
+    user: "0:${REFERENCE_STORAGE_GID:-2000}"
+    network_mode: host
+    volumes:
+      - reference_artifacts:/sources/reference_artifacts:ro
+      - geoserver_data:/sources/geoserver_data:ro
+
 volumes:
   postgres_data:
   document_storage:

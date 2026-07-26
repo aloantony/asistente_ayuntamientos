@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     local_geoserver_timeout_seconds: float = 8.0
     geoserver_admin_user: str | None = None
     geoserver_admin_password: SecretStr | None = None
+    geowebcache_disk_quota_gib: int = 20
+    geowebcache_disk_quota_min_free_gib: int = 5
+    geowebcache_disk_quota_cleanup_seconds: int = 60
+    geowebcache_disk_quota_policy: str = "LRU"
     local_geoserver_postgis_host: str = "postgres"
     local_geoserver_postgis_port: int = 5432
     local_geoserver_postgis_database: str = "app"
@@ -371,6 +375,66 @@ class Settings(BaseSettings):
                 "0.1 and 30 seconds"
             )
         return value
+
+    @field_validator(
+        "geowebcache_disk_quota_gib",
+        "geowebcache_disk_quota_min_free_gib",
+        "geowebcache_disk_quota_cleanup_seconds",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_geowebcache_numbers(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("GeoWebCache numeric settings cannot be boolean")
+        return value
+
+    @field_validator(
+        "geowebcache_disk_quota_gib",
+        "geowebcache_disk_quota_min_free_gib",
+    )
+    @classmethod
+    def validate_geowebcache_disk_sizes(cls, value: int) -> int:
+        if isinstance(value, bool) or not 0 <= value <= 1024:
+            raise ValueError(
+                "GeoWebCache disk sizes must be between 0 and 1024 GiB"
+            )
+        return value
+
+    @field_validator("geowebcache_disk_quota_cleanup_seconds")
+    @classmethod
+    def validate_geowebcache_cleanup_seconds(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 86_400:
+            raise ValueError(
+                "geowebcache_disk_quota_cleanup_seconds must be between "
+                "1 and 86400"
+            )
+        return value
+
+    @field_validator("geowebcache_disk_quota_policy")
+    @classmethod
+    def validate_geowebcache_policy(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in {"LRU", "LFU"}:
+            raise ValueError(
+                "geowebcache_disk_quota_policy must be LRU or LFU"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_geowebcache_quota(self):
+        if self.geowebcache_disk_quota_gib < 1:
+            raise ValueError(
+                "geowebcache_disk_quota_gib must be at least 1 GiB"
+            )
+        if (
+            self.geowebcache_disk_quota_gib
+            + self.geowebcache_disk_quota_min_free_gib
+            > 1024
+        ):
+            raise ValueError(
+                "GeoWebCache quota and reserve cannot exceed 1024 GiB"
+            )
+        return self
 
     @field_validator("geoserver_admin_user")
     @classmethod

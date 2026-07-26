@@ -97,3 +97,7 @@ La retención predeterminada se configura con
 `REFERENCE_STAGING_RETENTION_SECONDS` (24 horas por defecto y nunca menos de
 una hora). Se omiten ficheros activos, bloqueados, no regulares o con nombres
 no canónicos. Este comando nunca recorre ni elimina blobs publicados.
+
+El backup consistente, la verificación de hashes, el restore aislado y la
+cuota comprobada de GeoWebCache se operan según
+[Recuperación ante desastres del espejo SIUR](siur-disaster-recovery.md).
