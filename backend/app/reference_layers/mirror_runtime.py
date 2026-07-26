@@ -6,9 +6,13 @@ import argparse
 import logging
 import signal
 import threading
+from time import monotonic
 from typing import Sequence
 
 from app.core.config import settings
+from app.reference_layers.catalog_watcher import (
+    run_siur_catalog_update_check_job,
+)
 from app.reference_layers.mirror_orchestrator import (
     MirrorRunProcessor,
     enqueue_reference_sources_once,
@@ -18,13 +22,53 @@ from app.reference_layers.mirror_orchestrator import (
 logger = logging.getLogger(__name__)
 
 
+def _poll_catalog_watcher_if_due(
+    next_poll_at: float,
+    *,
+    now: float | None = None,
+    poll_seconds: float | None = None,
+) -> float:
+    current = monotonic() if now is None else now
+    if current < next_poll_at:
+        return next_poll_at
+
+    next_attempt = current + (
+        settings.reference_catalog_watcher_poll_seconds
+        if poll_seconds is None
+        else poll_seconds
+    )
+    try:
+        outcome = run_siur_catalog_update_check_job()
+        logger.info(
+            "SIUR catalog watcher poll completed",
+            extra={
+                "disposition": outcome.get("disposition"),
+                "status": outcome.get("status"),
+                "check_id": outcome.get("check_id"),
+                "next_check_at": outcome.get("next_check_at"),
+            },
+        )
+    except Exception as error:
+        logger.error(
+            "SIUR catalog watcher poll failed (%s)",
+            type(error).__name__,
+        )
+        return next_attempt
+
+    return next_attempt
+
+
 def run_scheduler(
     stop_event: threading.Event,
     *,
     once: bool = False,
 ) -> None:
     first_poll = True
+    next_catalog_poll_at = 0.0
     while not stop_event.is_set():
+        next_catalog_poll_at = _poll_catalog_watcher_if_due(
+            next_catalog_poll_at,
+        )
         try:
             reconciled = reconcile_reference_sources_once()
             for item in reconciled:

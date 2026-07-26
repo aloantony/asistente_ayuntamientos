@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     reference_storage_quota_bytes: int | None = 1024 * 1024 * 1024 * 1024
     reference_storage_min_free_bytes: int = 20 * 1024 * 1024 * 1024
     reference_mirror_scheduler_poll_seconds: float = 15.0
+    reference_catalog_watcher_poll_seconds: float = 300.0
     reference_mirror_worker_poll_seconds: float = 2.0
     reference_mirror_enqueue_limit: int = 100
     reference_mirror_lease_seconds: int = 600
@@ -242,6 +243,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "reference_mirror_scheduler_poll_seconds",
+        "reference_catalog_watcher_poll_seconds",
         "reference_mirror_worker_poll_seconds",
         "reference_mirror_heartbeat_seconds",
     )
