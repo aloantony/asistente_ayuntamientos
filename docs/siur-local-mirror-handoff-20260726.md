@@ -1,176 +1,194 @@
 # Handoff del espejo local SIUR — 2026-07-26
 
-Estado pausado por petición del usuario antes de agotar el límite de uso. La
-entrega **no está terminada ni lista para `main`**. Todo el trabajo aceptado y
-los tres frentes en curso están guardados en commits; los cuatro worktrees
-implicados están limpios y sus sesiones constan como `paused`.
+Checkpoint solicitado antes de agotar el límite de uso. La entrega **no está
+terminada ni lista para `main`**. El trabajo aceptado está versionado en la rama
+de integración y los dos cierres que seguían en paralelo tienen worktrees
+reservados independientes.
 
-No se ha adquirido el lease del runtime, no se ha migrado la base de desarrollo
-y no se ha reconstruido el stack compartido. Ninguna de estas ramas se ha
-enviado al remoto.
+No se ha adquirido el lease del runtime, no se ha migrado la base de desarrollo,
+no se ha reconstruido el stack compartido y no se ha iniciado la descarga real
+de las 227 capas. Ninguna de las ramas de este checkpoint se ha enviado al
+remoto.
 
 ## Punto de reanudación principal
 
 - Worktree:
   `/home/dev/proyectos/asistente_ayuntamientos-worktrees/siur-local-mirror`
 - Rama: `codex/siur-local-mirror-20260722`
-- HEAD: `6ed56a4` (`fix: honor SIUR base layer visibility`)
-- Upstream de comparación: `origin/main`
-- Divergencia al pausar: 39 commits por delante y 0 por detrás
-- Sesión/owner: `root-siur-local-mirror-20260722`, estado `paused`
-- Estado Git: limpio
+- HEAD: `441c226` (`fix: reject implausible reference feature growth`)
+- Comparación: `origin/main`
+- Divergencia al crear este checkpoint: 50 commits por delante
+- Sesión/owner: `root-siur-local-mirror-20260722`
+- Estado Git: limpio después de `441c226`
 - Runtime compartido: sin lease
 - Base de desarrollo observada, sin modificar: Alembic `20260722_0034`
+- Estado de datos observado, sin modificar: 227 capas hoja y 227 entregas en
+  modo `proxy`
 
-El objetivo sigue siendo almacenar y versionar localmente las 227 capas SIUR,
-renderizar desde infraestructura propia, comprobar cambios periódicamente,
-promover/retirar versiones de forma segura y verificar el flujo completo sin
-dependencias cartográficas remotas en el plano de servicio.
+El objetivo pendiente sigue siendo mantener en nuestros servidores artefactos
+locales, inmutables y versionados para todas las capas SIUR; servirlos sin
+dependencias remotas; comprobar actualizaciones; validar, promover y revertir
+versiones con evidencia; y probar el flujo completo desde el navegador.
 
-## Trabajo ya integrado
+## Trabajo integrado desde el checkpoint anterior
 
-Además de almacenamiento content-addressed, adquisición endurecida, ingesta
-vectorial/ráster, publicación GeoServer, MBTiles, estilos SLD, cobertura finita
-y lifecycle durable, esta rama contiene los últimos cierres:
+La rama ya contenía almacenamiento content-addressed, adquisición con
+reanudación, ingesta vectorial/ráster, publicación GeoServer, MBTiles, estilos
+SLD, cobertura finita, lifecycle durable y el frontend de capas de referencia.
+Desde el antiguo handoff se integraron además:
 
-- `b432a71`: siembra WMS mediante superteselas 8x8 (2048 px) y degradación
-  controlada 8 -> 4 -> 2 -> 1 ante rechazo dimensional.
-- `59ac86b`: fixture de adquisición alineado con el esquema de fallback.
-- `86baf31`: orden temporal determinista en las pruebas de estado del espejo.
-- `6ed56a4`: una base SIUR oculta o con opacidad cero deja de renderizarse.
+- `b9be54c`: fuentes oficiales WMS preferentes para PNOA, IGN Base y MTN,
+  WMTS como fallback, equivalencias versionadas, preflight estratificado y
+  controles de capacidad.
+- `f22a193`: validación de tipos de banda, nodata, resolución y pirámides de
+  overviews; un COG grande sin overviews no puede promocionarse.
+- `cc80ee2` + `a26810b`: continuidad entre snapshots, rollback histórico,
+  estado `serving_previous` y cierre ante evidencia manipulada.
+- `e4be78f`: la imagen final comprueba en build que existen
+  `gdalinfo`, `gdal_translate` y `ogr2ogr`.
+- `f242410` + `5415936`: worker y scheduler durables, bootstrap, reclamación
+  de runs interrumpidos, preservación de ETag/manifiesto/estadísticas y
+  muestreo periódico de píxeles de tiles.
+- `4146eb1`: proxy cartográfico remoto desactivado por defecto y opt-in
+  explícito; catálogo y rutas fallan antes de red si no existe copia local.
+- `07e46d5`: gate prepromoción de tipo, CRS, esquema, bounds, semántica ráster
+  y caída masiva de entidades.
+- `441c226`: gate adicional ante crecimientos de entidades inverosímiles,
+  con umbral y evidencia persistida.
 
-Validación real acumulada sobre la rama de integración:
+## Pruebas reales acumuladas
 
-- backend focal combinado: `102 passed`;
-- suite backend completa antes de `86baf31`: `1315 passed, 1 failed`; el único
-  fallo era precisamente el reloj no determinista corregido por `86baf31`;
-- regresión de ese archivo después de la corrección: `5 passed`;
-- frontend Vitest: `11 passed`;
-- frontend typecheck sin incremental: correcto;
-- frontend lint: 0 errores y 11 avisos preexistentes;
-- frontend build de producción: correcto, 23 páginas estáticas.
+- Suite backend completa después de la integración WMS/capacidad:
+  `1329 passed, 2 warnings in 356.81s`.
+- Suite combinada de referencia después de integrar orquestador, continuidad,
+  proxy y gates prepromoción: `408 passed in 22.95s`.
+- Regresión focal del último gate de crecimiento junto al orquestador:
+  `16 passed`.
+- Frontend Vitest: `11 passed`.
+- Frontend typecheck: correcto.
+- Frontend lint: 0 errores y 11 avisos preexistentes.
+- Frontend build de producción: correcto, 23 páginas.
 
-La suite backend completa todavía debe repetirse sobre la combinación final.
+La suite backend completa debe repetirse cuando se incorporen los dos cierres
+paralelos descritos abajo. La prueba real de GDAL debe ejecutarse después de
+reconstruir la imagen: el contenedor compartido actual procede de una rama
+anterior y no contiene aún los binarios que sí instala el Dockerfile integrado.
 
-## Checkpoints paralelos preservados
+## Migración hermana ya aplicada en desarrollo
 
-### 1. Fuentes WMS revisadas y capacidad
+`20260722_0034` no es corrupción de Alembic. Es una migración inmutable de la
+funcionalidad de accesos directos:
 
-- Worktree:
-  `/home/dev/proyectos/asistente_ayuntamientos-worktrees/siur-reviewed-wms-candidates`
-- Rama: `codex/siur-reviewed-wms-candidates-20260726`
-- Base: `b432a71`
-- Commit: `c9d7705` (`feat: optimize reviewed SIUR tile sources`)
-- Sesión: `reviewed-wms-capacity-20260726`, estado `paused`
-- Estado Git: limpio
+- archivo original:
+  `20260722_0034_add_user_sidebar_shortcuts.py`;
+- `down_revision`: `20260717_0033`;
+- SHA-256:
+  `4d29abea4c8583d4e9225a3f02dc2c7e2f2d132d5dee4a6a04cbb99f8023d346`;
+- añade `users.sidebar_shortcut_ids`.
 
-Incluye WMS oficiales preferentes para PNOA, IGN Base y MTN con prioridad 40,
-WMTS original como fallback con prioridad 50, equivalencias exactas
-versionadas, superteselas limitadas a perfiles SIUR y preflight estratificado
-por zoom que conserva cuota, límite de archivo y reserva real de disco.
+La rama SIUR tiene la hermana `20260717_0034` y después
+`20260723_0035 -> 0036 -> 0037`. Nunca se debe borrar, renombrar ni reescribir
+la revisión ya aplicada. El cierre correcto es copiarla byte a byte y añadir
+una revisión de merge pura con ambas cabezas como padres.
 
-Pruebas reales:
+## Cierres paralelos reservados
 
-- focal: `99 passed, 1 deselected`;
-- suite de referencia: `368 passed`, salvo el fixture de reloj preexistente en
-  su base y ya corregido en integración por `86baf31`;
-- `compileall` y `git diff --check`: correctos;
-- la suite global se detuvo al 54 % por este checkpoint, sin fallos nuevos.
-
-Es el primer commit candidato a integrar, pero después hay que repetir la suite
-combinada sobre la rama principal.
-
-### 2. Continuidad de versiones
-
-- Worktree:
-  `/home/dev/proyectos/asistente_ayuntamientos-worktrees/siur-version-continuity`
-- Rama: `codex/siur-version-continuity-20260726`
-- Base exacta: `86baf31`
-- Commit: `2b7b32f` (`fix: preserve SIUR mirror version continuity`)
-- Sesión: `version-continuity-20260726`, estado `paused`
-- Estado Git: limpio
-
-Conserva servible la versión local activa basada en su run/snapshot histórico
-íntegro aunque cambie la definición mutable de la fuente; exige a la vez que la
-capa siga activa en el snapshot actual. Añade rollback auditado entre snapshots
-y cierre fail-closed ante run, snapshot o asset manipulados. El estado distingue
-`serving_previous`.
-
-Validación real:
-
-- `git diff --check`: correcto;
-- parseo AST de los cinco archivos Python: correcto;
-- `pytest`: **no ejecutado** antes de pausar.
-
-No integrar como terminado hasta ejecutar:
-
-```bash
-python -m pytest \
-  tests/test_local_reference_delivery.py \
-  tests/test_reference_mirror_lifecycle.py -q
-```
-
-Hay que prestar atención a SQL/PostgreSQL, especialmente al bloqueo
-`with_for_update(of=ReferenceLayer)` y al helper de rollback cross-snapshot.
-
-### 3. Orquestador, reanudación y chequeo de píxeles
+### Watcher durable del catálogo y merge de migraciones
 
 - Worktree:
-  `/home/dev/proyectos/asistente_ayuntamientos-worktrees/mirror-orchestrator-final`
-- Rama: `codex/mirror-orchestrator-final-20260726`
-- Base de la rama: `b432a71`
-- Commits:
-  - `3117535` (`chore: checkpoint reference mirror orchestration`)
-  - `67cc9d6` (`fix: harden resumable reference mirror checks`)
-- Sesión: `orchestrator-final-20260726`, estado `paused`
-- Estado Git: limpio
+  `/home/dev/proyectos/asistente_ayuntamientos-worktrees/catalog-update-watcher-20260726`
+- Rama: `codex/catalog-update-watcher-20260726-20260726`
+- Sesión: `catalog-update-watcher-20260726`
+- Base original: `b9be54c`
 
-El primer commit incorpora worker/scheduler, bootstrap, configuración de
-capacidad y Compose. El segundo conserva ETag/manifiesto/estadísticas al
-reanudar, deja reclaimable un run interrumpido por SIGTERM, evita un segundo
-coordinador de fallback, fija 8 GiB como techo de origen geoespacial y añade
-muestreo determinista de píxeles remotos contra los MBTiles activos. Las fuentes
-tiles tienen comprobación diaria y refresco completo semanal.
+Al redactar este checkpoint había completado la implementación y estaban
+pasando `35` pruebas de migración en `235.75s`: fresh, actualización desde las
+dos cabezas hermanas, downgrades, inmutabilidad y `alembic check`. Debe dejar
+dos commits separados:
 
-Validación final de este checkpoint:
+1. copia byte-exacta de la migración de accesos directos y merge puro
+   `20260726_0038` con padres
+   `("20260723_0037", "20260722_0034")`;
+2. watcher en `20260726_0039`, con descarga condicional fijada, hash canónico,
+   versiones observadas inmutables, resultados `unchanged`,
+   `update_available` o `error`, idempotencia y sin autoaplicar cambios.
 
-- compilación Python: correcta;
-- `git diff --check`: correcto;
-- suite completa anterior: llegó a `828 passed` y reveló un fixture de
-  adquisición incompatible con lifecycle 0037; su corrección ya está en la
-  integración (`59ac86b`), pero no se repitió la suite.
+Antes de integrar, revisar especialmente que ningún lock transaccional de base
+de datos quede abierto durante una descarga de red y conectar el watcher al
+scheduler diario.
 
-Este checkpoint **no se debe integrar sin revisión y pruebas**. Se solapa con
-`mirror_lifecycle.py` del checkpoint de continuidad y con `tile_seed.py` del de
-capacidad. Además quedan dos cierres P0 expresamente sin implementar:
+### Smoke local prepromoción de GeoServer
 
-1. bloquear por defecto el proxy cartográfico remoto en catálogo y rutas;
-2. comparar estructura y contenido razonable con la versión activa antes de
-   promover (tipo, CRS, bounds, schema y caída masiva de features).
+- Worktree:
+  `/home/dev/proyectos/asistente_ayuntamientos-worktrees/local-operation-smoke-20260726`
+- Rama: `codex/local-operation-smoke-20260726-20260726`
+- Sesión: `local-operation-smoke-20260726`
+- Base original: `07e46d5`
 
-## Orden seguro al reanudar
+Implementa un smoke local por estilo antes de promover: mapa, leyenda cuando
+exista e `identify` GeoJSON cuando la capa sea consultable. La evidencia queda
+en las estadísticas del run y un fallo debe impedir la promoción. Al redactar
+este checkpoint faltaban sus pruebas focales y el commit final.
 
-1. Repetir la auditoría Git y confirmar que las cuatro sesiones siguen
-   `paused` y limpias. Hacer `git fetch origin` y comprobar la base, sin iniciar
-   aún el runtime.
-2. Integrar o rebasar primero `c9d7705` sobre
-   `codex/siur-local-mirror-20260722`; ejecutar sus pruebas focales y la suite de
-   referencia.
-3. Rebasar/probar `2b7b32f` sobre esa combinación. Ejecutar las dos suites
-   focales PostgreSQL y resolver cualquier incompatibilidad antes de
-   cherry-pick.
-4. Portar `3117535` + `67cc9d6` sobre la combinación ya validada, resolviendo
-   explícitamente los solapes. Lifecycle 0037 debe seguir siendo el único
-   coordinador de fallback.
-5. Añadir las regresiones que faltan al orquestador y cerrar el proxy remoto
-   fail-closed y la comparación pre-promoción.
-6. Implementar la comprobación diaria durable del catálogo
-   `settings.json`: descarga condicional fijada, hash canónico, evidencia
-   observable y estado `update_available`; un cambio de catálogo no debe
-   aplicarse automáticamente sin revisión.
-7. Ejecutar suite backend completa y migraciones fresh y deployed desde
-   `20260722_0034` a `head`, incluidos downgrades soportados.
-8. Solo entonces adquirir el lease:
+No editar ninguno de estos worktrees mientras su sesión siga `active`; esperar
+el handoff explícito del propietario.
+
+## Bloqueos de producto todavía abiertos
+
+P0 antes de considerar la entrega terminada:
+
+1. Integrar y revisar los dos cierres paralelos.
+2. Persistir una estrategia exacta para cada una de las 227 capas hoja:
+   `vector`, `raster`, `tiles`, `composition` o `blocked`; las composiciones
+   deben declarar dependencias sin ciclos y todo bloqueo debe tener evidencia.
+3. Persistir paridad de estilo `exact`, `adapted`, `baked` o `missing`; copiar
+   símbolos a almacenamiento local y bloquear la entrega si falta un recurso.
+4. Ejecutar migraciones fresh y desde las dos cabezas hermanas, y después
+   actualizar la base real desde `20260722_0034`.
+5. Ejecutar bootstrap, sincronizar, validar y promover las 227 capas. El estado
+   final esperado es 227 estrategias explícitas, 227 capas servibles desde
+   artefactos locales o bloqueadas con razón revisable, y cero proxy remoto.
+6. Probar offline el flujo completo: catálogo, teselas/mapa, estilos, leyenda,
+   identify, promoción, rollback y continuidad después de reinicio.
+
+P1 operativo:
+
+- exponer métricas de bytes, duración, próxima comprobación, validación y último
+  error;
+- añadir una interfaz de operador para rollback con target, generación
+  esperada, actor, motivo y dry-run;
+- definir retención/GC conservando al menos activa y anterior;
+- añadir herramienta/runbook de recuperación y simulacro de restauración;
+- conservar localmente la metadata descriptiva;
+- cuantificar geometrías reparadas y documentar contratos por fuente;
+- limitar explícitamente la cuota de GeoWebCache y comprobar margen de
+  almacenamiento/carga.
+
+## Orden exacto al reanudar
+
+1. Desde el checkout de coordinación:
+
+   ```bash
+   cd /home/dev/proyectos/asistente_ayuntamientos
+   pwd
+   git status --short --branch
+   git remote -v
+   git branch --show-current
+   scripts/codex-session audit
+   scripts/codex-session list
+   scripts/codex-session runtime status
+   ```
+
+2. Confirmar los handoffs de los dos workers. Revisar sus commits, diffs y
+   pruebas antes de llevarlos a `codex/siur-local-mirror-20260722`.
+3. Resolver primero el merge de migraciones y el watcher; después el smoke
+   prepromoción. Integrar la invocación diaria del watcher en el scheduler.
+4. Ejecutar focales, suite de referencia, suite backend completa y matriz de
+   migraciones desde fresh, desde `20260723_0037` y desde
+   `20260722_0034`.
+5. Implementar matriz de estrategias, paridad de estilos y los P0 restantes en
+   ramas/worktrees nuevos.
+6. Solo con código y pruebas limpios adquirir el runtime:
 
    ```bash
    scripts/codex-session runtime acquire \
@@ -178,30 +196,15 @@ capacidad. Además quedan dos cierres P0 expresamente sin implementar:
      --task siur-local-mirror
    ```
 
-   Reconstruir servicios, migrar desarrollo y ejecutar bootstrap real.
-9. Sincronizar y promover muestras vector, ráster y tiles; después iniciar la
-   carga completa de las 227 capas con capacidad observada. Verificar fallback,
-   reanudación, promoción y rollback.
-10. Verificar frontend en puerto 3000 y cortar la salida remota del plano de
-    servicio para comprobar mapa, teselas, estilos, leyendas e identify solo
-    desde copias locales.
+7. Reconstruir servicios, comprobar los binarios GDAL, migrar desarrollo,
+   ejecutar bootstrap y sincronizar muestras vector, ráster y tiles antes de la
+   carga completa.
+8. Volver a medir disco. La estimación anterior era aproximadamente 15 GB para
+   PNOA, 30 GB para IGN Base y 17 GB para MTN, además de derivados y reserva.
+9. Ejecutar la carga completa con capacidad observada, verificar promoción,
+   continuidad y rollback, y después la prueba offline integral.
+10. Leer las skills de verificación de navegador antes de comprobar el
+    frontend en puerto 3000.
 
-## Riesgos y trabajo todavía no realizado
-
-- La base de desarrollo seguía mostrando 227 capas con `delivery_mode=proxy`;
-  aún no existen 227 versiones locales promovidas.
-- El backend todavía puede usar el proxy remoto si no se integra el cierre P0.
-- No existe todavía comparación estructural activa antes de promoción.
-- Falta el watcher durable diario del catálogo SIUR, distinto del chequeo de
-  píxeles de fuentes tiles.
-- No se ha ejecutado bootstrap/carga real, ni prueba offline integral, ni
-  verificación visual en puerto 3000 con este código.
-- Falta completar validación ráster (nodata, overviews, resolución), smoke de
-  leyenda/identify, métricas operativas, interfaz explícita de rollback y
-  política de retención/recuperación compatible con la inmutabilidad.
-- Las estimaciones reales previas fueron aproximadamente 15 GB PNOA, 30 GB IGN
-  Base y 17 GB MTN; antes de una carga completa hay que volver a medir espacio y
-  respetar cuota y reserva.
-
-No fusionar en `main` hasta resolver estos puntos y repetir la verificación
-integral.
+No fusionar en `main` hasta cerrar los P0, repetir la verificación integral y
+realizar una auditoría requisito por requisito con evidencia.
