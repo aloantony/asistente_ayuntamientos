@@ -57,6 +57,7 @@ from app.reference_layers.mirror_authorization import (
     stored_mirror_authorization_review_is_valid,
 )
 from app.reference_layers.mirror_lifecycle import (
+    LocalMetadataTransitionVerification,
     SyncRunLease,
     catalog_snapshot_contains_active_layer,
     stored_catalog_snapshot_is_valid,
@@ -348,6 +349,62 @@ def verify_local_metadata_precommit(
     return LocalMetadataVerification(
         document_sha256=expected_sha256,
         document_size_bytes=len(expected_body),
+    )
+
+
+def verify_local_metadata_transition(
+    store: ReferenceBlobStore,
+    db: Session,
+    version: ReferenceDeliveryVersion,
+) -> LocalMetadataTransitionVerification:
+    """Rebuild and hash frozen metadata inside a lifecycle transaction."""
+
+    assets = tuple(
+        db.scalars(
+            select(ReferenceDeliveryAsset)
+            .where(ReferenceDeliveryAsset.version_id == version.id)
+            .order_by(ReferenceDeliveryAsset.id)
+        )
+    )
+    metadata_asset = _unique_metadata_asset(assets)
+    expected = _expected_documents_for_versions(
+        db,
+        versions=(version,),
+        assets_by_version={version.id: assets},
+    ).get(version.id)
+    if expected is None:
+        raise LocalMetadataError(
+            "delivery metadata transition evidence is incomplete"
+        )
+    expected_body = canonical_json_bytes(expected)
+    expected_binding = expected["binding"]
+    expected_descriptor = local_metadata_asset_descriptor(
+        document_sha256=metadata_asset.sha256,
+        document_size_bytes=metadata_asset.size_bytes or 0,
+        binding=expected_binding,
+    )
+    if (
+        metadata_asset.metadata_json != expected_descriptor
+        or not local_metadata_gate_matches(
+            version.validation_json,
+            document_sha256=metadata_asset.sha256,
+            document_size_bytes=metadata_asset.size_bytes,
+            descriptor=expected_descriptor,
+            binding=expected_binding,
+        )
+    ):
+        raise LocalMetadataError(
+            "delivery metadata transition gate is invalid"
+        )
+    body, parsed = _read_metadata_asset(store, metadata_asset)
+    if body != expected_body or parsed != expected:
+        raise LocalMetadataError(
+            "delivery metadata transition body is invalid"
+        )
+    return LocalMetadataTransitionVerification(
+        asset_id=metadata_asset.id,
+        document_sha256=metadata_asset.sha256,
+        document_size_bytes=len(body),
     )
 
 
@@ -811,6 +868,18 @@ def _assemble_document(
     artifacts: dict[int, ReferenceSourceArtifact],
     artifact_links: tuple[tuple[int, str], ...],
 ) -> dict[str, Any]:
+    run_definition = run.source_definition_json
+    if not isinstance(run_definition, dict):
+        raise LocalMetadataError(
+            "sync-run source definition is unavailable"
+        )
+    run_config = run_definition.get("config")
+    frozen_source_format = (
+        run_config.get("format")
+        if isinstance(run_config, dict)
+        and isinstance(run_config.get("format"), str)
+        else None
+    )
     prepared_validation_sha256 = canonical_json_sha256(
         prepared.validation_json
     )
@@ -937,14 +1006,26 @@ def _assemble_document(
                 "source key",
                 255,
             ),
-            "protocol": source.protocol,
-            "target_kind": source.target_kind,
+            "protocol": _required_text(
+                run_definition.get("protocol"),
+                "source protocol",
+                30,
+            ),
+            "target_kind": _required_text(
+                run_definition.get("target_kind"),
+                "source target kind",
+                16,
+            ),
             "source_format": _optional_text(
-                source.source_format,
+                frozen_source_format,
                 "source format",
                 255,
             ),
-            "sync_strategy": source.sync_strategy,
+            "sync_strategy": _required_text(
+                run_definition.get("sync_strategy"),
+                "source sync strategy",
+                30,
+            ),
             "definition_sha256": run.source_definition_sha256,
         },
         "styles": {
@@ -1394,12 +1475,19 @@ def _expected_documents_for_versions(
                 or service is None
                 or source.provider_key != version.provider_key
                 or source.layer_id != version.layer_id
-                or source.target_kind != version.delivery_kind
-                or source.definition_sha256
-                != run.source_definition_sha256
                 or run.source_id != source.id
                 or run.provider_key != version.provider_key
                 or run.layer_id != version.layer_id
+                or not isinstance(
+                    run.source_definition_json,
+                    dict,
+                )
+                or run.source_definition_json.get("target_kind")
+                != version.delivery_kind
+                or canonical_json_sha256(
+                    run.source_definition_json
+                )
+                != run.source_definition_sha256
                 or run.mirror_authorization_review_id != review.id
                 or run.mirror_authorization_review_sha256
                 != review.review_sha256
@@ -1407,10 +1495,7 @@ def _expected_documents_for_versions(
                 or snapshot.definition_sha256
                 != version.catalog_definition_sha256
                 or layer.provider_key != version.provider_key
-                or layer.last_seen_snapshot_id != snapshot.id
-                or layer.service_id != service.id
                 or service.provider_key != version.provider_key
-                or service.last_seen_snapshot_id != snapshot.id
                 or review.id
                 != version.mirror_authorization_review_id
                 or review.review_sha256

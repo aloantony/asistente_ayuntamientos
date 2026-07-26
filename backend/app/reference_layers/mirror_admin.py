@@ -34,6 +34,9 @@ from app.reference_layers.delivery_builder import (
     DeliveryBuildError,
     canonical_json_sha256,
 )
+from app.reference_layers.local_metadata import (
+    verify_local_metadata_transition,
+)
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
     require_current_source_authorization,
@@ -775,6 +778,7 @@ def _require_active_actor(db: Session, actor_user_id: int) -> User:
 def execute_transition(
     db: Session,
     *,
+    store: ReferenceBlobStore,
     action: str,
     provider_key: str,
     layer_id: int,
@@ -794,6 +798,15 @@ def execute_transition(
         "to_version_id": target_version_id,
         "expected_generation": expected_generation,
         "reason": reason,
+        "metadata_verifier": (
+            lambda transition_db, version: (
+                verify_local_metadata_transition(
+                    store,
+                    transition_db,
+                    version,
+                )
+            )
+        ),
     }
     if action == "rollback":
         result: DeliveryTransitionPreview | PromotionResult
@@ -983,19 +996,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                         layer_id=arguments.layer_id,
                     )
                 else:
-                    result = execute_transition(
-                        db,
-                        action=arguments.command,
-                        provider_key=arguments.provider_key,
-                        layer_id=arguments.layer_id,
-                        target_version_id=arguments.target_version_id,
-                        expected_generation=(
-                            arguments.expected_generation
+                    with ReferenceBlobStore(
+                        settings.reference_storage_root,
+                        max_blob_bytes=(
+                            settings.reference_blob_max_bytes
                         ),
-                        actor_user_id=arguments.actor_user_id,
-                        reason=arguments.reason,
-                        apply=arguments.apply,
-                    )
+                        quota_bytes=(
+                            settings.reference_storage_quota_bytes
+                        ),
+                        min_free_bytes=(
+                            settings.reference_storage_min_free_bytes
+                        ),
+                    ) as store:
+                        result = execute_transition(
+                            db,
+                            store=store,
+                            action=arguments.command,
+                            provider_key=arguments.provider_key,
+                            layer_id=arguments.layer_id,
+                            target_version_id=(
+                                arguments.target_version_id
+                            ),
+                            expected_generation=(
+                                arguments.expected_generation
+                            ),
+                            actor_user_id=arguments.actor_user_id,
+                            reason=arguments.reason,
+                            apply=arguments.apply,
+                        )
         _print_json(result)
         return 0
     except (MirrorAdminInputError, MirrorLifecycleError) as error:

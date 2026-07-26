@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -37,8 +38,11 @@ from app.reference_layers.delivery_builder import (
 from app.reference_layers.local_metadata import (
     attach_local_metadata_asset,
     catalog_local_metadata_availability,
+    resolve_local_metadata,
     verify_local_metadata_precommit,
+    verify_local_metadata_transition,
 )
+from app.reference_layers.local_delivery import resolve_local_delivery
 from app.reference_layers.mirror_lifecycle import (
     MirrorLeaseLostError,
     apply_mirror_bootstrap_plan,
@@ -181,6 +185,7 @@ def _lease_and_input(db, storage_root):
     fixture.lease = lease
     fixture.snapshot = layer.last_seen_snapshot
     fixture.review = review
+    fixture.definition = definition
     fixture.db = db
     fixture.store = ReferenceBlobStore(Path(storage_root))
     db.commit()
@@ -394,6 +399,16 @@ def _metadata_verifier(fixture):
     )
 
 
+def _transition_verifier(fixture):
+    return lambda transition_db, version: (
+        verify_local_metadata_transition(
+            fixture.store,
+            transition_db,
+            version,
+        )
+    )
+
+
 def _promoted_local_metadata_delivery(db, storage_root):
     source, lease, fixture = _lease_and_input(
         db,
@@ -413,6 +428,7 @@ def _promoted_local_metadata_delivery(db, storage_root):
         lease=lease,
         expected_generation=0,
         reason="Publish canonical local metadata",
+        metadata_verifier=_transition_verifier(fixture),
         now=NOW + timedelta(seconds=2),
     )
     return SimpleNamespace(
@@ -420,6 +436,7 @@ def _promoted_local_metadata_delivery(db, storage_root):
         store=fixture.store,
         layer=db.get(ReferenceLayer, source.layer_id),
         review=fixture.review,
+        definition=fixture.definition,
         version=db.get(ReferenceDeliveryVersion, built.version_id),
         metadata_asset=db.scalar(
             select(ReferenceDeliveryAsset).where(
@@ -720,6 +737,95 @@ def test_local_metadata_endpoint_is_authenticated_local_and_exact(
         if layer["id"] == delivery.layer.id
     )
     assert catalog_layer["metadata_available"] is True
+
+
+def test_semantic_catalog_refresh_preserves_frozen_map_and_metadata(
+    db,
+    tmp_path,
+) -> None:
+    delivery = _promoted_local_metadata_delivery(db, tmp_path)
+    original = resolve_local_metadata(
+        db,
+        delivery.store,
+        layer=delivery.layer,
+    )
+    original_snapshot_id = delivery.version.catalog_snapshot_id
+    original_service = delivery.definition.services[0]
+    original_layer = delivery.definition.layers[0]
+    original_style = original_layer.styles[0]
+    refreshed_definition = replace(
+        delivery.definition,
+        raw_catalog={"revision": 2},
+        services=(
+            replace(
+                original_service,
+                title="WMS refreshed",
+            ),
+        ),
+        layers=(
+            replace(
+                original_layer,
+                title="Planning refreshed",
+                styles=(
+                    replace(
+                        original_style,
+                        title="Default refreshed",
+                    ),
+                ),
+            ),
+        ),
+        retrieved_at=NOW + timedelta(days=1),
+    )
+    refreshed_snapshot, _ = apply_catalog_definition(
+        db,
+        refreshed_definition,
+    )
+    current_layer = db.get(ReferenceLayer, delivery.layer.id)
+    current_style = db.scalar(
+        select(ReferenceLayerStyle).where(
+            ReferenceLayerStyle.layer_id == current_layer.id,
+            ReferenceLayerStyle.is_default.is_(True),
+            ReferenceLayerStyle.last_seen_snapshot_id
+            == refreshed_snapshot.id,
+        )
+    )
+
+    selection = resolve_local_delivery(
+        db,
+        layer=current_layer,
+        style=current_style,
+        operation="tile",
+    )
+    refreshed = resolve_local_metadata(
+        db,
+        delivery.store,
+        layer=current_layer,
+    )
+    metadata_availability = catalog_local_metadata_availability(
+        db,
+        delivery.store,
+        provider_key=current_layer.provider_key,
+        layers=[current_layer],
+        local_availability={
+            current_layer.id: LayerDeliveryAvailability(
+                delivery_available=True,
+                legend_available=True,
+                identify_available=True,
+                delivery_blocker=None,
+                available_style_ids=(current_style.id,),
+                available_legend_style_ids=(current_style.id,),
+            )
+        },
+    )
+
+    assert refreshed_snapshot.id != original_snapshot_id
+    assert current_layer.last_seen_snapshot_id == refreshed_snapshot.id
+    assert selection is not None
+    assert selection.version_id == delivery.version.id
+    assert refreshed.version_id == delivery.version.id
+    assert refreshed.sha256 == original.sha256
+    assert refreshed.body == original.body
+    assert metadata_availability[current_layer.id] is True
 
 
 def test_extra_descriptor_key_disables_catalog_and_endpoint(
@@ -1250,6 +1356,7 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
         lease=lease,
         expected_generation=0,
         reason="Initial continuity baseline",
+        metadata_verifier=_transition_verifier(artifact),
         now=NOW + timedelta(seconds=2),
     )
 

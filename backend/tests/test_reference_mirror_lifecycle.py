@@ -2,6 +2,7 @@ from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
+import io
 import json
 from threading import Barrier
 import time
@@ -13,6 +14,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.reference_layers import delivery_builder as reference_delivery_builder
+from app.reference_layers import mirror_lifecycle as reference_mirror_lifecycle
+from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
@@ -38,11 +41,20 @@ from app.reference_layers.mirror_lifecycle import (
     rollback_delivery_version,
     stored_promotion_hash_is_valid,
 )
+from app.reference_layers.local_metadata import (
+    _assemble_document,
+    verify_local_metadata_transition,
+)
+from app.reference_layers.local_metadata_contract import (
+    local_metadata_asset_descriptor,
+    local_metadata_precommit_gate,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
     ReferenceDeliveryPromotion,
     ReferenceDeliveryVersion,
+    ReferenceDeliveryVersionArtifact,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerMirrorStrategy,
@@ -65,6 +77,22 @@ from support_reference_mirror_authorization import (
 )
 
 NOW = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def metadata_store(tmp_path):
+    with ReferenceBlobStore(tmp_path / "reference-data") as store:
+        yield store
+
+
+def _transition_verifier(store):
+    return lambda transition_db, version: (
+        verify_local_metadata_transition(
+            store,
+            transition_db,
+            version,
+        )
+    )
 
 
 @pytest.fixture
@@ -350,7 +378,18 @@ def _create_style_parity_plan(
     return style, style_artifact, plan, items
 
 
-def _create_version(db, *, source, snapshot, lease, sequence_number: int):
+def _create_version(
+    db,
+    *,
+    store,
+    source,
+    snapshot,
+    lease,
+    sequence_number: int,
+    include_metadata: bool = True,
+    include_metadata_gate: bool = True,
+    duplicate_metadata: bool = False,
+):
     review = ensure_authorized_mirror_source(
         db,
         source,
@@ -364,75 +403,51 @@ def _create_version(db, *, source, snapshot, lease, sequence_number: int):
         lease=lease,
         sequence_number=sequence_number,
     )
-    validation = {
+    prepared_validation = {
+        "schema_version": "reference-delivery-validation/v1",
         "passed": True,
-        "checks": ["bounds", "schema", "primary_asset"],
-        "style_parity_gate": {
-            "schema_version": "reference-delivery-style-parity-gate/v1",
-            "passed": True,
-            "plan_id": plan.id,
-            "plan_evidence_sha256": plan.evidence_sha256,
-            "required_style_count": len(plan_items),
-            "verified_style_count": len(plan_items),
-            "missing_style_count": 0,
+        "kind": source.target_kind,
+        "checks": {
+            "data_schema": {
+                "schema_version": "reference-test-schema/v1",
+            },
         },
     }
-    version = ReferenceDeliveryVersion(
-        provider_key=source.provider_key,
-        layer_id=source.layer_id,
-        source_id=source.id,
-        sync_run_id=lease.run_id,
-        catalog_snapshot_id=snapshot.id,
-        catalog_definition_sha256=snapshot.definition_sha256,
-        mirror_authorization_review_id=review.id,
-        mirror_authorization_review_sha256=review.review_sha256,
-        sequence_number=sequence_number,
-        delivery_kind=source.target_kind,
-        source_version=f"2026-07-{20 + sequence_number}",
-        content_sha256=f"{sequence_number + 1:x}" * 64,
-        manifest_sha256=f"{sequence_number + 3:x}" * 64,
-        validation_sha256=_canonical_sha256(validation),
-        reference_at=NOW,
-        crs="EPSG:3857",
-        bounds_json={
-            "west": -7.1,
-            "south": 40.0,
-            "east": -1.7,
-            "north": 43.3,
-        },
-        feature_count=10 * sequence_number,
-        validation_json=validation,
-        created_at=NOW + timedelta(minutes=sequence_number),
-    )
-    db.add(version)
-    db.flush()
+    content_sha256 = f"{sequence_number + 1:x}" * 64
     asset_kind = {
         "vector": "vector_table",
         "raster": "raster_cog",
         "tiles": "tile_archive",
     }[source.target_kind]
-    storage_backend = "postgres" if source.target_kind == "vector" else "filesystem"
-    primary = ReferenceDeliveryAsset(
-        version_id=version.id,
-        asset_key="primary",
-        asset_kind=asset_kind,
-        is_primary=True,
-        storage_backend=storage_backend,
-        storage_key=f"mirror/{source.id}/v{sequence_number}",
-        media_type="application/octet-stream",
-        sha256=version.content_sha256,
-        size_bytes=None if storage_backend == "postgres" else 1024,
-        metadata_json=(
-            {"catalog_style_source_key": style.source_key}
-            if source.target_kind == "tiles"
-            else {}
-        ),
+    storage_backend = (
+        "postgres"
+        if source.target_kind == "vector"
+        else "filesystem"
     )
-    delivery_assets = [primary]
+    prepared_assets = [
+        reference_delivery_builder.PreparedDeliveryAsset(
+            asset_key="primary",
+            asset_kind=asset_kind,
+            is_primary=True,
+            storage_backend=storage_backend,
+            storage_key=f"mirror/{source.id}/v{sequence_number}",
+            media_type="application/octet-stream",
+            sha256=content_sha256,
+            size_bytes=(
+                None if storage_backend == "postgres" else 1024
+            ),
+            metadata_json=(
+                {"catalog_style_source_key": style.source_key}
+                if source.target_kind == "tiles"
+                else {}
+            ),
+        )
+    ]
+    artifact_links: tuple[tuple[int, str], ...] = ()
+    artifacts = {}
     if style_artifact is not None:
-        delivery_assets.append(
-            ReferenceDeliveryAsset(
-                version_id=version.id,
+        prepared_assets.append(
+            reference_delivery_builder.PreparedDeliveryAsset(
                 asset_key="style-default",
                 asset_kind="style_sld",
                 is_primary=False,
@@ -450,6 +465,166 @@ def _create_version(db, *, source, snapshot, lease, sequence_number: int):
                 },
             )
         )
+        artifact_links = ((style_artifact.id, "style"),)
+        artifacts = {style_artifact.id: style_artifact}
+    prepared = reference_delivery_builder.PreparedDelivery(
+        delivery_kind=source.target_kind,
+        source_version=f"2026-07-{20 + sequence_number}",
+        content_sha256=content_sha256,
+        reference_at=NOW,
+        crs="EPSG:3857",
+        bounds_json={
+            "west": -7.1,
+            "south": 40.0,
+            "east": -1.7,
+            "north": 43.3,
+        },
+        feature_count=10 * sequence_number,
+        validation_json=prepared_validation,
+        input_artifact_ids=(),
+        assets=tuple(prepared_assets),
+        supporting_artifacts=artifact_links,
+    )
+    validation = {
+        **prepared_validation,
+        "continuity_gate": {"passed": True},
+        "style_parity_gate": {
+            "schema_version": "reference-delivery-style-parity-gate/v1",
+            "passed": True,
+            "plan_id": plan.id,
+            "plan_evidence_sha256": plan.evidence_sha256,
+            "required_style_count": len(plan_items),
+            "verified_style_count": len(plan_items),
+            "missing_style_count": 0,
+        },
+    }
+    metadata_prepared = None
+    if include_metadata:
+        layer = db.get(ReferenceLayer, source.layer_id)
+        service = db.get(ReferenceService, layer.service_id)
+        document = _assemble_document(
+            prepared=prepared,
+            source=source,
+            run=db.get(ReferenceSyncRun, lease.run_id),
+            layer=layer,
+            service=service,
+            snapshot=snapshot,
+            review=review,
+            plan=plan,
+            plan_items=plan_items,
+            styles=(style,),
+            artifacts=artifacts,
+            artifact_links=artifact_links,
+        )
+        body = reference_delivery_builder.canonical_json_bytes(
+            document
+        )
+        blob = store.put_stream(
+            io.BytesIO(body),
+            expected_sha256=hashlib.sha256(body).hexdigest(),
+            expected_size=len(body),
+        )
+        descriptor = local_metadata_asset_descriptor(
+            document_sha256=blob.sha256,
+            document_size_bytes=blob.size_bytes,
+            binding=document["binding"],
+        )
+        metadata_prepared = (
+            reference_delivery_builder.PreparedDeliveryAsset(
+                asset_key="metadata",
+                asset_kind="metadata",
+                is_primary=False,
+                storage_backend=blob.storage_backend,
+                storage_key=blob.storage_key,
+                media_type="application/json",
+                sha256=blob.sha256,
+                size_bytes=blob.size_bytes,
+                metadata_json=descriptor,
+            )
+        )
+        if include_metadata_gate:
+            validation["local_metadata_gate"] = (
+                local_metadata_precommit_gate(
+                    document_sha256=blob.sha256,
+                    document_size_bytes=blob.size_bytes,
+                    descriptor=descriptor,
+                    binding=document["binding"],
+                )
+            )
+    version = ReferenceDeliveryVersion(
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
+        source_id=source.id,
+        sync_run_id=lease.run_id,
+        catalog_snapshot_id=snapshot.id,
+        catalog_definition_sha256=snapshot.definition_sha256,
+        mirror_authorization_review_id=review.id,
+        mirror_authorization_review_sha256=review.review_sha256,
+        sequence_number=sequence_number,
+        delivery_kind=source.target_kind,
+        source_version=f"2026-07-{20 + sequence_number}",
+        content_sha256=content_sha256,
+        manifest_sha256=f"{sequence_number + 3:x}" * 64,
+        validation_sha256=_canonical_sha256(validation),
+        reference_at=NOW,
+        crs="EPSG:3857",
+        bounds_json={
+            "west": -7.1,
+            "south": 40.0,
+            "east": -1.7,
+            "north": 43.3,
+        },
+        feature_count=10 * sequence_number,
+        validation_json=validation,
+        created_at=NOW + timedelta(minutes=sequence_number),
+    )
+    db.add(version)
+    db.flush()
+    db.add_all(
+        [
+            ReferenceDeliveryVersionArtifact(
+                source_id=source.id,
+                version_id=version.id,
+                artifact_id=artifact_id,
+                role=role,
+            )
+            for artifact_id, role in artifact_links
+        ]
+    )
+    stored_assets = [
+        *prepared_assets,
+        *(
+            [metadata_prepared]
+            if metadata_prepared is not None
+            else []
+        ),
+        *(
+            [
+                replace(
+                    metadata_prepared,
+                    asset_key="metadata-copy",
+                )
+            ]
+            if duplicate_metadata
+            and metadata_prepared is not None
+            else []
+        ),
+    ]
+    delivery_assets = [
+        ReferenceDeliveryAsset(
+            version_id=version.id,
+            asset_key=asset.asset_key,
+            asset_kind=asset.asset_kind,
+            is_primary=asset.is_primary,
+            storage_backend=asset.storage_backend,
+            storage_key=asset.storage_key,
+            media_type=asset.media_type,
+            sha256=asset.sha256,
+            size_bytes=asset.size_bytes,
+            metadata_json=asset.metadata_json,
+        )
+        for asset in stored_assets
+    ]
     db.add_all(delivery_assets)
     db.flush()
     reference_delivery_builder._append_delivery_style_parity(
@@ -464,7 +639,23 @@ def _create_version(db, *, source, snapshot, lease, sequence_number: int):
     return version
 
 
-def _promote_cross_snapshot_versions(db):
+def _tamper_metadata_blob(db, store, version, tamper_kind):
+    metadata = db.scalar(
+        select(ReferenceDeliveryAsset).where(
+            ReferenceDeliveryAsset.version_id == version.id,
+            ReferenceDeliveryAsset.asset_kind == "metadata",
+        )
+    )
+    assert metadata is not None
+    path = store.resolve_blob(metadata.storage_key)
+    if tamper_kind == "delete":
+        path.unlink()
+        return
+    body = path.read_bytes()
+    path.write_bytes(bytes([body[0] ^ 1]) + body[1:])
+
+
+def _promote_cross_snapshot_versions(db, store):
     _, layer, snapshot_v1, sources, _ = _seed_bootstrap(db)
     source_v1 = next(item for item in sources if item.target_kind == "vector")
     _only_source_due(db, source_v1)
@@ -476,6 +667,7 @@ def _promote_cross_snapshot_versions(db):
     )
     version_v1 = _create_version(
         db,
+        store=store,
         source=source_v1,
         snapshot=snapshot_v1,
         lease=lease_v1,
@@ -487,6 +679,7 @@ def _promote_cross_snapshot_versions(db):
         lease=lease_v1,
         expected_generation=0,
         reason="catalog v1",
+        metadata_verifier=_transition_verifier(store),
         now=NOW + timedelta(seconds=1),
     )
 
@@ -528,6 +721,7 @@ def _promote_cross_snapshot_versions(db):
     )
     version_v2 = _create_version(
         db,
+        store=store,
         source=source_v2,
         snapshot=snapshot_v2,
         lease=lease_v2,
@@ -539,6 +733,7 @@ def _promote_cross_snapshot_versions(db):
         lease=lease_v2,
         expected_generation=1,
         reason="catalog v2",
+        metadata_verifier=_transition_verifier(store),
         now=NOW + timedelta(seconds=3),
     )
     return (
@@ -777,7 +972,10 @@ def test_failed_sources_fall_back_in_priority_order_and_exhaust_once(db) -> None
     assert next(source for source in sources if source.is_primary).id == primary.id
 
 
-def test_successful_fallback_keeps_preferred_daily_source(db) -> None:
+def test_successful_fallback_keeps_preferred_daily_source(
+    db,
+    metadata_store,
+) -> None:
     _, layer, snapshot, sources, _ = _seed_bootstrap(db)
     primary = next(source for source in sources if source.is_primary)
     primary.next_check_at = NOW - timedelta(seconds=1)
@@ -805,6 +1003,7 @@ def test_successful_fallback_keeps_preferred_daily_source(db) -> None:
     assert fallback_source.id != primary.id
     fallback_version = _create_version(
         db,
+        store=metadata_store,
         source=fallback_source,
         snapshot=snapshot,
         lease=fallback_lease,
@@ -816,6 +1015,7 @@ def test_successful_fallback_keeps_preferred_daily_source(db) -> None:
         lease=fallback_lease,
         expected_generation=0,
         reason="validated fallback delivery",
+        metadata_verifier=_transition_verifier(metadata_store),
         now=NOW + timedelta(seconds=3),
     )
 
@@ -1073,7 +1273,10 @@ def test_failed_outcome_requires_error_code(db) -> None:
         )
 
 
-def test_expired_worker_is_fenced_from_finish_and_promotion(db) -> None:
+def test_expired_worker_is_fenced_from_finish_and_promotion(
+    db,
+    metadata_store,
+) -> None:
     _, _, snapshot, sources, _ = _seed_bootstrap(db)
     source = next(item for item in sources if item.target_kind == "vector")
     _only_source_due(db, source)
@@ -1086,6 +1289,7 @@ def test_expired_worker_is_fenced_from_finish_and_promotion(db) -> None:
     )
     version = _create_version(
         db,
+        store=metadata_store,
         source=source,
         snapshot=snapshot,
         lease=expired,
@@ -1116,6 +1320,9 @@ def test_expired_worker_is_fenced_from_finish_and_promotion(db) -> None:
             lease=expired,
             expected_generation=0,
             reason="stale worker must not publish",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=after_expiry + timedelta(seconds=1),
         )
     with pytest.raises(MirrorLeaseLostError):
@@ -1134,6 +1341,7 @@ def test_expired_worker_is_fenced_from_finish_and_promotion(db) -> None:
         reason="replacement worker validated version",
         observed_manifest_sha256="a" * 64,
         stats_json={"features": 10},
+        metadata_verifier=_transition_verifier(metadata_store),
         now=after_expiry + timedelta(seconds=1),
     )
     assert promoted.generation == 1
@@ -1238,7 +1446,10 @@ def test_finish_rechecks_database_clock_after_waiting_for_the_run_lock(
                 future.result(timeout=5)
 
 
-def test_promotion_rejects_corrupt_current_source_definition(db) -> None:
+def test_promotion_rejects_corrupt_current_source_definition(
+    db,
+    metadata_store,
+) -> None:
     _, _, snapshot, sources, _ = _seed_bootstrap(db)
     source = next(item for item in sources if item.target_kind == "vector")
     _only_source_due(db, source)
@@ -1250,6 +1461,7 @@ def test_promotion_rejects_corrupt_current_source_definition(db) -> None:
     )
     version = _create_version(
         db,
+        store=metadata_store,
         source=source,
         snapshot=snapshot,
         lease=lease,
@@ -1268,12 +1480,342 @@ def test_promotion_rejects_corrupt_current_source_definition(db) -> None:
             lease=lease,
             expected_generation=0,
             reason="corrupt mutable source must not publish",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=1),
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "include_metadata",
+        "include_metadata_gate",
+        "duplicate_metadata",
+        "message",
+    ),
+    (
+        (False, False, False, "no unique verified metadata"),
+        (True, False, False, "precommit gate is invalid"),
+        (True, True, True, "no unique verified metadata"),
+    ),
+)
+def test_promotion_requires_exactly_one_gated_metadata_asset(
+    db,
+    metadata_store,
+    include_metadata,
+    include_metadata_gate,
+    duplicate_metadata,
+    message,
+) -> None:
+    _, _, snapshot, sources, _ = _seed_bootstrap(db)
+    source = next(
+        item for item in sources if item.target_kind == "vector"
+    )
+    _only_source_due(db, source)
+    enqueue_due_sources(db, now=NOW)
+    lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "f" * 64,
+    )
+    version = _create_version(
+        db,
+        store=metadata_store,
+        source=source,
+        snapshot=snapshot,
+        lease=lease,
+        sequence_number=1,
+        include_metadata=include_metadata,
+        include_metadata_gate=include_metadata_gate,
+        duplicate_metadata=duplicate_metadata,
+    )
+
+    with pytest.raises(MirrorPromotionConflict, match=message):
+        promote_delivery_version(
+            db,
+            version_id=version.id,
+            lease=lease,
+            expected_generation=0,
+            reason="invalid metadata evidence must not publish",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
+            now=NOW + timedelta(seconds=1),
+        )
+
+    assert db.get(
+        ReferenceLayerDeliveryState,
+        (source.provider_key, source.layer_id),
+    ) is None
+    assert db.get(ReferenceSyncRun, lease.run_id).status == "running"
+
+
+@pytest.mark.parametrize("tamper_kind", ("delete", "corrupt"))
+def test_promotion_rehashes_metadata_immediately_before_publish(
+    db,
+    metadata_store,
+    tamper_kind,
+) -> None:
+    _, _, snapshot, sources, _ = _seed_bootstrap(db)
+    source = next(
+        item for item in sources if item.target_kind == "vector"
+    )
+    _only_source_due(db, source)
+    enqueue_due_sources(db, now=NOW)
+    lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "9" * 64,
+    )
+    version = _create_version(
+        db,
+        store=metadata_store,
+        source=source,
+        snapshot=snapshot,
+        lease=lease,
+        sequence_number=1,
+    )
+    _tamper_metadata_blob(
+        db,
+        metadata_store,
+        version,
+        tamper_kind,
+    )
+
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="failed transition verification",
+    ):
+        promote_delivery_version(
+            db,
+            version_id=version.id,
+            lease=lease,
+            expected_generation=0,
+            reason="metadata changed after version creation",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
+            now=NOW + timedelta(seconds=1),
+        )
+
+    assert db.get(
+        ReferenceLayerDeliveryState,
+        (source.provider_key, source.layer_id),
+    ) is None
+    assert db.get(ReferenceSyncRun, lease.run_id).status == "running"
+
+
+@pytest.mark.parametrize("tamper_kind", ("delete", "corrupt"))
+def test_rollback_rehashes_frozen_metadata_before_transition(
+    db,
+    metadata_store,
+    tamper_kind,
+) -> None:
+    layer, _, _, version_v1, version_v2 = (
+        _promote_cross_snapshot_versions(db, metadata_store)
+    )
+    _tamper_metadata_blob(
+        db,
+        metadata_store,
+        version_v1,
+        tamper_kind,
+    )
+
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="failed transition verification",
+    ):
+        rollback_delivery_version(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=version_v1.id,
+            expected_generation=2,
+            reason="metadata changed after initial promotion",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
+            now=NOW + timedelta(seconds=4),
+        )
+
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.generation == 2
+    assert state.active_version_id == version_v2.id
+
+
+@pytest.mark.parametrize("tamper_kind", ("delete", "corrupt"))
+def test_reactivation_rehashes_frozen_metadata_before_transition(
+    db,
+    metadata_store,
+    tamper_kind,
+) -> None:
+    layer, _, _, version_v1, _ = (
+        _promote_cross_snapshot_versions(db, metadata_store)
+    )
+    deactivated = deactivate_delivery(
+        db,
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        expected_generation=2,
+        reason="maintenance isolation",
+        now=NOW + timedelta(seconds=4),
+    )
+    _tamper_metadata_blob(
+        db,
+        metadata_store,
+        version_v1,
+        tamper_kind,
+    )
+
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="failed transition verification",
+    ):
+        reactivate_delivery(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=version_v1.id,
+            expected_generation=deactivated.generation,
+            reason="metadata changed while disabled",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
+            now=NOW + timedelta(seconds=5),
+        )
+
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.status == "disabled"
+    assert state.generation == deactivated.generation
+    assert state.active_version_id is None
+
+
+def test_legacy_version_without_metadata_cannot_rollback_or_reactivate(
+    db,
+    metadata_store,
+) -> None:
+    _, layer, snapshot, sources, _ = _seed_bootstrap(db)
+    source = next(
+        item for item in sources if item.target_kind == "vector"
+    )
+    _only_source_due(db, source)
+    enqueue_due_sources(db, now=NOW)
+    first_lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "a" * 64,
+    )
+    legacy = _create_version(
+        db,
+        store=metadata_store,
+        source=source,
+        snapshot=snapshot,
+        lease=first_lease,
+        sequence_number=1,
+        include_metadata=False,
+        include_metadata_gate=False,
+    )
+    first_run = db.get(ReferenceSyncRun, first_lease.run_id)
+    first_run.status = "succeeded"
+    first_run.finished_at = NOW + timedelta(seconds=1)
+    first_run.lease_token = None
+    first_run.lease_expires_at = None
+    reference_mirror_lifecycle._append_promotion(
+        db,
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        action="promote",
+        from_version_id=None,
+        to_version_id=legacy.id,
+        run_id=first_run.id,
+        actor_id=None,
+        reason="legacy delivery predating metadata gate",
+        created_at=NOW + timedelta(seconds=1),
+        state=None,
+        latest=None,
+    )
+    db.commit()
+
+    source = db.get(ReferenceLayerSource, source.id)
+    source.next_check_at = NOW + timedelta(seconds=2)
+    db.commit()
+    enqueue_due_sources(db, now=NOW + timedelta(seconds=2))
+    second_lease = claim_next_sync_run(
+        db,
+        now=NOW + timedelta(seconds=2),
+        token_factory=lambda: "b" * 64,
+    )
+    current = _create_version(
+        db,
+        store=metadata_store,
+        source=source,
+        snapshot=snapshot,
+        lease=second_lease,
+        sequence_number=2,
+    )
+    promote_delivery_version(
+        db,
+        version_id=current.id,
+        lease=second_lease,
+        expected_generation=1,
+        reason="current gated delivery",
+        metadata_verifier=_transition_verifier(metadata_store),
+        now=NOW + timedelta(seconds=3),
+    )
+
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="no unique verified metadata",
+    ):
+        rollback_delivery_version(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=legacy.id,
+            expected_generation=2,
+            reason="legacy rollback must be blocked",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
+            now=NOW + timedelta(seconds=4),
+        )
+
+    deactivated = deactivate_delivery(
+        db,
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        expected_generation=2,
+        reason="prepare explicit reactivation check",
+        now=NOW + timedelta(seconds=5),
+    )
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="no unique verified metadata",
+    ):
+        reactivate_delivery(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=legacy.id,
+            expected_generation=deactivated.generation,
+            reason="legacy reactivation must be blocked",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
+            now=NOW + timedelta(seconds=6),
         )
 
 
 def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
     db,
+    metadata_store,
 ) -> None:
     _, layer, snapshot, sources, _ = _seed_bootstrap(db)
     source = next(item for item in sources if item.target_kind == "vector")
@@ -1287,6 +1829,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
     )
     first_version = _create_version(
         db,
+        store=metadata_store,
         source=source,
         snapshot=snapshot,
         lease=first_lease,
@@ -1298,6 +1841,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         lease=first_lease,
         expected_generation=0,
         reason="initial validated mirror",
+        metadata_verifier=_transition_verifier(metadata_store),
         now=NOW + timedelta(seconds=1),
     )
     assert first.generation == 1
@@ -1338,6 +1882,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
     )
     second_version = _create_version(
         db,
+        store=metadata_store,
         source=source,
         snapshot=snapshot,
         lease=second_lease,
@@ -1350,6 +1895,9 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
             lease=second_lease,
             expected_generation=0,
             reason="stale generation",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=4),
         )
     with pytest.raises(
@@ -1363,6 +1911,9 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
             to_version_id=second_version.id,
             expected_generation=1,
             reason="unpublished versions cannot bypass promotion",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=4),
         )
     state = db.get(
@@ -1377,6 +1928,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         lease=second_lease,
         expected_generation=1,
         reason="second validated mirror",
+        metadata_verifier=_transition_verifier(metadata_store),
         now=NOW + timedelta(seconds=4),
     )
     assert second.from_version_id == first_version.id
@@ -1390,6 +1942,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         to_version_id=first_version.id,
         expected_generation=2,
         reason="rollback after smoke-test regression",
+        metadata_verifier=_transition_verifier(metadata_store),
         now=NOW + timedelta(seconds=6),
     )
     assert rollback.generation == 3
@@ -1435,6 +1988,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
 
 def test_rollback_is_blocked_after_current_mirror_authorization_revocation(
     db,
+    metadata_store,
 ) -> None:
     _, layer, snapshot, sources, _ = _seed_bootstrap(
         db,
@@ -1454,6 +2008,7 @@ def test_rollback_is_blocked_after_current_mirror_authorization_revocation(
         )
         version = _create_version(
             db,
+            store=metadata_store,
             source=source,
             snapshot=snapshot,
             lease=lease,
@@ -1465,6 +2020,9 @@ def test_rollback_is_blocked_after_current_mirror_authorization_revocation(
             lease=lease,
             expected_generation=sequence - 1,
             reason=f"authorized version {sequence}",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=sequence, milliseconds=100),
         )
         versions.append(version)
@@ -1488,12 +2046,16 @@ def test_rollback_is_blocked_after_current_mirror_authorization_revocation(
             to_version_id=versions[0].id,
             expected_generation=2,
             reason="revoked evidence must block rollback",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=4),
         )
 
 
 def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
     db,
+    metadata_store,
 ) -> None:
     _, layer, snapshot, sources, _ = _seed_bootstrap(db)
     source = next(item for item in sources if item.target_kind == "vector")
@@ -1506,6 +2068,7 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
     )
     first_version = _create_version(
         db,
+        store=metadata_store,
         source=source,
         snapshot=snapshot,
         lease=first_lease,
@@ -1517,6 +2080,7 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
         lease=first_lease,
         expected_generation=0,
         reason="initial version",
+        metadata_verifier=_transition_verifier(metadata_store),
         now=NOW + timedelta(seconds=1),
     )
 
@@ -1530,6 +2094,7 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
     )
     second_version = _create_version(
         db,
+        store=metadata_store,
         source=source,
         snapshot=snapshot,
         lease=second_lease,
@@ -1579,6 +2144,9 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
             lease=second_lease,
             expected_generation=1,
             reason="implicit reactivation is forbidden",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=4),
         )
 
@@ -1589,6 +2157,7 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
         to_version_id=first_version.id,
         expected_generation=deactivated.generation,
         reason="operator explicitly restored the last known good version",
+        metadata_verifier=_transition_verifier(metadata_store),
         now=NOW + timedelta(seconds=5),
     )
     assert reactivated.action == "reactivate"
@@ -1619,7 +2188,10 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
     assert db.get(ReferenceSyncRun, queued_id).expected_active_generation == 3
 
 
-def test_rollback_revalidates_the_original_run_and_current_source(db) -> None:
+def test_rollback_revalidates_the_original_run_and_current_source(
+    db,
+    metadata_store,
+) -> None:
     _, layer, snapshot, sources, _ = _seed_bootstrap(db)
     source = next(item for item in sources if item.target_kind == "vector")
     _only_source_due(db, source)
@@ -1636,6 +2208,7 @@ def test_rollback_revalidates_the_original_run_and_current_source(db) -> None:
         )
         version = _create_version(
             db,
+            store=metadata_store,
             source=source,
             snapshot=snapshot,
             lease=lease,
@@ -1647,6 +2220,9 @@ def test_rollback_revalidates_the_original_run_and_current_source(db) -> None:
             lease=lease,
             expected_generation=sequence_number - 1,
             reason=f"version {sequence_number}",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=sequence_number, milliseconds=100),
         )
         versions.append(version)
@@ -1667,12 +2243,16 @@ def test_rollback_revalidates_the_original_run_and_current_source(db) -> None:
             to_version_id=versions[0].id,
             expected_generation=2,
             reason="must not revive invalid evidence",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=5),
         )
 
 
 def test_rollback_can_select_a_valid_version_from_a_previous_catalog_snapshot(
     db,
+    metadata_store,
 ) -> None:
     (
         layer,
@@ -1680,7 +2260,7 @@ def test_rollback_can_select_a_valid_version_from_a_previous_catalog_snapshot(
         snapshot_v2,
         version_v1,
         version_v2,
-    ) = _promote_cross_snapshot_versions(db)
+    ) = _promote_cross_snapshot_versions(db, metadata_store)
     run_v1 = db.get(ReferenceSyncRun, version_v1.sync_run_id)
     run_v2 = db.get(ReferenceSyncRun, version_v2.sync_run_id)
 
@@ -1691,6 +2271,7 @@ def test_rollback_can_select_a_valid_version_from_a_previous_catalog_snapshot(
         to_version_id=version_v1.id,
         expected_generation=2,
         reason="catalog v2 renderer regression",
+        metadata_verifier=_transition_verifier(metadata_store),
         now=NOW + timedelta(seconds=4),
     )
 
@@ -1715,6 +2296,7 @@ def test_rollback_can_select_a_valid_version_from_a_previous_catalog_snapshot(
 )
 def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
     db,
+    metadata_store,
     corruption: str,
 ) -> None:
     (
@@ -1723,7 +2305,7 @@ def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
         _,
         version_v1,
         version_v2,
-    ) = _promote_cross_snapshot_versions(db)
+    ) = _promote_cross_snapshot_versions(db, metadata_store)
     if corruption == "run_definition":
         run = db.get(ReferenceSyncRun, version_v1.sync_run_id)
         run.source_definition_json = {
@@ -1745,6 +2327,9 @@ def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
             to_version_id=version_v1.id,
             expected_generation=2,
             reason="corrupt historical evidence must never reactivate",
+            metadata_verifier=_transition_verifier(
+                metadata_store
+            ),
             now=NOW + timedelta(seconds=4),
         )
 
@@ -1758,6 +2343,7 @@ def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
 
 def test_published_asset_cannot_be_corrupted_before_cross_snapshot_rollback(
     db,
+    metadata_store,
 ) -> None:
     (
         layer,
@@ -1765,7 +2351,7 @@ def test_published_asset_cannot_be_corrupted_before_cross_snapshot_rollback(
         _,
         version_v1,
         version_v2,
-    ) = _promote_cross_snapshot_versions(db)
+    ) = _promote_cross_snapshot_versions(db, metadata_store)
     asset = db.scalar(
         select(ReferenceDeliveryAsset).where(
             ReferenceDeliveryAsset.version_id == version_v1.id,

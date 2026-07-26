@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 import secrets
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Protocol
 
 from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.orm import Session
@@ -207,6 +207,21 @@ class DeliveryTransitionPreview:
     to_version_id: int
     expected_generation: int
     resulting_generation: int
+
+
+@dataclass(frozen=True)
+class LocalMetadataTransitionVerification:
+    asset_id: int
+    document_sha256: str
+    document_size_bytes: int
+
+
+class LocalMetadataTransitionVerifier(Protocol):
+    def __call__(
+        self,
+        db: Session,
+        version: ReferenceDeliveryVersion,
+    ) -> LocalMetadataTransitionVerification: ...
 
 
 def build_mirror_bootstrap_plan(
@@ -931,6 +946,7 @@ def promote_delivery_version(
     lease: SyncRunLease,
     expected_generation: int,
     reason: str,
+    metadata_verifier: LocalMetadataTransitionVerifier,
     actor_id: int | None = None,
     observed_etag: str | None = None,
     observed_last_modified: datetime | None = None,
@@ -949,6 +965,7 @@ def promote_delivery_version(
 
     _validate_lease(lease)
     _validate_expected_generation(expected_generation)
+    _require_metadata_transition_verifier(metadata_verifier)
     reason = _bounded_required_text(reason, "reason", 10_000)
     observed_etag = _bounded_optional_text(
         observed_etag,
@@ -1055,7 +1072,7 @@ def promote_delivery_version(
             run=run,
         )
         _validate_current_version_catalog(db, version)
-        _validate_version_ready(db, version)
+        metadata_asset = _validate_version_ready(db, version)
         from_version_id = (
             state.active_version_id
             if state is not None and state.status == "active"
@@ -1063,6 +1080,12 @@ def promote_delivery_version(
         )
         if from_version_id == version.id:
             raise MirrorPromotionConflict("delivery version is already active")
+        _verify_transition_local_metadata(
+            db,
+            version=version,
+            metadata_asset=metadata_asset,
+            metadata_verifier=metadata_verifier,
+        )
         promotion, new_generation = _append_promotion(
             db,
             provider_key=version.provider_key,
@@ -1103,6 +1126,7 @@ def preview_rollback_delivery_version(
     to_version_id: int,
     expected_generation: int,
     reason: str,
+    metadata_verifier: LocalMetadataTransitionVerifier,
 ) -> DeliveryTransitionPreview:
     """Validate an operator rollback without appending an event.
 
@@ -1112,14 +1136,23 @@ def preview_rollback_delivery_version(
     """
 
     _validate_expected_generation(expected_generation)
+    _require_metadata_transition_verifier(metadata_verifier)
     _bounded_required_text(reason, "reason", 10_000)
     try:
-        state, _, version = _lock_and_validate_rollback_target(
+        state, _, version, metadata_asset = (
+            _lock_and_validate_rollback_target(
+                db,
+                provider_key=provider_key,
+                layer_id=layer_id,
+                to_version_id=to_version_id,
+                expected_generation=expected_generation,
+            )
+        )
+        _verify_transition_local_metadata(
             db,
-            provider_key=provider_key,
-            layer_id=layer_id,
-            to_version_id=to_version_id,
-            expected_generation=expected_generation,
+            version=version,
+            metadata_asset=metadata_asset,
+            metadata_verifier=metadata_verifier,
         )
         return DeliveryTransitionPreview(
             provider_key=provider_key,
@@ -1142,6 +1175,7 @@ def rollback_delivery_version(
     to_version_id: int,
     expected_generation: int,
     reason: str,
+    metadata_verifier: LocalMetadataTransitionVerifier,
     actor_id: int | None = None,
     now: datetime | None = None,
 ) -> PromotionResult:
@@ -1149,14 +1183,23 @@ def rollback_delivery_version(
 
     moment = _moment(now)
     _validate_expected_generation(expected_generation)
+    _require_metadata_transition_verifier(metadata_verifier)
     reason = _bounded_required_text(reason, "reason", 10_000)
     try:
-        state, latest, version = _lock_and_validate_rollback_target(
+        state, latest, version, metadata_asset = (
+            _lock_and_validate_rollback_target(
+                db,
+                provider_key=provider_key,
+                layer_id=layer_id,
+                to_version_id=to_version_id,
+                expected_generation=expected_generation,
+            )
+        )
+        _verify_transition_local_metadata(
             db,
-            provider_key=provider_key,
-            layer_id=layer_id,
-            to_version_id=to_version_id,
-            expected_generation=expected_generation,
+            version=version,
+            metadata_asset=metadata_asset,
+            metadata_verifier=metadata_verifier,
         )
         promotion, generation = _append_promotion(
             db,
@@ -1261,18 +1304,28 @@ def preview_reactivate_delivery(
     to_version_id: int,
     expected_generation: int,
     reason: str,
+    metadata_verifier: LocalMetadataTransitionVerifier,
 ) -> DeliveryTransitionPreview:
     """Validate recovery of a disabled delivery without changing state."""
 
     _validate_expected_generation(expected_generation)
+    _require_metadata_transition_verifier(metadata_verifier)
     _bounded_required_text(reason, "reason", 10_000)
     try:
-        _, _, version, _ = _lock_and_validate_reactivation_target(
+        _, _, version, _, metadata_asset = (
+            _lock_and_validate_reactivation_target(
+                db,
+                provider_key=provider_key,
+                layer_id=layer_id,
+                to_version_id=to_version_id,
+                expected_generation=expected_generation,
+            )
+        )
+        _verify_transition_local_metadata(
             db,
-            provider_key=provider_key,
-            layer_id=layer_id,
-            to_version_id=to_version_id,
-            expected_generation=expected_generation,
+            version=version,
+            metadata_asset=metadata_asset,
+            metadata_verifier=metadata_verifier,
         )
         return DeliveryTransitionPreview(
             provider_key=provider_key,
@@ -1295,6 +1348,7 @@ def reactivate_delivery(
     to_version_id: int,
     expected_generation: int,
     reason: str,
+    metadata_verifier: LocalMetadataTransitionVerifier,
     actor_id: int | None = None,
     now: datetime | None = None,
 ) -> PromotionResult:
@@ -1308,9 +1362,10 @@ def reactivate_delivery(
 
     moment = _moment(now)
     _validate_expected_generation(expected_generation)
+    _require_metadata_transition_verifier(metadata_verifier)
     reason = _bounded_required_text(reason, "reason", 10_000)
     try:
-        state, latest, version, source = (
+        state, latest, version, source, metadata_asset = (
             _lock_and_validate_reactivation_target(
                 db,
                 provider_key=provider_key,
@@ -1318,6 +1373,12 @@ def reactivate_delivery(
                 to_version_id=to_version_id,
                 expected_generation=expected_generation,
             )
+        )
+        _verify_transition_local_metadata(
+            db,
+            version=version,
+            metadata_asset=metadata_asset,
+            metadata_verifier=metadata_verifier,
         )
         source.enabled = True
         source.is_primary = True
@@ -1354,6 +1415,7 @@ def _lock_and_validate_rollback_target(
     ReferenceLayerDeliveryState,
     ReferenceDeliveryPromotion,
     ReferenceDeliveryVersion,
+    ReferenceDeliveryAsset,
 ]:
     _lock_delivery_layer(db, provider_key, layer_id)
     state, latest = _locked_delivery_state_and_chain(
@@ -1376,8 +1438,11 @@ def _lock_and_validate_rollback_target(
         version_id=to_version_id,
         action="rollback",
     )
-    _validate_stored_version_servability(db, version)
-    return state, latest, version
+    _, metadata_asset = _validate_stored_version_servability(
+        db,
+        version,
+    )
+    return state, latest, version, metadata_asset
 
 
 def _lock_and_validate_reactivation_target(
@@ -1392,6 +1457,7 @@ def _lock_and_validate_reactivation_target(
     ReferenceDeliveryPromotion,
     ReferenceDeliveryVersion,
     ReferenceLayerSource,
+    ReferenceDeliveryAsset,
 ]:
     _lock_delivery_layer(db, provider_key, layer_id)
     state, latest = _locked_delivery_state_and_chain(
@@ -1412,8 +1478,11 @@ def _lock_and_validate_reactivation_target(
         version_id=to_version_id,
         action="reactivation",
     )
-    source = _validate_stored_version_servability(db, version)
-    return state, latest, version, source
+    source, metadata_asset = _validate_stored_version_servability(
+        db,
+        version,
+    )
+    return state, latest, version, source, metadata_asset
 
 
 def _previously_active_version(
@@ -1702,7 +1771,7 @@ def _validate_current_version_catalog(
 def _validate_version_ready(
     db: Session,
     version: ReferenceDeliveryVersion,
-) -> None:
+) -> ReferenceDeliveryAsset:
     if not isinstance(version.validation_json, dict) or (
         version.validation_json.get("passed") is not True
     ):
@@ -1741,13 +1810,6 @@ def _validate_version_ready(
             )
         )
     )
-    if not metadata_assets:
-        if "local_metadata_gate" in version.validation_json:
-            raise MirrorPromotionConflict(
-                "delivery metadata gate has no immutable asset"
-            )
-        _validate_version_style_parity(db, version)
-        return
     if len(metadata_assets) != 1:
         raise MirrorPromotionConflict(
             "delivery version has no unique verified metadata asset"
@@ -1788,6 +1850,44 @@ def _validate_version_ready(
             "delivery local metadata precommit gate is invalid"
         )
     _validate_version_style_parity(db, version)
+    return metadata
+
+
+def _require_metadata_transition_verifier(
+    metadata_verifier: LocalMetadataTransitionVerifier,
+) -> None:
+    if not callable(metadata_verifier):
+        raise MirrorPromotionConflict(
+            "local metadata transition verifier is required"
+        )
+
+
+def _verify_transition_local_metadata(
+    db: Session,
+    *,
+    version: ReferenceDeliveryVersion,
+    metadata_asset: ReferenceDeliveryAsset,
+    metadata_verifier: LocalMetadataTransitionVerifier,
+) -> None:
+    try:
+        verification = metadata_verifier(db, version)
+    except Exception as error:
+        raise MirrorPromotionConflict(
+            "delivery local metadata failed transition verification"
+        ) from error
+    if (
+        not isinstance(
+            verification,
+            LocalMetadataTransitionVerification,
+        )
+        or verification.asset_id != metadata_asset.id
+        or verification.document_sha256 != metadata_asset.sha256
+        or verification.document_size_bytes
+        != metadata_asset.size_bytes
+    ):
+        raise MirrorPromotionConflict(
+            "delivery local metadata transition verification is invalid"
+        )
 
 
 def _validate_version_style_parity(
@@ -1921,7 +2021,7 @@ def _validate_version_style_parity(
 def _validate_stored_version_servability(
     db: Session,
     version: ReferenceDeliveryVersion,
-) -> ReferenceLayerSource:
+) -> tuple[ReferenceLayerSource, ReferenceDeliveryAsset]:
     source = db.scalar(
         select(ReferenceLayerSource)
         .where(ReferenceLayerSource.id == version.source_id)
@@ -1992,8 +2092,8 @@ def _validate_stored_version_servability(
         source=source,
         run=run,
     )
-    _validate_version_ready(db, version)
-    return source
+    metadata_asset = _validate_version_ready(db, version)
+    return source, metadata_asset
 
 
 def _validate_version_mirror_authorization(

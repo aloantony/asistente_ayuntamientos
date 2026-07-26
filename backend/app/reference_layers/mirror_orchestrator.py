@@ -69,6 +69,7 @@ from app.reference_layers.local_metadata import (
     LocalMetadataError,
     attach_local_metadata_asset,
     verify_local_metadata_precommit,
+    verify_local_metadata_transition,
 )
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
@@ -517,6 +518,7 @@ class MirrorRunProcessor:
                     )
                     promote_existing_delivery(
                         self.session_factory,
+                        self.store,
                         context,
                         supervisor.lease,
                         version_id=context.existing_version_id,
@@ -705,6 +707,7 @@ class MirrorRunProcessor:
                 )
                 promote_existing_delivery(
                     self.session_factory,
+                    self.store,
                     context,
                     supervisor.lease,
                     version_id=built.version_id,
@@ -1293,6 +1296,7 @@ def finish_unchanged(
 
 def promote_existing_delivery(
     session_factory: SessionFactory,
+    store: ReferenceBlobStore,
     context: RunContext,
     lease: SyncRunLease,
     *,
@@ -1310,6 +1314,13 @@ def promote_existing_delivery(
             lease=lease,
             expected_generation=context.run.expected_active_generation,
             reason="Validated immutable local mirror delivery",
+            metadata_verifier=lambda transition_db, version: (
+                verify_local_metadata_transition(
+                    store,
+                    transition_db,
+                    version,
+                )
+            ),
             observed_etag=observed_etag,
             observed_last_modified=observed_last_modified,
             observed_version=observed_version,
