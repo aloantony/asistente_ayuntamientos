@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import struct
 import zlib
@@ -1116,12 +1117,73 @@ def test_layer_smoke_checks_catalog_then_renders_local_png() -> None:
     assert "Authorization" not in requests[1][3]
 
 
+def test_layer_smoke_validates_map_legend_and_empty_identify_on_loopback() -> None:
+    map_png = make_png(256, 256)
+    legend_png = make_png(20, 40)
+    empty_features = b'{"type":"FeatureCollection","features":[]}'
+    client, factory = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            FakeResponse(map_png, content_type="image/png"),
+            FakeResponse(legend_png, content_type="image/png"),
+            FakeResponse(
+                empty_features,
+                content_type="application/geo+json",
+            ),
+        ]
+    )
+
+    result = client.smoke_layer(
+        layer_name="planning_v_012345",
+        style_name="planning_style_v_012345",
+        legend_available=True,
+        identify_available=True,
+        z=0,
+        x=0,
+        y=0,
+        pixel_x=128,
+        pixel_y=128,
+    )
+
+    assert result.legend_sha256 == hashlib.sha256(legend_png).hexdigest()
+    assert result.identify_sha256 == hashlib.sha256(empty_features).hexdigest()
+    assert result.identify_feature_count == 0
+    assert result.pixel_x == result.pixel_y == 128
+    assert all(call[0] == "127.0.0.1" for call in factory.calls)
+    requests = all_requests(factory)
+    operations = [
+        parse_qs(urlsplit(request[1]).query)["REQUEST"]
+        for request in requests[1:]
+    ]
+    assert operations == [["GetMap"], ["GetLegendGraphic"], ["GetFeatureInfo"]]
+
+
 def test_layer_smoke_reports_missing_catalog_and_render_failures_safely() -> None:
     client, _ = make_client([status_response(404)])
     with pytest.raises(GeoServerLayerSmokeError):
         client.smoke_layer(
             layer_name="planning_v_012345",
             style_name=None,
+        )
+
+    client, _ = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            FakeResponse(make_png(256, 256), content_type="image/png"),
+            FakeResponse(make_png(20, 40), content_type="image/png"),
+            FakeResponse(b"{}", content_type="application/geo+json"),
+        ]
+    )
+    with pytest.raises(GeoServerLayerSmokeError):
+        client.smoke_layer(
+            layer_name="planning_v_012345",
+            style_name=None,
+            legend_available=True,
+            identify_available=True,
         )
 
     client, _ = make_client(

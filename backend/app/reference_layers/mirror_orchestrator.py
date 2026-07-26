@@ -58,6 +58,7 @@ from app.reference_layers.geoserver_admin import (
     GeoServerAdminError,
     GeoServerAdminUnavailableError,
     InvalidGeoServerPublicationError,
+    LayerSmokeResult,
     UnsafeGeoServerAdminConfigurationError,
 )
 from app.reference_layers.local_tile_archive import (
@@ -190,6 +191,8 @@ class GeoServerPublicationPlan:
     store_name: str | None
     styles: tuple[StylePublication, ...]
     smoke_style_names: tuple[str | None, ...]
+    legend_available: bool
+    identify_available: bool
 
 
 @dataclass(frozen=True)
@@ -282,7 +285,10 @@ Materializer = Callable[
     [RunContext, AcquisitionResult, tuple[PersistedRunArtifact, ...], "LeaseSupervisor"],
     MaterializedDelivery,
 ]
-Publisher = Callable[[RunContext, PublicationPlan, "LeaseSupervisor"], None]
+Publisher = Callable[
+    [RunContext, PublicationPlan, "LeaseSupervisor"],
+    dict[str, Any] | None,
+]
 TileContentChecker = Callable[
     [
         RunContext,
@@ -467,7 +473,9 @@ class MirrorRunProcessor:
                         context,
                         context.existing_version_id,
                     )
-                    self.publisher(context, publication, supervisor)
+                    publication_stats = (
+                        self.publisher(context, publication, supervisor) or {}
+                    )
                     supervisor.pulse(force=True)
                     promote_existing_delivery(
                         self.session_factory,
@@ -489,6 +497,7 @@ class MirrorRunProcessor:
                                 context.existing_version_id
                             ),
                             "resumed_existing_version": True,
+                            **publication_stats,
                         },
                     )
                     return WorkerResult(
@@ -548,7 +557,10 @@ class MirrorRunProcessor:
                     )
                     tile_check_stats = content_check.stats()
                     if content_check.unchanged:
-                        self.publisher(context, publication, supervisor)
+                        publication_stats = (
+                            self.publisher(context, publication, supervisor)
+                            or {}
+                        )
                         supervisor.pulse(force=True)
                         finish_unchanged(
                             self.session_factory,
@@ -556,6 +568,7 @@ class MirrorRunProcessor:
                             acquired,
                             extra_stats={
                                 **tile_check_stats,
+                                **publication_stats,
                                 "reused_active_tile_archive": True,
                             },
                         )
@@ -577,7 +590,14 @@ class MirrorRunProcessor:
                     supervisor.lease,
                     materialized.prepared,
                 )
-                self.publisher(context, materialized.publication, supervisor)
+                publication_stats = (
+                    self.publisher(
+                        context,
+                        materialized.publication,
+                        supervisor,
+                    )
+                    or {}
+                )
                 supervisor.pulse(force=True)
                 promote_existing_delivery(
                     self.session_factory,
@@ -595,6 +615,7 @@ class MirrorRunProcessor:
                             "total_bytes": acquired.total_bytes,
                             "delivery_kind": materialized.prepared.delivery_kind,
                             "delivery_version_id": built.version_id,
+                            **publication_stats,
                         }
                     ),
                 )
@@ -738,17 +759,24 @@ class MirrorRunProcessor:
         context: RunContext,
         publication: PublicationPlan,
         supervisor: LeaseSupervisor,
-    ) -> None:
+    ) -> dict[str, Any]:
         if isinstance(publication, TilePublicationPlan):
-            smoke_tile_publication(self.store, publication, supervisor)
-            return
+            return {
+                "local_operation_smoke": smoke_tile_publication(
+                    self.store,
+                    publication,
+                    supervisor,
+                )
+            }
         client = self.geoserver or GeoServerAdminClient()
-        publish_geoserver_delivery(
-            self.store,
-            client,
-            publication,
-            supervisor,
-        )
+        return {
+            "local_operation_smoke": publish_geoserver_delivery(
+                self.store,
+                client,
+                publication,
+                supervisor,
+            )
+        }
 
 
 def reconcile_reference_sources_once(
@@ -1525,6 +1553,8 @@ def _geoserver_materialization(
                 if style_publications
                 else (None,)
             ),
+            legend_available=bool(style_publications),
+            identify_available=bool(context.layer.queryable),
         )
         return MaterializedDelivery(prepared, publication)
 
@@ -1573,6 +1603,8 @@ def _geoserver_materialization(
             if style_publications
             else (None,)
         ),
+        legend_available=bool(style_publications),
+        identify_available=False,
     )
     return MaterializedDelivery(prepared, publication)
 
@@ -1751,7 +1783,7 @@ def publish_geoserver_delivery(
     client: GeoServerAdminClient,
     plan: GeoServerPublicationPlan,
     supervisor: LeaseSupervisor,
-) -> None:
+) -> dict[str, Any]:
     """Idempotently publish fixed local resources, then render-smoke each style."""
 
     client.health()
@@ -1796,12 +1828,33 @@ def publish_geoserver_delivery(
             style_name=style.style_name,
         )
         supervisor.pulse()
+    smoke_results: list[LayerSmokeResult] = []
     for style_name in plan.smoke_style_names:
-        client.smoke_layer(
-            layer_name=plan.layer_name,
-            style_name=style_name,
+        smoke_results.append(
+            client.smoke_layer(
+                layer_name=plan.layer_name,
+                style_name=style_name,
+                legend_available=plan.legend_available,
+                identify_available=plan.identify_available,
+                z=0,
+                x=0,
+                y=0,
+                pixel_x=128,
+                pixel_y=128,
+            )
         )
         supervisor.pulse()
+    return {
+        "schema_version": "reference-local-operation-smoke/v1",
+        "renderer": "geoserver",
+        "transport": "numeric_loopback_http",
+        "delivery_kind": plan.delivery_kind,
+        "layer_name": plan.layer_name,
+        "style_checks": [
+            _geoserver_style_smoke_evidence(result)
+            for result in smoke_results
+        ],
+    }
 
 
 def smoke_tile_publication(
@@ -1810,8 +1863,9 @@ def smoke_tile_publication(
     supervisor: LeaseSupervisor,
     *,
     inspect: Callable[..., TileArchiveInspection] = geo_ingest.inspect_tile_archive,
-) -> None:
+) -> dict[str, Any]:
     renderer = LocalTileArchiveRenderer(store.root)
+    checks: list[dict[str, Any]] = []
     for asset in plan.assets:
         if plan.requires_full_inspection:
             inspect(
@@ -1822,14 +1876,71 @@ def smoke_tile_publication(
                 expected_coordinate_sha256=asset.expected_coordinate_sha256,
             )
             supervisor.pulse(force=True)
-        renderer.render_tile(
+        response = renderer.render_tile(
             storage_key=asset.storage_key,
             archive_sha256=asset.sha256,
             z=asset.smoke_z,
             x=asset.smoke_x,
             y=asset.smoke_y,
         )
+        checks.append(
+            {
+                "catalog_style_source_key": (
+                    asset.catalog_style_source_key
+                ),
+                "map": {
+                    "content_type": response.content_type,
+                    "sha256": hashlib.sha256(response.body).hexdigest(),
+                    "size_bytes": len(response.body),
+                    "z": asset.smoke_z,
+                    "x": asset.smoke_x,
+                    "y": asset.smoke_y,
+                },
+            }
+        )
         supervisor.pulse()
+    return {
+        "schema_version": "reference-local-operation-smoke/v1",
+        "renderer": "tile_archive",
+        "transport": "local_immutable_mbtiles",
+        "delivery_kind": "tiles",
+        "style_checks": checks,
+    }
+
+
+def _geoserver_style_smoke_evidence(
+    result: LayerSmokeResult,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "style_name": result.style_name,
+        "map": {
+            "content_type": result.image_content_type,
+            "sha256": result.image_sha256,
+            "size_bytes": result.image_bytes,
+            "z": result.z,
+            "x": result.x,
+            "y": result.y,
+        },
+    }
+    if result.legend_sha256 is not None:
+        evidence["legend"] = {
+            "content_type": result.legend_content_type,
+            "sha256": result.legend_sha256,
+            "size_bytes": result.legend_bytes,
+        }
+    if result.identify_sha256 is not None:
+        evidence["identify"] = {
+            "content_type": result.identify_content_type,
+            "sha256": result.identify_sha256,
+            "size_bytes": result.identify_bytes,
+            "feature_count": result.identify_feature_count,
+            "z": result.z,
+            "x": result.x,
+            "y": result.y,
+            "pixel_x": result.pixel_x,
+            "pixel_y": result.pixel_y,
+        }
+    return evidence
 
 
 def load_existing_publication(
@@ -1952,6 +2063,18 @@ def load_existing_publication(
         if style_publications
         else (None,)
     )
+    legend_available = _metadata_boolean(metadata, "legend_available")
+    identify_available = _metadata_boolean(metadata, "identify_available")
+    if legend_available != bool(style_publications):
+        raise MirrorOrchestrationError(
+            "existing GeoServer legend availability is inconsistent",
+            code="existing_delivery_invalid",
+        )
+    if identify_available and version.delivery_kind != "vector":
+        raise MirrorOrchestrationError(
+            "existing raster delivery advertises identify",
+            code="existing_delivery_invalid",
+        )
     return GeoServerPublicationPlan(
         delivery_kind=cast(Literal["vector", "raster"], version.delivery_kind),
         layer_name=layer_name,
@@ -1970,6 +2093,8 @@ def load_existing_publication(
         ),
         styles=tuple(style_publications),
         smoke_style_names=smoke_names,
+        legend_available=legend_available,
+        identify_available=identify_available,
     )
 
 
@@ -2451,6 +2576,16 @@ def _metadata_integer(
     ):
         raise MirrorOrchestrationError(
             "delivery asset integer metadata is invalid",
+            code="existing_delivery_invalid",
+        )
+    return value
+
+
+def _metadata_boolean(metadata: Mapping[str, Any], key: str) -> bool:
+    value = metadata.get(key)
+    if not isinstance(value, bool):
+        raise MirrorOrchestrationError(
+            "delivery asset boolean metadata is invalid",
             code="existing_delivery_invalid",
         )
     return value

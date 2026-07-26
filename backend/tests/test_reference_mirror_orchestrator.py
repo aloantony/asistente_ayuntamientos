@@ -4,10 +4,12 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
+import app.reference_layers.mirror_orchestrator as mirror_orchestrator
 from app.core.config import Settings
 from app.reference_layers.acquisition import (
     AcquiredArtifact,
@@ -27,6 +29,10 @@ from app.reference_layers.delivery_builder import (
     PreparedDeliveryAsset,
 )
 from app.reference_layers.geo_ingest import TileArchiveInspection
+from app.reference_layers.geoserver_admin import (
+    GeoServerLayerSmokeError,
+    LayerSmokeResult,
+)
 from app.reference_layers.mirror_lifecycle import (
     SyncRunLease,
     claim_next_sync_run,
@@ -34,11 +40,14 @@ from app.reference_layers.mirror_lifecycle import (
 )
 from app.reference_layers.mirror_orchestrator import (
     ClassifiedFailure,
+    FailureHandlingResult,
+    GeoServerPublicationPlan,
     MaterializedDelivery,
     MirrorOrchestrationError,
     MirrorRunProcessor,
     PersistedRunArtifact,
     RunContext,
+    StylePublication,
     TileContentCheck,
     TilePublicationPlan,
     _resolve_local_sld_artifacts,
@@ -48,6 +57,7 @@ from app.reference_layers.mirror_orchestrator import (
     handle_run_failure,
     load_run_context,
     materialize_tile_delivery,
+    publish_geoserver_delivery,
     reconcile_reference_sources_once,
 )
 from app.reference_layers.models import (
@@ -311,6 +321,100 @@ class FakeSupervisor:
         self.pulses += 1
 
 
+def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
+    tmp_path,
+) -> None:
+    store = ReferenceBlobStore(Path(tmp_path, "smoke-store"))
+    first = store.put_stream(io.BytesIO(b"<sld>first</sld>"))
+    second = store.put_stream(io.BytesIO(b"<sld>second</sld>"))
+    plan = GeoServerPublicationPlan(
+        delivery_kind="vector",
+        layer_name="planning_v_012345",
+        title="Planning",
+        primary_storage_key="reference_data.planning_v_012345",
+        declared_srs="EPSG:3857",
+        table_name="planning_v_012345",
+        store_name=None,
+        styles=(
+            StylePublication(1, "style_one_v_012345", first.storage_key, first.sha256),
+            StylePublication(
+                2,
+                "style_two_v_012345",
+                second.storage_key,
+                second.sha256,
+            ),
+        ),
+        smoke_style_names=(
+            "style_one_v_012345",
+            "style_two_v_012345",
+        ),
+        legend_available=True,
+        identify_available=True,
+    )
+
+    class Client:
+        def __init__(self):
+            self.smokes = []
+
+        def health(self):
+            return None
+
+        def publish_versioned_table(self, **kwargs):
+            return kwargs
+
+        def publish_immutable_sld(self, **kwargs):
+            return kwargs
+
+        def ensure_layer_style(self, **kwargs):
+            return kwargs
+
+        def smoke_layer(self, **kwargs):
+            self.smokes.append(kwargs)
+            style = kwargs["style_name"]
+            return LayerSmokeResult(
+                layer_name=kwargs["layer_name"],
+                style_name=style,
+                image_sha256="a" * 64,
+                image_bytes=100,
+                image_content_type="image/png",
+                z=kwargs["z"],
+                x=kwargs["x"],
+                y=kwargs["y"],
+                legend_sha256="b" * 64,
+                legend_bytes=50,
+                legend_content_type="image/png",
+                identify_sha256="c" * 64,
+                identify_bytes=42,
+                identify_content_type="application/geo+json",
+                identify_feature_count=0,
+                pixel_x=kwargs["pixel_x"],
+                pixel_y=kwargs["pixel_y"],
+            )
+
+    client = Client()
+    try:
+        evidence = publish_geoserver_delivery(
+            store,
+            client,
+            plan,
+            FakeSupervisor(),
+        )
+    finally:
+        store.close()
+
+    assert len(client.smokes) == 2
+    assert all(item["legend_available"] is True for item in client.smokes)
+    assert all(item["identify_available"] is True for item in client.smokes)
+    assert all((item["z"], item["x"], item["y"]) == (0, 0, 0) for item in client.smokes)
+    assert all(
+        (item["pixel_x"], item["pixel_y"]) == (128, 128)
+        for item in client.smokes
+    )
+    assert evidence["transport"] == "numeric_loopback_http"
+    assert len(evidence["style_checks"]) == 2
+    assert evidence["style_checks"][0]["identify"]["feature_count"] == 0
+
+
 def test_baked_styles_are_verified_and_seeded_as_distinct_local_assets(tmp_path) -> None:
     store = ReferenceBlobStore(Path(tmp_path, "store"), max_blob_bytes=1024 * 1024)
     try:
@@ -380,6 +484,11 @@ def test_baked_styles_are_verified_and_seeded_as_distinct_local_assets(tmp_path)
 
         assert seeded_styles == ["default", "alternate"]
         assert [item.metadata_json["catalog_style_id"] for item in result.prepared.assets] == [41, 42]
+        assert all(
+            "legend_available" not in item.metadata_json
+            and "identify_available" not in item.metadata_json
+            for item in result.prepared.assets
+        )
         assert [item.is_primary for item in result.prepared.assets] == [True, False]
         assert [item["expected_coordinate_sha256"] for item in inspected] == ["1" * 64, "2" * 64]
         assert isinstance(result.publication, TilePublicationPlan)
@@ -469,6 +578,191 @@ def test_failure_handler_uses_lifecycle_followup_after_terminal_finish(db) -> No
     )
     assert child is not None
     assert child.source_id == fallback_source_id
+
+
+def test_operation_smoke_evidence_is_finalized_with_the_promoted_run(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    context = replace(_styled_context(), active_version_id=77)
+    evidence = {
+        "local_operation_smoke": {
+            "schema_version": "reference-local-operation-smoke/v1",
+            "renderer": "geoserver",
+            "style_checks": [{"map": {"sha256": "a" * 64}}],
+        }
+    }
+    promoted = []
+
+    class Supervisor(FakeSupervisor):
+        def __init__(self, factory, lease, **kwargs):
+            del factory, kwargs
+            super().__init__()
+            self.lease = lease
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            del args
+
+    monkeypatch.setattr(mirror_orchestrator, "LeaseSupervisor", Supervisor)
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "load_run_context",
+        lambda factory, lease: context,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "persist_run_acquisition",
+        lambda factory, lease, acquired: (),
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "persist_delivery_version",
+        lambda factory, lease, prepared: SimpleNamespace(version_id=88),
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "promote_existing_delivery",
+        lambda *args, **kwargs: promoted.append(kwargs),
+    )
+    prepared = PreparedDelivery(
+        delivery_kind="tiles",
+        source_version="v1",
+        content_sha256="a" * 64,
+        reference_at=None,
+        crs="EPSG:3857",
+        bounds_json={"west": -7, "south": 40, "east": -1, "north": 44},
+        feature_count=None,
+        validation_json={"passed": True},
+        input_artifact_ids=(),
+        assets=(),
+    )
+    store = ReferenceBlobStore(Path(tmp_path, "success-store"))
+    processor = MirrorRunProcessor(
+        session_factory=lambda: nullcontext(None),
+        store=store,
+        acquisition=SimpleNamespace(
+            acquire=lambda *args, **kwargs: _tile_acquisition()
+        ),
+        config=Settings(
+            reference_storage_root=str(store.root),
+            reference_mirror_lease_seconds=600,
+            reference_mirror_heartbeat_seconds=100,
+        ),
+        materializer=lambda *args: MaterializedDelivery(
+            prepared,
+            TilePublicationPlan((), requires_full_inspection=False),
+        ),
+        publisher=lambda *args: evidence,
+    )
+    try:
+        result = processor.process_lease(context.lease)
+    finally:
+        processor.close()
+
+    assert result.state == "succeeded"
+    assert promoted[0]["stats"]["local_operation_smoke"] == evidence[
+        "local_operation_smoke"
+    ]
+
+
+def test_operation_smoke_failure_prevents_promotion_and_preserves_active(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    context = replace(_styled_context(), active_version_id=77)
+    active = {"version_id": 77}
+    promotion_calls = []
+
+    class Supervisor(FakeSupervisor):
+        def __init__(self, factory, lease, **kwargs):
+            del factory, kwargs
+            super().__init__()
+            self.lease = lease
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            del args
+
+    monkeypatch.setattr(mirror_orchestrator, "LeaseSupervisor", Supervisor)
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "load_run_context",
+        lambda factory, lease: context,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "persist_run_acquisition",
+        lambda factory, lease, acquired: (),
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "persist_delivery_version",
+        lambda factory, lease, prepared: SimpleNamespace(version_id=88),
+    )
+
+    def promote(*args, **kwargs):
+        promotion_calls.append((args, kwargs))
+        active["version_id"] = 88
+
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "promote_existing_delivery",
+        promote,
+    )
+    prepared = PreparedDelivery(
+        delivery_kind="tiles",
+        source_version="v1",
+        content_sha256="a" * 64,
+        reference_at=None,
+        crs="EPSG:3857",
+        bounds_json={"west": -7, "south": 40, "east": -1, "north": 44},
+        feature_count=None,
+        validation_json={"passed": True},
+        input_artifact_ids=(),
+        assets=(),
+    )
+
+    def fail_smoke(*args):
+        del args
+        raise GeoServerLayerSmokeError("local operation failed")
+
+    store = ReferenceBlobStore(Path(tmp_path, "failure-store"))
+    processor = MirrorRunProcessor(
+        session_factory=lambda: nullcontext(None),
+        store=store,
+        acquisition=SimpleNamespace(
+            acquire=lambda *args, **kwargs: _tile_acquisition()
+        ),
+        config=Settings(
+            reference_storage_root=str(store.root),
+            reference_mirror_lease_seconds=600,
+            reference_mirror_heartbeat_seconds=100,
+        ),
+        materializer=lambda *args: MaterializedDelivery(
+            prepared,
+            TilePublicationPlan((), requires_full_inspection=False),
+        ),
+        publisher=fail_smoke,
+        failure_handler=lambda factory, lease, failure: FailureHandlingResult(
+            lease.run_id,
+            failure.outcome,
+            "none",
+        ),
+    )
+    try:
+        result = processor.process_lease(context.lease)
+    finally:
+        processor.close()
+
+    assert result.state == "failed"
+    assert result.error_code == "local_renderer_failed"
+    assert promotion_calls == []
+    assert active["version_id"] == 77
 
 
 def test_continuity_rejection_classification_preserves_audit_evidence() -> None:
