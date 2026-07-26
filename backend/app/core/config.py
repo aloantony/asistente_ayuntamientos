@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     reference_blob_max_bytes: int = 256 * 1024 * 1024 * 1024
     reference_storage_quota_bytes: int | None = 1024 * 1024 * 1024 * 1024
     reference_storage_min_free_bytes: int = 20 * 1024 * 1024 * 1024
+    reference_staging_retention_seconds: int = 24 * 60 * 60
     reference_mirror_scheduler_poll_seconds: float = 15.0
     reference_catalog_watcher_poll_seconds: float = 300.0
     reference_mirror_worker_poll_seconds: float = 2.0
@@ -238,6 +239,16 @@ class Settings(BaseSettings):
         if isinstance(value, bool) or not 0 <= value <= 1024**5:
             raise ValueError(
                 "reference_storage_min_free_bytes must be between 0 and 1 PiB"
+            )
+        return value
+
+    @field_validator("reference_staging_retention_seconds")
+    @classmethod
+    def validate_reference_staging_retention(cls, value: int) -> int:
+        if isinstance(value, bool) or not 3_600 <= value <= 30 * 24 * 60 * 60:
+            raise ValueError(
+                "reference_staging_retention_seconds must be between "
+                "3600 and 2592000"
             )
         return value
 

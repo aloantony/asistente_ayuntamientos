@@ -42,8 +42,11 @@ class LayerMirrorStatus:
     active_source_version: str | None = None
     active_reference_at: datetime | None = None
     active_created_at: datetime | None = None
+    last_run_id: int | None = None
     last_run_status: str | None = None
+    last_run_started_at: datetime | None = None
     last_checked_at: datetime | None = None
+    last_run_duration_seconds: float | None = None
     last_error_code: str | None = None
     last_error_summary: str | None = None
     next_check_at: datetime | None = None
@@ -242,8 +245,11 @@ def catalog_mirror_statuses(
                 if expose_active and version is not None
                 else None
             ),
+            last_run_id=run.id if run is not None else None,
             last_run_status=run.status if run is not None else None,
+            last_run_started_at=run.started_at if run is not None else None,
             last_checked_at=run.finished_at if run is not None else None,
+            last_run_duration_seconds=_run_duration_seconds(run),
             last_error_code=run.error_code if run is not None else None,
             last_error_summary=_safe_error_summary(run),
             next_check_at=next_check_at,
@@ -298,6 +304,17 @@ def _safe_error_summary(run: ReferenceSyncRun | None) -> str | None:
     if not isinstance(run.error_summary, str) or len(run.error_summary) > 4_096:
         return None
     return run.error_summary
+
+
+def _run_duration_seconds(run: ReferenceSyncRun | None) -> float | None:
+    if (
+        run is None
+        or run.started_at is None
+        or run.finished_at is None
+        or run.finished_at < run.started_at
+    ):
+        return None
+    return (run.finished_at - run.started_at).total_seconds()
 
 
 def _safe_source_version(value: str | None) -> str | None:

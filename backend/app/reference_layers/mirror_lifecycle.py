@@ -185,6 +185,17 @@ class PromotionResult:
     event_sha256: str
 
 
+@dataclass(frozen=True)
+class DeliveryTransitionPreview:
+    provider_key: str
+    layer_id: int
+    action: Literal["rollback", "reactivate"]
+    from_version_id: int | None
+    to_version_id: int
+    expected_generation: int
+    resulting_generation: int
+
+
 def build_mirror_bootstrap_plan(
     db: Session,
     *,
@@ -1065,6 +1076,45 @@ def promote_delivery_version(
         raise
 
 
+def preview_rollback_delivery_version(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+    to_version_id: int,
+    expected_generation: int,
+    reason: str,
+) -> DeliveryTransitionPreview:
+    """Validate an operator rollback without appending an event.
+
+    This entrypoint always rolls the transaction back, including advisory and
+    row locks.  It is intentionally suitable only for a standalone dry-run;
+    callers must not mix unrelated pending changes into the same session.
+    """
+
+    _validate_expected_generation(expected_generation)
+    _bounded_required_text(reason, "reason", 10_000)
+    try:
+        state, _, version = _lock_and_validate_rollback_target(
+            db,
+            provider_key=provider_key,
+            layer_id=layer_id,
+            to_version_id=to_version_id,
+            expected_generation=expected_generation,
+        )
+        return DeliveryTransitionPreview(
+            provider_key=provider_key,
+            layer_id=layer_id,
+            action="rollback",
+            from_version_id=state.active_version_id,
+            to_version_id=version.id,
+            expected_generation=expected_generation,
+            resulting_generation=expected_generation + 1,
+        )
+    finally:
+        db.rollback()
+
+
 def rollback_delivery_version(
     db: Session,
     *,
@@ -1082,48 +1132,13 @@ def rollback_delivery_version(
     _validate_expected_generation(expected_generation)
     reason = _bounded_required_text(reason, "reason", 10_000)
     try:
-        _lock_delivery_layer(db, provider_key, layer_id)
-        state, latest = _locked_delivery_state_and_chain(
+        state, latest, version = _lock_and_validate_rollback_target(
             db,
             provider_key=provider_key,
             layer_id=layer_id,
+            to_version_id=to_version_id,
+            expected_generation=expected_generation,
         )
-        if state is None or state.status != "active":
-            raise MirrorPromotionConflict("layer has no active delivery")
-        if state.generation != expected_generation:
-            raise MirrorPromotionConflict(
-                "active delivery generation changed before rollback"
-            )
-        if state.active_version_id == to_version_id:
-            raise MirrorPromotionConflict("rollback target is already active")
-        version = db.scalar(
-            select(ReferenceDeliveryVersion).where(
-                ReferenceDeliveryVersion.id == to_version_id,
-                ReferenceDeliveryVersion.provider_key == provider_key,
-                ReferenceDeliveryVersion.layer_id == layer_id,
-            )
-        )
-        if version is None:
-            raise MirrorPromotionConflict(
-                "rollback target is not a version of this layer"
-            )
-        was_active = db.scalar(
-            select(ReferenceDeliveryPromotion.id)
-            .where(
-                ReferenceDeliveryPromotion.provider_key == provider_key,
-                ReferenceDeliveryPromotion.layer_id == layer_id,
-                ReferenceDeliveryPromotion.to_version_id == version.id,
-                ReferenceDeliveryPromotion.action.in_(
-                    ("promote", "rollback", "reactivate")
-                ),
-            )
-            .limit(1)
-        )
-        if was_active is None:
-            raise MirrorPromotionConflict(
-                "rollback target was never an active delivery"
-            )
-        _validate_stored_version_servability(db, version)
         promotion, generation = _append_promotion(
             db,
             provider_key=provider_key,
@@ -1219,6 +1234,40 @@ def deactivate_delivery(
         raise
 
 
+def preview_reactivate_delivery(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+    to_version_id: int,
+    expected_generation: int,
+    reason: str,
+) -> DeliveryTransitionPreview:
+    """Validate recovery of a disabled delivery without changing state."""
+
+    _validate_expected_generation(expected_generation)
+    _bounded_required_text(reason, "reason", 10_000)
+    try:
+        _, _, version, _ = _lock_and_validate_reactivation_target(
+            db,
+            provider_key=provider_key,
+            layer_id=layer_id,
+            to_version_id=to_version_id,
+            expected_generation=expected_generation,
+        )
+        return DeliveryTransitionPreview(
+            provider_key=provider_key,
+            layer_id=layer_id,
+            action="reactivate",
+            from_version_id=None,
+            to_version_id=version.id,
+            expected_generation=expected_generation,
+            resulting_generation=expected_generation + 1,
+        )
+    finally:
+        db.rollback()
+
+
 def reactivate_delivery(
     db: Session,
     *,
@@ -1242,46 +1291,15 @@ def reactivate_delivery(
     _validate_expected_generation(expected_generation)
     reason = _bounded_required_text(reason, "reason", 10_000)
     try:
-        _lock_delivery_layer(db, provider_key, layer_id)
-        state, latest = _locked_delivery_state_and_chain(
-            db,
-            provider_key=provider_key,
-            layer_id=layer_id,
-        )
-        if state is None or state.status != "disabled":
-            raise MirrorPromotionConflict("layer is not disabled")
-        if state.generation != expected_generation:
-            raise MirrorPromotionConflict(
-                "delivery generation changed before reactivation"
-            )
-        version = db.scalar(
-            select(ReferenceDeliveryVersion).where(
-                ReferenceDeliveryVersion.id == to_version_id,
-                ReferenceDeliveryVersion.provider_key == provider_key,
-                ReferenceDeliveryVersion.layer_id == layer_id,
+        state, latest, version, source = (
+            _lock_and_validate_reactivation_target(
+                db,
+                provider_key=provider_key,
+                layer_id=layer_id,
+                to_version_id=to_version_id,
+                expected_generation=expected_generation,
             )
         )
-        if version is None:
-            raise MirrorPromotionConflict(
-                "reactivation target is not a version of this layer"
-            )
-        was_active = db.scalar(
-            select(ReferenceDeliveryPromotion.id)
-            .where(
-                ReferenceDeliveryPromotion.provider_key == provider_key,
-                ReferenceDeliveryPromotion.layer_id == layer_id,
-                ReferenceDeliveryPromotion.to_version_id == version.id,
-                ReferenceDeliveryPromotion.action.in_(
-                    ("promote", "rollback", "reactivate")
-                ),
-            )
-            .limit(1)
-        )
-        if was_active is None:
-            raise MirrorPromotionConflict(
-                "reactivation target was never an active delivery"
-            )
-        source = _validate_stored_version_servability(db, version)
         source.enabled = True
         source.is_primary = True
         source.next_check_at = moment
@@ -1304,6 +1322,117 @@ def reactivate_delivery(
     except Exception:
         db.rollback()
         raise
+
+
+def _lock_and_validate_rollback_target(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+    to_version_id: int,
+    expected_generation: int,
+) -> tuple[
+    ReferenceLayerDeliveryState,
+    ReferenceDeliveryPromotion,
+    ReferenceDeliveryVersion,
+]:
+    _lock_delivery_layer(db, provider_key, layer_id)
+    state, latest = _locked_delivery_state_and_chain(
+        db,
+        provider_key=provider_key,
+        layer_id=layer_id,
+    )
+    if state is None or latest is None or state.status != "active":
+        raise MirrorPromotionConflict("layer has no active delivery")
+    if state.generation != expected_generation:
+        raise MirrorPromotionConflict(
+            "active delivery generation changed before rollback"
+        )
+    if state.active_version_id == to_version_id:
+        raise MirrorPromotionConflict("rollback target is already active")
+    version = _previously_active_version(
+        db,
+        provider_key=provider_key,
+        layer_id=layer_id,
+        version_id=to_version_id,
+        action="rollback",
+    )
+    _validate_stored_version_servability(db, version)
+    return state, latest, version
+
+
+def _lock_and_validate_reactivation_target(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+    to_version_id: int,
+    expected_generation: int,
+) -> tuple[
+    ReferenceLayerDeliveryState,
+    ReferenceDeliveryPromotion,
+    ReferenceDeliveryVersion,
+    ReferenceLayerSource,
+]:
+    _lock_delivery_layer(db, provider_key, layer_id)
+    state, latest = _locked_delivery_state_and_chain(
+        db,
+        provider_key=provider_key,
+        layer_id=layer_id,
+    )
+    if state is None or latest is None or state.status != "disabled":
+        raise MirrorPromotionConflict("layer is not disabled")
+    if state.generation != expected_generation:
+        raise MirrorPromotionConflict(
+            "delivery generation changed before reactivation"
+        )
+    version = _previously_active_version(
+        db,
+        provider_key=provider_key,
+        layer_id=layer_id,
+        version_id=to_version_id,
+        action="reactivation",
+    )
+    source = _validate_stored_version_servability(db, version)
+    return state, latest, version, source
+
+
+def _previously_active_version(
+    db: Session,
+    *,
+    provider_key: str,
+    layer_id: int,
+    version_id: int,
+    action: str,
+) -> ReferenceDeliveryVersion:
+    version = db.scalar(
+        select(ReferenceDeliveryVersion).where(
+            ReferenceDeliveryVersion.id == version_id,
+            ReferenceDeliveryVersion.provider_key == provider_key,
+            ReferenceDeliveryVersion.layer_id == layer_id,
+        )
+    )
+    if version is None:
+        raise MirrorPromotionConflict(
+            f"{action} target is not a version of this layer"
+        )
+    was_active = db.scalar(
+        select(ReferenceDeliveryPromotion.id)
+        .where(
+            ReferenceDeliveryPromotion.provider_key == provider_key,
+            ReferenceDeliveryPromotion.layer_id == layer_id,
+            ReferenceDeliveryPromotion.to_version_id == version.id,
+            ReferenceDeliveryPromotion.action.in_(
+                ("promote", "rollback", "reactivate")
+            ),
+        )
+        .limit(1)
+    )
+    if was_active is None:
+        raise MirrorPromotionConflict(
+            f"{action} target was never an active delivery"
+        )
+    return version
 
 
 def canonical_promotion_event_sha256(
