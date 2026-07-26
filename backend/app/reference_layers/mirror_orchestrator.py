@@ -65,6 +65,10 @@ from app.reference_layers.local_tile_archive import (
     LocalTileArchiveError,
     LocalTileArchiveRenderer,
 )
+from app.reference_layers.local_metadata import (
+    LocalMetadataError,
+    attach_local_metadata_asset,
+)
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
     bind_sync_run_authorization,
@@ -647,6 +651,25 @@ class MirrorRunProcessor:
                     acquired,
                     persisted,
                     supervisor,
+                )
+                try:
+                    prepared_with_metadata = attach_local_metadata_asset(
+                        self.session_factory,
+                        self.store,
+                        supervisor.lease,
+                        materialized.prepared,
+                    )
+                except LocalMetadataError as error:
+                    raise MirrorOrchestrationError(
+                        str(error),
+                        code=error.code,
+                        retryable=(
+                            error.code == "local_metadata_storage_failed"
+                        ),
+                    ) from error
+                materialized = MaterializedDelivery(
+                    prepared_with_metadata,
+                    materialized.publication,
                 )
                 supervisor.pulse(force=True)
                 revalidate_run_authorization(

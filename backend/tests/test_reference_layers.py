@@ -652,7 +652,7 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert overlay["delivery_blocker"] == "remote_proxy_disabled"
     assert overlay["available_style_ids"] == []
     assert overlay["legend_available"] is False
-    assert overlay["metadata_available"] is True
+    assert overlay["metadata_available"] is False
     assert [style["title"] for style in body["styles"]] == [
         "Clasificación por color",
         "Clasificación por trama",

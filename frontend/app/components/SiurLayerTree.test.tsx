@@ -68,6 +68,7 @@ function catalogFixture(): ReferenceCatalog {
     identify_available: true,
     available_style_ids: [12],
     legend_available: true,
+    metadata_available: true,
     mirror_status: "active",
     active_version_id: 17,
     active_generation: 2,
@@ -85,6 +86,7 @@ function catalogFixture(): ReferenceCatalog {
     delivery_available: false,
     delivery_blocker: "license_not_approved",
     available_style_ids: [],
+    metadata_available: false,
   };
   return {
     snapshot: {
@@ -159,6 +161,11 @@ describe("SiurLayerTree", () => {
     expect(screen.getByText("Inventario pendiente")).toBeTruthy();
     expect(screen.getByText(/licencia todavía no tiene aprobación humana/i)).toBeTruthy();
     expect(container.querySelector(".map-layer-chips")).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Metadatos" }).getAttribute("href"),
+    ).toBe(
+      "/api/organizations/7/reference-layers/2/metadata.json",
+    );
 
     fireEvent.change(
       screen.getByRole("slider", {

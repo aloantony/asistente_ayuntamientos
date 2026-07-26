@@ -1,7 +1,16 @@
+import logging
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Response,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -13,6 +22,10 @@ from app.reference_layers.access import (
     require_catalog_manage,
     require_catalog_view,
 )
+from app.reference_layers.blob_store import (
+    ReferenceBlobStore,
+    ReferenceBlobStoreError,
+)
 from app.reference_layers.models import (
     OrganizationReferenceLayerSetting,
     ReferenceCatalogSnapshot,
@@ -22,6 +35,11 @@ from app.reference_layers.models import (
 )
 from app.reference_layers.local_delivery import (
     catalog_local_delivery_availability,
+)
+from app.reference_layers.local_metadata import (
+    LocalMetadataError,
+    catalog_local_metadata_availability,
+    resolve_local_metadata,
 )
 from app.reference_layers.mirror_authorization import (
     effective_service_attributions,
@@ -42,6 +60,7 @@ from app.users.models import User
 
 router = APIRouter(tags=["reference-layers"])
 router.include_router(wms_router)
+logger = logging.getLogger(__name__)
 
 
 @router.get(
@@ -136,6 +155,32 @@ def get_reference_catalog(
         layers=layers,
         styles=styles,
     )
+    local_metadata_availability = {
+        layer.id: False for layer in layers
+    }
+    if any(
+        availability is not None
+        and availability.delivery_available
+        for availability in local_delivery_availability.values()
+    ):
+        try:
+            with _reference_blob_store() as store:
+                local_metadata_availability = (
+                    catalog_local_metadata_availability(
+                        db,
+                        store,
+                        provider_key=snapshot.provider_key,
+                        layers=layers,
+                        local_availability=(
+                            local_delivery_availability
+                        ),
+                    )
+                )
+        except ReferenceBlobStoreError:
+            logger.error(
+                "Local reference metadata storage is unavailable",
+                exc_info=True,
+            )
     delivery_availability = {
         layer.id: (
             local_delivery_availability[layer.id]
@@ -186,7 +231,9 @@ def get_reference_catalog(
                     "legend_available": (
                         availability.legend_available
                     ),
-                    "metadata_available": layer.metadata_url is not None,
+                    "metadata_available": (
+                        local_metadata_availability[layer.id]
+                    ),
                     "mirror_status": mirror_status.status,
                     "active_version_id": mirror_status.active_version_id,
                     "active_generation": mirror_status.active_generation,
@@ -227,6 +274,58 @@ def get_reference_catalog(
             )
             for item in styles
         ],
+    )
+
+
+@router.get(
+    "/organizations/{organization_id}/reference-layers/{layer_id}"
+    "/metadata.json",
+    response_class=Response,
+)
+def get_reference_layer_metadata(
+    organization_id: Annotated[int, Path(ge=1)],
+    layer_id: Annotated[int, Path(ge=1)],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    require_catalog_view(db, current_user, organization_id)
+    layer = db.get(ReferenceLayer, layer_id)
+    if layer is None or layer.node_type != "layer":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reference layer not found",
+        )
+    try:
+        with _reference_blob_store() as store:
+            document = resolve_local_metadata(
+                db,
+                store,
+                layer=layer,
+            )
+    except (LocalMetadataError, ReferenceBlobStoreError):
+        logger.warning(
+            "Active local reference metadata failed validation",
+            exc_info=True,
+            extra={"layer_id": layer_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Local reference metadata is not available",
+        ) from None
+    return Response(
+        content=document.body,
+        media_type="application/json",
+        headers={
+            "Cache-Control": "private, no-store, max-age=0",
+            "Pragma": "no-cache",
+            "ETag": f'"{document.sha256}"',
+            "Vary": "Authorization, Cookie",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'",
+            "Content-Disposition": (
+                f'inline; filename="siur-layer-{layer_id}-metadata.json"'
+            ),
+        },
     )
 
 
@@ -305,3 +404,12 @@ def delete_reference_layer_setting(
         db.delete(setting)
         db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _reference_blob_store() -> ReferenceBlobStore:
+    return ReferenceBlobStore(
+        app_settings.reference_storage_root,
+        max_blob_bytes=app_settings.reference_blob_max_bytes,
+        quota_bytes=app_settings.reference_storage_quota_bytes,
+        min_free_bytes=app_settings.reference_storage_min_free_bytes,
+    )

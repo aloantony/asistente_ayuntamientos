@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildReferenceIdentifyPath,
   buildReferenceLayerTree,
+  buildReferenceMetadataUrl,
   buildReferenceTileUrl,
   buildSiurMapLayers,
   parseReferenceLayerBounds,
@@ -324,6 +325,10 @@ describe("approved SIUR delivery descriptors", () => {
     expect(descriptors[0].attribution).toContain("&lt;script&gt;");
     expect(descriptors[0].attribution).not.toContain("<script>");
     expect(() => buildReferenceTileUrl(7, 2, -1)).toThrow(TypeError);
+    expect(buildReferenceMetadataUrl(7, 2)).toBe(
+      "/api/organizations/7/reference-layers/2/metadata.json",
+    );
+    expect(() => buildReferenceMetadataUrl(0, 2)).toThrow(TypeError);
   });
 
   it("rejects locally active layers with only partial style coverage", () => {
