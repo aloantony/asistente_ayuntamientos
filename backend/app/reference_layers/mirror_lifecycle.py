@@ -19,6 +19,7 @@ from typing import Any, Callable, Literal, Protocol
 from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.orm import Session
 
+from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.catalog import (
     canonical_normalized_definition_sha256,
 )
@@ -1060,6 +1061,7 @@ def promote_delivery_version(
     expected_generation: int,
     reason: str,
     metadata_verifier: LocalMetadataTransitionVerifier,
+    style_evidence_store: ReferenceBlobStore | None = None,
     actor_id: int | None = None,
     observed_etag: str | None = None,
     observed_last_modified: datetime | None = None,
@@ -1184,7 +1186,11 @@ def promote_delivery_version(
             source=source,
             run=run,
         )
-        require_official_style_promotion_allowed(db, source=source)
+        require_official_style_promotion_allowed(
+            db,
+            source=source,
+            store=style_evidence_store,
+        )
         _validate_current_version_catalog(db, version)
         metadata_asset = _validate_version_ready(db, version)
         from_version_id = (

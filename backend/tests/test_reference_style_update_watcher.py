@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 from importlib.resources import files
@@ -10,6 +11,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 
+import app.reference_layers.style_update_admin as style_update_admin
 from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
@@ -42,6 +44,7 @@ from app.reference_layers.style_update_watcher import (
     apply_style_update_review,
     check_official_style_update,
     parse_style_update_review,
+    plan_style_update_review,
     require_official_style_promotion_allowed,
     style_watch_target_for_source,
 )
@@ -285,6 +288,18 @@ def _review_document(
     return json.dumps(value, indent=2, sort_keys=True).encode()
 
 
+def _damage_candidate_blob(
+    store: ReferenceBlobStore,
+    observed: ReferenceStyleObservedVersion,
+    mode: str,
+) -> None:
+    path = store.root / observed.storage_key
+    if mode == "missing":
+        path.unlink()
+    else:
+        path.write_bytes(b"x" * observed.size_bytes)
+
+
 def test_exact_200_then_daily_304_records_no_candidate(
     db,
     tmp_path: Path,
@@ -404,6 +419,12 @@ def test_changed_bytes_are_deduplicated_in_cas_and_block_promotion(
         )
         with store.open_blob(observed.storage_key) as stream:
             assert stream.read() == body
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
     finally:
         store.close()
 
@@ -414,10 +435,6 @@ def test_changed_bytes_are_deduplicated_in_cas_and_block_promotion(
     assert observed.semantic_summary_json[
         "matches_vendored_semantics"
     ] is (not semantic_change)
-    with pytest.raises(OfficialStyleReviewRequiredError):
-        require_official_style_promotion_allowed(db, source=source)
-
-
 def test_explicit_review_resolves_candidate_without_replacing_vendored_evidence(
     db,
     tmp_path: Path,
@@ -446,10 +463,15 @@ def test_explicit_review_resolves_candidate_without_replacing_vendored_evidence(
         review = apply_style_update_review(
             db,
             review_document,
+            store=store,
             expected_review_sha256=evidence.review_sha256,
             expected_document_sha256=evidence.document_sha256,
         )
-        require_official_style_promotion_allowed(db, source=source)
+        require_official_style_promotion_allowed(
+            db,
+            source=source,
+            store=store,
+        )
         second = check_official_style_update(
             db,
             source_id=source.id,
@@ -469,6 +491,129 @@ def test_explicit_review_resolves_candidate_without_replacing_vendored_evidence(
         ]
         == target.baseline_raw_sha256
     )
+
+
+@pytest.mark.parametrize("damage_mode", ["missing", "corrupt"])
+def test_review_plan_and_apply_reject_invalid_candidate_cas(
+    db,
+    tmp_path: Path,
+    damage_mode: str,
+) -> None:
+    source = _seed_source(
+        db,
+        provider_key=f"style-watch-plan-cas-{damage_mode}",
+    )
+    target = style_watch_target_for_source(source)
+    body = _changed_body()
+    store = ReferenceBlobStore(tmp_path / f"plan-cas-{damage_mode}")
+    try:
+        outcome = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW,
+            downloader=FakeDownloader(
+                body=body,
+                result=_result(target.official_url, body),
+            ),
+        )
+        observed = db.get(
+            ReferenceStyleObservedVersion,
+            outcome.observed_version_id,
+        )
+        document = _review_document(source, observed)
+        evidence = parse_style_update_review(document)
+        _damage_candidate_blob(store, observed, damage_mode)
+
+        with pytest.raises(
+            ValueError,
+            match="CAS evidence failed integrity",
+        ):
+            plan_style_update_review(db, document, store=store)
+        with pytest.raises(
+            ValueError,
+            match="CAS evidence failed integrity",
+        ):
+            apply_style_update_review(
+                db,
+                document,
+                store=store,
+                expected_review_sha256=evidence.review_sha256,
+                expected_document_sha256=evidence.document_sha256,
+            )
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
+    finally:
+        store.close()
+    assert db.scalar(select(func.count(ReferenceStyleUpdateReview.id))) == 0
+
+
+@pytest.mark.parametrize("damage_mode", ["missing", "corrupt"])
+def test_resolved_review_gate_rejects_later_candidate_cas_loss(
+    db,
+    tmp_path: Path,
+    damage_mode: str,
+) -> None:
+    source = _seed_source(
+        db,
+        provider_key=f"style-watch-reviewed-cas-{damage_mode}",
+    )
+    target = style_watch_target_for_source(source)
+    body = _changed_body()
+    store = ReferenceBlobStore(tmp_path / f"reviewed-cas-{damage_mode}")
+    try:
+        outcome = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW,
+            downloader=FakeDownloader(
+                body=body,
+                result=_result(target.official_url, body),
+            ),
+        )
+        observed = db.get(
+            ReferenceStyleObservedVersion,
+            outcome.observed_version_id,
+        )
+        document = _review_document(source, observed)
+        evidence = parse_style_update_review(document)
+        apply_style_update_review(
+            db,
+            document,
+            store=store,
+            expected_review_sha256=evidence.review_sha256,
+            expected_document_sha256=evidence.document_sha256,
+        )
+        followup = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW + timedelta(days=1),
+            downloader=FakeDownloader(
+                result=_not_modified(target.official_url)
+            ),
+        )
+        assert followup.status == "unchanged"
+        assert followup.observed_version_id == observed.id
+        require_official_style_promotion_allowed(
+            db,
+            source=source,
+            store=store,
+        )
+        _damage_candidate_blob(store, observed, damage_mode)
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
+    finally:
+        store.close()
 
 
 def test_vendor_update_required_review_keeps_promotion_blocked(
@@ -493,27 +638,32 @@ def test_vendor_update_required_review_keeps_promotion_blocked(
                 result=_result(target.official_url, body),
             ),
         )
+        observed = db.get(
+            ReferenceStyleObservedVersion,
+            outcome.observed_version_id,
+        )
+        document = _review_document(
+            source,
+            observed,
+            decision="vendor_update_required",
+        )
+        evidence = parse_style_update_review(document)
+        apply_style_update_review(
+            db,
+            document,
+            store=store,
+            expected_review_sha256=evidence.review_sha256,
+            expected_document_sha256=evidence.document_sha256,
+        )
+
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                db,
+                source=source,
+                store=store,
+            )
     finally:
         store.close()
-    observed = db.get(
-        ReferenceStyleObservedVersion,
-        outcome.observed_version_id,
-    )
-    document = _review_document(
-        source,
-        observed,
-        decision="vendor_update_required",
-    )
-    evidence = parse_style_update_review(document)
-    apply_style_update_review(
-        db,
-        document,
-        expected_review_sha256=evidence.review_sha256,
-        expected_document_sha256=evidence.document_sha256,
-    )
-
-    with pytest.raises(OfficialStyleReviewRequiredError):
-        require_official_style_promotion_allowed(db, source=source)
 
 
 @pytest.mark.parametrize(
@@ -553,6 +703,11 @@ def test_404_or_network_failure_is_durable_and_keeps_last_success_usable(
             checked_at=NOW + timedelta(days=1),
             downloader=FakeDownloader(error=error),
         )
+        require_official_style_promotion_allowed(
+            db,
+            source=source,
+            store=store,
+        )
     finally:
         store.close()
 
@@ -560,7 +715,6 @@ def test_404_or_network_failure_is_durable_and_keeps_last_success_usable(
     check = db.get(ReferenceStyleUpdateCheck, failed.check_id)
     assert check.error_code in {"http_404", "connection_failed"}
     assert check.next_check_at == NOW + timedelta(days=2)
-    require_official_style_promotion_allowed(db, source=source)
     assert db.scalar(select(func.count(ReferenceStyleObservedVersion.id))) == 0
 
 
@@ -685,6 +839,122 @@ def test_metadata_probe_permission_is_required_before_network(
     assert check.authorization_review_id is None
 
 
+def test_operator_cli_lists_template_then_dry_runs_and_applies_exact_hashes(
+    db,
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    source = _seed_source(db, provider_key="style-watch-cli")
+    target = style_watch_target_for_source(source)
+    body = _changed_body()
+    store_root = tmp_path / "cli-store"
+    with ReferenceBlobStore(store_root) as store:
+        outcome = check_official_style_update(
+            db,
+            source_id=source.id,
+            store=store,
+            checked_at=NOW,
+            downloader=FakeDownloader(
+                body=body,
+                result=_result(target.official_url, body),
+            ),
+        )
+    monkeypatch.setattr(
+        style_update_admin,
+        "register_all_models",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        style_update_admin,
+        "SessionLocal",
+        lambda: nullcontext(db),
+    )
+    monkeypatch.setattr(
+        style_update_admin,
+        "build_style_review_store",
+        lambda: ReferenceBlobStore(store_root),
+    )
+
+    assert style_update_admin.main(
+        ["status", "--source-id", str(source.id)]
+    ) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["pending_count"] == 1
+    pending = status["pending_candidates"][0]
+    assert pending["observed_version_id"] == outcome.observed_version_id
+    assert pending["official_style_url"] == target.official_url
+    assert pending["candidate_integrity"] == "verified"
+    template = pending["review_document_template"]
+    assert template["decision"] is None
+    template.update(
+        {
+            "decision": "retain_vendored",
+            "reviewer": "Style operator",
+            "reviewed_at": "2026-07-28T10:00:00Z",
+            "rationale": "Exact candidate reviewed against local adaptation.",
+        }
+    )
+    review_path = tmp_path / "style-review.json"
+    review_path.write_bytes(
+        json.dumps(template, indent=2, sort_keys=True).encode()
+    )
+
+    assert style_update_admin.main(
+        ["review", "--file", str(review_path)]
+    ) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["mode"] == "dry-run"
+    assert dry_run["applied"] is False
+    assert dry_run["observed_version_id"] == outcome.observed_version_id
+    assert db.scalar(select(ReferenceStyleUpdateReview.id)) is None
+
+    assert style_update_admin.main(
+        ["review", "--file", str(review_path), "--apply"]
+    ) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["error_code"] == "style_update_review_document_rejected"
+
+    assert style_update_admin.main(
+        [
+            "review",
+            "--file",
+            str(review_path),
+            "--apply",
+            "--expected-review-sha256",
+            dry_run["review_sha256"],
+            "--expected-document-sha256",
+            dry_run["document_sha256"],
+        ]
+    ) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["mode"] == "apply"
+    assert applied["applied"] is True
+    assert applied["review_id"] == db.scalar(
+        select(ReferenceStyleUpdateReview.id)
+    )
+
+    assert style_update_admin.main(["status"]) == 0
+    resolved = json.loads(capsys.readouterr().out)
+    assert resolved["pending_count"] == 0
+
+
+def test_operator_cli_rejects_symlink_review_document(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    target = tmp_path / "review-target.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "review.json"
+    link.symlink_to(target)
+
+    assert style_update_admin.main(
+        ["review", "--file", str(link)]
+    ) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["error_code"] == "style_update_review_document_rejected"
+
+
 def test_pending_style_candidate_has_stable_nonretryable_worker_code() -> None:
     failure = classify_worker_failure(
         OfficialStyleReviewRequiredError(
@@ -715,20 +985,21 @@ def test_observation_check_and_review_rows_are_immutable(
                 result=_result(target.official_url, body),
             ),
         )
+        observed = db.get(
+            ReferenceStyleObservedVersion,
+            outcome.observed_version_id,
+        )
+        document = _review_document(source, observed)
+        evidence = parse_style_update_review(document)
+        review = apply_style_update_review(
+            db,
+            document,
+            store=store,
+            expected_review_sha256=evidence.review_sha256,
+            expected_document_sha256=evidence.document_sha256,
+        )
     finally:
         store.close()
-    observed = db.get(
-        ReferenceStyleObservedVersion,
-        outcome.observed_version_id,
-    )
-    document = _review_document(source, observed)
-    evidence = parse_style_update_review(document)
-    review = apply_style_update_review(
-        db,
-        document,
-        expected_review_sha256=evidence.review_sha256,
-        expected_document_sha256=evidence.document_sha256,
-    )
 
     for table, row_id in (
         ("reference_style_observed_versions", observed.id),

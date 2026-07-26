@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 
 STYLE_CHECK_INTERVAL_SECONDS = 86_400
 STYLE_REVIEW_SCHEMA = "siur-style-update-review-v1"
+MAX_STYLE_REVIEW_DOCUMENT_BYTES = 65_536
 _STYLE_WATCHER_LOCK_DOMAIN = b"asistente/reference-style-watcher/v1\0"
 _SUCCESS_STATUSES = ("unchanged", "style_review_required")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
@@ -218,6 +219,38 @@ class StyleUpdateReviewEvidence:
     reviewer: str
     reviewed_at: datetime
     rationale: str
+
+
+@dataclass(frozen=True)
+class StyleUpdateReviewPlan:
+    evidence: StyleUpdateReviewEvidence
+    already_applied_id: int | None
+
+    def public_summary(self, *, applied: bool = False) -> dict[str, object]:
+        return {
+            "ok": True,
+            "mode": "apply" if applied else "dry-run",
+            "applied": applied,
+            "schema_version": STYLE_REVIEW_SCHEMA,
+            "provider_key": self.evidence.provider_key,
+            "layer_id": self.evidence.layer_id,
+            "source_id": self.evidence.source_id,
+            "source_definition_sha256": (
+                self.evidence.source_definition_sha256
+            ),
+            "profile": self.evidence.profile,
+            "official_style_url": self.evidence.official_style_url,
+            "observed_version_id": self.evidence.observed_version_id,
+            "observed_raw_sha256": self.evidence.observed_raw_sha256,
+            "observed_semantic_sha256": (
+                self.evidence.observed_semantic_sha256
+            ),
+            "decision": self.evidence.decision,
+            "review_sha256": self.evidence.review_sha256,
+            "document_sha256": self.evidence.document_sha256,
+            "already_applied": self.already_applied_id is not None,
+            "review_id": self.already_applied_id,
+        }
 
 
 def build_official_style_downloader(
@@ -638,25 +671,187 @@ def require_official_style_promotion_allowed(
     db: Session,
     *,
     source: ReferenceLayerSource,
+    store: ReferenceBlobStore | None,
 ) -> None:
-    """Fail closed when the last live style candidate awaits review."""
+    """Fail closed on an unreviewed or physically unverifiable candidate."""
 
     target = style_watch_target_for_source(source)
     if target is None:
         return
     latest = _latest_successful_check(db, target)
-    if latest is None or latest.status == "unchanged":
+    if latest is None:
         return
-    observed = (
-        db.get(ReferenceStyleObservedVersion, latest.observed_version_id)
-        if latest.observed_version_id is not None
-        else None
+    if latest.observed_version_id is None:
+        if latest.status == "unchanged":
+            return
+        raise OfficialStyleReviewRequiredError(
+            "official style candidate evidence is unavailable"
+        )
+    observed = db.get(
+        ReferenceStyleObservedVersion,
+        latest.observed_version_id,
     )
-    if observed is not None and _candidate_is_resolved(db, observed):
+    if observed is None or store is None:
+        raise OfficialStyleReviewRequiredError(
+            "official style candidate evidence is unavailable"
+        )
+    try:
+        _verify_observed_blob(store, observed)
+    except OfficialStyleWatcherError as error:
+        raise OfficialStyleReviewRequiredError(
+            "official style candidate evidence failed integrity validation"
+        ) from error
+    if _candidate_is_resolved(db, observed):
         return
     raise OfficialStyleReviewRequiredError(
         "official style changed and requires explicit review"
     )
+
+
+def pending_official_style_review_status(
+    db: Session,
+    *,
+    store: ReferenceBlobStore,
+    source_id: int | None = None,
+) -> dict[str, object]:
+    """List current promotion blockers and complete operator templates."""
+
+    if source_id is not None and (
+        isinstance(source_id, bool)
+        or not isinstance(source_id, int)
+        or source_id <= 0
+    ):
+        raise StyleUpdateReviewDocumentError("source_id is invalid")
+    query = select(ReferenceLayerSource).order_by(ReferenceLayerSource.id)
+    if source_id is None:
+        query = query.where(ReferenceLayerSource.enabled.is_(True))
+    else:
+        query = query.where(ReferenceLayerSource.id == source_id)
+    sources = tuple(db.scalars(query))
+    if source_id is not None and not sources:
+        raise StyleUpdateReviewDocumentError(
+            "reference style source does not exist"
+        )
+
+    pending: list[dict[str, object]] = []
+    for source in sources:
+        target = style_watch_target_for_source(source)
+        if target is None:
+            continue
+        successful = _latest_successful_check(db, target)
+        if (
+            successful is None
+            or successful.observed_version_id is None
+        ):
+            continue
+        observed = db.get(
+            ReferenceStyleObservedVersion,
+            successful.observed_version_id,
+        )
+        if observed is None:
+            raise StyleUpdateReviewDocumentError(
+                "pending style candidate evidence is inconsistent"
+            )
+        resolved = _candidate_is_resolved(db, observed)
+        try:
+            _verify_observed_blob(store, observed)
+            candidate_integrity = "verified"
+            candidate_integrity_error = None
+        except OfficialStyleWatcherError as error:
+            candidate_integrity = "invalid"
+            candidate_integrity_error = error.code
+        if resolved and candidate_integrity == "verified":
+            continue
+        latest = _latest_check(db, target)
+        review = db.scalar(
+            select(ReferenceStyleUpdateReview).where(
+                ReferenceStyleUpdateReview.observed_version_id
+                == observed.id
+            )
+        )
+        if review is None:
+            review_state = "unreviewed"
+        elif stored_style_update_review_is_valid(review):
+            review_state = review.decision
+        else:
+            review_state = "invalid_review"
+        template: dict[str, object] | None = None
+        if (
+            review is None
+            and successful.status == "style_review_required"
+            and candidate_integrity == "verified"
+        ):
+            template = {
+                "schema_version": STYLE_REVIEW_SCHEMA,
+                "provider_key": target.provider_key,
+                "layer_id": target.layer_id,
+                "source_id": target.source_id,
+                "source_definition_sha256": (
+                    target.source_definition_sha256
+                ),
+                "profile": target.profile,
+                "official_style_url": target.official_url,
+                "baseline_raw_sha256": target.baseline_raw_sha256,
+                "baseline_semantic_sha256": (
+                    target.baseline_semantic_sha256
+                ),
+                "observed_version_id": observed.id,
+                "observed_raw_sha256": observed.raw_sha256,
+                "observed_semantic_sha256": observed.semantic_sha256,
+                "decision": None,
+                "reviewer": None,
+                "reviewed_at": None,
+                "rationale": None,
+            }
+        pending.append(
+            {
+                "provider_key": target.provider_key,
+                "layer_id": target.layer_id,
+                "source_id": target.source_id,
+                "source_definition_sha256": (
+                    target.source_definition_sha256
+                ),
+                "profile": target.profile,
+                "official_style_url": target.official_url,
+                "baseline_raw_sha256": target.baseline_raw_sha256,
+                "baseline_semantic_sha256": (
+                    target.baseline_semantic_sha256
+                ),
+                "latest_check_id": (
+                    latest.id if latest is not None else successful.id
+                ),
+                "latest_check_status": (
+                    latest.status
+                    if latest is not None
+                    else successful.status
+                ),
+                "candidate_check_id": successful.id,
+                "observed_version_id": observed.id,
+                "observed_raw_sha256": observed.raw_sha256,
+                "observed_semantic_sha256": observed.semantic_sha256,
+                "observed_at": _utc_isoformat(observed.retrieved_at),
+                "candidate_integrity": candidate_integrity,
+                "candidate_integrity_error": candidate_integrity_error,
+                "blocking_reason": (
+                    "style_candidate_integrity"
+                    if candidate_integrity != "verified"
+                    else "style_review_required"
+                ),
+                "review_state": review_state,
+                "review_id": review.id if review is not None else None,
+                "review_sha256": (
+                    review.review_sha256 if review is not None else None
+                ),
+                "review_document_template": template,
+            }
+        )
+    return {
+        "ok": True,
+        "mode": "status",
+        "source_id": source_id,
+        "pending_count": len(pending),
+        "pending_candidates": pending,
+    }
 
 
 def parse_style_update_review(
@@ -664,7 +859,10 @@ def parse_style_update_review(
 ) -> StyleUpdateReviewEvidence:
     """Parse one exact, strict review document without touching the network."""
 
-    if not isinstance(document, bytes) or not 1 <= len(document) <= 65_536:
+    if (
+        not isinstance(document, bytes)
+        or not 1 <= len(document) <= MAX_STYLE_REVIEW_DOCUMENT_BYTES
+    ):
         raise StyleUpdateReviewDocumentError(
             "style review document exceeds its byte limit"
         )
@@ -740,10 +938,98 @@ def parse_style_update_review(
     )
 
 
+def plan_style_update_review(
+    db: Session,
+    document: bytes,
+    *,
+    store: ReferenceBlobStore,
+    lock: bool = False,
+) -> StyleUpdateReviewPlan:
+    """Validate one review against the exact current pending candidate."""
+
+    evidence = parse_style_update_review(document)
+    query = select(ReferenceLayerSource).where(
+        ReferenceLayerSource.id == evidence.source_id,
+        ReferenceLayerSource.provider_key == evidence.provider_key,
+        ReferenceLayerSource.layer_id == evidence.layer_id,
+    )
+    source = db.scalar(query)
+    if source is None:
+        raise StyleUpdateReviewDocumentError(
+            "style review source does not exist"
+        )
+    target = style_watch_target_for_source(source)
+    if target is None:
+        raise StyleUpdateReviewDocumentError(
+            "style review source is not currently watched"
+        )
+    if lock:
+        db.scalar(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _style_watcher_lock_key(target)},
+        )
+        current_source = db.scalar(query.with_for_update())
+        current_target = (
+            style_watch_target_for_source(current_source)
+            if current_source is not None
+            else None
+        )
+        if current_target != target:
+            raise StyleUpdateReviewDocumentError(
+                "style review source changed while acquiring its lock"
+            )
+        assert current_source is not None and current_target is not None
+        source = current_source
+        target = current_target
+    observed = db.get(
+        ReferenceStyleObservedVersion,
+        evidence.observed_version_id,
+    )
+    if (
+        observed is None
+        or not _review_matches_candidate(evidence, target, observed)
+    ):
+        raise StyleUpdateReviewDocumentError(
+            "style review does not match the exact staged candidate"
+        )
+    try:
+        _verify_observed_blob(store, observed)
+    except OfficialStyleWatcherError as error:
+        raise StyleUpdateReviewDocumentError(
+            "style candidate CAS evidence failed integrity validation"
+        ) from error
+    existing = db.scalar(
+        select(ReferenceStyleUpdateReview).where(
+            ReferenceStyleUpdateReview.observed_version_id == observed.id
+        )
+    )
+    if existing is not None:
+        if (
+            existing.document_sha256 != evidence.document_sha256
+            or existing.review_sha256 != evidence.review_sha256
+            or not stored_style_update_review_is_valid(existing)
+        ):
+            raise StyleUpdateReviewDocumentError(
+                "style candidate already has a different review"
+            )
+        return StyleUpdateReviewPlan(evidence, existing.id)
+    latest = _latest_successful_check(db, target)
+    if (
+        latest is None
+        or latest.status != "style_review_required"
+        or latest.observed_version_id != observed.id
+    ):
+        raise StyleUpdateReviewDocumentError(
+            "style candidate is no longer the current promotion blocker"
+        )
+    return StyleUpdateReviewPlan(evidence, None)
+
+
 def apply_style_update_review(
     db: Session,
     document: bytes,
     *,
+    store: ReferenceBlobStore,
     expected_review_sha256: str,
     expected_document_sha256: str,
 ) -> ReferenceStyleUpdateReview:
@@ -757,72 +1043,33 @@ def apply_style_update_review(
         expected_document_sha256,
         "expected_document_sha256",
     )
-    evidence = parse_style_update_review(document)
-    if evidence.review_sha256 != expected_review:
-        raise StyleUpdateReviewDocumentError(
-            "style review hash changed after dry-run"
-        )
-    if evidence.document_sha256 != expected_document:
-        raise StyleUpdateReviewDocumentError(
-            "style review document hash changed after dry-run"
-        )
     try:
-        source = db.scalar(
-            select(ReferenceLayerSource)
-            .where(ReferenceLayerSource.id == evidence.source_id)
-            .with_for_update()
+        plan = plan_style_update_review(
+            db,
+            document,
+            store=store,
+            lock=True,
         )
-        if source is None:
+        evidence = plan.evidence
+        if evidence.review_sha256 != expected_review:
             raise StyleUpdateReviewDocumentError(
-                "style review source does not exist"
+                "style review hash changed after dry-run"
             )
-        target = style_watch_target_for_source(source)
-        observed = db.get(
-            ReferenceStyleObservedVersion,
-            evidence.observed_version_id,
-        )
-        if (
-            target is None
-            or observed is None
-            or evidence.provider_key != target.provider_key
-            or evidence.layer_id != target.layer_id
-            or evidence.source_definition_sha256
-            != target.source_definition_sha256
-            or evidence.profile != target.profile
-            or evidence.official_style_url != target.official_url
-            or evidence.baseline_raw_sha256
-            != target.baseline_raw_sha256
-            or evidence.baseline_semantic_sha256
-            != target.baseline_semantic_sha256
-            or observed.provider_key != target.provider_key
-            or observed.layer_id != target.layer_id
-            or observed.source_id != target.source_id
-            or observed.source_definition_sha256
-            != target.source_definition_sha256
-            or observed.profile != target.profile
-            or observed.source_url != target.official_url
-            or evidence.observed_raw_sha256 != observed.raw_sha256
-            or evidence.observed_semantic_sha256
-            != observed.semantic_sha256
-            or evidence.reviewed_at < _aware_utc(observed.retrieved_at)
-        ):
+        if evidence.document_sha256 != expected_document:
             raise StyleUpdateReviewDocumentError(
-                "style review does not match the exact staged candidate"
+                "style review document hash changed after dry-run"
             )
-        existing = db.scalar(
-            select(ReferenceStyleUpdateReview).where(
-                ReferenceStyleUpdateReview.observed_version_id
-                == observed.id
+        if plan.already_applied_id is not None:
+            existing = db.get(
+                ReferenceStyleUpdateReview,
+                plan.already_applied_id,
             )
-        )
-        if existing is not None:
             if (
-                existing.document_sha256 != evidence.document_sha256
-                or existing.review_sha256 != evidence.review_sha256
+                existing is None
                 or not stored_style_update_review_is_valid(existing)
             ):
                 raise StyleUpdateReviewDocumentError(
-                    "style candidate already has a different review"
+                    "stored style review is invalid"
                 )
             db.commit()
             return existing
@@ -854,6 +1101,36 @@ def apply_style_update_review(
     except Exception:
         db.rollback()
         raise
+
+
+def _review_matches_candidate(
+    evidence: StyleUpdateReviewEvidence,
+    target: StyleWatchTarget,
+    observed: ReferenceStyleObservedVersion,
+) -> bool:
+    return (
+        evidence.provider_key == target.provider_key
+        and evidence.layer_id == target.layer_id
+        and evidence.source_id == target.source_id
+        and evidence.source_definition_sha256
+        == target.source_definition_sha256
+        and evidence.profile == target.profile
+        and evidence.official_style_url == target.official_url
+        and evidence.baseline_raw_sha256 == target.baseline_raw_sha256
+        and evidence.baseline_semantic_sha256
+        == target.baseline_semantic_sha256
+        and observed.provider_key == target.provider_key
+        and observed.layer_id == target.layer_id
+        and observed.source_id == target.source_id
+        and observed.source_definition_sha256
+        == target.source_definition_sha256
+        and observed.profile == target.profile
+        and observed.source_url == target.official_url
+        and evidence.observed_version_id == observed.id
+        and evidence.observed_raw_sha256 == observed.raw_sha256
+        and evidence.observed_semantic_sha256 == observed.semantic_sha256
+        and evidence.reviewed_at >= _aware_utc(observed.retrieved_at)
+    )
 
 
 def stored_style_update_review_is_valid(
@@ -1517,17 +1794,25 @@ def _canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _utc_isoformat(value: datetime) -> str:
+    return _aware_utc(value).isoformat().replace("+00:00", "Z")
+
+
 __all__ = [
     "OfficialStyleReviewRequiredError",
     "OfficialStyleWatcherError",
+    "MAX_STYLE_REVIEW_DOCUMENT_BYTES",
     "STYLE_CHECK_INTERVAL_SECONDS",
     "STYLE_REVIEW_SCHEMA",
     "StyleUpdateCheckOutcome",
     "StyleUpdateReviewDocumentError",
+    "StyleUpdateReviewPlan",
     "apply_style_update_review",
     "build_official_style_downloader",
     "check_official_style_update",
     "parse_style_update_review",
+    "pending_official_style_review_status",
+    "plan_style_update_review",
     "require_official_style_promotion_allowed",
     "run_official_style_update_check_job",
     "scheduled_style_check_key",
