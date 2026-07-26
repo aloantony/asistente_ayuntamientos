@@ -146,6 +146,14 @@ export type SiurMapLayer = {
   zIndex: number;
 };
 
+export type LegacyMapBaseLayerPreference = "street" | "topographic";
+
+export type StoredMapBaseLayerPreference =
+  | number
+  | null
+  | LegacyMapBaseLayerPreference
+  | undefined;
+
 export type SiurIdentifyPoint = {
   layer: SiurMapLayer;
   z: number;
@@ -729,26 +737,142 @@ export function buildSiurMapLayers(
   return result;
 }
 
-export function selectLocalBaseMapLayer(
-  layers: SiurMapLayer[],
-  preference: "street" | "topographic",
-) {
-  const candidates = layers
+function isLocalReferenceTileLayer(layer: SiurMapLayer) {
+  try {
+    return (
+      layer.tileUrl ===
+      buildReferenceTileUrl(
+        layer.organizationId,
+        layer.layerId,
+        layer.styleId,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function listLocalBaseMapLayers(layers: SiurMapLayer[]) {
+  return layers
     .filter(
       (layer) =>
         layer.role === "base" &&
-        layer.visible &&
-        layer.opacity > 0,
+        layer.opacity > 0 &&
+        isLocalReferenceTileLayer(layer),
     )
     .sort(
       (left, right) =>
         left.zIndex - right.zIndex || left.layerId - right.layerId,
     );
-  if (candidates.length === 0) {
+}
+
+export function parseStoredMapBaseLayerPreference(
+  preferences: unknown,
+): StoredMapBaseLayerPreference {
+  if (
+    !preferences ||
+    typeof preferences !== "object" ||
+    Array.isArray(preferences)
+  ) {
+    return undefined;
+  }
+  const record = preferences as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(record, "baseLayerId")) {
+    if (record.baseLayerId === null) {
+      return null;
+    }
+    return Number.isInteger(record.baseLayerId) &&
+      (record.baseLayerId as number) > 0
+      ? (record.baseLayerId as number)
+      : undefined;
+  }
+  return record.baseLayer === "street" || record.baseLayer === "topographic"
+    ? record.baseLayer
+    : undefined;
+}
+
+export function resolveLocalBaseMapLayerId(
+  layers: SiurMapLayer[],
+  preference: StoredMapBaseLayerPreference,
+) {
+  const candidates = listLocalBaseMapLayers(layers);
+  const defaultCandidate =
+    candidates.find((layer) => layer.visible) ?? candidates[0] ?? null;
+  if (preference === null) {
     return null;
   }
-  const preferredIndex = preference === "topographic" ? 1 : 0;
-  return candidates[preferredIndex] ?? candidates[0];
+  if (typeof preference === "number") {
+    return candidates.some((layer) => layer.layerId === preference)
+      ? preference
+      : defaultCandidate?.layerId ?? null;
+  }
+  if (preference === "street" || preference === "topographic") {
+    const legacyIndex = preference === "topographic" ? 1 : 0;
+    return candidates[legacyIndex]?.layerId ?? defaultCandidate?.layerId ?? null;
+  }
+  return defaultCandidate?.layerId ?? null;
+}
+
+export function serializeMapBaseLayerPreference(
+  preference: StoredMapBaseLayerPreference,
+  resolvedLayerId: number | null,
+  resolved: boolean,
+): {
+  baseLayerId?: number | null;
+  baseLayer?: LegacyMapBaseLayerPreference;
+} {
+  if (resolved) {
+    return { baseLayerId: resolvedLayerId };
+  }
+  if (preference === "street" || preference === "topographic") {
+    return { baseLayer: preference };
+  }
+  if (preference === null || typeof preference === "number") {
+    return { baseLayerId: preference };
+  }
+  return {};
+}
+
+export function applyLocalBaseMapSelection(
+  layers: SiurMapLayer[],
+  preferences: SiurMapPreferences,
+  selectedLayerId: number | null,
+) {
+  const candidates = listLocalBaseMapLayers(layers);
+  const candidateIds = new Set(candidates.map((layer) => layer.layerId));
+  const validSelectedLayerId =
+    selectedLayerId !== null && candidateIds.has(selectedLayerId)
+      ? selectedLayerId
+      : null;
+  let changed = false;
+  const nextLayers = { ...preferences.layers };
+  for (const layerId of candidateIds) {
+    const key = String(layerId);
+    const control = preferences.layers[key];
+    if (!control) {
+      continue;
+    }
+    const visible = layerId === validSelectedLayerId;
+    if (control.visible !== visible) {
+      changed = true;
+      nextLayers[key] = { ...control, visible };
+    }
+  }
+  return changed ? { ...preferences, layers: nextLayers } : preferences;
+}
+
+export function selectLocalBaseMapLayer(
+  layers: SiurMapLayer[],
+  selectedLayerId: number | null,
+) {
+  if (selectedLayerId === null) {
+    return null;
+  }
+  return (
+    listLocalBaseMapLayers(layers).find(
+      (layer) => layer.layerId === selectedLayerId && layer.visible,
+    ) ?? null
+  );
 }
 
 export function selectTopIdentifyLayer(

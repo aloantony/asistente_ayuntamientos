@@ -30,8 +30,6 @@ export type MapBounds = {
   west: number;
 };
 
-export type MapBaseLayer = "street" | "topographic";
-
 type MunicipalMapProps = {
   items: GeoMapItem[];
   focusLocation?: {
@@ -42,7 +40,7 @@ type MunicipalMapProps = {
   initialZoom?: number | null;
   selectedItemId?: string | null;
   markerColors?: Record<string, string>;
-  baseLayer?: MapBaseLayer;
+  baseLayerId?: number | null;
   fitRequest?: number;
   locateRequest?: number;
   areaSelectionEnabled?: boolean;
@@ -367,7 +365,7 @@ function locationErrorMessage(error: LeafletLocationErrorEvent) {
 export function MunicipalMap({
   areaBounds,
   areaSelectionEnabled = false,
-  baseLayer = "street",
+  baseLayerId = null,
   fitRequest,
   focusLocation,
   initialZoom,
@@ -401,8 +399,8 @@ export function MunicipalMap({
   const lastLocateRequestRef = useRef<number | undefined>(locateRequest);
   const [mapReady, setMapReady] = useState(false);
   const selectedBaseMap = useMemo(
-    () => selectLocalBaseMapLayer(siurLayers, baseLayer),
-    [baseLayer, siurLayers],
+    () => selectLocalBaseMapLayer(siurLayers, baseLayerId),
+    [baseLayerId, siurLayers],
   );
 
   const focusLocationRef = useRef(focusLocation);

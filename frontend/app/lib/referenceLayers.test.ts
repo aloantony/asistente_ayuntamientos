@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyLocalBaseMapSelection,
   buildReferenceIdentifyPath,
   buildReferenceLayerTree,
   buildReferenceMetadataUrl,
   buildReferenceTileUrl,
   buildSiurMapLayers,
+  listLocalBaseMapLayers,
+  parseStoredMapBaseLayerPreference,
   parseReferenceLayerBounds,
   referenceLayerBlocker,
   reconcileSiurPreferences,
+  resolveLocalBaseMapLayerId,
+  serializeMapBaseLayerPreference,
   selectLocalBaseMapLayer,
   selectTopIdentifyLayer,
   tileCoordinatesForProjectedPoint,
@@ -116,7 +121,7 @@ function makeCatalog(
 }
 
 function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
-  return {
+  const layer = {
     organizationId: 7,
     layerId: 1,
     role: "overlay",
@@ -133,72 +138,214 @@ function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
     zIndex: 1,
     ...overrides,
   };
+  return {
+    ...layer,
+    tileUrl:
+      overrides.tileUrl ??
+      buildReferenceTileUrl(
+        layer.organizationId,
+        layer.layerId,
+        layer.styleId,
+      ),
+  };
 }
 
 describe("local base map selection", () => {
-  it("selects only internal base descriptors and falls back deterministically", () => {
-    const street = makeMapLayer({
+  it("selects the requested local layer id independently of input order", () => {
+    const image = makeMapLayer({
       layerId: 10,
       role: "base",
+      title: "IMAGEN",
       zIndex: 1,
-      tileUrl: "/api/local/street/{z}/{x}/{y}.png",
     });
-    const topographic = makeMapLayer({
+    const map = makeMapLayer({
       layerId: 11,
       role: "base",
+      title: "MAPA",
       zIndex: 2,
-      tileUrl: "/api/local/topographic/{z}/{x}/{y}.png",
     });
-    const overlay = makeMapLayer({ layerId: 12, role: "overlay", zIndex: 3 });
+    const relief = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      title: "RELIEVE",
+      zIndex: 3,
+    });
+    const overlay = makeMapLayer({ layerId: 13, role: "overlay", zIndex: 4 });
 
-    expect(selectLocalBaseMapLayer([overlay, topographic, street], "street"))
-      .toBe(street);
     expect(
-      selectLocalBaseMapLayer([overlay, topographic, street], "topographic"),
-    ).toBe(topographic);
-    expect(selectLocalBaseMapLayer([overlay, street], "topographic")).toBe(
-      street,
-    );
-    expect(selectLocalBaseMapLayer([overlay], "street")).toBeNull();
-    expect([street, topographic].every((layer) => layer.tileUrl.startsWith("/")))
-      .toBe(true);
+      selectLocalBaseMapLayer([relief, overlay, image, map], relief.layerId),
+    ).toBe(relief);
+    expect(selectLocalBaseMapLayer([overlay], image.layerId)).toBeNull();
+    expect(selectLocalBaseMapLayer([image, map, relief], null)).toBeNull();
   });
 
-  it("never renders a base disabled by the SIUR layer controls", () => {
-    const hiddenStreet = makeMapLayer({
+  it("never renders a hidden, transparent, unavailable, or remote base", () => {
+    const hidden = makeMapLayer({
       layerId: 10,
       role: "base",
       visible: false,
       zIndex: 1,
     });
-    const visibleTopographic = makeMapLayer({
+    const transparent = makeMapLayer({
       layerId: 11,
+      opacity: 0,
       role: "base",
       visible: true,
       zIndex: 2,
     });
+    const remote = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      tileUrl: "https://tiles.example.test/{z}/{x}/{y}.png",
+      visible: true,
+      zIndex: 3,
+    });
+
+    expect(selectLocalBaseMapLayer([hidden], hidden.layerId)).toBeNull();
+    expect(
+      selectLocalBaseMapLayer([transparent], transparent.layerId),
+    ).toBeNull();
+    expect(selectLocalBaseMapLayer([remote], remote.layerId)).toBeNull();
+    expect(listLocalBaseMapLayers([transparent, remote])).toEqual([]);
+  });
+
+  it("lists all selectable local bases in canonical order", () => {
+    const image = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      title: "IMAGEN",
+      visible: true,
+      zIndex: 1,
+    });
+    const map = makeMapLayer({
+      layerId: 11,
+      role: "base",
+      title: "MAPA",
+      visible: false,
+      zIndex: 2,
+    });
+    const relief = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      title: "RELIEVE",
+      visible: false,
+      zIndex: 3,
+    });
 
     expect(
-      selectLocalBaseMapLayer(
-        [hiddenStreet, visibleTopographic],
-        "street",
-      ),
-    ).toBe(visibleTopographic);
+      listLocalBaseMapLayers([relief, map, image]).map((layer) => layer.title),
+    ).toEqual(["IMAGEN", "MAPA", "RELIEVE"]);
+  });
+
+  it("migrates legacy preferences to a stable id and fails closed safely", () => {
+    const image = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      title: "IMAGEN",
+      visible: true,
+      zIndex: 1,
+    });
+    const map = makeMapLayer({
+      layerId: 11,
+      role: "base",
+      title: "MAPA",
+      visible: false,
+      zIndex: 2,
+    });
+    const relief = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      title: "RELIEVE",
+      visible: false,
+      zIndex: 3,
+    });
+    const shuffled = [relief, image, map];
+
     expect(
-      selectLocalBaseMapLayer(
-        [
-          hiddenStreet,
-          { ...visibleTopographic, visible: false },
-        ],
-        "topographic",
+      resolveLocalBaseMapLayerId(
+        shuffled,
+        parseStoredMapBaseLayerPreference({ baseLayer: "street" }),
       ),
-    ).toBeNull();
+    ).toBe(image.layerId);
     expect(
-      selectLocalBaseMapLayer(
-        [{ ...visibleTopographic, opacity: 0 }],
-        "topographic",
+      resolveLocalBaseMapLayerId(
+        shuffled,
+        parseStoredMapBaseLayerPreference({ baseLayer: "topographic" }),
       ),
-    ).toBeNull();
+    ).toBe(map.layerId);
+    expect(
+      resolveLocalBaseMapLayerId(
+        shuffled,
+        parseStoredMapBaseLayerPreference({ baseLayerId: relief.layerId }),
+      ),
+    ).toBe(relief.layerId);
+    expect(resolveLocalBaseMapLayerId(shuffled, 999)).toBe(image.layerId);
+    expect(resolveLocalBaseMapLayerId(shuffled, null)).toBeNull();
+    expect(
+      parseStoredMapBaseLayerPreference({
+        baseLayerId: "11",
+        baseLayer: "topographic",
+      }),
+    ).toBeUndefined();
+    expect(
+      serializeMapBaseLayerPreference("topographic", map.layerId, false),
+    ).toEqual({ baseLayer: "topographic" });
+    expect(
+      serializeMapBaseLayerPreference("topographic", map.layerId, true),
+    ).toEqual({ baseLayerId: map.layerId });
+  });
+
+  it("makes a selected base exclusive without changing overlay controls", () => {
+    const bases = [10, 11, 12].map((layerId, index) =>
+      makeMapLayer({
+        layerId,
+        role: "base",
+        visible: layerId === 10,
+        zIndex: index + 1,
+      }),
+    );
+    const overlay = makeMapLayer({
+      layerId: 20,
+      role: "overlay",
+      visible: true,
+      zIndex: 4,
+    });
+    const preferences = {
+      layers: Object.fromEntries(
+        [...bases, overlay].map((layer) => [
+          String(layer.layerId),
+          {
+            opacity: layer.opacity,
+            styleId: layer.styleId,
+            visible: layer.visible,
+          },
+        ]),
+      ),
+      stackOrder: [...bases, overlay].map((layer) => layer.layerId),
+    };
+
+    const selected = applyLocalBaseMapSelection(
+      [overlay, ...bases],
+      preferences,
+      12,
+    );
+    expect(selected.layers["10"].visible).toBe(false);
+    expect(selected.layers["11"].visible).toBe(false);
+    expect(selected.layers["12"].visible).toBe(true);
+    expect(selected.layers["20"].visible).toBe(true);
+
+    const withoutBackground = applyLocalBaseMapSelection(
+      [overlay, ...bases],
+      selected,
+      null,
+    );
+    expect(
+      bases.every(
+        (layer) =>
+          withoutBackground.layers[String(layer.layerId)].visible === false,
+      ),
+    ).toBe(true);
+    expect(withoutBackground.layers["20"].visible).toBe(true);
   });
 });
 

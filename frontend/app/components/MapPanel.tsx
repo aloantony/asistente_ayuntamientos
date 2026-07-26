@@ -18,16 +18,22 @@ import {
   fetchMunicipalAssets,
 } from "../lib/geo";
 import {
+  applyLocalBaseMapSelection,
   buildReferenceLayerTree,
   buildSiurMapLayers,
   fetchReferenceCatalog,
   fetchReferenceIdentify,
+  listLocalBaseMapLayers,
+  parseStoredMapBaseLayerPreference,
   reconcileSiurPreferences,
+  resolveLocalBaseMapLayerId,
+  serializeMapBaseLayerPreference,
   type ReferenceCatalog,
   type ReferenceIdentifyFeature,
   type SiurIdentifyPoint,
   type SiurLayerControl,
   type SiurMapPreferences,
+  type StoredMapBaseLayerPreference,
 } from "../lib/referenceLayers";
 import { useSession } from "../lib/session";
 import { AssetMaintenancePanel } from "./AssetMaintenancePanel";
@@ -35,11 +41,8 @@ import {
   MunicipalityMapDirectory,
   type MunicipalityMapFocus,
 } from "./MunicipalityMapDirectory";
-import {
-  MunicipalMap,
-  type MapBaseLayer,
-  type MapBounds,
-} from "./MunicipalMap";
+import { LocalBaseMapSelect } from "./LocalBaseMapSelect";
+import { MunicipalMap, type MapBounds } from "./MunicipalMap";
 import { SiurLayerTree } from "./SiurLayerTree";
 import type {
   AssetStatus,
@@ -443,7 +446,8 @@ export function MapPanel({ user }: MapPanelProps) {
   const [visibleStatuses, setVisibleStatuses] = useState<
     Record<string, boolean>
   >({});
-  const [baseLayer, setBaseLayer] = useState<MapBaseLayer>("street");
+  const [baseLayerPreference, setBaseLayerPreference] =
+    useState<StoredMapBaseLayerPreference>(undefined);
   const [fitRequest, setFitRequest] = useState(0);
   const [locateRequest, setLocateRequest] = useState(0);
   const [areaSelectionEnabled, setAreaSelectionEnabled] = useState(false);
@@ -818,6 +822,20 @@ export function MapPanel({ user }: MapPanelProps) {
         : [],
     [siurCatalog, siurPreferences],
   );
+  const localBaseMapLayers = useMemo(
+    () => listLocalBaseMapLayers(siurMapLayers),
+    [siurMapLayers],
+  );
+  const localBaseMapLayerIds = useMemo(
+    () => new Set(localBaseMapLayers.map((layer) => layer.layerId)),
+    [localBaseMapLayers],
+  );
+  const baseLayerId = useMemo(
+    () =>
+      resolveLocalBaseMapLayerId(siurMapLayers, baseLayerPreference),
+    [baseLayerPreference, siurMapLayers],
+  );
+  const baseLayerResolved = siurCatalog !== null && siurPreferences !== null;
 
   const availableStatuses = useMemo(
     () =>
@@ -894,7 +912,8 @@ export function MapPanel({ user }: MapPanelProps) {
           layerPanelOpen?: boolean;
           stateLayerEnabled?: boolean;
           visibleStatuses?: Record<string, boolean>;
-          baseLayer?: MapBaseLayer;
+          baseLayerId?: unknown;
+          baseLayer?: unknown;
         };
         if (preferences.visibleLayerKeys) {
           setVisibleLayerKeys(preferences.visibleLayerKeys);
@@ -911,12 +930,9 @@ export function MapPanel({ user }: MapPanelProps) {
         if (preferences.visibleStatuses) {
           setVisibleStatuses(preferences.visibleStatuses);
         }
-        if (
-          preferences.baseLayer === "street" ||
-          preferences.baseLayer === "topographic"
-        ) {
-          setBaseLayer(preferences.baseLayer);
-        }
+        setBaseLayerPreference(
+          parseStoredMapBaseLayerPreference(preferences),
+        );
       }
     } catch {
       window.localStorage.removeItem(MAP_PREFERENCES_KEY);
@@ -945,6 +961,12 @@ export function MapPanel({ user }: MapPanelProps) {
       return;
     }
     try {
+      const serializedBaseLayerPreference =
+        serializeMapBaseLayerPreference(
+          baseLayerPreference,
+          baseLayerId,
+          baseLayerResolved,
+        );
       window.localStorage.setItem(
         MAP_PREFERENCES_KEY,
         JSON.stringify({
@@ -953,14 +975,16 @@ export function MapPanel({ user }: MapPanelProps) {
           layerPanelOpen,
           stateLayerEnabled,
           visibleStatuses,
-          baseLayer,
+          ...serializedBaseLayerPreference,
         }),
       );
     } catch {
       // Preferences are optional when browser storage is unavailable.
     }
   }, [
-    baseLayer,
+    baseLayerId,
+    baseLayerPreference,
+    baseLayerResolved,
     layerOrder,
     layerPanelOpen,
     preferencesReady,
@@ -968,6 +992,20 @@ export function MapPanel({ user }: MapPanelProps) {
     visibleLayerKeys,
     visibleStatuses,
   ]);
+
+  useEffect(() => {
+    if (!baseLayerResolved) {
+      return;
+    }
+    setBaseLayerPreference((current) =>
+      current === baseLayerId ? current : baseLayerId,
+    );
+    setSiurPreferences((current) =>
+      current
+        ? applyLocalBaseMapSelection(siurMapLayers, current, baseLayerId)
+        : current,
+    );
+  }, [baseLayerId, baseLayerResolved, siurMapLayers]);
 
   useEffect(() => {
     if (!siurPreferences || siurOrganizationId === null) {
@@ -1122,11 +1160,22 @@ export function MapPanel({ user }: MapPanelProps) {
 
   const handleSiurControlChange = useCallback(
     (layerId: number, control: SiurLayerControl) => {
+      const isBaseLayer = localBaseMapLayerIds.has(layerId);
+      const selectedBaseLayerId = isBaseLayer
+        ? control.visible
+          ? layerId
+          : baseLayerId === layerId
+            ? null
+            : baseLayerId
+        : baseLayerId;
+      if (isBaseLayer) {
+        setBaseLayerPreference(selectedBaseLayerId);
+      }
       setSiurPreferences((current) => {
         if (!current || !current.layers[String(layerId)]) {
           return current;
         }
-        return {
+        const nextPreferences = {
           ...current,
           layers: {
             ...current.layers,
@@ -1136,9 +1185,32 @@ export function MapPanel({ user }: MapPanelProps) {
             },
           },
         };
+        return isBaseLayer
+          ? applyLocalBaseMapSelection(
+              siurMapLayers,
+              nextPreferences,
+              selectedBaseLayerId,
+            )
+          : nextPreferences;
       });
     },
-    [],
+    [
+      baseLayerId,
+      localBaseMapLayerIds,
+      siurMapLayers,
+    ],
+  );
+
+  const handleBaseMapSelect = useCallback(
+    (layerId: number | null) => {
+      setBaseLayerPreference(layerId);
+      setSiurPreferences((current) =>
+        current
+          ? applyLocalBaseMapSelection(siurMapLayers, current, layerId)
+          : current,
+      );
+    },
+    [siurMapLayers],
   );
 
   const handleSiurMove = useCallback(
@@ -1860,18 +1932,11 @@ export function MapPanel({ user }: MapPanelProps) {
             </div>
           ) : null}
         </div>
-        <label className="map-base-layer-control">
-          Mapa base
-          <select
-            onChange={(event) =>
-              setBaseLayer(event.target.value as MapBaseLayer)
-            }
-            value={baseLayer}
-          >
-            <option value="street">Calles</option>
-            <option value="topographic">Topográfico</option>
-          </select>
-        </label>
+        <LocalBaseMapSelect
+          layers={siurMapLayers}
+          onSelect={handleBaseMapSelect}
+          selectedLayerId={baseLayerId}
+        />
         <label className="checkbox-row map-archive-filter">
           <input
             checked={includeArchived}
@@ -2084,7 +2149,7 @@ export function MapPanel({ user }: MapPanelProps) {
           <MunicipalMap
             areaBounds={areaBounds}
             areaSelectionEnabled={areaSelectionEnabled}
-            baseLayer={baseLayer}
+            baseLayerId={baseLayerId}
             fitRequest={fitRequest}
             focusLocation={
               manualFocusLocation ??
