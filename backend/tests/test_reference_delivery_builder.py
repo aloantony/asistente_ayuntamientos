@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
     apply_catalog_definition,
 )
@@ -32,10 +34,13 @@ from app.reference_layers.models import (
     ReferenceDeliveryAsset,
     ReferenceDeliveryVersion,
     ReferenceLayerSource,
+    ReferenceLayer,
+    ReferenceLayerStyle,
     ReferenceSourceArtifact,
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
 )
+from app.reference_layers.style_parity import persist_style_parity_plan
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=timezone.utc)
 
@@ -71,6 +76,15 @@ def _lease_and_input(db):
                     "east": -1.7,
                     "north": 43.3,
                 },
+                style_name="style:default",
+                styles=(
+                    ReferenceLayerStyleDefinition(
+                        source_key="style:default",
+                        remote_name="planning:default",
+                        title="Default",
+                        is_default=True,
+                    ),
+                ),
             ),
         ),
         retrieved_at=NOW,
@@ -126,11 +140,113 @@ def _lease_and_input(db):
             role="input",
         )
     )
+    db.flush()
+    fixture = _persist_builder_style_plan(
+        db,
+        source=source,
+        lease=lease,
+        input_artifact=artifact,
+        now=NOW,
+    )
     db.commit()
-    return source, lease, artifact
+    return source, lease, fixture
 
 
-def _prepared(artifact_id: int) -> PreparedDelivery:
+def _persist_builder_style_plan(
+    db,
+    *,
+    source,
+    lease,
+    input_artifact,
+    now,
+):
+    layer = db.get(ReferenceLayer, source.layer_id)
+    style = db.scalar(
+        select(ReferenceLayerStyle).where(
+            ReferenceLayerStyle.layer_id == layer.id,
+            ReferenceLayerStyle.source_key == "style:default",
+        )
+    )
+    digest = hashlib.sha256(
+        f"builder-style-{lease.run_id}".encode()
+    ).hexdigest()
+    style_artifact = ReferenceSourceArtifact(
+        source_id=source.id,
+        artifact_kind="style",
+        source_version="1.0.0",
+        media_type="application/vnd.ogc.sld+xml",
+        storage_backend="filesystem",
+        storage_key=f"blobs/sha256/{digest[:2]}/{digest}",
+        size_bytes=256,
+        sha256=digest,
+        metadata_json={
+            "catalog_style_source_key": style.source_key,
+            "remote_name": style.remote_name,
+            "parity_kind": "exact",
+            "resource_bindings": [],
+            "unresolved_resources": [],
+        },
+        retrieved_at=now,
+    )
+    db.add(style_artifact)
+    db.flush()
+    db.add(
+        ReferenceSyncRunArtifact(
+            source_id=source.id,
+            run_id=lease.run_id,
+            artifact_id=style_artifact.id,
+            role="style",
+        )
+    )
+    db.flush()
+    persist_style_parity_plan(
+        db,
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
+        catalog_snapshot_id=layer.last_seen_snapshot_id,
+        source_id=source.id,
+        sync_run_id=lease.run_id,
+        delivery_kind=source.target_kind,
+        styles=(style,),
+        artifacts=(
+            SimpleNamespace(
+                artifact_id=input_artifact.id,
+                artifact_kind=input_artifact.artifact_kind,
+                roles=frozenset({"input"}),
+                media_type=input_artifact.media_type,
+                storage_backend=input_artifact.storage_backend,
+                storage_key=input_artifact.storage_key,
+                size_bytes=input_artifact.size_bytes,
+                sha256=input_artifact.sha256,
+                metadata_json=input_artifact.metadata_json,
+            ),
+            SimpleNamespace(
+                artifact_id=style_artifact.id,
+                artifact_kind="style",
+                roles=frozenset({"style"}),
+                media_type=style_artifact.media_type,
+                storage_backend=style_artifact.storage_backend,
+                storage_key=style_artifact.storage_key,
+                size_bytes=style_artifact.size_bytes,
+                sha256=style_artifact.sha256,
+                metadata_json=style_artifact.metadata_json,
+            ),
+        ),
+        probe=None,
+        now=now,
+    )
+    return SimpleNamespace(
+        id=input_artifact.id,
+        style_artifact_id=style_artifact.id,
+        style_sha256=style_artifact.sha256,
+        style_storage_key=style_artifact.storage_key,
+        style_id=style.id,
+        style_source_key=style.source_key,
+    )
+
+
+def _prepared(fixture, *, input_artifact_id: int | None = None) -> PreparedDelivery:
+    artifact_id = fixture.id if input_artifact_id is None else input_artifact_id
     validation = {
         "schema_version": "reference-delivery-validation/v1",
         "passed": True,
@@ -183,19 +299,39 @@ def _prepared(artifact_id: int) -> PreparedDelivery:
                 metadata_json={
                     "renderer": "geoserver",
                     "layer_name": "siur_layer_1_run_1",
-                    "default_style_name": None,
-                    "styles": {"12": "siur_style_12_v1"},
+                    "default_style_name": "siur_style_default_v1",
+                    "styles": {
+                        str(fixture.style_id): "siur_style_default_v1"
+                    },
                     "identify_available": True,
                     "legend_available": True,
                 },
             ),
+            PreparedDeliveryAsset(
+                asset_key="style-default",
+                asset_kind="style_sld",
+                is_primary=False,
+                storage_backend="filesystem",
+                storage_key=fixture.style_storage_key,
+                media_type="application/vnd.ogc.sld+xml",
+                sha256=fixture.style_sha256,
+                size_bytes=256,
+                metadata_json={
+                    "catalog_style_id": fixture.style_id,
+                    "catalog_style_source_key": fixture.style_source_key,
+                    "style_name": "siur_style_default_v1",
+                    "parity_kind": "exact",
+                    "effective": True,
+                },
+            ),
         ),
+        supporting_artifacts=((fixture.style_artifact_id, "style"),),
     )
 
 
 def test_create_delivery_version_links_inputs_and_assets(db) -> None:
     source, lease, artifact = _lease_and_input(db)
-    prepared = _prepared(artifact.id)
+    prepared = _prepared(artifact)
 
     built = create_delivery_version(
         db,
@@ -231,21 +367,24 @@ def test_builder_rejects_unlinked_input_and_expired_lease(db) -> None:
         create_delivery_version(
             db,
             lease=lease,
-            prepared=_prepared(artifact.id + 999),
+            prepared=_prepared(
+                artifact,
+                input_artifact_id=artifact.id + 999,
+            ),
             now=NOW + timedelta(seconds=1),
         )
     with pytest.raises(MirrorLeaseLostError):
         create_delivery_version(
             db,
             lease=lease,
-            prepared=_prepared(artifact.id),
+            prepared=_prepared(artifact),
             now=NOW + timedelta(seconds=301),
         )
 
 
 def test_builder_rejects_unsafe_or_inconsistent_primary_asset(db) -> None:
     _, lease, artifact = _lease_and_input(db)
-    prepared = _prepared(artifact.id)
+    prepared = _prepared(artifact)
     unsafe = PreparedDelivery(
         **{
             **prepared.__dict__,
@@ -328,7 +467,7 @@ def test_filesystem_assets_must_be_content_addressed() -> None:
 
 def test_continuity_report_checks_kind_crs_bounds_schema_and_features(db) -> None:
     _, lease, artifact = _lease_and_input(db)
-    prepared = _prepared(artifact.id)
+    prepared = _prepared(artifact)
     built = create_delivery_version(
         db,
         lease=lease,
@@ -470,7 +609,7 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
     db,
 ) -> None:
     source, lease, artifact = _lease_and_input(db)
-    first = _prepared(artifact.id)
+    first = _prepared(artifact)
     built = create_delivery_version(
         db,
         lease=lease,
@@ -525,8 +664,15 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
             role="input",
         )
     )
+    second_fixture = _persist_builder_style_plan(
+        db,
+        source=source,
+        lease=second_lease,
+        input_artifact=second_artifact,
+        now=due_at,
+    )
     db.commit()
-    collapsed = _prepared(second_artifact.id)
+    collapsed = _prepared(second_fixture)
     collapsed = PreparedDelivery(
         **{
             **collapsed.__dict__,

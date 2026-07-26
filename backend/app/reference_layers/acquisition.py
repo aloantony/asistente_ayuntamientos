@@ -64,9 +64,23 @@ from app.reference_layers.source_probes import (
 
 
 ArtifactKind = Literal[
-    "capabilities", "manifest", "dataset", "style", "metadata", "tile_archive"
+    "capabilities",
+    "manifest",
+    "dataset",
+    "style",
+    "style_package",
+    "style_resource",
+    "metadata",
+    "tile_archive",
 ]
-ArtifactRole = Literal["observation", "input", "style", "metadata"]
+ArtifactRole = Literal[
+    "observation",
+    "input",
+    "style",
+    "style_package",
+    "style_resource",
+    "metadata",
+]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_REMOTE_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,1000}$")
@@ -86,6 +100,8 @@ _MAX_SLD_ELEMENTS = 100_000
 _MAX_SLD_DEPTH = 64
 _MAX_SLD_TEXT_BYTES = 4 * 1024 * 1024
 _MAX_SLD_EXTRACTED_BYTES = 2 * MAX_PROBE_BYTES
+_MAX_STYLE_RESOURCE_BYTES = 4 * 1024 * 1024
+_MAX_STYLE_RESOURCES_PER_SOURCE = 512
 _STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
 _STYLE_SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
 _EXTERNAL_SLD_TEXT_RE = re.compile(
@@ -93,6 +109,17 @@ _EXTERNAL_SLD_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _SLD_NAMESPACE = "http://www.opengis.net/sld"
+_XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
+_STYLE_RESOURCE_MEDIA_TYPES = frozenset(
+    {
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/svg+xml",
+        "image/webp",
+        "application/octet-stream",
+    }
+)
 _XML_MEDIA_TYPES = frozenset(
     {
         "application/xml",
@@ -388,6 +415,19 @@ class _StyleRequest:
 class _ParsedStyleBundle:
     sld_version: str
     standalone_slds: tuple[tuple[str, bytes], ...]
+    resource_hrefs: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+@dataclass(frozen=True)
+class _StyleResourceInspection:
+    media_type: str
+    extension: str
+
+
+@dataclass(frozen=True)
+class _AcquiredStyleResource:
+    artifact: AcquiredArtifact
+    local_path: str
 
 
 class ReferenceAcquisitionPipeline:
@@ -670,14 +710,106 @@ class ReferenceAcquisitionPipeline:
         )
         artifacts: list[AcquiredArtifact] = [bundle]
         standalone_by_name = dict(parsed.standalone_slds)
+        resource_hrefs_by_name = dict(parsed.resource_hrefs)
+        resources_by_url: dict[str, _AcquiredStyleResource] = {}
         maximum = min(
             self.limits.max_probe_bytes,
             self.store.max_blob_bytes,
             self.limits.max_total_bytes,
         )
         for spec in request.styles:
+            original_document = standalone_by_name[spec.remote_name]
+            bindings: list[dict[str, str]] = []
+            unresolved: list[dict[str, str]] = []
+            resources_for_style: dict[str, _AcquiredStyleResource] = {}
+            for original_href in resource_hrefs_by_name[spec.remote_name]:
+                try:
+                    resolved_url = _resolve_style_resource_url(
+                        request.endpoint_url,
+                        original_href,
+                    )
+                except AcquisitionValidationError as error:
+                    unresolved.append(
+                        {
+                            "original_href": original_href,
+                            "reason_code": error.code,
+                        }
+                    )
+                    continue
+                resource = resources_by_url.get(resolved_url)
+                if resource is None:
+                    downloaded_resource = self._download(
+                        candidate,
+                        resolved_url,
+                        max_bytes=min(
+                            _MAX_STYLE_RESOURCE_BYTES,
+                            self.limits.max_page_bytes,
+                        ),
+                        accept=(
+                            "image/png, image/jpeg, image/gif, "
+                            "image/svg+xml, image/webp;q=0.9"
+                        ),
+                        allowed_media_types=_STYLE_RESOURCE_MEDIA_TYPES,
+                        validator=_inspect_style_resource,
+                    )
+                    inspection = cast(
+                        _StyleResourceInspection,
+                        downloaded_resource.parsed,
+                    )
+                    remote_artifact = self._remote_artifact(
+                        downloaded_resource,
+                        kind="style_resource",
+                        role="style_resource",
+                        metadata={
+                            "schema": "reference-style-resource/v1",
+                            "resolved_url": resolved_url,
+                            "detected_media_type": inspection.media_type,
+                            "extension": inspection.extension,
+                        },
+                    )
+                    local_path = (
+                        f"resources/{remote_artifact.blob.sha256}."
+                        f"{inspection.extension}"
+                    )
+                    resource = _AcquiredStyleResource(
+                        artifact=remote_artifact,
+                        local_path=local_path,
+                    )
+                    resources_by_url[resolved_url] = resource
+                    artifacts.append(remote_artifact)
+                    _enforce_total_bytes(
+                        artifacts,
+                        self.limits.max_total_bytes,
+                    )
+                resources_for_style[original_href] = resource
+                bindings.append(
+                    {
+                        "original_href": original_href,
+                        "resolved_url": resolved_url,
+                        "local_path": resource.local_path,
+                        "sha256": resource.artifact.blob.sha256,
+                        "media_type": resource.artifact.media_type,
+                    }
+                )
+
+            parity_kind = (
+                "missing"
+                if unresolved
+                else ("adapted" if bindings else "exact")
+            )
+            standalone_document = (
+                original_document
+                if parity_kind != "adapted"
+                else _rewrite_style_resource_hrefs(
+                    original_document,
+                    {
+                        href: resource.local_path
+                        for href, resource in resources_for_style.items()
+                    },
+                )
+            )
             standalone_blob = self.store.put_stream(
-                io.BytesIO(standalone_by_name[spec.remote_name]),
+                io.BytesIO(standalone_document),
                 max_bytes=maximum,
             )
             standalone = AcquiredArtifact(
@@ -692,9 +824,47 @@ class ReferenceAcquisitionPipeline:
                     "remote_name": spec.remote_name,
                     "style_layer_name": request.layer_name,
                     "parent_sha256": bundle.blob.sha256,
+                    "parity_kind": parity_kind,
+                    "resource_bindings": bindings,
+                    "unresolved_resources": unresolved,
                 },
             )
             artifacts.append(standalone)
+            if parity_kind == "adapted":
+                package_blob = _store_style_package(
+                    self.store,
+                    sld=standalone_document,
+                    resources=tuple(
+                        {
+                            resource.local_path: resource
+                            for resource in resources_for_style.values()
+                        }.values()
+                    ),
+                    max_bytes=min(
+                        self.limits.max_page_bytes,
+                        self.store.max_blob_bytes,
+                        self.limits.max_total_bytes,
+                    ),
+                )
+                artifacts.append(
+                    AcquiredArtifact(
+                        artifact_kind="style_package",
+                        role="style_package",
+                        media_type="application/zip",
+                        blob=package_blob,
+                        source_version=parsed.sld_version,
+                        metadata={
+                            "schema": "reference-style-package/v1",
+                            "catalog_style_source_key": (
+                                spec.catalog_style_source_key
+                            ),
+                            "remote_name": spec.remote_name,
+                            "style_layer_name": request.layer_name,
+                            "sld_sha256": standalone_blob.sha256,
+                            "resource_bindings": bindings,
+                        },
+                    )
+                )
             _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
         return artifacts
 
@@ -2847,9 +3017,6 @@ def _parse_style_bundle(
     element_count = 0
     text_bytes = 0
     blocked_elements = {
-        "externalgraphic",
-        "externalmark",
-        "onlineresource",
         "remoteows",
         "include",
         "fallback",
@@ -2876,10 +3043,21 @@ def _parse_style_bundle(
                 )
             local_attribute = _xml_local(attribute).casefold()
             if local_attribute in {"href", "src", "url", "uri"}:
-                raise AcquisitionValidationError(
-                    "SLD references an external or auxiliary resource",
-                    code="unsafe_sld_reference",
-                )
+                if (
+                    local_element != "onlineresource"
+                    or local_attribute != "href"
+                    or not raw_value.strip()
+                    or any(
+                        ord(character) < 32 or ord(character) == 127
+                        for character in raw_value
+                    )
+                ):
+                    raise AcquisitionValidationError(
+                        "SLD contains an unsupported resource reference",
+                        code="unsafe_sld_reference",
+                    )
+                text_bytes += len(raw_value.encode("utf-8"))
+                continue
             # XML schema locations are validation hints rather than runtime
             # style dependencies.  They are removed from standalone output.
             if local_attribute not in {
@@ -2919,6 +3097,7 @@ def _parse_style_bundle(
         )
     named_layer = named_layers[0]
     standalone_slds: list[tuple[str, bytes]] = []
+    resource_hrefs: list[tuple[str, tuple[str, ...]]] = []
     standalone_total_bytes = 0
     for style_name in style_names:
         matching_styles = [
@@ -2964,6 +3143,21 @@ def _parse_style_bundle(
                 code="sld_size_limit",
             )
         standalone_slds.append((style_name, standalone))
+        hrefs = tuple(
+            dict.fromkeys(
+                value.strip()
+                for element in standalone_root.iter()
+                if _xml_local(element.tag).casefold() == "onlineresource"
+                for attribute, value in element.attrib.items()
+                if _xml_local(attribute).casefold() == "href"
+            )
+        )
+        if len(hrefs) > _MAX_STYLE_RESOURCES_PER_SOURCE:
+            raise AcquisitionLimitError(
+                "SLD declares too many auxiliary resources",
+                code="style_resource_count_limit",
+            )
+        resource_hrefs.append((style_name, hrefs))
         standalone_total_bytes += len(standalone)
         if standalone_total_bytes > _MAX_SLD_EXTRACTED_BYTES:
             raise AcquisitionLimitError(
@@ -2973,6 +3167,7 @@ def _parse_style_bundle(
     return _ParsedStyleBundle(
         sld_version=version,
         standalone_slds=tuple(standalone_slds),
+        resource_hrefs=tuple(resource_hrefs),
     )
 
 
@@ -2985,6 +3180,218 @@ def _direct_sld_name(element: ElementTree.Element) -> str | None:
     if len(names) != 1 or len(names[0]) > 1000:
         return None
     return names[0]
+
+
+def _resolve_style_resource_url(endpoint_url: str, raw_href: str) -> str:
+    if (
+        not isinstance(raw_href, str)
+        or not raw_href
+        or len(raw_href) > 8192
+        or raw_href.startswith(("//", "\\"))
+        or "\\" in raw_href
+    ):
+        raise AcquisitionValidationError(
+            "SLD resource URL is invalid",
+            code="style_resource_url_invalid",
+        )
+    try:
+        resolved = normalize_https_url(urljoin(endpoint_url, raw_href))
+        return _require_same_origin(endpoint_url, resolved)
+    except (AcquisitionConfigurationError, ValueError) as error:
+        raise AcquisitionValidationError(
+            "SLD resource origin is not reviewed",
+            code="style_resource_origin_unreviewed",
+        ) from error
+
+
+def _inspect_style_resource(document: bytes) -> _StyleResourceInspection:
+    if (
+        not isinstance(document, bytes)
+        or not document
+        or len(document) > _MAX_STYLE_RESOURCE_BYTES
+    ):
+        raise AcquisitionValidationError(
+            "SLD resource is empty or oversized",
+            code="invalid_style_resource",
+        )
+    if document.startswith(b"\x89PNG\r\n\x1a\n"):
+        if len(document) < 33 or document[12:16] != b"IHDR":
+            raise AcquisitionValidationError(
+                "SLD PNG resource is malformed",
+                code="invalid_style_resource",
+            )
+        return _StyleResourceInspection("image/png", "png")
+    if document.startswith(b"\xff\xd8\xff") and document.endswith(b"\xff\xd9"):
+        return _StyleResourceInspection("image/jpeg", "jpg")
+    if document.startswith((b"GIF87a", b"GIF89a")):
+        return _StyleResourceInspection("image/gif", "gif")
+    if (
+        len(document) >= 12
+        and document[:4] == b"RIFF"
+        and document[8:12] == b"WEBP"
+    ):
+        return _StyleResourceInspection("image/webp", "webp")
+
+    lowered = document[:4096].lower()
+    if (
+        b"\x00" in document
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+    ):
+        raise AcquisitionValidationError(
+            "SLD SVG resource cannot declare DTDs or entities",
+            code="unsafe_style_resource",
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "SLD resource is not an allowlisted image",
+            code="invalid_style_resource",
+        ) from error
+    if _xml_local(root.tag).casefold() != "svg":
+        raise AcquisitionValidationError(
+            "SLD resource is not an allowlisted image",
+            code="invalid_style_resource",
+        )
+    elements = list(root.iter())
+    if len(elements) > 20_000:
+        raise AcquisitionLimitError(
+            "SLD SVG resource exceeds its complexity limit",
+            code="style_resource_complexity_limit",
+        )
+    for element in elements:
+        if _xml_local(element.tag).casefold() in {
+            "script",
+            "foreignobject",
+            "iframe",
+        }:
+            raise AcquisitionValidationError(
+                "SLD SVG resource contains active content",
+                code="unsafe_style_resource",
+            )
+        for attribute, value in element.attrib.items():
+            if (
+                _xml_local(attribute).casefold()
+                in {"href", "src", "url", "uri"}
+                or _EXTERNAL_SLD_TEXT_RE.search(value)
+            ):
+                raise AcquisitionValidationError(
+                    "SLD SVG resource has an external dependency",
+                    code="unsafe_style_resource",
+                )
+    return _StyleResourceInspection("image/svg+xml", "svg")
+
+
+def _rewrite_style_resource_hrefs(
+    document: bytes,
+    replacements: Mapping[str, str],
+) -> bytes:
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "standalone SLD became malformed",
+            code="invalid_sld",
+        ) from error
+    replaced: set[str] = set()
+    for element in root.iter():
+        if _xml_local(element.tag).casefold() != "onlineresource":
+            continue
+        for attribute, value in list(element.attrib.items()):
+            if _xml_local(attribute).casefold() != "href":
+                continue
+            replacement = replacements.get(value.strip())
+            if replacement is None:
+                raise AcquisitionValidationError(
+                    "SLD resource rewrite is incomplete",
+                    code="style_resource_missing",
+                )
+            element.set(attribute, replacement)
+            replaced.add(value.strip())
+    if replaced != set(replacements):
+        raise AcquisitionValidationError(
+            "SLD resource rewrite evidence is inconsistent",
+            code="style_resource_rewrite_invalid",
+        )
+    return ElementTree.tostring(
+        root,
+        encoding="utf-8",
+        xml_declaration=True,
+        short_empty_elements=True,
+    )
+
+
+def _store_style_package(
+    store: ReferenceBlobStore,
+    *,
+    sld: bytes,
+    resources: tuple[_AcquiredStyleResource, ...],
+    max_bytes: int,
+) -> StoredReferenceBlob:
+    if (
+        not resources
+        or len(resources) > _MAX_STYLE_RESOURCES_PER_SOURCE
+        or len({item.local_path for item in resources}) != len(resources)
+    ):
+        raise AcquisitionValidationError(
+            "style package resource set is invalid",
+            code="style_package_invalid",
+        )
+    expected_size = len(sld) + sum(
+        item.artifact.blob.size_bytes for item in resources
+    )
+    if expected_size > max_bytes:
+        raise AcquisitionLimitError(
+            "style package exceeds its aggregate byte limit",
+            code="style_package_size_limit",
+        )
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(
+        output,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+        strict_timestamps=True,
+    ) as archive:
+        _write_deterministic_zip_member(archive, "style.sld", sld)
+        for resource in sorted(resources, key=lambda item: item.local_path):
+            with store.open_blob(resource.artifact.blob.storage_key) as source:
+                payload = source.read(resource.artifact.blob.size_bytes + 1)
+            if (
+                len(payload) != resource.artifact.blob.size_bytes
+                or hashlib.sha256(payload).hexdigest()
+                != resource.artifact.blob.sha256
+            ):
+                raise AcquisitionValidationError(
+                    "style resource CAS evidence is inconsistent",
+                    code="style_resource_integrity",
+                )
+            _write_deterministic_zip_member(
+                archive,
+                resource.local_path,
+                payload,
+            )
+    payload = output.getvalue()
+    if not payload or len(payload) > max_bytes:
+        raise AcquisitionLimitError(
+            "style package exceeds its output byte limit",
+            code="style_package_size_limit",
+        )
+    return store.put_stream(io.BytesIO(payload), max_bytes=max_bytes)
+
+
+def _write_deterministic_zip_member(
+    archive: zipfile.ZipFile,
+    name: str,
+    payload: bytes,
+) -> None:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    archive.writestr(info, payload)
 
 
 def _parse_atom_feed(document: bytes, remote_name: str) -> str:

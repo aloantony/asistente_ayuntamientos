@@ -30,14 +30,22 @@ from app.reference_layers.mirror_lifecycle import (
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
+    ReferenceDeliveryStyleParity,
+    ReferenceDeliveryStyleResource,
     ReferenceDeliveryVersion,
     ReferenceDeliveryVersionArtifact,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerSource,
     ReferenceSourceArtifact,
+    ReferenceStyleParityPlan,
+    ReferenceStyleParityPlanItem,
+    ReferenceStyleParityPlanResource,
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
+)
+from app.reference_layers.style_parity import (
+    IMPLICIT_DEFAULT_STYLE_KEY,
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
@@ -117,6 +125,7 @@ class PreparedDelivery:
     validation_json: dict[str, Any]
     input_artifact_ids: tuple[int, ...]
     assets: tuple[PreparedDeliveryAsset, ...]
+    supporting_artifacts: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -231,21 +240,27 @@ def create_delivery_version(
         if snapshot is None:
             raise DeliveryBuildError("current catalog snapshot is unavailable")
 
-        artifact_ids = set(prepared.input_artifact_ids)
-        linked_ids = set(
-            db.scalars(
-                select(ReferenceSyncRunArtifact.artifact_id).where(
+        artifact_links = {
+            (artifact_id, "input")
+            for artifact_id in prepared.input_artifact_ids
+        }
+        artifact_links.update(prepared.supporting_artifacts)
+        run_links = set(
+            db.execute(
+                select(
+                    ReferenceSyncRunArtifact.artifact_id,
+                    ReferenceSyncRunArtifact.role,
+                ).where(
                     ReferenceSyncRunArtifact.source_id == source.id,
                     ReferenceSyncRunArtifact.run_id == run.id,
-                    ReferenceSyncRunArtifact.artifact_id.in_(artifact_ids),
-                    ReferenceSyncRunArtifact.role == "input",
                 )
             )
         )
-        if linked_ids != artifact_ids:
+        if not artifact_links <= run_links:
             raise DeliveryBuildError(
-                "prepared inputs are not immutable artifacts of the leased run"
+                "prepared provenance is not immutable artifacts of the leased run"
             )
+        artifact_ids = {artifact_id for artifact_id, _role in artifact_links}
         artifact_rows = list(
             db.scalars(
                 select(ReferenceSourceArtifact).where(
@@ -255,7 +270,17 @@ def create_delivery_version(
             )
         )
         if {item.id for item in artifact_rows} != artifact_ids:
-            raise DeliveryBuildError("prepared input artifact identity is invalid")
+            raise DeliveryBuildError(
+                "prepared provenance artifact identity is invalid"
+            )
+        plan, plan_items = _complete_style_parity_plan(
+            db,
+            source=source,
+            run=run,
+            snapshot=snapshot,
+            delivery_kind=prepared.delivery_kind,
+            artifact_links=artifact_links,
+        )
 
         active_version = _active_delivery_version(
             db,
@@ -271,6 +296,15 @@ def create_delivery_version(
             raise DeliveryContinuityError(continuity)
         stored_validation = deepcopy(prepared.validation_json)
         stored_validation["continuity_gate"] = continuity
+        stored_validation["style_parity_gate"] = {
+            "schema_version": "reference-delivery-style-parity-gate/v1",
+            "passed": True,
+            "plan_id": plan.id,
+            "plan_evidence_sha256": plan.evidence_sha256,
+            "required_style_count": plan.required_style_count,
+            "verified_style_count": len(plan_items),
+            "missing_style_count": 0,
+        }
         validation_sha256 = canonical_json_sha256(stored_validation)
         normalized["validation_sha256"] = validation_sha256
 
@@ -300,7 +334,24 @@ def create_delivery_version(
                     "size_bytes": item.size_bytes,
                 }
                 for item in sorted(artifact_rows, key=lambda value: value.id)
+                if (item.id, "input") in artifact_links
             ],
+            "supporting_artifacts": [
+                {
+                    "artifact_id": item.id,
+                    "artifact_kind": item.artifact_kind,
+                    "role": role,
+                    "sha256": item.sha256,
+                    "size_bytes": item.size_bytes,
+                }
+                for item in sorted(artifact_rows, key=lambda value: value.id)
+                for artifact_id, role in sorted(artifact_links)
+                if artifact_id == item.id and role != "input"
+            ],
+            "style_parity_plan": {
+                "plan_id": plan.id,
+                "evidence_sha256": plan.evidence_sha256,
+            },
         }
         manifest_sha256 = canonical_json_sha256(manifest)
         version = ReferenceDeliveryVersion(
@@ -331,13 +382,12 @@ def create_delivery_version(
                     source_id=source.id,
                     version_id=version.id,
                     artifact_id=artifact_id,
-                    role="input",
+                    role=role,
                 )
-                for artifact_id in sorted(artifact_ids)
+                for artifact_id, role in sorted(artifact_links)
             ]
         )
-        db.add_all(
-            [
+        delivery_assets = [
                 ReferenceDeliveryAsset(
                     version_id=version.id,
                     asset_key=asset.asset_key,
@@ -352,7 +402,16 @@ def create_delivery_version(
                     created_at=moment,
                 )
                 for asset in prepared.assets
-            ]
+        ]
+        db.add_all(delivery_assets)
+        db.flush()
+        _append_delivery_style_parity(
+            db,
+            version=version,
+            plan=plan,
+            items=plan_items,
+            assets=delivery_assets,
+            now=moment,
         )
         db.commit()
         return BuiltDeliveryVersion(
@@ -364,6 +423,209 @@ def create_delivery_version(
     except Exception:
         db.rollback()
         raise
+
+
+def _complete_style_parity_plan(
+    db: Session,
+    *,
+    source: ReferenceLayerSource,
+    run: ReferenceSyncRun,
+    snapshot: ReferenceCatalogSnapshot,
+    delivery_kind: str,
+    artifact_links: set[tuple[int, str]],
+) -> tuple[
+    ReferenceStyleParityPlan,
+    tuple[ReferenceStyleParityPlanItem, ...],
+]:
+    plan = db.scalar(
+        select(ReferenceStyleParityPlan).where(
+            ReferenceStyleParityPlan.source_id == source.id,
+            ReferenceStyleParityPlan.sync_run_id == run.id,
+        )
+    )
+    if (
+        plan is None
+        or plan.provider_key != source.provider_key
+        or plan.layer_id != source.layer_id
+        or plan.catalog_snapshot_id != snapshot.id
+        or plan.catalog_definition_sha256 != snapshot.definition_sha256
+        or plan.delivery_kind != delivery_kind
+        or not plan.complete
+        or plan.missing_style_count != 0
+        or canonical_json_sha256(plan.evidence_json)
+        != plan.evidence_sha256
+    ):
+        raise DeliveryBuildError(
+            "delivery has no complete immutable style parity plan"
+        )
+    items = tuple(
+        db.scalars(
+            select(ReferenceStyleParityPlanItem)
+            .where(ReferenceStyleParityPlanItem.plan_id == plan.id)
+            .order_by(ReferenceStyleParityPlanItem.id)
+        )
+    )
+    if (
+        len(items) != plan.required_style_count
+        or any(
+            item.parity_kind == "missing"
+            or not item.verified
+            or canonical_json_sha256(item.evidence_json)
+            != item.evidence_sha256
+            for item in items
+        )
+    ):
+        raise DeliveryBuildError(
+            "style parity plan is partial or unverified"
+        )
+    resources = tuple(
+        db.scalars(
+            select(ReferenceStyleParityPlanResource)
+            .join(
+                ReferenceStyleParityPlanItem,
+                ReferenceStyleParityPlanItem.id
+                == ReferenceStyleParityPlanResource.plan_item_id,
+            )
+            .where(ReferenceStyleParityPlanItem.plan_id == plan.id)
+            .order_by(ReferenceStyleParityPlanResource.id)
+        )
+    )
+    resources_by_item: dict[int, list[ReferenceStyleParityPlanResource]] = {}
+    for resource in resources:
+        resources_by_item.setdefault(resource.plan_item_id, []).append(
+            resource
+        )
+    required_links: set[tuple[int, str]] = set()
+    for item in items:
+        if item.source_style_artifact_id is not None:
+            required_links.add((item.source_style_artifact_id, "style"))
+        if item.source_package_artifact_id is not None:
+            required_links.add(
+                (item.source_package_artifact_id, "style_package")
+            )
+        item_resources = resources_by_item.get(item.id, [])
+        if len(item_resources) != item.resource_count:
+            raise DeliveryBuildError(
+                "style parity resource count is inconsistent"
+            )
+        for resource in item_resources:
+            required_links.add((resource.artifact_id, "style_resource"))
+            resource_evidence = {
+                "artifact_id": resource.artifact_id,
+                "original_href": resource.original_href,
+                "resolved_url": resource.resolved_url,
+                "local_path": resource.local_path,
+                "media_type": resource.media_type,
+                "sha256": resource.sha256,
+            }
+            if (
+                canonical_json_sha256(resource_evidence)
+                != resource.evidence_sha256
+            ):
+                raise DeliveryBuildError(
+                    "style parity resource evidence hash is invalid"
+                )
+    if not required_links <= artifact_links:
+        raise DeliveryBuildError(
+            "delivery omits style or resource provenance"
+        )
+    return plan, items
+
+
+def _append_delivery_style_parity(
+    db: Session,
+    *,
+    version: ReferenceDeliveryVersion,
+    plan: ReferenceStyleParityPlan,
+    items: tuple[ReferenceStyleParityPlanItem, ...],
+    assets: list[ReferenceDeliveryAsset],
+    now: datetime,
+) -> None:
+    for item in items:
+        expected_asset_kind = {
+            "exact": "style_sld",
+            "adapted": "style_package",
+            "baked": "tile_archive",
+        }.get(item.parity_kind)
+        if expected_asset_kind is None:
+            raise DeliveryBuildError(
+                "missing style parity cannot be delivered"
+            )
+        candidates = [
+            asset
+            for asset in assets
+            if asset.asset_kind == expected_asset_kind
+            and _asset_style_source_key(asset)
+            == item.style_source_key
+            and (
+                expected_asset_kind == "tile_archive"
+                or asset.metadata_json.get("effective") is True
+            )
+        ]
+        if len(candidates) != 1:
+            raise DeliveryBuildError(
+                "delivery asset coverage differs from its style parity plan"
+            )
+        asset = candidates[0]
+        resources = tuple(
+            db.scalars(
+                select(ReferenceStyleParityPlanResource)
+                .where(
+                    ReferenceStyleParityPlanResource.plan_item_id == item.id
+                )
+                .order_by(ReferenceStyleParityPlanResource.id)
+            )
+        )
+        if len(resources) != item.resource_count:
+            raise DeliveryBuildError(
+                "delivery style resources are partial"
+            )
+        evidence = {
+            "schema_version": "reference-delivery-style-parity/v1",
+            "version_id": version.id,
+            "plan_id": plan.id,
+            "plan_item_id": item.id,
+            "style_source_key": item.style_source_key,
+            "parity_kind": item.parity_kind,
+            "verified": True,
+            "delivery_asset_id": asset.id,
+            "delivery_asset_sha256": asset.sha256,
+            "plan_item_evidence_sha256": item.evidence_sha256,
+            "resource_evidence_sha256": [
+                resource.evidence_sha256 for resource in resources
+            ],
+        }
+        parity = ReferenceDeliveryStyleParity(
+            version_id=version.id,
+            plan_item_id=item.id,
+            parity_kind=item.parity_kind,
+            verified=True,
+            delivery_asset_id=asset.id,
+            resource_count=len(resources),
+            evidence_json=evidence,
+            evidence_sha256=canonical_json_sha256(evidence),
+            created_at=now,
+        )
+        db.add(parity)
+        db.flush()
+        db.add_all(
+            [
+                ReferenceDeliveryStyleResource(
+                    delivery_parity_id=parity.id,
+                    plan_resource_id=resource.id,
+                    created_at=now,
+                )
+                for resource in resources
+            ]
+        )
+    db.flush()
+
+
+def _asset_style_source_key(asset: ReferenceDeliveryAsset) -> str | None:
+    value = asset.metadata_json.get("catalog_style_source_key")
+    if value is None and asset.asset_kind == "tile_archive":
+        return IMPLICIT_DEFAULT_STYLE_KEY
+    return value if isinstance(value, str) else None
 
 
 def canonical_json_sha256(value: Any) -> str:
@@ -601,6 +863,25 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
         or len(set(prepared.input_artifact_ids)) != len(prepared.input_artifact_ids)
     ):
         raise DeliveryBuildError("prepared input artifact ids are invalid")
+    if (
+        not isinstance(prepared.supporting_artifacts, tuple)
+        or len(prepared.supporting_artifacts) > 1024
+        or len(set(prepared.supporting_artifacts))
+        != len(prepared.supporting_artifacts)
+        or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or isinstance(item[0], bool)
+            or not isinstance(item[0], int)
+            or item[0] < 1
+            or item[1]
+            not in {"style", "style_package", "style_resource", "metadata"}
+            for item in prepared.supporting_artifacts
+        )
+    ):
+        raise DeliveryBuildError(
+            "prepared supporting artifact provenance is invalid"
+        )
     if not prepared.assets or len(prepared.assets) > 512:
         raise DeliveryBuildError("prepared delivery assets are invalid")
     if len({asset.asset_key for asset in prepared.assets}) != len(prepared.assets):
@@ -633,6 +914,10 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
         "bounds": bounds,
         "feature_count": prepared.feature_count,
         "validation_sha256": canonical_json_sha256(prepared.validation_json),
+        "supporting_artifacts": [
+            {"artifact_id": artifact_id, "role": role}
+            for artifact_id, role in prepared.supporting_artifacts
+        ],
         "assets": [
             {
                 "asset_key": asset.asset_key,
@@ -948,6 +1233,7 @@ def _validate_asset(asset: PreparedDeliveryAsset, delivery_kind: str) -> None:
         "tile_archive",
         "tile_prefix",
         "style_sld",
+        "style_package",
         "legend",
         "metadata",
     }:

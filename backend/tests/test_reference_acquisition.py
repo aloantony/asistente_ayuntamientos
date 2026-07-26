@@ -465,19 +465,12 @@ def test_style_acquisition_fails_when_getstyles_omits_exact_remote_name(
     assert error.value.code == "style_unavailable"
 
 
-@pytest.mark.parametrize(
-    "href",
-    [
-        "https://assets.example.net/symbol.svg",
-        "symbols/symbol.svg",
-        "../symbol.svg",
-    ],
-)
-def test_style_acquisition_rejects_every_auxiliary_resource_reference(
+def test_cross_origin_style_resource_is_persisted_as_missing_parity(
     store,
     limits,
-    href,
 ):
+    href = "https://assets.example.net/symbol.svg"
+
     def handler(url, _etag, _modified):
         request = parse_qs(urlsplit(url).query).get("request", [None])[0]
         if request == "GetCapabilities":
@@ -495,20 +488,106 @@ def test_style_acquisition_rejects_every_auxiliary_resource_reference(
             "application/xml",
         )
 
-    with pytest.raises(AcquisitionValidationError) as error:
-        ReferenceAcquisitionPipeline(
-            store,
-            limits=limits,
-            downloader_factory=FakeTransport(handler),
-        ).acquire(
-            candidate(
-                "wfs",
-                remote_name="workspace:roads",
-                config=style_config(("style:blue", "workspace:blue")),
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+    ).acquire(
+        candidate(
+            "wfs",
+            remote_name="workspace:roads",
+            config=style_config(("style:blue", "workspace:blue")),
+        )
+    )
+
+    style = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style" and item.role == "style"
+    )
+    assert style.metadata["parity_kind"] == "missing"
+    assert style.metadata["unresolved_resources"] == [
+        {
+            "original_href": href,
+            "reason_code": "style_resource_origin_unreviewed",
+        }
+    ]
+    assert all(
+        urlsplit(call["url"]).hostname != "assets.example.net"
+        for call in transport.calls
+    )
+
+
+def test_same_origin_style_resource_is_copied_and_packaged_locally(
+    store,
+    limits,
+):
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d494844520000000100000001"
+        "08060000001f15c4890000000d49444154789c6360000000"
+        "020001e221bc330000000049454e44ae426082"
+    )
+
+    def handler(url, _etag, _modified):
+        parsed = urlsplit(url)
+        request = parse_qs(parsed.query).get("request", [None])[0]
+        if parsed.path.endswith("/symbols/symbol.png"):
+            return Response(png, "image/png")
+        if request == "GetCapabilities":
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if request == "GetFeature":
+            return json_response(
+                {
+                    "type": "FeatureCollection",
+                    "numberMatched": 0,
+                    "features": [],
+                }
             )
+        return Response(
+            sld_payload(
+                "workspace:blue",
+                external_href="symbols/symbol.png",
+            ),
+            "application/xml",
         )
 
-    assert error.value.code == "unsafe_sld_reference"
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            remote_name="workspace:roads",
+            config=style_config(("style:blue", "workspace:blue")),
+        )
+    )
+
+    resource = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style_resource"
+    )
+    style = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style" and item.role == "style"
+    )
+    package = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style_package"
+    )
+    local_path = f"resources/{resource.blob.sha256}.png"
+    assert style.metadata["parity_kind"] == "adapted"
+    assert style.metadata["resource_bindings"][0]["local_path"] == local_path
+    with store.open_blob(style.blob.storage_key) as source:
+        assert local_path.encode() in source.read()
+    with store.open_blob(package.blob.storage_key) as source:
+        with zipfile.ZipFile(source) as archive:
+            assert sorted(archive.namelist()) == [local_path, "style.sld"]
+            assert archive.read(local_path) == png
 
 
 def test_style_acquisition_rejects_cross_origin_before_any_request(store, limits):

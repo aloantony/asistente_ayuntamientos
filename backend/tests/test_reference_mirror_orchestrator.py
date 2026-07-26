@@ -619,6 +619,13 @@ def test_operation_smoke_evidence_is_finalized_with_the_promoted_run(
     )
     monkeypatch.setattr(
         mirror_orchestrator,
+        "persist_run_style_parity",
+        lambda factory, context, artifacts, acquired: SimpleNamespace(
+            complete=True
+        ),
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
         "persist_delivery_version",
         lambda factory, lease, prepared: SimpleNamespace(version_id=88),
     )
@@ -698,6 +705,13 @@ def test_operation_smoke_failure_prevents_promotion_and_preserves_active(
         mirror_orchestrator,
         "persist_run_acquisition",
         lambda factory, lease, acquired: (),
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "persist_run_style_parity",
+        lambda factory, context, artifacts, acquired: SimpleNamespace(
+            complete=True
+        ),
     )
     monkeypatch.setattr(
         mirror_orchestrator,

@@ -30,11 +30,15 @@ from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
     ReferenceDeliveryPromotion,
+    ReferenceDeliveryStyleParity,
+    ReferenceDeliveryStyleResource,
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerSource,
     ReferenceService,
+    ReferenceStyleParityPlan,
+    ReferenceStyleParityPlanItem,
     ReferenceSyncRun,
 )
 from app.reference_layers.source_audit import (
@@ -1585,6 +1589,135 @@ def _validate_version_ready(
         or primary.sha256 != version.content_sha256
     ):
         raise MirrorPromotionConflict("delivery content hash is invalid")
+    _validate_version_style_parity(db, version)
+
+
+def _validate_version_style_parity(
+    db: Session,
+    version: ReferenceDeliveryVersion,
+) -> None:
+    plan = db.scalar(
+        select(ReferenceStyleParityPlan).where(
+            ReferenceStyleParityPlan.source_id == version.source_id,
+            ReferenceStyleParityPlan.sync_run_id == version.sync_run_id,
+        )
+    )
+    if (
+        plan is None
+        or not plan.complete
+        or plan.missing_style_count != 0
+        or plan.provider_key != version.provider_key
+        or plan.layer_id != version.layer_id
+        or plan.catalog_snapshot_id != version.catalog_snapshot_id
+        or plan.catalog_definition_sha256
+        != version.catalog_definition_sha256
+        or plan.delivery_kind != version.delivery_kind
+        or _canonical_sha256(plan.evidence_json) != plan.evidence_sha256
+    ):
+        raise MirrorPromotionConflict(
+            "delivery style parity plan is absent or incomplete"
+        )
+    items = tuple(
+        db.scalars(
+            select(ReferenceStyleParityPlanItem)
+            .where(ReferenceStyleParityPlanItem.plan_id == plan.id)
+            .order_by(ReferenceStyleParityPlanItem.id)
+        )
+    )
+    parities = tuple(
+        db.scalars(
+            select(ReferenceDeliveryStyleParity)
+            .join(
+                ReferenceStyleParityPlanItem,
+                ReferenceStyleParityPlanItem.id
+                == ReferenceDeliveryStyleParity.plan_item_id,
+            )
+            .where(
+                ReferenceDeliveryStyleParity.version_id == version.id,
+                ReferenceStyleParityPlanItem.plan_id == plan.id,
+            )
+            .order_by(ReferenceDeliveryStyleParity.id)
+        )
+    )
+    if (
+        len(items) != plan.required_style_count
+        or len(parities) != len(items)
+        or {item.id for item in items}
+        != {parity.plan_item_id for parity in parities}
+        or any(
+            item.parity_kind == "missing"
+            or not item.verified
+            or _canonical_sha256(item.evidence_json)
+            != item.evidence_sha256
+            for item in items
+        )
+    ):
+        raise MirrorPromotionConflict(
+            "delivery style parity coverage is partial"
+        )
+    assets = {
+        asset.id: asset
+        for asset in db.scalars(
+            select(ReferenceDeliveryAsset).where(
+                ReferenceDeliveryAsset.version_id == version.id
+            )
+        )
+    }
+    resource_counts = {
+        parity_id: count
+        for parity_id, count in db.execute(
+            select(
+                ReferenceDeliveryStyleResource.delivery_parity_id,
+                func.count(),
+            )
+            .where(
+                ReferenceDeliveryStyleResource.delivery_parity_id.in_(
+                    [item.id for item in parities]
+                )
+            )
+            .group_by(
+                ReferenceDeliveryStyleResource.delivery_parity_id
+            )
+        )
+    }
+    item_by_id = {item.id: item for item in items}
+    for parity in parities:
+        item = item_by_id[parity.plan_item_id]
+        asset = assets.get(parity.delivery_asset_id)
+        expected_kind = {
+            "exact": "style_sld",
+            "adapted": "style_package",
+            "baked": "tile_archive",
+        }.get(item.parity_kind)
+        if (
+            not parity.verified
+            or parity.parity_kind != item.parity_kind
+            or asset is None
+            or asset.asset_kind != expected_kind
+            or parity.resource_count
+            != resource_counts.get(parity.id, 0)
+            or parity.resource_count != item.resource_count
+            or _canonical_sha256(parity.evidence_json)
+            != parity.evidence_sha256
+        ):
+            raise MirrorPromotionConflict(
+                "delivery style parity evidence is invalid"
+            )
+    gate = version.validation_json.get("style_parity_gate")
+    if (
+        not isinstance(gate, dict)
+        or gate.get("schema_version")
+        != "reference-delivery-style-parity-gate/v1"
+        or gate.get("passed") is not True
+        or gate.get("plan_id") != plan.id
+        or gate.get("plan_evidence_sha256") != plan.evidence_sha256
+        or gate.get("required_style_count") != len(items)
+        or gate.get("verified_style_count") != len(items)
+        or gate.get("missing_style_count") != 0
+    ):
+        raise MirrorPromotionConflict(
+            "delivery validation omits its style parity gate"
+        )
 
 
 def _validate_stored_version_servability(

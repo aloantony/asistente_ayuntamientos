@@ -8,7 +8,7 @@ import json
 import re
 from typing import Any, Literal
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.reference_layers.mirror_lifecycle import (
@@ -21,12 +21,16 @@ from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
     ReferenceDeliveryPromotion,
+    ReferenceDeliveryStyleParity,
+    ReferenceDeliveryStyleResource,
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerMirrorStrategy,
     ReferenceLayerSource,
     ReferenceLayerStyle,
+    ReferenceStyleParityPlan,
+    ReferenceStyleParityPlanItem,
     ReferenceSyncRun,
 )
 from app.reference_layers.wms_delivery import LayerDeliveryAvailability
@@ -173,6 +177,16 @@ def resolve_local_delivery(
     if row is None:
         raise LocalDeliveryError("local_version_invalid")
     version, source, run, snapshot = row
+    configured_style_versions = _configured_style_parity_versions(
+        db,
+        [version.id],
+    )
+    if (
+        version.id in configured_style_versions
+        and version.id
+        not in _complete_style_parity_versions(db, [version.id])
+    ):
+        raise LocalDeliveryError("style_parity_incomplete")
     assets = list(
         db.scalars(
             select(ReferenceDeliveryAsset)
@@ -287,6 +301,14 @@ def catalog_local_delivery_availability(
             heads.get(state.layer_id),
         )
     ]
+    complete_style_versions = _complete_style_parity_versions(
+        db,
+        active_ids,
+    )
+    configured_style_versions = _configured_style_parity_versions(
+        db,
+        active_ids,
+    )
     active_records: dict[int, _ActiveRecord] = {}
     if active_ids:
         rows = db.execute(
@@ -335,6 +357,10 @@ def catalog_local_delivery_availability(
                 and layer is not None
                 and current_snapshot is not None
                 and layer_blockers.get(version.layer_id) is None
+                and (
+                    version.id not in configured_style_versions
+                    or version.id in complete_style_versions
+                )
                 and state.active_version_id == version.id
                 and delivery_state_matches_promotion_head(state, head)
             ):
@@ -399,10 +425,13 @@ def catalog_local_delivery_availability(
             continue
         record = active_records.get(layer.id)
         if record is None:
-            result[layer.id] = _unavailable("local_version_invalid")
-            continue
-        if strategy is not None and record.version.delivery_kind != strategy.strategy:
-            result[layer.id] = _unavailable("strategy_delivery_kind_mismatch")
+            blocker = (
+                "style_parity_incomplete"
+                if state.active_version_id in configured_style_versions
+                and state.active_version_id not in complete_style_versions
+                else "local_version_invalid"
+            )
+            result[layer.id] = _unavailable(blocker)
             continue
         assets = assets_by_version.get(record.version.id, [])
         layer_styles = styles_by_layer.get(layer.id, [])
@@ -462,6 +491,158 @@ def catalog_local_delivery_availability(
             available_legend_style_ids=tuple(legend_style_ids),
         )
     return result
+
+
+def _complete_style_parity_versions(
+    db: Session,
+    version_ids: list[int],
+) -> set[int]:
+    if not version_ids:
+        return set()
+    version_plans = {
+        version.id: (version, plan)
+        for version, plan in db.execute(
+            select(
+                ReferenceDeliveryVersion,
+                ReferenceStyleParityPlan,
+            )
+            .join(
+                ReferenceStyleParityPlan,
+                and_(
+                    ReferenceStyleParityPlan.source_id
+                    == ReferenceDeliveryVersion.source_id,
+                    ReferenceStyleParityPlan.sync_run_id
+                    == ReferenceDeliveryVersion.sync_run_id,
+                ),
+            )
+            .where(ReferenceDeliveryVersion.id.in_(version_ids))
+        )
+    }
+    if not version_plans:
+        return set()
+    plan_ids = [plan.id for _version, plan in version_plans.values()]
+    items_by_plan: dict[int, list[ReferenceStyleParityPlanItem]] = {}
+    for item in db.scalars(
+        select(ReferenceStyleParityPlanItem).where(
+            ReferenceStyleParityPlanItem.plan_id.in_(plan_ids)
+        )
+    ):
+        items_by_plan.setdefault(item.plan_id, []).append(item)
+    parities_by_version: dict[int, list[ReferenceDeliveryStyleParity]] = {}
+    parity_ids: list[int] = []
+    for parity in db.scalars(
+        select(ReferenceDeliveryStyleParity).where(
+            ReferenceDeliveryStyleParity.version_id.in_(version_ids)
+        )
+    ):
+        parities_by_version.setdefault(parity.version_id, []).append(
+            parity
+        )
+        parity_ids.append(parity.id)
+    resource_counts = {
+        parity_id: int(count)
+        for parity_id, count in db.execute(
+            select(
+                ReferenceDeliveryStyleResource.delivery_parity_id,
+                func.count(),
+            )
+            .where(
+                ReferenceDeliveryStyleResource.delivery_parity_id.in_(
+                    parity_ids
+                )
+            )
+            .group_by(
+                ReferenceDeliveryStyleResource.delivery_parity_id
+            )
+        )
+    } if parity_ids else {}
+    complete: set[int] = set()
+    for version_id, (version, plan) in version_plans.items():
+        items = items_by_plan.get(plan.id, [])
+        parities = parities_by_version.get(version_id, [])
+        gate = (
+            version.validation_json.get("style_parity_gate")
+            if isinstance(version.validation_json, dict)
+            else None
+        )
+        if (
+            not plan.complete
+            or plan.missing_style_count != 0
+            or plan.provider_key != version.provider_key
+            or plan.layer_id != version.layer_id
+            or plan.catalog_snapshot_id != version.catalog_snapshot_id
+            or plan.catalog_definition_sha256
+            != version.catalog_definition_sha256
+            or plan.delivery_kind != version.delivery_kind
+            or _json_sha256(plan.evidence_json) != plan.evidence_sha256
+            or len(items) != plan.required_style_count
+            or len(parities) != len(items)
+            or {item.id for item in items}
+            != {parity.plan_item_id for parity in parities}
+            or any(
+                item.parity_kind == "missing"
+                or not item.verified
+                or _json_sha256(item.evidence_json)
+                != item.evidence_sha256
+                for item in items
+            )
+            or any(
+                not parity.verified
+                or _json_sha256(parity.evidence_json)
+                != parity.evidence_sha256
+                or resource_counts.get(parity.id, 0)
+                != parity.resource_count
+                for parity in parities
+            )
+            or not isinstance(gate, dict)
+            or gate.get("passed") is not True
+            or gate.get("plan_id") != plan.id
+            or gate.get("plan_evidence_sha256")
+            != plan.evidence_sha256
+            or gate.get("required_style_count") != len(items)
+            or gate.get("verified_style_count") != len(items)
+            or gate.get("missing_style_count") != 0
+        ):
+            continue
+        complete.add(version_id)
+    return complete
+
+
+def _configured_style_parity_versions(
+    db: Session,
+    version_ids: list[int],
+) -> set[int]:
+    if not version_ids:
+        return set()
+    return set(
+        db.scalars(
+            select(ReferenceDeliveryVersion.id)
+            .join(
+                ReferenceStyleParityPlan,
+                and_(
+                    ReferenceStyleParityPlan.source_id
+                    == ReferenceDeliveryVersion.source_id,
+                    ReferenceStyleParityPlan.sync_run_id
+                    == ReferenceDeliveryVersion.sync_run_id,
+                ),
+            )
+            .where(ReferenceDeliveryVersion.id.in_(version_ids))
+        )
+    )
+
+
+def _json_sha256(value: Any) -> str | None:
+    try:
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _load_current_layer_context(

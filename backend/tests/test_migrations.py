@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260726_0040"
+HEAD_REVISION = "20260726_0041"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -188,6 +188,105 @@ REFERENCE_MIRROR_TABLES = {
     "reference_delivery_assets",
     "reference_delivery_promotions",
     "reference_layer_delivery_state",
+}
+REFERENCE_STYLE_PARITY_TABLES = {
+    "reference_style_parity_plans",
+    "reference_style_parity_plan_items",
+    "reference_style_parity_plan_resources",
+    "reference_delivery_style_parities",
+    "reference_delivery_style_resources",
+}
+REFERENCE_STYLE_PARITY_COLUMNS = {
+    "reference_style_parity_plans": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "catalog_snapshot_id",
+        "catalog_definition_sha256",
+        "source_id",
+        "sync_run_id",
+        "delivery_kind",
+        "required_style_count",
+        "missing_style_count",
+        "complete",
+        "evidence_json",
+        "evidence_sha256",
+        "created_at",
+    },
+    "reference_style_parity_plan_items": {
+        "id",
+        "plan_id",
+        "source_id",
+        "style_id",
+        "style_source_key",
+        "remote_name",
+        "is_default",
+        "parity_kind",
+        "verified",
+        "source_style_artifact_id",
+        "source_package_artifact_id",
+        "resource_count",
+        "reason_code",
+        "evidence_json",
+        "evidence_sha256",
+        "created_at",
+    },
+    "reference_style_parity_plan_resources": {
+        "id",
+        "plan_item_id",
+        "source_id",
+        "artifact_id",
+        "original_href",
+        "resolved_url",
+        "local_path",
+        "media_type",
+        "sha256",
+        "evidence_sha256",
+        "created_at",
+    },
+    "reference_delivery_style_parities": {
+        "id",
+        "version_id",
+        "plan_item_id",
+        "parity_kind",
+        "verified",
+        "delivery_asset_id",
+        "resource_count",
+        "evidence_json",
+        "evidence_sha256",
+        "created_at",
+    },
+    "reference_delivery_style_resources": {
+        "delivery_parity_id",
+        "plan_resource_id",
+        "created_at",
+    },
+}
+REFERENCE_STYLE_PARITY_TRIGGERS = {
+    "reference_style_parity_plans": {
+        "trg_reference_style_parity_plans_immutable",
+        "trg_reference_style_parity_plans_truncate_immutable",
+    },
+    "reference_style_parity_plan_items": {
+        "trg_reference_style_parity_plan_items_validate",
+        "trg_reference_style_parity_plan_items_immutable",
+        "trg_reference_style_parity_plan_items_truncate_immutable",
+    },
+    "reference_style_parity_plan_resources": {
+        "trg_reference_style_parity_plan_resources_validate",
+        "trg_reference_style_parity_plan_resources_immutable",
+        "trg_reference_style_parity_plan_resources_truncate_immutable",
+    },
+    "reference_delivery_style_parities": {
+        "trg_reference_delivery_style_parities_validate",
+        "trg_reference_delivery_style_parities_immutable",
+        "trg_reference_delivery_style_parities_truncate_immutable",
+    },
+    "reference_delivery_style_resources": {
+        "trg_reference_delivery_style_resources_validate",
+        "trg_reference_delivery_style_resources_immutable",
+        "trg_reference_delivery_style_resources_truncate_immutable",
+    },
 }
 REFERENCE_CATALOG_WATCHER_TABLES = {
     "reference_catalog_observed_versions",
@@ -1163,6 +1262,94 @@ def assert_reference_mirror_schema(
             }
 
 
+def assert_reference_style_parity_schema(
+    inspector: Inspector,
+    engine: Engine,
+) -> None:
+    assert REFERENCE_STYLE_PARITY_TABLES <= set(inspector.get_table_names())
+    for table_name, expected_columns in REFERENCE_STYLE_PARITY_COLUMNS.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+
+    expected_indexes = {
+        "reference_style_parity_plans": {
+            "ix_reference_style_parity_plans_snapshot",
+        },
+        "reference_style_parity_plan_items": {
+            "ix_reference_style_parity_plan_items_status",
+        },
+        "reference_style_parity_plan_resources": {
+            "ix_reference_style_parity_plan_resources_artifact",
+        },
+        "reference_delivery_style_parities": {
+            "ix_reference_delivery_style_parities_version",
+        },
+        "reference_delivery_style_resources": set(),
+    }
+    for table_name, expected in expected_indexes.items():
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected
+
+    expanded_checks = {
+        table_name: {
+            item["name"]: item["sqltext"]
+            for item in inspector.get_check_constraints(table_name)
+        }
+        for table_name in (
+            "reference_source_artifacts",
+            "reference_sync_run_artifacts",
+            "reference_delivery_version_artifacts",
+            "reference_delivery_assets",
+        )
+    }
+    assert "style_package" in expanded_checks[
+        "reference_source_artifacts"
+    ]["ck_reference_source_artifacts_kind"]
+    assert "style_resource" in expanded_checks[
+        "reference_source_artifacts"
+    ]["ck_reference_source_artifacts_kind"]
+    assert "style_package" in expanded_checks[
+        "reference_sync_run_artifacts"
+    ]["ck_reference_sync_run_artifacts_role"]
+    assert "style_resource" in expanded_checks[
+        "reference_delivery_version_artifacts"
+    ]["ck_reference_delivery_version_artifacts_role"]
+    assert "style_package" in expanded_checks[
+        "reference_delivery_assets"
+    ]["ck_reference_delivery_assets_kind"]
+
+    quoted_tables = ", ".join(
+        f"'{table_name}'" for table_name in REFERENCE_STYLE_PARITY_TABLES
+    )
+    with engine.connect() as connection:
+        trigger_rows = connection.execute(
+            text(
+                """
+                SELECT relation.relname, trigger.tgname
+                FROM pg_trigger AS trigger
+                JOIN pg_class AS relation
+                  ON relation.oid = trigger.tgrelid
+                WHERE NOT trigger.tgisinternal
+                  AND relation.relname IN ("""
+                + quoted_tables
+                + ")"
+            )
+        ).all()
+    triggers_by_table = {
+        table_name: {
+            trigger_name
+            for observed_table, trigger_name in trigger_rows
+            if observed_table == table_name
+        }
+        for table_name in REFERENCE_STYLE_PARITY_TABLES
+    }
+    assert triggers_by_table == REFERENCE_STYLE_PARITY_TRIGGERS
+
+
 def assert_reference_catalog_watcher_schema(inspector: Inspector) -> None:
     assert REFERENCE_CATALOG_WATCHER_TABLES <= set(
         inspector.get_table_names()
@@ -1311,6 +1498,197 @@ def test_reference_strategy_matrix_schema_is_reversible(
         )
         run_alembic(migration_database_url, "upgrade", "head")
         assert_reference_mirror_strategy_schema(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_reference_style_parity_schema_is_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "head")
+    engine = create_engine(migration_database_url)
+    try:
+        assert_reference_style_parity_schema(inspect(engine), engine)
+        run_alembic(migration_database_url, "downgrade", "20260726_0040")
+        assert REFERENCE_STYLE_PARITY_TABLES.isdisjoint(
+            set(inspect(engine).get_table_names())
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_style_parity_schema(inspect(engine), engine)
+    finally:
+        engine.dispose()
+
+
+def test_reference_style_parity_backfill_is_missing_and_fail_closed(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0040")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            version_id = connection.execute(
+                text(
+                    """
+                    WITH snapshot AS (
+                        INSERT INTO reference_catalog_snapshots (
+                            provider_key, source_url, content_sha256,
+                            definition_sha256, raw_catalog_json,
+                            normalized_definition_json, retrieved_at,
+                            service_count, group_count, layer_count,
+                            unresolved_count, status, is_current
+                        ) VALUES (
+                            'siur', 'https://example.test/settings.json',
+                            repeat('a', 64), repeat('b', 64),
+                            CAST('{}' AS JSON), CAST('{}' AS JSON), now(),
+                            1, 0, 1, 0, 'applied', true
+                        ) RETURNING id, definition_sha256
+                    ),
+                    service AS (
+                        INSERT INTO reference_services (
+                            last_seen_snapshot_id, provider_key, source_key,
+                            title, upstream_protocol, base_url, license_status,
+                            cache_policy, status
+                        )
+                        SELECT
+                            id, 'siur', 'service:style-backfill',
+                            'Style backfill WMS', 'wms',
+                            'https://example.test/geoserver/wms',
+                            'pending', 'mirror', 'active'
+                        FROM snapshot
+                        RETURNING id, last_seen_snapshot_id
+                    ),
+                    layer AS (
+                        INSERT INTO reference_layers (
+                            last_seen_snapshot_id, service_id, provider_key,
+                            source_key, node_type, title, remote_name, role,
+                            renderer, delivery_mode, sort_order,
+                            default_visible, default_opacity, queryable,
+                            downloadable, status
+                        )
+                        SELECT
+                            service.last_seen_snapshot_id, service.id, 'siur',
+                            'layer:style-backfill', 'layer',
+                            'Style backfill layer', 'test:style-backfill',
+                            'overlay', 'vector_tile', 'mirror', 0, false, 1,
+                            true, true, 'active'
+                        FROM service
+                        RETURNING id, last_seen_snapshot_id
+                    ),
+                    source AS (
+                        INSERT INTO reference_layer_sources (
+                            provider_key, layer_id, source_key, protocol,
+                            target_kind, endpoint_url, remote_name,
+                            sync_strategy, config_json, definition_sha256,
+                            enabled, is_primary
+                        )
+                        SELECT
+                            'siur', layer.id, 'source:style-backfill', 'wfs',
+                            'vector', 'https://example.test/geoserver/wfs',
+                            'test:style-backfill', 'paged_snapshot',
+                            CAST('{}' AS JSON), repeat('c', 64), true, true
+                        FROM layer
+                        RETURNING id, layer_id
+                    ),
+                    run AS (
+                        INSERT INTO reference_sync_runs (
+                            provider_key, layer_id, source_id,
+                            source_definition_json,
+                            source_definition_sha256, trigger_kind,
+                            check_mode, status, started_at, finished_at
+                        )
+                        SELECT
+                            'siur', source.layer_id, source.id,
+                            CAST('{}' AS JSON), repeat('c', 64), 'manual',
+                            'full', 'succeeded', now(), now()
+                        FROM source
+                        RETURNING id, source_id, layer_id
+                    )
+                    INSERT INTO reference_delivery_versions (
+                        provider_key, layer_id, source_id, sync_run_id,
+                        catalog_snapshot_id, catalog_definition_sha256,
+                        sequence_number, delivery_kind, source_version,
+                        content_sha256, manifest_sha256, validation_sha256,
+                        reference_at, crs, bounds_json, feature_count,
+                        validation_json
+                    )
+                    SELECT
+                        'siur', run.layer_id, run.source_id, run.id,
+                        snapshot.id, snapshot.definition_sha256, 1, 'vector',
+                        'legacy', repeat('d', 64), repeat('e', 64),
+                        repeat('f', 64), now(), 'EPSG:3857',
+                        CAST(:bounds AS JSON),
+                        1, CAST(:validation AS JSON)
+                    FROM run CROSS JOIN snapshot
+                    RETURNING id
+                    """
+                ),
+                {
+                    "bounds": json.dumps(
+                        {"west": -7, "south": 40, "east": -1, "north": 44}
+                    ),
+                    "validation": json.dumps({"passed": True}),
+                },
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_style_parity_schema(inspect(engine), engine)
+        with engine.connect() as connection:
+            backfill = connection.execute(
+                text(
+                    """
+                    SELECT
+                        plan.complete,
+                        plan.required_style_count,
+                        plan.missing_style_count,
+                        item.parity_kind,
+                        item.verified,
+                        item.reason_code,
+                        item.style_source_key
+                    FROM reference_delivery_versions AS version
+                    JOIN reference_style_parity_plans AS plan
+                      ON plan.source_id = version.source_id
+                     AND plan.sync_run_id = version.sync_run_id
+                    JOIN reference_style_parity_plan_items AS item
+                      ON item.plan_id = plan.id
+                    WHERE version.id = :version_id
+                    """
+                ),
+                {"version_id": version_id},
+            ).one()
+        assert backfill == (
+            False,
+            1,
+            1,
+            "missing",
+            False,
+            "migration_backfill_required",
+            "__implicit_default__",
+        )
+
+        with pytest.raises(DBAPIError) as immutable:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE reference_style_parity_plans
+                        SET complete = true
+                        """
+                    )
+                )
+        assert immutable.value.orig.sqlstate == "55000"
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260726_0040",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "style parity evidence exists" in refused.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
     finally:
         engine.dispose()
 

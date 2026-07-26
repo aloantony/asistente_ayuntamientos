@@ -1602,7 +1602,8 @@ class ReferenceSourceArtifact(Base):
     __table_args__ = (
         CheckConstraint(
             "artifact_kind in ('capabilities', 'manifest', 'dataset', "
-            "'style', 'metadata', 'tile_archive')",
+            "'style', 'style_package', 'style_resource', 'metadata', "
+            "'tile_archive')",
             name="ck_reference_source_artifacts_kind",
         ),
         CheckConstraint(
@@ -1692,7 +1693,8 @@ class ReferenceSyncRunArtifact(Base):
     __tablename__ = "reference_sync_run_artifacts"
     __table_args__ = (
         CheckConstraint(
-            "role in ('observation', 'input', 'style', 'metadata')",
+            "role in ('observation', 'input', 'style', 'style_package', "
+            "'style_resource', 'metadata')",
             name="ck_reference_sync_run_artifacts_role",
         ),
         ForeignKeyConstraint(
@@ -1721,6 +1723,274 @@ class ReferenceSyncRunArtifact(Base):
     run_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     artifact_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     role: Mapped[str] = mapped_column(String(20), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceStyleParityPlan(Base):
+    """Immutable style-reproduction decision for one catalog-bound sync run."""
+
+    __tablename__ = "reference_style_parity_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "delivery_kind in ('vector', 'raster', 'tiles')",
+            name="ck_reference_style_parity_plans_kind",
+        ),
+        CheckConstraint(
+            "required_style_count > 0 and missing_style_count >= 0 and "
+            "missing_style_count <= required_style_count and "
+            "complete = (missing_style_count = 0)",
+            name="ck_reference_style_parity_plans_counts",
+        ),
+        CheckConstraint(
+            "catalog_definition_sha256 ~ '^[0-9a-f]{64}$' and "
+            "evidence_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_style_parity_plans_hashes",
+        ),
+        CheckConstraint(
+            "btrim(provider_key) <> '' and "
+            "octet_length(evidence_json::text) <= 4194304",
+            name="ck_reference_style_parity_plans_evidence",
+        ),
+        UniqueConstraint(
+            "source_id",
+            "sync_run_id",
+            name="uq_reference_style_parity_plans_run",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "id",
+            name="uq_reference_style_parity_plans_layer_id",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id", "source_id"],
+            [
+                "reference_layer_sources.provider_key",
+                "reference_layer_sources.layer_id",
+                "reference_layer_sources.id",
+            ],
+            name="fk_reference_style_parity_plans_layer_source",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "sync_run_id"],
+            ["reference_sync_runs.source_id", "reference_sync_runs.id"],
+            name="fk_reference_style_parity_plans_source_run",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "catalog_snapshot_id",
+                "catalog_definition_sha256",
+            ],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+                "reference_catalog_snapshots.definition_sha256",
+            ],
+            name="fk_reference_style_parity_plans_catalog",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_style_parity_plans_snapshot",
+            "provider_key",
+            "catalog_snapshot_id",
+            "layer_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    catalog_snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    catalog_definition_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sync_run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    delivery_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    required_style_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    missing_style_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceStyleParityPlanItem(Base):
+    """One required catalog (or implicit default) style in a parity plan."""
+
+    __tablename__ = "reference_style_parity_plan_items"
+    __table_args__ = (
+        CheckConstraint(
+            "parity_kind in ('exact', 'adapted', 'baked', 'missing')",
+            name="ck_reference_style_parity_plan_items_kind",
+        ),
+        CheckConstraint(
+            "btrim(style_source_key) <> '' and btrim(remote_name) <> '' and "
+            "evidence_sha256 ~ '^[0-9a-f]{64}$' and resource_count >= 0 and "
+            "octet_length(evidence_json::text) <= 4194304",
+            name="ck_reference_style_parity_plan_items_evidence",
+        ),
+        CheckConstraint(
+            "(parity_kind = 'missing' and not verified and "
+            "reason_code is not null and btrim(reason_code) <> '') or "
+            "(parity_kind <> 'missing' and verified and reason_code is null)",
+            name="ck_reference_style_parity_plan_items_verification",
+        ),
+        CheckConstraint(
+            "(parity_kind = 'exact' and "
+            "source_style_artifact_id is not null and "
+            "source_package_artifact_id is null and resource_count = 0) or "
+            "(parity_kind = 'adapted' and "
+            "source_style_artifact_id is not null and "
+            "source_package_artifact_id is not null and resource_count > 0) "
+            "or (parity_kind in ('baked', 'missing') and "
+            "source_style_artifact_id is null and "
+            "source_package_artifact_id is null and resource_count = 0)",
+            name="ck_reference_style_parity_plan_items_artifacts",
+        ),
+        UniqueConstraint(
+            "plan_id",
+            "style_source_key",
+            name="uq_reference_style_parity_plan_items_identity",
+        ),
+        UniqueConstraint(
+            "plan_id",
+            "id",
+            name="uq_reference_style_parity_plan_items_plan_id",
+        ),
+        ForeignKeyConstraint(
+            ["plan_id"],
+            ["reference_style_parity_plans.id"],
+            name="fk_reference_style_parity_plan_items_plan",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["style_id"],
+            ["reference_layer_styles.id"],
+            name="fk_reference_style_parity_plan_items_style",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "source_style_artifact_id"],
+            [
+                "reference_source_artifacts.source_id",
+                "reference_source_artifacts.id",
+            ],
+            name="fk_reference_style_parity_plan_items_style_artifact",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "source_package_artifact_id"],
+            [
+                "reference_source_artifacts.source_id",
+                "reference_source_artifacts.id",
+            ],
+            name="fk_reference_style_parity_plan_items_package_artifact",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_style_parity_plan_items_status",
+            "plan_id",
+            "parity_kind",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    style_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    style_source_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    remote_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    parity_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_style_artifact_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    source_package_artifact_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    resource_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceStyleParityPlanResource(Base):
+    """A locally copied auxiliary resource required by one adapted SLD."""
+
+    __tablename__ = "reference_style_parity_plan_resources"
+    __table_args__ = (
+        CheckConstraint(
+            "resolved_url like 'https://%' and "
+            "btrim(original_href) <> '' and "
+            "local_path ~ '^resources/[0-9a-f]{64}\\.[a-z0-9]{1,8}$' and "
+            "sha256 ~ '^[0-9a-f]{64}$' and btrim(media_type) <> '' and "
+            "evidence_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_style_parity_plan_resources_evidence",
+        ),
+        UniqueConstraint(
+            "plan_item_id",
+            "original_href",
+            name="uq_reference_style_parity_plan_resources_href",
+        ),
+        UniqueConstraint(
+            "plan_item_id",
+            "id",
+            name="uq_reference_style_parity_plan_resources_item_id",
+        ),
+        ForeignKeyConstraint(
+            ["plan_item_id"],
+            ["reference_style_parity_plan_items.id"],
+            name="fk_reference_style_parity_plan_resources_item",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "artifact_id"],
+            [
+                "reference_source_artifacts.source_id",
+                "reference_source_artifacts.id",
+            ],
+            name="fk_reference_style_parity_plan_resources_artifact",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_style_parity_plan_resources_artifact",
+            "artifact_id",
+            "plan_item_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    plan_item_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    artifact_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    original_href: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_url: Mapped[str] = mapped_column(Text, nullable=False)
+    local_path: Mapped[str] = mapped_column(String(96), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -1861,7 +2131,8 @@ class ReferenceDeliveryVersionArtifact(Base):
     __tablename__ = "reference_delivery_version_artifacts"
     __table_args__ = (
         CheckConstraint(
-            "role in ('input', 'style', 'metadata')",
+            "role in ('input', 'style', 'style_package', 'style_resource', "
+            "'metadata')",
             name="ck_reference_delivery_version_artifacts_role",
         ),
         ForeignKeyConstraint(
@@ -1905,7 +2176,8 @@ class ReferenceDeliveryAsset(Base):
     __table_args__ = (
         CheckConstraint(
             "asset_kind in ('vector_table', 'raster_cog', 'tile_archive', "
-            "'tile_prefix', 'style_sld', 'legend', 'metadata')",
+            "'tile_prefix', 'style_sld', 'style_package', 'legend', "
+            "'metadata')",
             name="ck_reference_delivery_assets_kind",
         ),
         CheckConstraint(
@@ -1969,6 +2241,109 @@ class ReferenceDeliveryAsset(Base):
         default=dict,
         server_default=text("'{}'::json"),
         nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceDeliveryStyleParity(Base):
+    """Final style parity bound to one immutable local delivery version."""
+
+    __tablename__ = "reference_delivery_style_parities"
+    __table_args__ = (
+        CheckConstraint(
+            "parity_kind in ('exact', 'adapted', 'baked') and verified",
+            name="ck_reference_delivery_style_parities_verified",
+        ),
+        CheckConstraint(
+            "resource_count >= 0 and "
+            "((parity_kind = 'adapted' and resource_count > 0) or "
+            "(parity_kind in ('exact', 'baked') and resource_count = 0)) and "
+            "evidence_sha256 ~ '^[0-9a-f]{64}$' and "
+            "octet_length(evidence_json::text) <= 4194304",
+            name="ck_reference_delivery_style_parities_evidence",
+        ),
+        UniqueConstraint(
+            "version_id",
+            "plan_item_id",
+            name="uq_reference_delivery_style_parities_item",
+        ),
+        UniqueConstraint(
+            "version_id",
+            "id",
+            name="uq_reference_delivery_style_parities_version_id",
+        ),
+        ForeignKeyConstraint(
+            ["version_id"],
+            ["reference_delivery_versions.id"],
+            name="fk_reference_delivery_style_parities_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["plan_item_id"],
+            ["reference_style_parity_plan_items.id"],
+            name="fk_reference_delivery_style_parities_plan_item",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["delivery_asset_id"],
+            ["reference_delivery_assets.id"],
+            name="fk_reference_delivery_style_parities_asset",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_delivery_style_parities_version",
+            "version_id",
+            "parity_kind",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    version_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    plan_item_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    parity_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    delivery_asset_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    resource_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceDeliveryStyleResource(Base):
+    """Exact auxiliary-resource provenance for a delivered adapted style."""
+
+    __tablename__ = "reference_delivery_style_resources"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["delivery_parity_id"],
+            ["reference_delivery_style_parities.id"],
+            name="fk_reference_delivery_style_resources_parity",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["plan_resource_id"],
+            ["reference_style_parity_plan_resources.id"],
+            name="fk_reference_delivery_style_resources_plan_resource",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    delivery_parity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+    )
+    plan_resource_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -2529,6 +2904,21 @@ _install_immutable_reference_truncate_trigger(
 
 for _table, _function_name, _trigger_name in (
     (
+        ReferenceStyleParityPlan.__table__,
+        "prevent_reference_style_parity_plan_mutation",
+        "trg_reference_style_parity_plans_immutable",
+    ),
+    (
+        ReferenceStyleParityPlanItem.__table__,
+        "prevent_reference_style_parity_plan_item_mutation",
+        "trg_reference_style_parity_plan_items_immutable",
+    ),
+    (
+        ReferenceStyleParityPlanResource.__table__,
+        "prevent_reference_style_parity_plan_resource_mutation",
+        "trg_reference_style_parity_plan_resources_immutable",
+    ),
+    (
         ReferenceSourceArtifact.__table__,
         "prevent_reference_source_artifact_mutation",
         "trg_reference_source_artifacts_immutable",
@@ -2554,6 +2944,16 @@ for _table, _function_name, _trigger_name in (
         "trg_reference_delivery_assets_immutable",
     ),
     (
+        ReferenceDeliveryStyleParity.__table__,
+        "prevent_reference_delivery_style_parity_mutation",
+        "trg_reference_delivery_style_parities_immutable",
+    ),
+    (
+        ReferenceDeliveryStyleResource.__table__,
+        "prevent_reference_delivery_style_resource_mutation",
+        "trg_reference_delivery_style_resources_immutable",
+    ),
+    (
         ReferenceDeliveryPromotion.__table__,
         "prevent_reference_delivery_promotion_mutation",
         "trg_reference_delivery_promotions_immutable",
@@ -2564,4 +2964,37 @@ for _table, _function_name, _trigger_name in (
         function_name=_function_name,
         trigger_name=_trigger_name,
         error_message="reference mirror records are immutable",
+    )
+
+for _table, _function_name, _trigger_name in (
+    (
+        ReferenceStyleParityPlan.__table__,
+        "prevent_reference_style_parity_plan_mutation",
+        "trg_reference_style_parity_plans_truncate_immutable",
+    ),
+    (
+        ReferenceStyleParityPlanItem.__table__,
+        "prevent_reference_style_parity_plan_item_mutation",
+        "trg_reference_style_parity_plan_items_truncate_immutable",
+    ),
+    (
+        ReferenceStyleParityPlanResource.__table__,
+        "prevent_reference_style_parity_plan_resource_mutation",
+        "trg_reference_style_parity_plan_resources_truncate_immutable",
+    ),
+    (
+        ReferenceDeliveryStyleParity.__table__,
+        "prevent_reference_delivery_style_parity_mutation",
+        "trg_reference_delivery_style_parities_truncate_immutable",
+    ),
+    (
+        ReferenceDeliveryStyleResource.__table__,
+        "prevent_reference_delivery_style_resource_mutation",
+        "trg_reference_delivery_style_resources_truncate_immutable",
+    ),
+):
+    _install_immutable_reference_truncate_trigger(
+        _table,
+        function_name=_function_name,
+        trigger_name=_trigger_name,
     )

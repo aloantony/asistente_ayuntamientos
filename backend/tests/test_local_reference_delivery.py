@@ -27,8 +27,11 @@ from app.reference_layers.models import (
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
+    ReferenceLayerMirrorStrategy,
     ReferenceLayerSource,
     ReferenceLayerStyle,
+    ReferenceStyleParityPlan,
+    ReferenceStyleParityPlanItem,
     ReferenceSyncRun,
 )
 
@@ -292,6 +295,95 @@ def test_catalog_local_availability_exposes_only_published_styles(db) -> None:
     assert availability.identify_available is True
     assert availability.legend_available is True
     assert availability.available_style_ids == tuple(style.id for style in styles)
+
+
+def test_validated_fallback_delivery_can_differ_from_preferred_strategy(db) -> None:
+    layer, styles, source, _, version, _ = seed_local_delivery(
+        db,
+        kind="tiles",
+    )
+    evidence = {
+        "preferred_strategy": "vector",
+        "effective_delivery": "tiles",
+    }
+    db.add(
+        ReferenceLayerMirrorStrategy(
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            catalog_snapshot_id=version.catalog_snapshot_id,
+            catalog_definition_sha256=version.catalog_definition_sha256,
+            strategy="vector",
+            source_id=source.id,
+            strategy_reason_code="preferred_vector_candidate",
+            strategy_reason="Vector is preferred; tiles remain the fallback.",
+            evidence_json=evidence,
+            evidence_sha256=canonical_json_sha256(evidence),
+            generation=1,
+            validated_at=datetime(2026, 7, 22, 9, tzinfo=timezone.utc),
+        )
+    )
+    db.commit()
+
+    availability = catalog_local_delivery_availability(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        styles=[styles[0]],
+    )[layer.id]
+
+    assert availability is not None
+    assert availability.delivery_available is True
+    assert availability.delivery_blocker is None
+    assert availability.available_style_ids == (styles[0].id,)
+
+
+def test_incomplete_style_parity_blocks_an_active_legacy_delivery(db) -> None:
+    layer, styles, source, run, version, _ = seed_local_delivery(db)
+    plan_evidence = {"reason": "legacy_backfill"}
+    plan = ReferenceStyleParityPlan(
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        catalog_snapshot_id=version.catalog_snapshot_id,
+        catalog_definition_sha256=version.catalog_definition_sha256,
+        source_id=source.id,
+        sync_run_id=run.id,
+        delivery_kind=version.delivery_kind,
+        required_style_count=1,
+        missing_style_count=1,
+        complete=False,
+        evidence_json=plan_evidence,
+        evidence_sha256=canonical_json_sha256(plan_evidence),
+    )
+    db.add(plan)
+    db.flush()
+    item_evidence = {"reason_code": "migration_backfill_required"}
+    db.add(
+        ReferenceStyleParityPlanItem(
+            plan_id=plan.id,
+            source_id=source.id,
+            style_id=styles[0].id,
+            style_source_key=styles[0].source_key,
+            remote_name=styles[0].remote_name,
+            is_default=True,
+            parity_kind="missing",
+            verified=False,
+            resource_count=0,
+            reason_code="migration_backfill_required",
+            evidence_json=item_evidence,
+            evidence_sha256=canonical_json_sha256(item_evidence),
+        )
+    )
+    db.commit()
+
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+
+    assert raised.value.blocker == "style_parity_incomplete"
 
 
 def test_changed_mutable_source_does_not_invalidate_frozen_delivery(db) -> None:
