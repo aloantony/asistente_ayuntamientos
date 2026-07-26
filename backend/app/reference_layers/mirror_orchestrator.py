@@ -513,6 +513,7 @@ class MirrorRunProcessor:
                     revalidate_style_promotion_gate(
                         self.session_factory,
                         context,
+                        store=self.store,
                     )
                     publication_stats = (
                         self.publisher(context, publication, supervisor) or {}
@@ -535,6 +536,7 @@ class MirrorRunProcessor:
                             context.run.observed_last_modified
                         ),
                         observed_version=context.run.observed_version,
+                        style_evidence_store=self.store,
                         stats={
                             **dict(context.run.stats_json),
                             "delivery_kind": context.source.target_kind,
@@ -679,6 +681,7 @@ class MirrorRunProcessor:
                 revalidate_style_promotion_gate(
                     self.session_factory,
                     context,
+                    store=self.store,
                 )
                 publication_stats = (
                     self.publisher(
@@ -703,6 +706,7 @@ class MirrorRunProcessor:
                     observed_etag=acquired.observed_etag,
                     observed_last_modified=acquired.observed_last_modified,
                     observed_version=acquired.observed_version,
+                    style_evidence_store=self.store,
                     stats=_bounded_stats(
                         {
                             **acquired.stats,
@@ -1137,6 +1141,8 @@ def revalidate_run_authorization(
 def revalidate_style_promotion_gate(
     session_factory: SessionFactory,
     context: RunContext,
+    *,
+    store: ReferenceBlobStore,
 ) -> None:
     """Recheck the independent style watcher immediately before publish."""
 
@@ -1152,7 +1158,11 @@ def revalidate_style_promotion_gate(
                 "reference source changed before style promotion gate",
                 code="source_definition_changed",
             )
-        require_official_style_promotion_allowed(db, source=source)
+        require_official_style_promotion_allowed(
+            db,
+            source=source,
+            store=store,
+        )
 
 
 def persist_run_acquisition(
@@ -1306,6 +1316,7 @@ def promote_existing_delivery(
     observed_etag: str | None = None,
     observed_last_modified: datetime | None = None,
     observed_version: str | None = None,
+    style_evidence_store: ReferenceBlobStore | None = None,
 ) -> None:
     with session_factory() as db:
         promote_delivery_version(
@@ -1314,6 +1325,7 @@ def promote_existing_delivery(
             lease=lease,
             expected_generation=context.run.expected_active_generation,
             reason="Validated immutable local mirror delivery",
+            style_evidence_store=style_evidence_store,
             observed_etag=observed_etag,
             observed_last_modified=observed_last_modified,
             observed_version=observed_version,

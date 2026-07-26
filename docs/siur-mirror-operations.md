@@ -34,6 +34,43 @@ Un servicio con catálogo `pending`, sin revisión, sin atestación o sin permis
 explícito figura como `mirror_authorized=false`. Este comando no crea ni
 aprueba evidencia legal.
 
+## Revisión de cambios del estilo oficial
+
+El watcher comprueba diariamente las cinco referencias MITECO adaptadas. Un
+cambio conserva el JSON observado en CAS y bloquea nuevas promociones sin
+alterar el estilo local. Para listar bloqueos y obtener una plantilla completa:
+
+```bash
+python -m app.reference_layers.style_update_admin status
+```
+
+Se puede limitar con `--source-id`. La plantilla deja `decision`, `reviewer`,
+`reviewed_at` y `rationale` a `null` para obligar a cumplimentarlos. Las únicas
+decisiones válidas son `retain_vendored` y `vendor_update_required`.
+
+Tras guardar la plantilla editada en un fichero local regular, ejecutar el
+dry-run y conservar los dos hashes:
+
+```bash
+python -m app.reference_layers.style_update_admin review \
+  --file /ruta/revision-estilo.json
+```
+
+Solo se aplica el mismo fichero, con el candidato y su blob CAS todavía
+íntegros, confirmando ambos hashes emitidos por el dry-run:
+
+```bash
+python -m app.reference_layers.style_update_admin review \
+  --file /ruta/revision-estilo.json \
+  --apply \
+  --expected-review-sha256 HASH_SEMANTICO \
+  --expected-document-sha256 HASH_DOCUMENTO
+```
+
+`retain_vendored` desbloquea promociones manteniendo la adaptación revisada.
+`vendor_update_required` conserva el bloqueo hasta actualizar y revisar la
+evidencia versionada en el repositorio.
+
 ## Rollback
 
 Primero se revisa un dry-run:
