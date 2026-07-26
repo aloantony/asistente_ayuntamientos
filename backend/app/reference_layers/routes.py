@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
+from app.core.config import settings as app_settings
 from app.db.session import get_db
 from app.reference_layers.access import (
     require_catalog_manage,
@@ -124,6 +125,7 @@ def get_reference_catalog(
         services=services,
         layers=layers,
         styles=styles,
+        enabled=app_settings.reference_remote_proxy_enabled,
     )
     local_delivery_availability = catalog_local_delivery_availability(
         db,

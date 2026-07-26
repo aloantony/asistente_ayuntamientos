@@ -649,7 +649,7 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert overlay["effective_opacity"] == 0.75
     assert overlay["delivery_available"] is False
     assert overlay["identify_available"] is False
-    assert overlay["delivery_blocker"] == "attestation_missing"
+    assert overlay["delivery_blocker"] == "remote_proxy_disabled"
     assert overlay["available_style_ids"] == []
     assert overlay["legend_available"] is False
     assert overlay["metadata_available"] is True

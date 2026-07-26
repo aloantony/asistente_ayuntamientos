@@ -10,6 +10,9 @@ services:
       GEOSERVER_ADMIN_USER: ""
       GEOSERVER_ADMIN_PASSWORD: ""
       LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
+      # Local reference delivery is the production default. Remote WMS
+      # fallback requires an explicit operator opt-in.
+      REFERENCE_REMOTE_PROXY_ENABLED: ${REFERENCE_REMOTE_PROXY_ENABLED:-false}
     network_mode: host
     command:
       ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]

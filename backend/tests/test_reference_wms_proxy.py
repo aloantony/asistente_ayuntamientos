@@ -66,6 +66,17 @@ from wms_evidence_fixtures import (
 )
 
 
+@pytest.fixture(autouse=True)
+def explicitly_enable_remote_proxy_for_proxy_contract_tests(monkeypatch):
+    """Existing proxy tests exercise the opt-in path deliberately."""
+
+    monkeypatch.setattr(
+        wms_routes.settings,
+        "reference_remote_proxy_enabled",
+        True,
+    )
+
+
 def make_wms_definition(
     *,
     license_status: str = "approved",
@@ -359,6 +370,63 @@ def test_tile_route_builds_a_fixed_server_side_wms_request(
         "VERSION": ["1.3.0"],
         "WIDTH": ["256"],
     }
+
+
+def test_remote_proxy_disabled_blocks_all_routes_before_cache_or_network(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    monkeypatch.setattr(
+        wms_routes.settings,
+        "reference_remote_proxy_enabled",
+        False,
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("disabled remote proxy must not touch cache or network")
+
+    monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "store_cached_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden)
+    prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
+    responses = (
+        client.get(
+            f"{prefix}/tiles/0/0/0.png",
+            headers=headers_for(viewer),
+        ),
+        client.get(
+            f"{prefix}/legend.png",
+            headers=headers_for(viewer),
+        ),
+        client.get(
+            f"{prefix}/identify",
+            params={
+                "pixel_x": 1,
+                "pixel_y": 1,
+                "x": 0,
+                "y": 0,
+                "z": 0,
+            },
+            headers=headers_for(viewer),
+        ),
+    )
+
+    assert [response.status_code for response in responses] == [503, 503, 503]
+    assert {
+        response.json()["detail"]
+        for response in responses
+    } == {"Local reference layer is unavailable"}
 
 
 def test_wms_routes_accept_httponly_access_token_cookie_without_bearer_header(
@@ -992,6 +1060,44 @@ def test_catalog_exposes_only_attested_effective_delivery_availability(
         "license_status",
     ):
         assert secret not in serialized
+
+
+def test_catalog_hides_remote_delivery_when_proxy_is_disabled(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+) -> None:
+    layer = seed_wms_layer(db)
+    organization, viewer = prepare_viewer(
+        db,
+        make_user,
+        make_organization,
+        grant_permissions,
+    )
+    monkeypatch.setattr(
+        wms_routes.settings,
+        "reference_remote_proxy_enabled",
+        False,
+    )
+
+    response = client.get(
+        "/reference-layers/catalog",
+        params={"organization_id": organization.id, "provider_key": "siur"},
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    delivered = next(
+        item for item in response.json()["layers"] if item["id"] == layer.id
+    )
+    assert delivered["delivery_available"] is False
+    assert delivered["legend_available"] is False
+    assert delivered["identify_available"] is False
+    assert delivered["available_style_ids"] == []
+    assert delivered["delivery_blocker"] == "remote_proxy_disabled"
 
 
 def test_catalog_does_not_advertise_delivery_for_a_disabled_service(

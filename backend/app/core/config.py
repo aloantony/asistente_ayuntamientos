@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     reference_tile_change_check_samples: int = 16
     reference_geo_max_source_bytes: int = 8 * 1024 * 1024 * 1024
     reference_geo_timeout_seconds: int = 3600
+    reference_remote_proxy_enabled: bool = False
     local_geoserver_base_url: str = "http://127.0.0.1:8081/geoserver"
     local_geoserver_workspace: str = "siur"
     local_geoserver_timeout_seconds: float = 8.0
