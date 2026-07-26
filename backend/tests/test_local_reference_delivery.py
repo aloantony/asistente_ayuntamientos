@@ -89,7 +89,13 @@ def _catalog_definition(
     )
 
 
-def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
+def seed_local_delivery(
+    db,
+    *,
+    kind="vector",
+    asset_metadata=None,
+    asset_sha256: str = "e" * 64,
+):
     definition = _catalog_definition()
     snapshot, _ = apply_catalog_definition(db, definition)
     layer = db.scalar(
@@ -203,7 +209,7 @@ def seed_local_delivery(db, *, kind="vector", asset_metadata=None):
             if kind == "vector"
             else "application/vnd.mapbox-vector-tile"
         ),
-        sha256="e" * 64,
+        sha256=asset_sha256,
         size_bytes=None if kind == "vector" else 1024,
         metadata_json=asset_metadata,
     )
@@ -436,7 +442,10 @@ def test_frozen_snapshot_or_asset_corruption_is_fail_closed(
     db,
     corruption: str,
 ) -> None:
-    layer, styles, _, _, version, asset = seed_local_delivery(db)
+    layer, styles, _, _, version, _ = seed_local_delivery(
+        db,
+        asset_sha256="f" * 64 if corruption == "asset" else "e" * 64,
+    )
     if corruption == "snapshot":
         snapshot = db.get(
             ReferenceCatalogSnapshot,
@@ -446,8 +455,6 @@ def test_frozen_snapshot_or_asset_corruption_is_fail_closed(
             **snapshot.normalized_definition_json,
             "unresolved_count": 999,
         }
-    else:
-        asset.sha256 = "f" * 64
     db.commit()
 
     with pytest.raises(LocalDeliveryError) as raised:

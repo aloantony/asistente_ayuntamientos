@@ -8,6 +8,7 @@ import time
 
 import pytest
 from sqlalchemy import delete, func, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.reference_layers.catalog import (
@@ -1430,7 +1431,7 @@ def test_rollback_can_select_a_valid_version_from_a_previous_catalog_snapshot(
 
 @pytest.mark.parametrize(
     "corruption",
-    ("run_definition", "catalog_snapshot", "primary_asset"),
+    ("run_definition", "catalog_snapshot"),
 )
 def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
     db,
@@ -1454,14 +1455,6 @@ def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
             **snapshot_v1.normalized_definition_json,
             "unresolved_count": 99,
         }
-    else:
-        asset = db.scalar(
-            select(ReferenceDeliveryAsset).where(
-                ReferenceDeliveryAsset.version_id == version_v1.id,
-                ReferenceDeliveryAsset.is_primary.is_(True),
-            )
-        )
-        asset.sha256 = "f" * 64
     db.commit()
 
     with pytest.raises(MirrorPromotionConflict):
@@ -1481,6 +1474,42 @@ def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
     )
     assert state.generation == 2
     assert state.active_version_id == version_v2.id
+
+
+def test_published_asset_cannot_be_corrupted_before_cross_snapshot_rollback(
+    db,
+) -> None:
+    (
+        layer,
+        _,
+        _,
+        version_v1,
+        version_v2,
+    ) = _promote_cross_snapshot_versions(db)
+    asset = db.scalar(
+        select(ReferenceDeliveryAsset).where(
+            ReferenceDeliveryAsset.version_id == version_v1.id,
+            ReferenceDeliveryAsset.is_primary.is_(True),
+        )
+    )
+    asset.sha256 = "f" * 64
+
+    with pytest.raises(
+        OperationalError,
+        match="reference mirror records are immutable",
+    ):
+        db.commit()
+    db.rollback()
+
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.generation == 2
+    assert state.active_version_id == version_v2.id
+    assert db.get(ReferenceDeliveryAsset, asset.id).sha256 == (
+        version_v1.content_sha256
+    )
 
 
 def test_worker_observation_metadata_is_bounded(db) -> None:
