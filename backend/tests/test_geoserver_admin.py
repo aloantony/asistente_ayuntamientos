@@ -6,6 +6,7 @@ import struct
 import zipfile
 import zlib
 from urllib.parse import parse_qs, urlsplit
+from xml.etree import ElementTree
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -13,9 +14,12 @@ from pydantic import SecretStr, ValidationError
 from app.core.config import Settings
 from app.reference_layers.geoserver_admin import (
     MAX_JSON_BYTES,
+    GEOWEBCACHE_TILE_BLOB_STORE_DIRECTORY,
+    GEOWEBCACHE_TILE_BLOB_STORE_ID,
     GeoServerAdminAuthenticationError,
     GeoServerAdminClient,
     GeoServerAdminConflictError,
+    GeoWebCacheFileBlobStore,
     GeoServerAdminResponseError,
     GeoServerAdminUnavailableError,
     GeoServerLayerSmokeError,
@@ -214,6 +218,55 @@ def json_response(payload: dict, *, status: int = 200) -> FakeResponse:
 
 def status_response(status: int) -> FakeResponse:
     return FakeResponse(b"", status=status, content_type=None)
+
+
+def xml_response(payload: bytes, *, status: int = 200) -> FakeResponse:
+    return FakeResponse(
+        payload,
+        status=status,
+        content_type="application/xml; charset=UTF-8",
+    )
+
+
+def blob_store_list_xml(*names: str) -> bytes:
+    stores = "".join(
+        (
+            "<blobStore>"
+            f"<name>{name}</name>"
+            '<atom:link xmlns:atom="http://www.w3.org/2005/Atom" '
+            'rel="alternate" '
+            f'href="http://127.0.0.1:8081/geoserver/gwc/rest/blobstores/{name}.xml" '
+            'type="text/xml"/>'
+            "</blobStore>"
+        )
+        for name in names
+    )
+    return f"<blobStores>{stores}</blobStores>".encode()
+
+
+def file_blob_store_xml(
+    *,
+    identifier: str = GEOWEBCACHE_TILE_BLOB_STORE_ID,
+    enabled: bool = True,
+    default: bool = True,
+    base_directory: str = GEOWEBCACHE_TILE_BLOB_STORE_DIRECTORY,
+    block_size: int = 4096,
+    path_generator: str | None = None,
+) -> bytes:
+    generator = (
+        ""
+        if path_generator is None
+        else f"<pathGeneratorType>{path_generator}</pathGeneratorType>"
+    )
+    return (
+        f'<FileBlobStore default="{str(default).lower()}">'
+        f"<id>{identifier}</id>"
+        f"<enabled>{str(enabled).lower()}</enabled>"
+        f"<baseDirectory>{base_directory}</baseDirectory>"
+        f"<fileSystemBlockSize>{block_size}</fileSystemBlockSize>"
+        f"{generator}"
+        "</FileBlobStore>"
+    ).encode()
 
 
 def workspace_payload(name: str = "siur") -> dict:
@@ -557,6 +610,235 @@ def test_health_rejects_malformed_or_unexpected_json() -> None:
         client, _ = make_client([response])
         with pytest.raises(GeoServerAdminResponseError):
             client.health()
+
+
+def test_geowebcache_file_blob_store_reads_fixed_xml_resources() -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(
+                file_blob_store_xml(path_generator="DEFAULT")
+            ),
+        ]
+    )
+
+    stores = client.read_geowebcache_file_blob_stores()
+
+    assert stores == (
+        GeoWebCacheFileBlobStore(
+            id=GEOWEBCACHE_TILE_BLOB_STORE_ID,
+            enabled=True,
+            default=True,
+            base_directory=GEOWEBCACHE_TILE_BLOB_STORE_DIRECTORY,
+            file_system_block_size=4096,
+            path_generator_type="DEFAULT",
+        ),
+    )
+    assert [request[:2] for request in all_requests(factory)] == [
+        ("GET", "/geoserver/gwc/rest/blobstores.xml"),
+        (
+            "GET",
+            "/geoserver/gwc/rest/blobstores/"
+            f"{GEOWEBCACHE_TILE_BLOB_STORE_ID}.xml",
+        ),
+    ]
+    assert all(
+        request[3]["Accept"] == "application/xml"
+        for request in all_requests(factory)
+    )
+
+
+def test_geowebcache_tile_blob_store_creation_is_xml_and_revalidated() -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml()),
+            status_response(200),
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(file_blob_store_xml()),
+        ]
+    )
+
+    store = client.ensure_geowebcache_tile_blob_store(
+        file_system_block_size=4096,
+    )
+
+    assert store.id == GEOWEBCACHE_TILE_BLOB_STORE_ID
+    requests = all_requests(factory)
+    assert [request[:2] for request in requests] == [
+        ("GET", "/geoserver/gwc/rest/blobstores.xml"),
+        (
+            "PUT",
+            "/geoserver/gwc/rest/blobstores/"
+            f"{GEOWEBCACHE_TILE_BLOB_STORE_ID}.xml",
+        ),
+        ("GET", "/geoserver/gwc/rest/blobstores.xml"),
+        (
+            "GET",
+            "/geoserver/gwc/rest/blobstores/"
+            f"{GEOWEBCACHE_TILE_BLOB_STORE_ID}.xml",
+        ),
+    ]
+    put = requests[1]
+    assert put[3]["Content-Type"] == "application/xml"
+    root = ElementTree.fromstring(put[2] or b"")
+    assert root.tag == "FileBlobStore"
+    assert root.attrib == {"default": "true"}
+    assert [(child.tag, child.text) for child in root] == [
+        ("id", GEOWEBCACHE_TILE_BLOB_STORE_ID),
+        ("enabled", "true"),
+        ("baseDirectory", GEOWEBCACHE_TILE_BLOB_STORE_DIRECTORY),
+        ("fileSystemBlockSize", "4096"),
+    ]
+    assert ADMIN_PASSWORD not in (put[2] or b"").decode()
+
+
+def test_geowebcache_tile_blob_store_creation_is_idempotent() -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(file_blob_store_xml()),
+        ]
+    )
+
+    store = client.ensure_geowebcache_tile_blob_store(
+        file_system_block_size=4096,
+    )
+
+    assert store.default is True
+    assert [request[0] for request in all_requests(factory)] == ["GET", "GET"]
+
+
+def test_geowebcache_tile_blob_store_fails_before_put_on_mismatch() -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(file_blob_store_xml(base_directory="/wrong/cache")),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerAdminConflictError,
+        match="blob store differs",
+    ):
+        client.ensure_geowebcache_tile_blob_store(
+            file_system_block_size=4096,
+        )
+
+    assert [request[0] for request in all_requests(factory)] == ["GET", "GET"]
+
+
+def test_geowebcache_tile_blob_store_fails_on_configured_default() -> None:
+    legacy_id = "defaultCache"
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml(legacy_id)),
+            xml_response(
+                file_blob_store_xml(
+                    identifier=legacy_id,
+                    base_directory="/opt/geoserver_data/gwc",
+                )
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerAdminConflictError,
+        match="another GeoWebCache default",
+    ):
+        client.ensure_geowebcache_tile_blob_store(
+            file_system_block_size=4096,
+        )
+
+    assert [request[0] for request in all_requests(factory)] == ["GET", "GET"]
+
+
+def test_geowebcache_tile_blob_store_fails_on_extra_default() -> None:
+    other_id = "other-default"
+    client, factory = make_client(
+        [
+            xml_response(
+                blob_store_list_xml(
+                    GEOWEBCACHE_TILE_BLOB_STORE_ID,
+                    other_id,
+                )
+            ),
+            xml_response(file_blob_store_xml()),
+            xml_response(
+                file_blob_store_xml(
+                    identifier=other_id,
+                    base_directory="/other/cache",
+                )
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerAdminConflictError,
+        match="additional default",
+    ):
+        client.ensure_geowebcache_tile_blob_store(
+            file_system_block_size=4096,
+        )
+
+    assert [request[0] for request in all_requests(factory)] == [
+        "GET",
+        "GET",
+        "GET",
+    ]
+
+
+def test_geowebcache_tile_blob_store_fails_if_reread_is_not_exact() -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml()),
+            status_response(200),
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(file_blob_store_xml(block_size=8192)),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerAdminConflictError,
+        match="blob store differs",
+    ):
+        client.ensure_geowebcache_tile_blob_store(
+            file_system_block_size=4096,
+        )
+
+    assert [request[0] for request in all_requests(factory)] == [
+        "GET",
+        "PUT",
+        "GET",
+        "GET",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"<!DOCTYPE blobStores [<!ENTITY x 'unsafe'>]>"
+        b"<blobStores>&x;</blobStores>",
+        b"<blobStores><blobStore><name>duplicate</name>"
+        b"<name>duplicate</name></blobStore></blobStores>",
+        b"<S3BlobStore default=\"true\"><id>remote</id>"
+        b"<enabled>true</enabled></S3BlobStore>",
+        file_blob_store_xml(path_generator="UNKNOWN"),
+        file_blob_store_xml(block_size=4097),
+    ],
+)
+def test_geowebcache_blob_store_xml_is_strict(payload: bytes) -> None:
+    responses = (
+        [xml_response(payload)]
+        if payload.startswith(b"<blobStores") or payload.startswith(b"<!")
+        else [
+            xml_response(blob_store_list_xml("remote")),
+            xml_response(payload),
+        ]
+    )
+    client, _ = make_client(responses)
+
+    with pytest.raises(GeoServerAdminResponseError):
+        client.read_geowebcache_file_blob_stores()
 
 
 def test_geowebcache_disk_quota_reads_fixed_gwc_rest_resource() -> None:

@@ -21,6 +21,8 @@ from app.core.config import Settings, settings
 from app.reference_layers.geoserver_admin import (
     GeoServerAdminClient,
     GeoWebCacheDiskQuota,
+    GeoWebCacheFileBlobStore,
+    expected_geowebcache_tile_blob_store,
 )
 
 GIB = 1024**3
@@ -231,11 +233,11 @@ def quota_status(
 ) -> dict[str, object]:
     """Return current/desired quota state and optionally apply it.
 
-    Capacity is checked before any REST mutation.  Apply is accepted only when
+    Capacity is checked before any REST mutation. Apply is accepted only when
     the filesystem can reserve both the operator free-space floor and every
-    byte by which the measured cache can still grow before reaching its
-    quota. ``configure_geowebcache_disk_quota`` then performs PUT + GET and
-    rejects a server that does not persist the exact requested values.
+    byte by which the measured cache can still grow before reaching its quota.
+    The exact default FileBlobStore is then created/revalidated before disk
+    quota is configured. Both resources are re-read by the closed client.
     """
 
     capacity = cache_capacity_report(
@@ -244,8 +246,12 @@ def quota_status(
         min_free_gib=configured.geowebcache_disk_quota_min_free_gib,
     )
     admin = client or GeoServerAdminClient()
-    before = admin.read_geowebcache_disk_quota()
-    desired = {
+    desired_blob_store = expected_geowebcache_tile_blob_store(
+        file_system_block_size=capacity.filesystem_block_size_bytes,
+    )
+    before_blob_stores = admin.read_geowebcache_file_blob_stores()
+    before_quota = admin.read_geowebcache_disk_quota()
+    desired_quota = {
         "enabled": True,
         "quota_bytes": configured.geowebcache_disk_quota_gib * GIB,
         "quota_value": configured.geowebcache_disk_quota_gib,
@@ -256,14 +262,29 @@ def quota_status(
         "cleanup_units": "SECONDS",
         "expiration_policy": configured.geowebcache_disk_quota_policy,
     }
+    blob_store_verified = _blob_store_matches(
+        before_blob_stores,
+        desired_blob_store,
+    )
+    quota_verified = _quota_matches(before_quota, desired_quota)
     if not apply:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": "dry-run",
             "capacity": asdict(capacity),
-            "current": asdict(before),
-            "desired": desired,
-            "verified": _matches(before, desired),
+            "blob_store": {
+                "current": [
+                    asdict(store) for store in before_blob_stores
+                ],
+                "desired": asdict(desired_blob_store),
+                "verified": blob_store_verified,
+            },
+            "disk_quota": {
+                "current": asdict(before_quota),
+                "desired": desired_quota,
+                "verified": quota_verified,
+            },
+            "verified": blob_store_verified and quota_verified,
         }
     apply_capacity = cache_capacity_report(
         cache_path,
@@ -280,24 +301,41 @@ def quota_status(
             "GeoWebCache quota cannot be applied: capacity cannot reserve "
             "physical cache growth, inodes and the free-space floor"
         )
-    after = admin.configure_geowebcache_disk_quota(
+    after_blob_store = admin.ensure_geowebcache_tile_blob_store(
+        file_system_block_size=capacity.filesystem_block_size_bytes,
+    )
+    if after_blob_store != desired_blob_store:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache tile blob store re-read does not match the "
+            "requested state"
+        )
+    after_quota = admin.configure_geowebcache_disk_quota(
         quota_gib=configured.geowebcache_disk_quota_gib,
         cleanup_seconds=configured.geowebcache_disk_quota_cleanup_seconds,
         expiration_policy=configured.geowebcache_disk_quota_policy,
     )
-    if not _matches(after, desired):
+    if not _quota_matches(after_quota, desired_quota):
         # The client also verifies this; keep the operator boundary
         # independently fail-closed if either implementation changes.
         raise GeoWebCacheQuotaSafetyError(
             "GeoWebCache quota re-read does not match the requested state"
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "apply",
         "capacity": asdict(capacity),
-        "before": asdict(before),
-        "current": asdict(after),
-        "desired": desired,
+        "blob_store": {
+            "before": [asdict(store) for store in before_blob_stores],
+            "current": asdict(after_blob_store),
+            "desired": asdict(desired_blob_store),
+            "verified": True,
+        },
+        "disk_quota": {
+            "before": asdict(before_quota),
+            "current": asdict(after_quota),
+            "desired": desired_quota,
+            "verified": True,
+        },
         "verified": True,
     }
 
@@ -330,11 +368,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _matches(
+def _quota_matches(
     actual: GeoWebCacheDiskQuota,
     desired: dict[str, object],
 ) -> bool:
     return all(getattr(actual, name) == value for name, value in desired.items())
+
+
+def _blob_store_matches(
+    stores: tuple[GeoWebCacheFileBlobStore, ...],
+    desired: GeoWebCacheFileBlobStore,
+) -> bool:
+    defaults = tuple(store for store in stores if store.default)
+    return desired in stores and defaults == (desired,)
 
 
 def _gib(value: int, *, minimum: int, label: str) -> int:

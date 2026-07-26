@@ -7,7 +7,11 @@ import pytest
 
 from app.core.config import Settings
 from app.reference_layers import gwc_quota as quota_module
-from app.reference_layers.geoserver_admin import GeoWebCacheDiskQuota
+from app.reference_layers.geoserver_admin import (
+    GeoWebCacheDiskQuota,
+    GeoWebCacheFileBlobStore,
+    expected_geowebcache_tile_blob_store,
+)
 from app.reference_layers.gwc_quota import (
     GeoWebCacheQuotaSafetyError,
     build_parser,
@@ -42,15 +46,41 @@ class FakeAdmin:
         *,
         before: GeoWebCacheDiskQuota,
         after: GeoWebCacheDiskQuota | None = None,
+        before_blob_stores: tuple[GeoWebCacheFileBlobStore, ...] = (),
+        after_blob_store: GeoWebCacheFileBlobStore | None = None,
     ) -> None:
         self.before = before
         self.after = after or before
+        self.before_blob_stores = before_blob_stores
+        self.after_blob_store = after_blob_store
         self.read_calls = 0
+        self.read_blob_store_calls = 0
+        self.ensure_blob_store_calls: list[int] = []
         self.configure_calls: list[dict[str, object]] = []
+        self.call_order: list[str] = []
+
+    def read_geowebcache_file_blob_stores(
+        self,
+    ) -> tuple[GeoWebCacheFileBlobStore, ...]:
+        self.call_order.append("read_blob_stores")
+        self.read_blob_store_calls += 1
+        return self.before_blob_stores
 
     def read_geowebcache_disk_quota(self) -> GeoWebCacheDiskQuota:
+        self.call_order.append("read_quota")
         self.read_calls += 1
         return self.before
+
+    def ensure_geowebcache_tile_blob_store(
+        self,
+        *,
+        file_system_block_size: int,
+    ) -> GeoWebCacheFileBlobStore:
+        self.call_order.append("ensure_blob_store")
+        self.ensure_blob_store_calls.append(file_system_block_size)
+        return self.after_blob_store or expected_geowebcache_tile_blob_store(
+            file_system_block_size=file_system_block_size,
+        )
 
     def configure_geowebcache_disk_quota(
         self,
@@ -59,6 +89,7 @@ class FakeAdmin:
         cleanup_seconds: int,
         expiration_policy: str,
     ) -> GeoWebCacheDiskQuota:
+        self.call_order.append("configure_quota")
         self.configure_calls.append(
             {
                 "quota_gib": quota_gib,
@@ -135,9 +166,14 @@ def test_quota_command_is_dry_run_by_default_and_reports_mismatch(
         client=admin,  # type: ignore[arg-type]
     )
 
+    assert result["schema_version"] == 2
     assert result["mode"] == "dry-run"
     assert result["verified"] is False
+    assert result["blob_store"]["verified"] is False  # type: ignore[index]
+    assert result["disk_quota"]["verified"] is False  # type: ignore[index]
+    assert admin.read_blob_store_calls == 1
     assert admin.read_calls == 1
+    assert admin.ensure_blob_store_calls == []
     assert admin.configure_calls == []
     args = build_parser().parse_args(["--cache-path", str(cache)])
     assert args.apply is False
@@ -164,12 +200,23 @@ def test_quota_apply_checks_capacity_then_uses_exact_configuration(
 
     assert result["mode"] == "apply"
     assert result["verified"] is True
+    assert result["blob_store"]["verified"] is True  # type: ignore[index]
+    assert result["disk_quota"]["verified"] is True  # type: ignore[index]
+    assert admin.ensure_blob_store_calls == [
+        result["capacity"]["filesystem_block_size_bytes"]  # type: ignore[index]
+    ]
     assert admin.configure_calls == [
         {
             "quota_gib": 20,
             "cleanup_seconds": 60,
             "expiration_policy": "LRU",
         }
+    ]
+    assert admin.call_order == [
+        "read_blob_stores",
+        "read_quota",
+        "ensure_blob_store",
+        "configure_quota",
     ]
 
 
@@ -194,6 +241,7 @@ def test_quota_apply_fails_before_mutation_without_capacity_margin(
         )
 
     assert admin.configure_calls == []
+    assert admin.ensure_blob_store_calls == []
 
 
 def test_empty_cache_with_only_six_gib_free_cannot_reserve_quota_growth(
@@ -229,6 +277,45 @@ def test_empty_cache_with_only_six_gib_free_cannot_reserve_quota_growth(
             client=admin,  # type: ignore[arg-type]
         )
     assert admin.configure_calls == []
+    assert admin.ensure_blob_store_calls == []
+
+
+def test_quota_apply_fails_before_disk_quota_if_blob_store_is_not_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.shutil.disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+    )
+    admin = FakeAdmin(
+        before=quota(enabled=False),
+        after_blob_store=GeoWebCacheFileBlobStore(
+            id="siur-tile-cache-v3",
+            enabled=True,
+            default=True,
+            base_directory="/wrong/cache",
+            file_system_block_size=4096,
+            path_generator_type="DEFAULT",
+        ),
+    )
+
+    with pytest.raises(
+        GeoWebCacheQuotaSafetyError,
+        match="blob store re-read",
+    ):
+        quota_status(
+            cache_path=cache,
+            configured=configured(),
+            apply=True,
+            client=admin,  # type: ignore[arg-type]
+        )
+
+    assert admin.ensure_blob_store_calls
+    assert admin.configure_calls == []
+    assert admin.call_order[-1] == "ensure_blob_store"
 
 
 def test_capacity_inventory_measures_files_and_rejects_nested_links(

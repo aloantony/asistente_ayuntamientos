@@ -121,19 +121,20 @@ services:
       RUN_UNPRIVILEGED: "true"
       RUN_WITH_USER_UID: "999"
       RUN_WITH_USER_GID: ${REFERENCE_STORAGE_GID:-2000}
+      CHANGE_OWNERSHIP_ON_FOLDERS: "/opt /opt/geoserver_data /var/lib/geowebcache"
       SKIP_DEMO_DATA: "true"
-      # Keep generated tiles on their own reconstructible volume. Persistent
-      # GWC configuration remains inside GEOSERVER_DATA_DIR and is backed up.
-      GEOWEBCACHE_CACHE_DIR: /opt/geoserver_data/gwc-cache
+      # This path stores persistent GWC configuration, not the tile cache.
+      # The explicit FileBlobStore below points tiles at the separate v3 mount.
+      GEOWEBCACHE_CACHE_DIR: /opt/geoserver_data/gwc
     ports:
       - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
     volumes:
       - geoserver_data:/opt/geoserver_data
-      # Versioned tile-only volume: never reuse the former mixed
-      # geowebcache_data volume that occupied this cache mountpoint.
+      # Versioned tile-only volume. The GWC REST bootstrap configures this
+      # exact path as the default FileBlobStore before enabling disk quota.
       - type: volume
-        source: geowebcache_tile_cache_v2
-        target: /opt/geoserver_data/gwc-cache
+        source: geowebcache_tile_cache_v3
+        target: /var/lib/geowebcache
         volume:
           nocopy: true
       - reference_artifacts:/mnt/reference_artifacts:ro
@@ -170,7 +171,7 @@ services:
       ]
     volumes:
       - type: volume
-        source: geowebcache_tile_cache_v2
+        source: geowebcache_tile_cache_v3
         target: /var/lib/geowebcache
         read_only: true
         volume:
@@ -195,4 +196,4 @@ volumes:
   document_storage:
   reference_artifacts:
   geoserver_data:
-  geowebcache_tile_cache_v2:
+  geowebcache_tile_cache_v3:
