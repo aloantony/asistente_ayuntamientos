@@ -314,6 +314,364 @@ def test_reviewed_siur_native_maps_prefer_exact_official_wms_with_wmts_fallback(
     assert acquisition_candidates(catalog_service, catalog_layer) == candidates
 
 
+def test_reviewed_catastro_layer_uses_cyl_atom_download_not_wms_tiles() -> None:
+    catalog_service = service(
+        "wms",
+        "https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx",
+    )
+    catalog_layer = replace(
+        layer("Catastro"),
+        source_key="layer:siur:" + "3" * 64,
+        style_name="default",
+        styles=(
+            ReferenceLayerStyleDefinition(
+                source_key="default",
+                title="Default",
+                remote_name="Default",
+                is_default=True,
+            ),
+        ),
+    )
+
+    candidates = acquisition_candidates(catalog_service, catalog_layer)
+
+    assert len(candidates) == 1
+    selected = candidates[0]
+    assert selected.protocol == "atom"
+    assert selected.target_kind == "vector"
+    assert selected.sync_strategy == "full_snapshot"
+    assert selected.endpoint_url == (
+        "https://www.catastro.hacienda.gob.es/INSPIRE/"
+        "CadastralParcels/ES.SDGC.CP.Atom.xml"
+    )
+    assert selected.config["data_format"] == (
+        "inspire-cadastral-parcel-gml-zip"
+    )
+    assert selected.config["input_layer"] == "CadastralParcel"
+    assert len(selected.config["nested_feed_urls"]) == 9
+    assert selected.config["reviewed_equivalence"]["province_codes"] == [
+        "05",
+        "09",
+        "24",
+        "34",
+        "37",
+        "40",
+        "42",
+        "47",
+        "49",
+    ]
+    style_evidence = selected.config["reviewed_equivalence"][
+        "style_evidence"
+    ]
+    assert style_evidence["style_parity_status"] == (
+        "local_style_adaptation_required"
+    )
+    assert style_evidence["original_wms_endpoint_url"] == (
+        catalog_service.base_url
+    )
+    assert style_evidence["catalog_styles"] == [
+        {
+            "catalog_style_source_key": "default",
+            "remote_name": "Default",
+            "is_default": True,
+        }
+    ]
+    assert all(item.protocol != "wms_tiles" for item in candidates)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected_url", "expected_dataset"),
+    [
+        (
+            "https://wms.mapama.gob.es/sig/Biodiversidad/"
+            "INESErosionPotencial",
+            "https://www.miteco.gob.es/content/dam/miteco/es/"
+            "biodiversidad/servicios/banco-datos-naturaleza/1-ines/"
+            "cleon/E_PotencialxNiveles41.zip",
+            "erosion-potential-levels",
+        ),
+        (
+            "https://wms.mapama.gob.es/sig/Biodiversidad/"
+            "INESErosionLaminarRaster",
+            "https://www.miteco.gob.es/content/dam/miteco/es/"
+            "biodiversidad/servicios/banco-datos-naturaleza/1-ines/"
+            "cleon/E_LaminarxNiveles41.zip",
+            "erosion-laminar-levels",
+        ),
+    ],
+)
+def test_reviewed_ines_layers_use_official_cyl_geotiff_downloads(
+    endpoint: str,
+    expected_url: str,
+    expected_dataset: str,
+) -> None:
+    potential = expected_dataset == "erosion-potential-levels"
+    style_key = (
+        "biodiversidad_ines_erosionpotencial"
+        if potential
+        else "biodiversidad_ines_erosionlaminar"
+    )
+    style_remote = (
+        "Biodiversidad_INES_ErosionPotencial"
+        if potential
+        else "Biodiversidad_INES_ErosionLaminar"
+    )
+    candidates = acquisition_candidates(
+        service("wms", endpoint),
+        replace(
+            layer("NZ.HazardArea"),
+            source_key="layer:siur:" + "4" * 64,
+            style_name=style_key,
+            styles=(
+                ReferenceLayerStyleDefinition(
+                    source_key=style_key,
+                    title=style_remote,
+                    remote_name=style_remote,
+                    is_default=True,
+                ),
+            ),
+        ),
+    )
+
+    assert len(candidates) == 1
+    selected = candidates[0]
+    assert selected.protocol == "download"
+    assert selected.target_kind == "raster"
+    assert selected.endpoint_url == expected_url
+    assert selected.sync_strategy == "conditional_get"
+    assert selected.config["data_format"] == "geotiff-zip"
+    assert selected.config["max_pixels"] == 1_600_000_000
+    assert selected.config["media_type"] == "application/zip"
+    expected_classification = (
+        "EroPot_pb" if potential else "EroLam_pb"
+    )
+    assert selected.config["vat_value_field"] == "Value"
+    assert selected.config["vat_class_field"] == expected_classification
+    assert selected.config["vat_class_values"] == list(range(1, 10))
+    assert (
+        selected.config["reviewed_equivalence"]["official_dataset"]
+        == expected_dataset
+    )
+    style_evidence = selected.config["reviewed_equivalence"][
+        "style_evidence"
+    ]
+    assert style_evidence["catalog_default_style_source_key"] == style_key
+    assert style_evidence["original_wms_style_name"] == style_remote
+    assert style_evidence["style_parity_status"] == (
+        "local_style_adaptation_required"
+    )
+    official_style = selected.config["reviewed_equivalence"][
+        "official_raster_style_evidence"
+    ]
+    attribute_table = official_style["attribute_table"]
+    assert official_style["tiff_color_map_present"] is False
+    assert official_style["embedded_style_files"] == []
+    assert attribute_table["classification_field"] == expected_classification
+    assert attribute_table["class_values"] == list(range(1, 10))
+    assert attribute_table["color_fields"] == []
+    assert official_style["adaptation_status"] == "adaptation_required"
+    palette_reference = selected.config["reviewed_equivalence"][
+        "official_style_reference"
+    ]
+    assert palette_reference["url"].endswith(
+        "Efectos_negativos_tcm30-207684.pdf"
+    )
+    assert [item["class_value"] for item in palette_reference["palette"]] == (
+        list(range(1, 10))
+    )
+    assert [item["color"] for item in palette_reference["palette"]] == [
+        "#7b8257",
+        "#9bb068",
+        "#edd998",
+        "#f6ec3c",
+        "#ffd130",
+        "#cc8e5d",
+        "#ac514d",
+        "#1eaae2",
+        "#d0d1d4",
+    ]
+    assert palette_reference["parity_claim"] == (
+        "official_historical_adaptation_not_exact"
+    )
+    assert all(item.protocol != "wms_tiles" for item in candidates)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "remote_name", "collection"),
+    [
+        (
+            "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ10/wms.aspx",
+            "Z.I. con alta probabilidad",
+            "agua:Zi_laminas_q10",
+        ),
+        (
+            "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ50/wms.aspx",
+            "Z.I. frecuente",
+            "agua:Zi_laminas_q50",
+        ),
+        (
+            "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ100/wms.aspx",
+            "Z.I. con probabilidad media u ocasional",
+            "agua:Zi_laminas_q100",
+        ),
+        (
+            "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ500/wms.aspx",
+            "Z.I. con probabilidad baja o excepcional",
+            "agua:Zi_laminas_q500",
+        ),
+        (
+            "https://wms.mapama.gob.es/sig/agua/ZI_LaminasZFP/wms.aspx",
+            "Zona de flujo preferente",
+            "agua:ZI_Laminas_ZFP",
+        ),
+    ],
+)
+def test_miteco_flood_layers_use_exact_official_ogc_api_collections(
+    endpoint: str,
+    remote_name: str,
+    collection: str,
+) -> None:
+    candidates = acquisition_candidates(
+        service("wms", endpoint),
+        replace(
+            layer(remote_name),
+            source_key="layer:siur:" + "5" * 64,
+            style_name="default",
+            styles=(
+                ReferenceLayerStyleDefinition(
+                    source_key="default",
+                    title="Default",
+                    remote_name="default",
+                    is_default=True,
+                ),
+            ),
+        ),
+    )
+
+    assert len(candidates) == 1
+    selected = candidates[0]
+    assert selected.protocol == "ogc_api_features"
+    assert selected.target_kind == "vector"
+    assert selected.endpoint_url == (
+        "https://gis.miteco.gob.es/geoserver/ogc/features/v1/"
+    )
+    assert selected.remote_name == collection
+    assert selected.sync_strategy == "paged_snapshot"
+    assert selected.config["page_size"] == 2_000
+    assert selected.config["bbox"] == [-7.6, 39.9, -1.3, 43.4]
+    assert selected.config["bbox_crs"] == (
+        "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+    )
+    assert selected.config["require_number_matched"] is True
+    assert selected.config["reviewed_equivalence"][
+        "official_collection"
+    ] == collection
+    assert selected.config["reviewed_equivalence"]["wms_bulk_eligible"] is False
+    style_evidence = selected.config["reviewed_equivalence"][
+        "style_evidence"
+    ]
+    assert style_evidence["catalog_styles"] == [
+        {
+            "catalog_style_source_key": "default",
+            "remote_name": "default",
+            "is_default": True,
+        }
+    ]
+    assert style_evidence["style_parity_status"] == (
+        "local_style_adaptation_required"
+    )
+    expected_style = {
+        "agua:Zi_laminas_q10": (
+            "ZI_LaminasQ10.json",
+            "#ff0000",
+            "#c80000",
+        ),
+        "agua:Zi_laminas_q50": (
+            "ZI_LaminasQ50.json",
+            "#ffbee8",
+            "#a80084",
+        ),
+        "agua:Zi_laminas_q100": (
+            "ZI_LaminasQ100.json",
+            "#e8beff",
+            "#b68cff",
+        ),
+        "agua:Zi_laminas_q500": (
+            "ZI_LaminasQ500.json",
+            "#ff73df",
+            "#ff32df",
+        ),
+        "agua:ZI_Laminas_ZFP": (
+            "ZI_LaminasZFP.json",
+            "#cccccc",
+            "#e6e600",
+        ),
+    }[collection]
+    official_style = selected.config["reviewed_equivalence"][
+        "official_style_reference"
+    ]
+    assert official_style["url"].endswith(expected_style[0])
+    assert official_style["fill_color"] == expected_style[1]
+    assert official_style["outline_color"] == expected_style[2]
+    assert official_style["adaptation_status"] == "adaptation_required"
+    assert all(item.protocol != "wms_tiles" for item in candidates)
+
+
+@pytest.mark.parametrize(
+    ("source_key", "endpoint", "remote_name"),
+    [
+        (
+            "layer:other:catastro",
+            "https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx",
+            "Catastro",
+        ),
+        (
+            "layer:siur:" + "6" * 64,
+            "https://ovc.catastro.meh.es/Cartografia/WMS/"
+            "ServidorWMS-copy.aspx",
+            "Catastro",
+        ),
+        (
+            "layer:siur:" + "7" * 64,
+            "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ10/wms.aspx",
+            "Similar flood layer",
+        ),
+    ],
+)
+def test_reviewed_dataset_rules_never_leak_to_similar_catalog_entries(
+    source_key: str,
+    endpoint: str,
+    remote_name: str,
+) -> None:
+    if (
+        endpoint
+        == "https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx"
+        or "ZI_LaminasQ10" in endpoint
+    ):
+        with pytest.raises(SourceDiscoveryError) as captured:
+            acquisition_candidates(
+                service("wms", endpoint),
+                replace(
+                    layer(remote_name),
+                    source_key=source_key,
+                    style_name=None,
+                ),
+            )
+        assert captured.value.code == "bulk_wms_prohibited"
+        assert captured.value.evidence["wms_tiles_eligible"] is False
+    else:
+        candidates = acquisition_candidates(
+            service("wms", endpoint),
+            replace(
+                layer(remote_name),
+                source_key=source_key,
+                style_name=None,
+            ),
+        )
+        assert [item.protocol for item in candidates] == ["wms_tiles"]
+        assert "reviewed_equivalence" not in candidates[0].config
+
+
 @pytest.mark.parametrize(
     ("source_key", "role", "endpoint", "remote_name"),
     [

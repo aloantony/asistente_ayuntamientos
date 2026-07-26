@@ -195,6 +195,111 @@ def shapefile_zip_payload() -> bytes:
     return target.getvalue()
 
 
+def cadastral_gml_zip_payload(code: str = "05001") -> bytes:
+    gml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<wfs:FeatureCollection
+ xmlns:wfs="http://www.opengis.net/wfs/2.0"
+ xmlns:gml="http://www.opengis.net/gml/3.2"
+ xmlns:cp="http://inspire.ec.europa.eu/schemas/cp/4.0">
+ <wfs:member>
+  <cp:CadastralParcel gml:id="ES.SDGC.CP.{code}.1">
+   <cp:localId>{code}-1</cp:localId>
+  </cp:CadastralParcel>
+ </wfs:member>
+</wfs:FeatureCollection>""".encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(
+        target,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.writestr(
+            f"A.ES.SDGC.CP.{code}.cadastralparcel.gml",
+            gml,
+        )
+        archive.writestr(f"A.ES.SDGC.CP.{code}.metadata.xml", b"<metadata/>")
+    return target.getvalue()
+
+
+def raster_vat_dbf(
+    class_field: str,
+    value_class_mapping: list[tuple[int, int]],
+) -> bytes:
+    fields = (
+        ("Value", "N", 10, 0),
+        ("Count", "F", 19, 11),
+        (class_field, "N", 10, 0),
+        ("LimProvPen", "N", 10, 0),
+        ("NUTS2", "F", 19, 11),
+    )
+    header_length = 32 + len(fields) * 32 + 1
+    record_length = 1 + sum(item[2] for item in fields)
+    header = bytearray(32)
+    header[0] = 0x03
+    struct.pack_into("<I", header, 4, len(value_class_mapping))
+    struct.pack_into("<H", header, 8, header_length)
+    struct.pack_into("<H", header, 10, record_length)
+    descriptors = bytearray()
+    for name, field_type, width, decimal_count in fields:
+        descriptor = bytearray(32)
+        encoded_name = name.encode("ascii")
+        descriptor[: len(encoded_name)] = encoded_name
+        descriptor[11] = ord(field_type)
+        descriptor[16] = width
+        descriptor[17] = decimal_count
+        descriptors.extend(descriptor)
+    records = bytearray()
+    for value, class_value in value_class_mapping:
+        row = (
+            b" "
+            + f"{value:>10d}".encode()
+            + f"{1.0:>19.11e}".encode()
+            + f"{class_value:>10d}".encode()
+            + f"{24:>10d}".encode()
+            + f"{41.0:>19.11e}".encode()
+        )
+        assert len(row) == record_length
+        records.extend(row)
+    return bytes(header + descriptors + b"\r" + records + b"\x1a")
+
+
+def geotiff_zip_payload(
+    member: str = "erosion.tiff",
+    *,
+    vat_class_field: str | None = None,
+    value_class_mapping: list[tuple[int, int]] | None = None,
+) -> bytes:
+    target = io.BytesIO()
+    with zipfile.ZipFile(
+        target,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.writestr(member, b"II+\x00" + b"\x00" * 124)
+        archive.writestr(member + ".aux.xml", b"<PAMDataset/>")
+        if vat_class_field is not None:
+            archive.writestr(
+                member + ".vat.dbf",
+                raster_vat_dbf(
+                    vat_class_field,
+                    value_class_mapping
+                    or [(63 + value, value) for value in range(1, 10)],
+                ),
+            )
+    return target.getvalue()
+
+
+def atom_feed_payload(*hrefs: str) -> bytes:
+    entries = "".join(
+        f'<entry><id>{index}</id><link rel="enclosure" href="{href}" /></entry>'
+        for index, href in enumerate(hrefs)
+    )
+    return (
+        '<feed xmlns="http://www.w3.org/2005/Atom">'
+        f"{entries}</feed>"
+    ).encode()
+
+
 def geotiff_payload() -> bytes:
     entries = [
         struct.pack("<HHII", 256, 4, 1, 256),
@@ -763,6 +868,265 @@ def test_ogc_api_follows_relative_next_link_to_a_complete_snapshot(store, limits
     assert result.feature_count == 3
     assert result.stats["page_count"] == 2
     assert result.stats["number_matched"] == 3
+    pages = [
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "dataset" and item.role == "input"
+    ]
+    assert [item.metadata["page_index"] for item in pages] == [0, 1]
+    assert [item.metadata["feature_count"] for item in pages] == [2, 1]
+    manifest = read_json_artifact(store, result, "manifest")
+    assert manifest["materialization"]["kind"] == "feature-pages"
+    assert manifest["materialization"]["page_artifact_sha256"] == [
+        item.blob.sha256 for item in pages
+    ]
+
+
+MITECO_OGC_SCOPE = {
+    "bbox": [-7.6, 39.9, -1.3, 43.4],
+    "bbox_crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+    "require_number_matched": True,
+}
+
+
+def test_ogc_api_preserves_reviewed_bbox_through_complete_pagination(
+    store,
+    limits,
+):
+    page_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal page_calls
+        path = urlsplit(url).path
+        query = parse_qs(urlsplit(url).query)
+        if path.endswith("/collections"):
+            return json_response(
+                {"collections": [{"id": "agua:Zi_laminas_q10"}]}
+            )
+        page_calls += 1
+        assert query["bbox"] == ["-7.6,39.9,-1.3,43.4"]
+        offset = int(query["offset"][0])
+        ids = [1, 2] if offset == 0 else [3]
+        payload = {
+            "type": "FeatureCollection",
+            "numberMatched": 3,
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": identifier,
+                    "properties": {},
+                    "geometry": None,
+                }
+                for identifier in ids
+            ],
+        }
+        if offset == 0:
+            payload["links"] = [
+                {
+                    "rel": "next",
+                    "href": (
+                        "?limit=2&offset=2&f=json"
+                        "&bbox=-7.6,39.9,-1.3,43.4"
+                    ),
+                }
+            ]
+        return json_response(payload)
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "ogc_api_features",
+            endpoint=(
+                "https://gis.miteco.example.es/geoserver/ogc/features/v1/"
+            ),
+            remote_name="agua:Zi_laminas_q10",
+            config=MITECO_OGC_SCOPE,
+        )
+    )
+
+    assert page_calls == 2
+    assert result.feature_count == 3
+    assert result.stats["bbox"] == [-7.6, 39.9, -1.3, 43.4]
+    assert result.stats["bbox_crs"] == MITECO_OGC_SCOPE["bbox_crs"]
+    manifest = read_json_artifact(store, result, "manifest")
+    assert manifest["materialization"]["collection"] == (
+        "agua:Zi_laminas_q10"
+    )
+    assert manifest["materialization"]["bbox"] == [
+        -7.6,
+        39.9,
+        -1.3,
+        43.4,
+    ]
+    assert manifest["materialization"]["bbox_crs"] == (
+        MITECO_OGC_SCOPE["bbox_crs"]
+    )
+
+
+def test_ogc_api_rejects_next_link_that_drops_reviewed_bbox(
+    store,
+    limits,
+):
+    item_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal item_calls
+        if urlsplit(url).path.endswith("/collections"):
+            return json_response(
+                {"collections": [{"id": "agua:Zi_laminas_q10"}]}
+            )
+        item_calls += 1
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 3,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": 1,
+                        "properties": {},
+                        "geometry": None,
+                    },
+                    {
+                        "type": "Feature",
+                        "id": 2,
+                        "properties": {},
+                        "geometry": None,
+                    },
+                ],
+                "links": [
+                    {
+                        "rel": "next",
+                        "href": "?limit=2&offset=2&f=json",
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "ogc_api_features",
+                endpoint=(
+                    "https://gis.miteco.example.es/geoserver/ogc/"
+                    "features/v1/"
+                ),
+                remote_name="agua:Zi_laminas_q10",
+                config=MITECO_OGC_SCOPE,
+            )
+        )
+
+    assert captured.value.code == "pagination_scope_changed"
+    assert item_calls == 1
+
+
+def test_scoped_ogc_api_requires_advertised_filtered_feature_count(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        if urlsplit(url).path.endswith("/collections"):
+            return json_response(
+                {"collections": [{"id": "agua:Zi_laminas_q10"}]}
+            )
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": 1,
+                        "properties": {},
+                        "geometry": None,
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "ogc_api_features",
+                endpoint=(
+                    "https://gis.miteco.example.es/geoserver/ogc/"
+                    "features/v1/"
+                ),
+                remote_name="agua:Zi_laminas_q10",
+                config=MITECO_OGC_SCOPE,
+            )
+        )
+
+    assert captured.value.code == "snapshot_completeness_unproven"
+
+
+@pytest.mark.parametrize(
+    ("second_ids", "expected_code"),
+    [
+        ([2, 3], "unstable_pagination"),
+        ([1, 2], "pagination_loop"),
+    ],
+)
+def test_ogc_api_rejects_duplicate_features_or_repeated_pages(
+    store,
+    limits,
+    second_ids,
+    expected_code,
+):
+    calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal calls
+        if urlsplit(url).path.endswith("/collections"):
+            return json_response({"collections": [{"id": "agua:Zi_laminas_q10"}]})
+        calls += 1
+        ids = [1, 2] if calls == 1 else second_ids
+        payload = {
+            "type": "FeatureCollection",
+            "numberMatched": 4,
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": identifier,
+                    "properties": {},
+                    "geometry": None,
+                }
+                for identifier in ids
+            ],
+        }
+        if calls == 1 or expected_code == "pagination_loop":
+            payload["links"] = [
+                {"rel": "next", "href": "?limit=2&offset=2&f=json"}
+            ]
+        return json_response(payload)
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "ogc_api_features",
+                endpoint=(
+                    "https://gis.miteco.example.es/geoserver/ogc/"
+                    "features/v1/"
+                ),
+                remote_name="agua:Zi_laminas_q10",
+            )
+        )
+
+    assert captured.value.code == expected_code
 
 
 def test_feature_page_rejects_duplicate_json_keys_before_blob_publication(store, limits):
@@ -1171,6 +1535,366 @@ def test_atom_never_fetches_cross_origin_enclosure(store, limits):
 
     assert error.value.code == "cross_origin_url"
     assert len(transport.calls) == 1
+
+
+def test_nested_atom_acquires_ordered_cadastral_gml_zip_snapshot(
+    store,
+    limits,
+):
+    root_url = "https://catastro.example.es/root.xml"
+    feed_05 = "https://catastro.example.es/05/feed.xml"
+    feed_09 = "https://catastro.example.es/09/feed.xml"
+    datasets = {
+        "https://catastro.example.es/05/05001%20ALFA/A.05001.zip": (
+            cadastral_gml_zip_payload("05001")
+        ),
+        "https://catastro.example.es/05/05002-BETA/A.05002.zip": (
+            cadastral_gml_zip_payload("05002")
+        ),
+        "https://catastro.example.es/09/09001-GAMMA/A.09001.zip": (
+            cadastral_gml_zip_payload("09001")
+        ),
+    }
+
+    def handler(url, etag, modified):
+        assert etag is None
+        assert modified is None
+        if url == root_url:
+            return Response(
+                atom_feed_payload(
+                    "http://catastro.example.es/09/feed.xml",
+                    "http://catastro.example.es/05/feed.xml",
+                ),
+                "application/atom+xml",
+            )
+        if url == feed_05:
+            return Response(
+                atom_feed_payload(
+                    "05002-BETA/A.05002.zip",
+                    "05001 ALFA/A.05001.zip",
+                ),
+                "application/atom+xml",
+            )
+        if url == feed_09:
+            return Response(
+                atom_feed_payload("09001-GAMMA/A.09001.zip"),
+                "application/atom+xml",
+            )
+        return Response(
+            datasets[url],
+            (
+                "application/x-zip-compressed"
+                if "05001" in url
+                else "application/zip"
+            ),
+        )
+
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+    ).acquire(
+        candidate(
+            "atom",
+            endpoint=root_url,
+            config={
+                "data_format": "inspire-cadastral-parcel-gml-zip",
+                "input_layer": "CadastralParcel",
+                "media_types": [
+                    "application/octet-stream",
+                    "application/x-zip-compressed",
+                    "application/zip",
+                ],
+                "nested_feed_urls": [feed_05, feed_09],
+            },
+        ),
+        conditional=ConditionalRequest(
+            source_url="https://catastro.example.es/old.zip",
+            etag='"old"',
+        ),
+    )
+
+    assert [item["url"] for item in transport.calls] == [
+        root_url,
+        feed_05,
+        feed_09,
+        *datasets,
+    ]
+    dataset_artifacts = [
+        item for item in result.artifacts if item.artifact_kind == "dataset"
+    ]
+    assert [item.metadata["page_index"] for item in dataset_artifacts] == [
+        0,
+        1,
+        2,
+    ]
+    assert [
+        item.metadata["archive_member"] for item in dataset_artifacts
+    ] == [
+        "A.ES.SDGC.CP.05001.cadastralparcel.gml",
+        "A.ES.SDGC.CP.05002.cadastralparcel.gml",
+        "A.ES.SDGC.CP.09001.cadastralparcel.gml",
+    ]
+    assert all(
+        item.metadata["input_layer"] == "CadastralParcel"
+        for item in dataset_artifacts
+    )
+    assert result.stats["nested_feed_count"] == 2
+    assert result.stats["dataset_count"] == 3
+    manifest = read_json_artifact(store, result, "manifest")
+    assert manifest["materialization"]["kind"] == "dataset-parts"
+    assert len(manifest["materialization"]["dataset_artifact_sha256"]) == 3
+
+
+def test_nested_atom_rejects_duplicate_or_excess_dataset_sets(
+    store,
+    limits,
+):
+    root_url = "https://catastro.example.es/root.xml"
+    feeds = [
+        "https://catastro.example.es/05/feed.xml",
+        "https://catastro.example.es/09/feed.xml",
+    ]
+
+    def acquire(handler, nested_feeds):
+        transport = FakeTransport(handler)
+        pipeline = ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        )
+        selected = candidate(
+            "atom",
+            endpoint=root_url,
+            config={
+                "data_format": "inspire-cadastral-parcel-gml-zip",
+                "media_type": "application/zip",
+                "nested_feed_urls": nested_feeds,
+            },
+        )
+        return transport, pipeline, selected
+
+    duplicate = "https://catastro.example.es/data/repeated.zip"
+
+    def duplicate_handler(url, _etag, _modified):
+        if url == root_url:
+            return Response(
+                atom_feed_payload(
+                    "http://catastro.example.es/05/feed.xml",
+                    "http://catastro.example.es/09/feed.xml",
+                ),
+                "application/atom+xml",
+            )
+        return Response(
+            atom_feed_payload(duplicate),
+            "application/atom+xml",
+        )
+
+    transport, pipeline, selected = acquire(duplicate_handler, feeds)
+    with pytest.raises(AcquisitionValidationError) as duplicate_error:
+        pipeline.acquire(selected)
+    assert duplicate_error.value.code == "atom_dataset_duplicate"
+    assert len(transport.calls) == 3
+
+    one_feed = feeds[:1]
+
+    def limit_handler(url, _etag, _modified):
+        if url == root_url:
+            return Response(
+                atom_feed_payload("http://catastro.example.es/05/feed.xml"),
+                "application/atom+xml",
+            )
+        return Response(
+            atom_feed_payload(
+                *(
+                    f"https://catastro.example.es/data/{index}.zip"
+                    for index in range(limits.max_pages + 1)
+                )
+            ),
+            "application/atom+xml",
+        )
+
+    transport, pipeline, selected = acquire(limit_handler, one_feed)
+    with pytest.raises(AcquisitionLimitError) as limit_error:
+        pipeline.acquire(selected)
+    assert limit_error.value.code == "page_limit"
+    assert len(transport.calls) == 2
+
+
+def test_nested_atom_rejects_archive_without_unique_parcel_gml(
+    store,
+    limits,
+):
+    root_url = "https://catastro.example.es/root.xml"
+    feed_url = "https://catastro.example.es/05/feed.xml"
+    dataset_url = "https://catastro.example.es/data/invalid.zip"
+    invalid = io.BytesIO()
+    with zipfile.ZipFile(invalid, "w") as archive:
+        archive.writestr("metadata.xml", b"<metadata/>")
+
+    def handler(url, _etag, _modified):
+        if url == root_url:
+            return Response(
+                atom_feed_payload("http://catastro.example.es/05/feed.xml"),
+                "application/atom+xml",
+            )
+        if url == feed_url:
+            return Response(
+                atom_feed_payload(dataset_url),
+                "application/atom+xml",
+            )
+        return Response(invalid.getvalue(), "application/zip")
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "atom",
+                endpoint=root_url,
+                config={
+                    "data_format": (
+                        "inspire-cadastral-parcel-gml-zip"
+                    ),
+                    "media_type": "application/zip",
+                    "nested_feed_urls": [feed_url],
+                },
+            )
+        )
+
+    assert captured.value.code == "cadastral_parcel_member_invalid"
+
+
+def test_direct_geotiff_zip_validates_and_records_selected_member(
+    store,
+    limits,
+):
+    payload = geotiff_zip_payload("EroPotNiveles_41.tiff")
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(
+                payload,
+                "application/zip",
+            )
+        ),
+    ).acquire(
+        candidate(
+            "download",
+            endpoint="https://miteco.example.es/E_Potencial.zip",
+            config={
+                "data_format": "geotiff-zip",
+                "media_type": "application/zip",
+            },
+        )
+    )
+
+    dataset = next(
+        item for item in result.artifacts if item.artifact_kind == "dataset"
+    )
+    assert dataset.metadata["archive_member"] == "EroPotNiveles_41.tiff"
+    assert dataset.metadata["uncompressed_bytes"] > 100
+
+
+def test_reviewed_geotiff_zip_preserves_complete_vat_value_mapping(
+    store,
+    limits,
+):
+    mapping = [
+        (64, 7),
+        (65, 1),
+        (66, 6),
+        (67, 5),
+        (68, 4),
+        (69, 3),
+        (75, 2),
+        (80, 9),
+        (92, 8),
+    ]
+    payload = geotiff_zip_payload(
+        "EroPotNiveles_41.tiff",
+        vat_class_field="EroPot_pb",
+        value_class_mapping=mapping,
+    )
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(
+                payload,
+                "application/zip",
+            )
+        ),
+    ).acquire(
+        candidate(
+            "download",
+            endpoint="https://miteco.example.es/E_Potencial.zip",
+            config={
+                "data_format": "geotiff-zip",
+                "media_type": "application/zip",
+                "vat_value_field": "Value",
+                "vat_class_field": "EroPot_pb",
+                "vat_class_values": list(range(1, 10)),
+            },
+        )
+    )
+
+    dataset = next(
+        item for item in result.artifacts if item.artifact_kind == "dataset"
+    )
+    vat = dataset.metadata["raster_value_attribute_table"]
+    assert vat["member"] == "EroPotNiveles_41.tiff.vat.dbf"
+    assert vat["row_count"] == len(mapping)
+    assert vat["value_field"] == "Value"
+    assert vat["class_field"] == "EroPot_pb"
+    assert vat["value_class_mapping"] == [
+        {"value": value, "class_value": class_value}
+        for value, class_value in sorted(mapping)
+    ]
+    assert len(vat["sha256"]) == 64
+
+
+def test_reviewed_geotiff_zip_rejects_duplicate_vat_values(store, limits):
+    payload = geotiff_zip_payload(
+        "EroPotNiveles_41.tiff",
+        vat_class_field="EroPot_pb",
+        value_class_mapping=[
+            (64, 1),
+            (64, 2),
+            *[(64 + value, value) for value in range(3, 10)],
+        ],
+    )
+    pipeline = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda _url, _etag, _modified: Response(
+                payload,
+                "application/zip",
+            )
+        ),
+    )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        pipeline.acquire(
+            candidate(
+                "download",
+                endpoint="https://miteco.example.es/E_Potencial.zip",
+                config={
+                    "data_format": "geotiff-zip",
+                    "media_type": "application/zip",
+                    "vat_value_field": "Value",
+                    "vat_class_field": "EroPot_pb",
+                    "vat_class_values": list(range(1, 10)),
+                },
+            )
+        )
+
+    assert captured.value.code == "raster_vat_invalid"
 
 
 TILE_CONFIG = {

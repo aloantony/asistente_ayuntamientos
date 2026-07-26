@@ -88,6 +88,11 @@ _MAX_SLD_TEXT_BYTES = 4 * 1024 * 1024
 _MAX_SLD_EXTRACTED_BYTES = 2 * MAX_PROBE_BYTES
 _STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
 _STYLE_SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+_MAX_NESTED_ATOM_FEEDS = 100
+_DBF_FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,10}$")
+_MAX_RASTER_VAT_BYTES = 8 * 1024 * 1024
+_MAX_RASTER_VAT_FIELDS = 64
+_MAX_RASTER_VAT_ROWS = 10_000
 _EXTERNAL_SLD_TEXT_RE = re.compile(
     r"(?:\b(?:https?|ftp|file|data|jar):|\burl\s*\()",
     re.IGNORECASE,
@@ -363,6 +368,14 @@ class _FeaturePage:
     number_matched: int | None
     next_url: str | None
     feature_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _OGCQueryScope:
+    bbox: tuple[float, float, float, float] | None
+    bbox_text: str | None
+    bbox_crs: str | None
+    require_number_matched: bool
 
 
 @dataclass(frozen=True)
@@ -983,7 +996,15 @@ class ReferenceAcquisitionPipeline:
         probe, capabilities, _document = self._probe(candidate)
         collection = probe.canonical_name or ""
         page_size = _configured_page_size(candidate.config, self.limits.page_size)
-        current_url = _ogc_items_url(candidate, collection, page_size)
+        query_scope = _ogc_query_scope(candidate.config)
+        scope_metadata = _ogc_scope_metadata(query_scope)
+        current_url = _ogc_items_url(
+            candidate,
+            collection,
+            page_size,
+            query_scope,
+        )
+        expected_items_path = urlsplit(current_url).path
         seen_urls: set[str] = set()
         seen_digests: set[str] = set()
         seen_feature_ids: set[str] = set()
@@ -995,6 +1016,11 @@ class ReferenceAcquisitionPipeline:
         last_result: HTTPSDownloadResult | None = None
         for page_index in range(self.limits.max_pages):
             current_url = _require_same_origin(candidate.endpoint_url, current_url)
+            _require_ogc_page_scope(
+                current_url,
+                expected_items_path=expected_items_path,
+                scope=query_scope,
+            )
             if current_url in seen_urls:
                 raise AcquisitionValidationError(
                     "OGC API pagination contains a URL loop",
@@ -1063,6 +1089,7 @@ class ReferenceAcquisitionPipeline:
                         "protocol": "ogc_api_features",
                         "data_format": "geojson",
                         "collection": collection,
+                        **scope_metadata,
                         "page_index": page_index,
                         "offset": offset,
                         "feature_count": page.count,
@@ -1092,6 +1119,15 @@ class ReferenceAcquisitionPipeline:
                 "OGC API pagination exceeds the page limit",
                 code="page_limit",
             )
+        if (
+            query_scope.require_number_matched
+            and expected_matched is None
+        ):
+            raise AcquisitionValidationError(
+                "OGC API did not prove the filtered snapshot feature count",
+                code="snapshot_completeness_unproven",
+                retryable=True,
+            )
         if expected_matched is not None and total_features != expected_matched:
             raise AcquisitionValidationError(
                 "OGC API snapshot does not match its advertised feature count",
@@ -1110,6 +1146,7 @@ class ReferenceAcquisitionPipeline:
             "page_size": page_size,
             "number_matched": expected_matched,
             "feature_ids_observed": len(seen_feature_ids),
+            **scope_metadata,
         }
         return self._finish(
             candidate,
@@ -1119,6 +1156,7 @@ class ReferenceAcquisitionPipeline:
                 "kind": "feature-pages",
                 "format": "geojson",
                 "collection": collection,
+                **scope_metadata,
                 "page_artifact_sha256": [
                     item.blob.sha256
                     for item in page_artifacts
@@ -1489,7 +1527,11 @@ class ReferenceAcquisitionPipeline:
             max_bytes=self.limits.max_dataset_bytes,
             accept=media_type,
             allowed_media_types=allowed,
-            file_validator=_dataset_file_validator(data_format, self.limits),
+            file_validator=_dataset_file_validator(
+                data_format,
+                self.limits,
+                config=candidate.config,
+            ),
             conditional=conditional,
         )
         if downloaded.result.not_modified:
@@ -1502,6 +1544,11 @@ class ReferenceAcquisitionPipeline:
                 "protocol": "download",
                 "data_format": data_format,
                 "remote_name": candidate.remote_name,
+                **(
+                    downloaded.parsed
+                    if isinstance(downloaded.parsed, dict)
+                    else {}
+                ),
             },
         )
         return self._finish(
@@ -1524,6 +1571,12 @@ class ReferenceAcquisitionPipeline:
         *,
         conditional: ConditionalRequest | None,
     ) -> AcquisitionResult:
+        nested_feed_urls = _nested_atom_feed_urls(candidate)
+        if nested_feed_urls:
+            return self._acquire_nested_atom(
+                candidate,
+                nested_feed_urls=nested_feed_urls,
+            )
         feed = self._download(
             candidate,
             candidate.endpoint_url,
@@ -1536,7 +1589,11 @@ class ReferenceAcquisitionPipeline:
                 or candidate.remote_name,
             ),
         )
-        enclosure_url = urljoin(feed.result.final_url, cast(str, feed.parsed))
+        enclosure_url = _resolve_atom_link(
+            candidate.endpoint_url,
+            feed.result.final_url,
+            cast(str, feed.parsed),
+        )
         feed_artifact = self._remote_artifact(
             feed,
             kind="metadata",
@@ -1544,14 +1601,10 @@ class ReferenceAcquisitionPipeline:
             metadata={
                 "protocol": "atom",
                 "remote_name": candidate.remote_name,
-                "selected_url": _require_same_origin(candidate.endpoint_url, enclosure_url),
+                "selected_url": enclosure_url,
             },
         )
-        media_type = _config_optional_text(candidate.config, "media_type", max_chars=200)
-        if media_type is None:
-            raise AcquisitionConfigurationError(
-                "Atom dataset requires an explicit media_type"
-            )
+        media_types = _configured_media_types(candidate.config, protocol="Atom")
         data_format = _config_optional_text(
             candidate.config,
             "data_format",
@@ -1561,14 +1614,17 @@ class ReferenceAcquisitionPipeline:
             raise AcquisitionConfigurationError(
                 "Atom dataset requires an explicit data_format"
             )
-        allowed = frozenset({media_type.casefold()})
         downloaded = self._download(
             candidate,
             enclosure_url,
             max_bytes=self.limits.max_dataset_bytes,
-            accept=media_type,
-            allowed_media_types=allowed,
-            file_validator=_dataset_file_validator(data_format, self.limits),
+            accept=", ".join(sorted(media_types)),
+            allowed_media_types=media_types,
+            file_validator=_dataset_file_validator(
+                data_format,
+                self.limits,
+                config=candidate.config,
+            ),
             conditional=conditional,
         )
         if downloaded.result.not_modified:
@@ -1599,6 +1655,204 @@ class ReferenceAcquisitionPipeline:
             feature_count=None,
             stats={"dataset_bytes": dataset.blob.size_bytes},
             observed=downloaded.result,
+        )
+
+    def _acquire_nested_atom(
+        self,
+        candidate: SourceCandidate,
+        *,
+        nested_feed_urls: tuple[str, ...],
+    ) -> AcquisitionResult:
+        """Acquire one deterministic multi-feed Atom snapshot in full.
+
+        A conditional response for one municipal enclosure cannot prove the
+        completeness of the other enclosures, so nested snapshots deliberately
+        ignore resource-level validators and are rebuilt atomically.
+        """
+
+        feed = self._download(
+            candidate,
+            candidate.endpoint_url,
+            max_bytes=self.limits.max_probe_bytes,
+            accept="application/atom+xml, application/xml;q=0.9",
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=_parse_atom_entry_links,
+        )
+        advertised_nested = {
+            resolved
+            for href in cast(tuple[str, ...], feed.parsed)
+            if (
+                resolved := _optional_same_origin_atom_link(
+                    candidate.endpoint_url,
+                    feed.result.final_url,
+                    href,
+                )
+            )
+            is not None
+        }
+        missing_nested = [
+            url for url in nested_feed_urls if url not in advertised_nested
+        ]
+        if missing_nested:
+            raise AcquisitionValidationError(
+                "Atom root feed no longer advertises every reviewed nested feed",
+                code="atom_nested_feed_missing",
+            )
+        artifacts: list[AcquiredArtifact] = [
+            self._remote_artifact(
+                feed,
+                kind="metadata",
+                role="observation",
+                metadata={
+                    "protocol": "atom",
+                    "kind": "root-feed",
+                    "remote_name": candidate.remote_name,
+                    "nested_feed_count": len(nested_feed_urls),
+                },
+            )
+        ]
+        enclosure_urls: list[str] = []
+        for feed_index, nested_url in enumerate(nested_feed_urls):
+            nested = self._download(
+                candidate,
+                nested_url,
+                max_bytes=self.limits.max_probe_bytes,
+                accept="application/atom+xml, application/xml;q=0.9",
+                allowed_media_types=_XML_MEDIA_TYPES,
+                validator=_parse_atom_entry_links,
+            )
+            artifacts.append(
+                self._remote_artifact(
+                    nested,
+                    kind="metadata",
+                    role="observation",
+                    metadata={
+                        "protocol": "atom",
+                        "kind": "nested-feed",
+                        "feed_index": feed_index,
+                        "feed_url": nested_url,
+                    },
+                )
+            )
+            resolved_links = sorted(
+                {
+                    _resolve_atom_link(
+                        candidate.endpoint_url,
+                        nested.result.final_url,
+                        href,
+                    )
+                    for href in cast(tuple[str, ...], nested.parsed)
+                }
+            )
+            if not resolved_links:
+                raise AcquisitionValidationError(
+                    "reviewed nested Atom feed contains no dataset enclosures",
+                    code="atom_dataset_missing",
+                )
+            enclosure_urls.extend(resolved_links)
+        if len(enclosure_urls) != len(set(enclosure_urls)):
+            raise AcquisitionValidationError(
+                "nested Atom feeds repeat a dataset enclosure",
+                code="atom_dataset_duplicate",
+            )
+        if len(enclosure_urls) > self.limits.max_pages:
+            raise AcquisitionLimitError(
+                "nested Atom snapshot exceeds the dataset artifact limit",
+                code="page_limit",
+            )
+
+        media_types = _configured_media_types(candidate.config, protocol="Atom")
+        data_format = _config_optional_text(
+            candidate.config,
+            "data_format",
+            max_chars=100,
+        )
+        if data_format is None:
+            raise AcquisitionConfigurationError(
+                "Atom dataset requires an explicit data_format"
+            )
+        input_layer = _config_optional_text(
+            candidate.config,
+            "input_layer",
+            max_chars=255,
+        )
+        dataset_artifacts: list[AcquiredArtifact] = []
+        total_uncompressed = 0
+        for page_index, enclosure_url in enumerate(enclosure_urls):
+            downloaded = self._download(
+                candidate,
+                enclosure_url,
+                max_bytes=self.limits.max_dataset_bytes,
+                accept=", ".join(sorted(media_types)),
+                allowed_media_types=media_types,
+                file_validator=_dataset_file_validator(
+                    data_format,
+                    self.limits,
+                    config=candidate.config,
+                ),
+            )
+            validation = (
+                downloaded.parsed
+                if isinstance(downloaded.parsed, dict)
+                else {}
+            )
+            uncompressed = validation.get("uncompressed_bytes", 0)
+            if isinstance(uncompressed, bool) or not isinstance(
+                uncompressed,
+                int,
+            ):
+                raise AcquisitionValidationError(
+                    "nested Atom dataset validation metadata is invalid"
+                )
+            total_uncompressed += uncompressed
+            if total_uncompressed > self.limits.max_total_bytes:
+                raise AcquisitionLimitError(
+                    "nested Atom snapshot exceeds the expanded byte limit",
+                    code="archive_expansion_limit",
+                )
+            metadata: dict[str, Any] = {
+                "protocol": "atom",
+                "data_format": data_format,
+                "remote_name": candidate.remote_name,
+                "page_index": page_index,
+                "dataset_url": enclosure_url,
+                **validation,
+            }
+            if input_layer is not None:
+                metadata["input_layer"] = input_layer
+            dataset_artifacts.append(
+                self._remote_artifact(
+                    downloaded,
+                    kind="dataset",
+                    role="input",
+                    metadata=metadata,
+                )
+            )
+            _enforce_total_bytes(
+                [*artifacts, *dataset_artifacts],
+                self.limits.max_total_bytes,
+            )
+        artifacts.extend(dataset_artifacts)
+        dataset_sha256 = [item.blob.sha256 for item in dataset_artifacts]
+        return self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization={
+                "kind": "dataset-parts",
+                "format": data_format,
+                "dataset_artifact_sha256": dataset_sha256,
+            },
+            feature_count=None,
+            stats={
+                "nested_feed_count": len(nested_feed_urls),
+                "dataset_count": len(dataset_artifacts),
+                "dataset_bytes": sum(
+                    item.blob.size_bytes for item in dataset_artifacts
+                ),
+                "expanded_dataset_bytes": total_uncompressed,
+            },
+            observed=feed.result,
         )
 
     def _acquire_tile_source(
@@ -2163,6 +2417,74 @@ def _config_text(
     return _config_optional_text(config, name, max_chars=max_chars) or default
 
 
+def _configured_media_types(
+    config: Mapping[str, Any],
+    *,
+    protocol: str,
+) -> frozenset[str]:
+    singular = _config_optional_text(config, "media_type", max_chars=200)
+    raw_multiple = config.get("media_types")
+    if singular is not None and raw_multiple is not None:
+        raise AcquisitionConfigurationError(
+            f"{protocol} dataset cannot declare media_type and media_types"
+        )
+    if raw_multiple is None:
+        if singular is None:
+            raise AcquisitionConfigurationError(
+                f"{protocol} dataset requires an explicit media_type"
+            )
+        values = [singular]
+    else:
+        if (
+            not isinstance(raw_multiple, list)
+            or not 1 <= len(raw_multiple) <= 16
+            or any(
+                not isinstance(item, str)
+                or not item
+                or len(item) > 200
+                or item != item.strip()
+                or any(ord(character) < 32 for character in item)
+                for item in raw_multiple
+            )
+        ):
+            raise AcquisitionConfigurationError(
+                f"{protocol} dataset media_types are invalid"
+            )
+        values = [item.casefold() for item in raw_multiple]
+        if values != sorted(values) or len(values) != len(set(values)):
+            raise AcquisitionConfigurationError(
+                f"{protocol} dataset media_types are not canonical"
+            )
+    return frozenset(item.casefold() for item in values)
+
+
+def _nested_atom_feed_urls(
+    candidate: SourceCandidate,
+) -> tuple[str, ...]:
+    raw = candidate.config.get("nested_feed_urls")
+    if raw is None:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or not 1 <= len(raw) <= _MAX_NESTED_ATOM_FEEDS
+        or any(not isinstance(item, str) for item in raw)
+    ):
+        raise AcquisitionConfigurationError(
+            "Atom nested_feed_urls are invalid"
+        )
+    normalized = tuple(
+        _require_same_origin(candidate.endpoint_url, item)
+        for item in raw
+    )
+    if normalized != tuple(sorted(normalized)) or len(normalized) != len(
+        set(normalized)
+    ):
+        raise AcquisitionConfigurationError(
+            "Atom nested_feed_urls are not canonical"
+        )
+    return normalized
+
+
 def _style_request_config(candidate: SourceCandidate) -> _StyleRequest | None:
     config = candidate.config
     has_endpoint = "style_endpoint_url" in config
@@ -2659,9 +2981,40 @@ def _validate_raster_file(path: Path, size_bytes: int) -> None:
         )
 
 
+def _configured_raster_vat(
+    config: Mapping[str, Any],
+) -> tuple[str, str, tuple[int, ...]] | None:
+    value_field = config.get("vat_value_field")
+    class_field = config.get("vat_class_field")
+    class_values = config.get("vat_class_values")
+    if value_field is None and class_field is None and class_values is None:
+        return None
+    if (
+        not isinstance(value_field, str)
+        or _DBF_FIELD_NAME_RE.fullmatch(value_field) is None
+        or not isinstance(class_field, str)
+        or _DBF_FIELD_NAME_RE.fullmatch(class_field) is None
+        or not isinstance(class_values, list)
+        or not 1 <= len(class_values) <= 256
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, int)
+            or not 0 <= item <= 2**31 - 1
+            for item in class_values
+        )
+        or class_values != sorted(set(class_values))
+    ):
+        raise AcquisitionConfigurationError(
+            "GeoTIFF VAT configuration is invalid"
+        )
+    return value_field, class_field, tuple(class_values)
+
+
 def _dataset_file_validator(
     data_format: str,
     limits: AcquisitionLimits,
+    *,
+    config: Mapping[str, Any] | None = None,
 ) -> FileValidator:
     normalized = data_format.strip().casefold()
     if normalized in {"zip", "shapefile-zip"}:
@@ -2670,6 +3023,20 @@ def _dataset_file_validator(
             size,
             require_shapefile=normalized == "shapefile-zip",
             maximum_uncompressed=limits.max_total_bytes,
+        )
+    if normalized == "inspire-cadastral-parcel-gml-zip":
+        return lambda path, size: _validate_cadastral_parcel_gml_zip(
+            path,
+            size,
+            maximum_uncompressed=limits.max_total_bytes,
+        )
+    if normalized == "geotiff-zip":
+        vat_spec = _configured_raster_vat(config or {})
+        return lambda path, size: _validate_geotiff_zip(
+            path,
+            size,
+            maximum_uncompressed=limits.max_total_bytes,
+            vat_spec=vat_spec,
         )
     if normalized in {"geopackage", "gpkg"}:
         return _validate_geopackage
@@ -2739,6 +3106,350 @@ def _validate_zip_dataset(
         if isinstance(exc, ReferenceAcquisitionError):
             raise
         raise AcquisitionValidationError("dataset is not a valid ZIP archive") from exc
+
+
+def _validate_cadastral_parcel_gml_zip(
+    path: Path,
+    size_bytes: int,
+    *,
+    maximum_uncompressed: int,
+) -> dict[str, Any]:
+    _validate_zip_dataset(
+        path,
+        size_bytes,
+        require_shapefile=False,
+        maximum_uncompressed=maximum_uncompressed,
+    )
+    try:
+        with zipfile.ZipFile(path) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            parcel_members = [
+                item
+                for item in files
+                if (
+                    len(
+                        PurePosixPath(
+                            item.filename.replace("\\", "/")
+                        ).parts
+                    )
+                    == 1
+                    and PurePosixPath(
+                        item.filename.replace("\\", "/")
+                    )
+                    .name.casefold()
+                    .endswith(".cadastralparcel.gml")
+                )
+            ]
+            if len(parcel_members) != 1:
+                raise AcquisitionValidationError(
+                    "cadastral dataset must contain exactly one parcel GML",
+                    code="cadastral_parcel_member_invalid",
+                )
+            member = parcel_members[0]
+            if not 100 <= member.file_size <= maximum_uncompressed:
+                raise AcquisitionValidationError(
+                    "cadastral parcel GML size is invalid",
+                    code="cadastral_parcel_member_invalid",
+                )
+            with archive.open(member) as source:
+                prefix = source.read(min(member.file_size, 256 * 1024))
+            lowered = prefix.lower()
+            if (
+                b"\x00" in prefix
+                or b"<!doctype" in lowered
+                or b"<!entity" in lowered
+                or b"featurecollection" not in lowered
+                or b"cadastralparcel" not in lowered
+            ):
+                raise AcquisitionValidationError(
+                    "cadastral parcel GML has an invalid feature collection",
+                    code="cadastral_parcel_gml_invalid",
+                )
+            return {
+                "archive_member": member.filename,
+                "uncompressed_bytes": sum(item.file_size for item in files),
+            }
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        if isinstance(exc, ReferenceAcquisitionError):
+            raise
+        raise AcquisitionValidationError(
+            "cadastral dataset cannot be inspected"
+        ) from exc
+
+
+def _validate_geotiff_zip(
+    path: Path,
+    size_bytes: int,
+    *,
+    maximum_uncompressed: int,
+    vat_spec: tuple[str, str, tuple[int, ...]] | None = None,
+) -> dict[str, Any]:
+    _validate_zip_dataset(
+        path,
+        size_bytes,
+        require_shapefile=False,
+        maximum_uncompressed=maximum_uncompressed,
+    )
+    try:
+        with zipfile.ZipFile(path) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            raster_members = [
+                item
+                for item in files
+                if (
+                    len(
+                        PurePosixPath(
+                            item.filename.replace("\\", "/")
+                        ).parts
+                    )
+                    == 1
+                    and PurePosixPath(
+                        item.filename.replace("\\", "/")
+                    ).suffix.casefold()
+                    in {".tif", ".tiff"}
+                )
+            ]
+            if len(raster_members) != 1:
+                raise AcquisitionValidationError(
+                    "raster dataset must contain exactly one root GeoTIFF",
+                    code="geotiff_member_invalid",
+                )
+            member = raster_members[0]
+            if not 100 <= member.file_size <= maximum_uncompressed:
+                raise AcquisitionValidationError(
+                    "archived GeoTIFF size is invalid",
+                    code="geotiff_member_invalid",
+                )
+            with archive.open(member) as source:
+                prefix = source.read(4)
+            if prefix not in {
+                b"II*\x00",
+                b"MM\x00*",
+                b"II+\x00",
+                b"MM\x00+",
+            }:
+                raise AcquisitionValidationError(
+                    "archived raster does not match GeoTIFF",
+                    code="geotiff_member_invalid",
+                )
+            metadata: dict[str, Any] = {
+                "archive_member": member.filename,
+                "uncompressed_bytes": sum(item.file_size for item in files),
+            }
+            if vat_spec is not None:
+                metadata["raster_value_attribute_table"] = (
+                    _parse_raster_value_attribute_table(
+                        archive,
+                        files=files,
+                        raster_member=member,
+                        value_field=vat_spec[0],
+                        class_field=vat_spec[1],
+                        expected_class_values=vat_spec[2],
+                    )
+                )
+            return metadata
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        if isinstance(exc, ReferenceAcquisitionError):
+            raise
+        raise AcquisitionValidationError(
+            "raster dataset cannot be inspected"
+        ) from exc
+
+
+def _parse_raster_value_attribute_table(
+    archive: zipfile.ZipFile,
+    *,
+    files: list[zipfile.ZipInfo],
+    raster_member: zipfile.ZipInfo,
+    value_field: str,
+    class_field: str,
+    expected_class_values: tuple[int, ...],
+) -> dict[str, Any]:
+    expected_name = f"{raster_member.filename}.vat.dbf".casefold()
+    vat_members = [
+        item
+        for item in files
+        if (
+            len(PurePosixPath(item.filename.replace("\\", "/")).parts) == 1
+            and item.filename.casefold() == expected_name
+        )
+    ]
+    if len(vat_members) != 1:
+        raise AcquisitionValidationError(
+            "reviewed raster must contain its unique VAT DBF companion",
+            code="raster_vat_invalid",
+        )
+    vat_member = vat_members[0]
+    if not 65 <= vat_member.file_size <= _MAX_RASTER_VAT_BYTES:
+        raise AcquisitionValidationError(
+            "raster VAT DBF size is invalid",
+            code="raster_vat_invalid",
+        )
+    try:
+        body = archive.read(vat_member)
+    except (KeyError, OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise AcquisitionValidationError(
+            "raster VAT DBF cannot be read",
+            code="raster_vat_invalid",
+        ) from exc
+    try:
+        record_count = struct.unpack_from("<I", body, 4)[0]
+        header_length = struct.unpack_from("<H", body, 8)[0]
+        record_length = struct.unpack_from("<H", body, 10)[0]
+    except struct.error as exc:
+        raise AcquisitionValidationError(
+            "raster VAT DBF header is truncated",
+            code="raster_vat_invalid",
+        ) from exc
+    if (
+        body[0] != 0x03
+        or not 1 <= record_count <= _MAX_RASTER_VAT_ROWS
+        or not 65 <= header_length <= len(body)
+        or (header_length - 33) % 32 != 0
+        or body[header_length - 1] != 0x0D
+        or not 2 <= record_length <= 65_535
+        or header_length + record_count * record_length > len(body)
+    ):
+        raise AcquisitionValidationError(
+            "raster VAT DBF header is invalid",
+            code="raster_vat_invalid",
+        )
+    field_count = (header_length - 33) // 32
+    if not 2 <= field_count <= _MAX_RASTER_VAT_FIELDS:
+        raise AcquisitionValidationError(
+            "raster VAT DBF field count is invalid",
+            code="raster_vat_invalid",
+        )
+    fields: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    expected_record_length = 1
+    for field_index in range(field_count):
+        offset = 32 + field_index * 32
+        descriptor = body[offset : offset + 32]
+        raw_name = descriptor[:11].split(b"\x00", 1)[0]
+        try:
+            name = raw_name.decode("ascii")
+            field_type = chr(descriptor[11])
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise AcquisitionValidationError(
+                "raster VAT DBF field descriptor is invalid",
+                code="raster_vat_invalid",
+            ) from exc
+        width = descriptor[16]
+        decimal_count = descriptor[17]
+        normalized_name = name.casefold()
+        if (
+            _DBF_FIELD_NAME_RE.fullmatch(name) is None
+            or normalized_name in seen_names
+            or field_type not in {"C", "D", "F", "L", "N"}
+            or width <= 0
+            or decimal_count > width
+            or (field_type not in {"F", "N"} and decimal_count != 0)
+        ):
+            raise AcquisitionValidationError(
+                "raster VAT DBF field descriptor is invalid",
+                code="raster_vat_invalid",
+            )
+        seen_names.add(normalized_name)
+        expected_record_length += width
+        fields.append(
+            {
+                "name": name,
+                "type": field_type,
+                "width": width,
+                "decimal_count": decimal_count,
+            }
+        )
+    if expected_record_length != record_length:
+        raise AcquisitionValidationError(
+            "raster VAT DBF record length is invalid",
+            code="raster_vat_invalid",
+        )
+    field_offsets: dict[str, tuple[int, dict[str, Any]]] = {}
+    current_offset = 1
+    for field in fields:
+        field_offsets[field["name"].casefold()] = (current_offset, field)
+        current_offset += cast(int, field["width"])
+    value_descriptor = field_offsets.get(value_field.casefold())
+    class_descriptor = field_offsets.get(class_field.casefold())
+    if value_descriptor is None or class_descriptor is None:
+        raise AcquisitionValidationError(
+            "raster VAT DBF lacks its reviewed value or class field",
+            code="raster_vat_invalid",
+        )
+    for _offset, descriptor in (value_descriptor, class_descriptor):
+        if descriptor["type"] != "N" or descriptor["decimal_count"] != 0:
+            raise AcquisitionValidationError(
+                "raster VAT mapping fields must be integral numeric fields",
+                code="raster_vat_invalid",
+            )
+    value_to_class: dict[int, int] = {}
+    for row_index in range(record_count):
+        record_offset = header_length + row_index * record_length
+        record = body[record_offset : record_offset + record_length]
+        if len(record) != record_length or record[:1] != b" ":
+            raise AcquisitionValidationError(
+                "raster VAT DBF contains an invalid or deleted record",
+                code="raster_vat_invalid",
+            )
+        value = _parse_dbf_integer(record, value_descriptor)
+        class_value = _parse_dbf_integer(record, class_descriptor)
+        if (
+            not 0 <= value <= 2**31 - 1
+            or class_value not in expected_class_values
+            or value in value_to_class
+        ):
+            raise AcquisitionValidationError(
+                "raster VAT value-to-class mapping is invalid",
+                code="raster_vat_invalid",
+            )
+        value_to_class[value] = class_value
+    if set(value_to_class.values()) != set(expected_class_values):
+        raise AcquisitionValidationError(
+            "raster VAT does not cover every reviewed class",
+            code="raster_vat_invalid",
+        )
+    trailing = body[header_length + record_count * record_length :]
+    if trailing not in {b"", b"\x1a"}:
+        raise AcquisitionValidationError(
+            "raster VAT DBF has unexpected trailing bytes",
+            code="raster_vat_invalid",
+        )
+    return {
+        "member": vat_member.filename,
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "fields": fields,
+        "row_count": record_count,
+        "value_field": value_field,
+        "class_field": class_field,
+        "expected_class_values": list(expected_class_values),
+        "value_class_mapping": [
+            {"value": value, "class_value": value_to_class[value]}
+            for value in sorted(value_to_class)
+        ],
+    }
+
+
+def _parse_dbf_integer(
+    record: bytes,
+    descriptor: tuple[int, dict[str, Any]],
+) -> int:
+    offset, field = descriptor
+    width = cast(int, field["width"])
+    raw = record[offset : offset + width]
+    try:
+        text = raw.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise AcquisitionValidationError(
+            "raster VAT numeric value is not ASCII",
+            code="raster_vat_invalid",
+        ) from exc
+    if re.fullmatch(r"[+-]?[0-9]+", text) is None:
+        raise AcquisitionValidationError(
+            "raster VAT numeric value is invalid",
+            code="raster_vat_invalid",
+        )
+    return int(text)
 
 
 def _validate_geopackage(path: Path, size_bytes: int) -> None:
@@ -2988,24 +3699,7 @@ def _direct_sld_name(element: ElementTree.Element) -> str | None:
 
 
 def _parse_atom_feed(document: bytes, remote_name: str) -> str:
-    lowered = document.lower()
-    if (
-        not document
-        or len(document) > MAX_PROBE_BYTES
-        or b"<!doctype" in lowered
-        or b"<!entity" in lowered
-        or b"\x00" in document
-    ):
-        raise AcquisitionValidationError("Atom feed is unsafe or oversized")
-    try:
-        root = ElementTree.fromstring(document)
-    except ElementTree.ParseError as exc:
-        raise AcquisitionValidationError("Atom feed XML is malformed") from exc
-    if _xml_local(root.tag) != "feed":
-        raise AcquisitionValidationError("response is not an Atom feed")
-    elements = list(root.iter())
-    if len(elements) > 100_000:
-        raise AcquisitionLimitError("Atom feed has too many elements", code="xml_complexity_limit")
+    root, elements = _parse_atom_document(document)
     enclosure_matches: list[str] = []
     alternate_matches: list[str] = []
     for entry in (item for item in elements if _xml_local(item.tag) == "entry"):
@@ -3035,6 +3729,122 @@ def _parse_atom_feed(document: bytes, remote_name: str) -> str:
     return matches[0]
 
 
+def _parse_atom_entry_links(document: bytes) -> tuple[str, ...]:
+    _root, elements = _parse_atom_document(document)
+    links: list[str] = []
+    for entry in (item for item in elements if _xml_local(item.tag) == "entry"):
+        for link in entry:
+            if (
+                _xml_local(link.tag) != "link"
+                or (link.get("rel") or "alternate").casefold() != "enclosure"
+            ):
+                continue
+            href = link.get("href")
+            if (
+                not isinstance(href, str)
+                or not href
+                or len(href) > 8192
+                or any(ord(character) < 32 for character in href)
+            ):
+                raise AcquisitionValidationError(
+                    "Atom feed contains an invalid enclosure URL"
+                )
+            links.append(href)
+    if len(links) != len(set(links)):
+        raise AcquisitionValidationError(
+            "Atom feed repeats an enclosure URL",
+            code="atom_link_duplicate",
+        )
+    return tuple(links)
+
+
+def _parse_atom_document(
+    document: bytes,
+) -> tuple[ElementTree.Element, list[ElementTree.Element]]:
+    lowered = document.lower()
+    if (
+        not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError("Atom feed is unsafe or oversized")
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as exc:
+        raise AcquisitionValidationError("Atom feed XML is malformed") from exc
+    if _xml_local(root.tag) != "feed":
+        raise AcquisitionValidationError("response is not an Atom feed")
+    elements = list(root.iter())
+    if len(elements) > 100_000:
+        raise AcquisitionLimitError(
+            "Atom feed has too many elements",
+            code="xml_complexity_limit",
+        )
+    return root, elements
+
+
+def _resolve_atom_link(
+    reviewed_origin: str,
+    feed_url: str,
+    href: str,
+) -> str:
+    joined = urljoin(feed_url, href)
+    if (
+        not joined
+        or len(joined) > 8192
+        or "\\" in joined
+        or any(ord(character) < 32 or ord(character) == 127 for character in joined)
+    ):
+        raise AcquisitionValidationError(
+            "Atom feed contains an unsafe enclosure URL"
+        )
+    parts = urlsplit(joined)
+    joined = urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            quote(parts.path, safe="/%:@!$&'()*+,;=-._~"),
+            quote(parts.query, safe="%=&?/:@!$'()*+,;-._~"),
+            parts.fragment,
+        )
+    )
+    parts = urlsplit(joined)
+    reviewed = urlsplit(normalize_https_url(reviewed_origin))
+    if (
+        parts.scheme.casefold() == "http"
+        and parts.hostname is not None
+        and reviewed.hostname is not None
+        and parts.hostname.rstrip(".").casefold()
+        == reviewed.hostname.rstrip(".").casefold()
+        and parts.port in {None, 80}
+        and parts.username is None
+        and parts.password is None
+    ):
+        joined = urlunsplit(
+            (
+                "https",
+                reviewed.hostname,
+                parts.path,
+                parts.query,
+                "",
+            )
+        )
+    return _require_same_origin(reviewed_origin, joined)
+
+
+def _optional_same_origin_atom_link(
+    reviewed_origin: str,
+    feed_url: str,
+    href: str,
+) -> str | None:
+    try:
+        return _resolve_atom_link(reviewed_origin, feed_url, href)
+    except ValueError:
+        return None
+
+
 def _xml_local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
@@ -3043,6 +3853,7 @@ def _ogc_items_url(
     candidate: SourceCandidate,
     collection: str,
     page_size: int,
+    scope: _OGCQueryScope,
 ) -> str:
     configured = _config_optional_text(candidate.config, "items_url", max_chars=8192)
     if configured is not None:
@@ -3059,7 +3870,131 @@ def _ogc_items_url(
                 _append_path(_append_path(normalized, "collections"), collection),
                 "items",
             )
-    return _merge_query(base, {"limit": str(page_size), "offset": "0", "f": "json"})
+    params = {
+        "limit": str(page_size),
+        "offset": "0",
+        "f": "json",
+    }
+    if scope.bbox_text is not None:
+        params["bbox"] = scope.bbox_text
+    return _merge_query(base, params)
+
+
+def _ogc_query_scope(config: Mapping[str, Any]) -> _OGCQueryScope:
+    raw_bbox = config.get("bbox")
+    raw_crs = config.get("bbox_crs")
+    require_number_matched = config.get("require_number_matched", False)
+    if not isinstance(require_number_matched, bool):
+        raise AcquisitionConfigurationError(
+            "OGC API require_number_matched must be boolean"
+        )
+    if raw_bbox is None:
+        if raw_crs is not None:
+            raise AcquisitionConfigurationError(
+                "OGC API bbox_crs requires a bbox"
+            )
+        return _OGCQueryScope(
+            bbox=None,
+            bbox_text=None,
+            bbox_crs=None,
+            require_number_matched=require_number_matched,
+        )
+    if (
+        not isinstance(raw_bbox, list)
+        or len(raw_bbox) != 4
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            for item in raw_bbox
+        )
+    ):
+        raise AcquisitionConfigurationError("OGC API bbox is invalid")
+    bbox = tuple(float(item) for item in raw_bbox)
+    west, south, east, north = bbox
+    if (
+        not -180 <= west < east <= 180
+        or not -90 <= south < north <= 90
+    ):
+        raise AcquisitionConfigurationError("OGC API bbox is invalid")
+    if raw_crs != "http://www.opengis.net/def/crs/OGC/1.3/CRS84":
+        raise AcquisitionConfigurationError(
+            "OGC API bbox_crs must be the core CRS84 profile"
+        )
+    return _OGCQueryScope(
+        bbox=bbox,
+        bbox_text=",".join(format(item, ".15g") for item in bbox),
+        bbox_crs=raw_crs,
+        require_number_matched=require_number_matched,
+    )
+
+
+def _require_ogc_page_scope(
+    url: str,
+    *,
+    expected_items_path: str,
+    scope: _OGCQueryScope,
+) -> None:
+    parts = urlsplit(url)
+    if parts.path != expected_items_path:
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed collection",
+            code="pagination_scope_changed",
+        )
+    if scope.bbox is None:
+        return
+    pairs = parse_qsl(
+        parts.query,
+        keep_blank_values=True,
+        strict_parsing=False,
+    )
+    bbox_values = [
+        value for name, value in pairs if name.casefold() == "bbox"
+    ]
+    if len(bbox_values) != 1:
+        raise AcquisitionValidationError(
+            "OGC API pagination dropped or repeated the reviewed bbox",
+            code="pagination_scope_changed",
+        )
+    try:
+        observed = tuple(
+            float(item) for item in bbox_values[0].split(",")
+        )
+    except ValueError as error:
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed bbox",
+            code="pagination_scope_changed",
+        ) from error
+    if (
+        len(observed) != 4
+        or any(not math.isfinite(item) for item in observed)
+        or observed != scope.bbox
+    ):
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed bbox",
+            code="pagination_scope_changed",
+        )
+    crs_values = [
+        value
+        for name, value in pairs
+        if name.casefold() == "bbox-crs"
+    ]
+    if len(crs_values) > 1 or (
+        crs_values and crs_values[0] != scope.bbox_crs
+    ):
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed bbox CRS",
+            code="pagination_scope_changed",
+        )
+
+
+def _ogc_scope_metadata(scope: _OGCQueryScope) -> dict[str, Any]:
+    if scope.bbox is None:
+        return {}
+    return {
+        "bbox": list(scope.bbox),
+        "bbox_crs": scope.bbox_crs,
+    }
 
 
 def _tile_common(candidate: SourceCandidate) -> dict[str, Any]:

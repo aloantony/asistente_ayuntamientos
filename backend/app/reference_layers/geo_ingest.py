@@ -9,7 +9,7 @@ from io import BytesIO
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import selectors
 import stat
@@ -19,6 +19,7 @@ import tempfile
 import time
 from typing import Any
 import warnings
+import zipfile
 
 from PIL import Image, UnidentifiedImageError
 
@@ -52,6 +53,7 @@ _ALLOWED_BINARIES = {
 _ALLOWED_VECTOR_DRIVERS = {
     "GeoJSON": ".geojson",
     "FlatGeobuf": ".fgb",
+    "GMLZIP": ".zip",
 }
 _VECTOR_DRIVER_ALIASES = {
     name.casefold(): (name, suffix)
@@ -60,6 +62,8 @@ _VECTOR_DRIVER_ALIASES = {
 _RASTER_DRIVER_ALIASES = {
     "gtiff": ("GTiff", ".tif"),
     "geotiff": ("GTiff", ".tif"),
+    "gtiffzip": ("GTiffZIP", ".zip"),
+    "geotiffzip": ("GTiffZIP", ".zip"),
 }
 _RASTER_SAMPLE_BYTES = {
     "Byte": 1,
@@ -90,12 +94,13 @@ _STRICT_GDAL_ENVIRONMENT = {
     "GDAL_CACHEMAX": "256",
 }
 MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
-MAX_VECTOR_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_VECTOR_SOURCE_BYTES = 8 * 1024 * 1024 * 1024
 MAX_RASTER_SOURCE_BYTES = 8 * 1024 * 1024 * 1024
-MAX_RASTER_PIXELS = 250_000_000
+DEFAULT_MAX_RASTER_PIXELS = 250_000_000
+MAX_RASTER_PIXELS = 2_000_000_000
 MAX_RASTER_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_RASTER_BANDS = 16
-DEFAULT_MAX_RASTER_OUTPUT_BYTES = 8 * 1024 * 1024 * 1024
+DEFAULT_MAX_RASTER_OUTPUT_BYTES = 10 * 1024 * 1024 * 1024
 MAX_TILE_COUNT = 10_000_000
 MAX_VECTOR_ARTIFACTS = 10_000
 
@@ -661,6 +666,7 @@ def ingest_raster_artifact(
     input_driver: str | None = None,
     timeout_seconds: int = 3600,
     max_source_bytes: int = MAX_RASTER_SOURCE_BYTES,
+    max_pixels: int = DEFAULT_MAX_RASTER_PIXELS,
     max_output_bytes: int = DEFAULT_MAX_RASTER_OUTPUT_BYTES,
     runner: CommandRunner = run_geo_command,
 ) -> RasterIngestResult:
@@ -676,6 +682,11 @@ def ingest_raster_artifact(
         max_source_bytes,
         maximum=MAX_RASTER_SOURCE_BYTES,
         message="raster source byte limit is invalid",
+    )
+    _bounded_positive_integer(
+        max_pixels,
+        maximum=MAX_RASTER_PIXELS,
+        message="raster pixel limit is invalid",
     )
     if (
         isinstance(max_output_bytes, bool)
@@ -706,13 +717,15 @@ def ingest_raster_artifact(
             capacity_store=store,
         )
         _validate_raster_signature(snapshot.path, driver)
+        source_argument = _raster_source_argument(snapshot.path, driver)
         environment = _strict_gdal_environment(cpl_tmpdir=private_directory)
         original = _inspect_raster(
-            snapshot.path,
+            source_argument,
             runner=runner,
             environment=environment,
             timeout=timeout_seconds,
-            expected_driver=driver,
+            expected_driver="GTiff",
+            max_pixels=max_pixels,
         )
         estimated_output_bytes = _estimated_cog_bytes(original)
         if estimated_output_bytes > max_output_bytes:
@@ -739,7 +752,7 @@ def ingest_raster_artifact(
                 "OVERVIEWS=AUTO",
                 "-co",
                 "RESAMPLING=AVERAGE",
-                str(snapshot.path),
+                source_argument,
                 str(output),
             ],
             environment,
@@ -753,6 +766,7 @@ def ingest_raster_artifact(
             timeout=timeout_seconds,
             require_cog=True,
             expected_driver="GTiff",
+            max_pixels=max_pixels,
         )
         if (
             inspection.width != original.width
@@ -964,13 +978,14 @@ def inspect_tile_archive(
 
 
 def _inspect_raster(
-    path: Path,
+    path: Path | str,
     *,
     runner: CommandRunner,
     environment: Mapping[str, str],
     timeout: int,
     require_cog: bool = False,
     expected_driver: str = "GTiff",
+    max_pixels: int = DEFAULT_MAX_RASTER_PIXELS,
 ) -> RasterInspection:
     result = runner(
         [_ALLOWED_BINARIES["gdalinfo"], "-json", str(path)],
@@ -996,7 +1011,7 @@ def _inspect_raster(
         or any(isinstance(item, bool) or not isinstance(item, int) for item in size)
         or not 1 <= size[0]
         or not 1 <= size[1]
-        or size[0] * size[1] > MAX_RASTER_PIXELS
+        or size[0] * size[1] > max_pixels
         or not isinstance(bands, list)
         or not 1 <= len(bands) <= MAX_RASTER_BANDS
         or not isinstance(driver, str)
@@ -1212,10 +1227,12 @@ def _vector_import_command(
     input_layer: str | None,
     append: bool,
 ) -> list[str]:
+    gdal_driver = "GML" if driver == "GMLZIP" else driver
+    source_argument = _vector_source_argument(snapshot, driver)
     command = [
         _ALLOWED_BINARIES["ogr2ogr"],
         "-if",
-        driver,
+        gdal_driver,
         "-f",
         "PostgreSQL",
     ]
@@ -1244,7 +1261,7 @@ def _vector_import_command(
                 "FID=source_fid",
             ]
         )
-    command.extend([database.ogr_connection, str(snapshot)])
+    command.extend([database.ogr_connection, source_argument])
     if input_layer is not None:
         command.append(input_layer)
     return command
@@ -1264,6 +1281,9 @@ def _raster_driver(input_driver: str | None, source_path: Path) -> tuple[str, st
 
 
 def _validate_vector_signature(path: Path, driver: str) -> None:
+    if driver == "GMLZIP":
+        _cadastral_gml_member(path)
+        return
     try:
         with path.open("rb") as source:
             prefix = source.read(4096)
@@ -1281,7 +1301,82 @@ def _validate_vector_signature(path: Path, driver: str) -> None:
         raise GeoIngestError("vector input driver is not allowlisted")
 
 
+def _vector_source_argument(path: Path, driver: str) -> str:
+    if driver != "GMLZIP":
+        return str(path)
+    member = _cadastral_gml_member(path)
+    return f"/vsizip/{path.as_posix()}/{member}"
+
+
+def _cadastral_gml_member(path: Path) -> str:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if not entries or len(entries) > 100_000:
+                raise GeoIngestError(
+                    "cadastral GML archive entry count is invalid"
+                )
+            matches: list[str] = []
+            for entry in entries:
+                name = entry.filename
+                pure = PurePosixPath(name.replace("\\", "/"))
+                if (
+                    not name
+                    or len(name) > 4096
+                    or pure.is_absolute()
+                    or any(part in {"", ".", ".."} for part in pure.parts)
+                    or entry.flag_bits & 0x1
+                    or ((entry.external_attr >> 16) & 0o170000) == 0o120000
+                ):
+                    raise GeoIngestError(
+                        "cadastral GML archive contains an unsafe entry"
+                    )
+                if entry.is_dir():
+                    continue
+                if (
+                    len(pure.parts) == 1
+                    and pure.name.casefold().endswith(
+                        ".cadastralparcel.gml"
+                    )
+                    and re.fullmatch(
+                        r"[A-Za-z0-9._-]{1,255}",
+                        pure.name,
+                        re.ASCII,
+                    )
+                    is not None
+                ):
+                    matches.append(pure.name)
+            if len(matches) != 1:
+                raise GeoIngestError(
+                    "cadastral GML archive has no unique parcel member"
+                )
+            member = matches[0]
+            with archive.open(member) as source:
+                prefix = source.read(256 * 1024)
+            lowered = prefix.lower()
+            if (
+                b"\x00" in prefix
+                or b"<!doctype" in lowered
+                or b"<!entity" in lowered
+                or b"featurecollection" not in lowered
+                or b"cadastralparcel" not in lowered
+            ):
+                raise GeoIngestError(
+                    "cadastral GML archive member is invalid"
+                )
+            return member
+    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+        if isinstance(error, GeoIngestError):
+            raise
+        raise GeoIngestError(
+            "cadastral GML archive could not be inspected"
+        ) from error
+
+
 def _validate_raster_signature(path: Path, driver: str) -> None:
+    if driver == "GTiffZIP":
+        _geotiff_zip_member(path)
+        return
     try:
         with path.open("rb") as source:
             prefix = source.read(4)
@@ -1294,6 +1389,68 @@ def _validate_raster_signature(path: Path, driver: str) -> None:
         b"MM\x00+",
     }:
         raise GeoIngestError("raster snapshot does not match GeoTIFF")
+
+
+def _raster_source_argument(path: Path, driver: str) -> str:
+    if driver != "GTiffZIP":
+        return str(path)
+    member = _geotiff_zip_member(path)
+    return f"/vsizip/{path.as_posix()}/{member}"
+
+
+def _geotiff_zip_member(path: Path) -> str:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if not entries or len(entries) > 100_000:
+                raise GeoIngestError(
+                    "GeoTIFF archive entry count is invalid"
+                )
+            matches: list[str] = []
+            for entry in entries:
+                name = entry.filename
+                pure = PurePosixPath(name.replace("\\", "/"))
+                if (
+                    not name
+                    or len(name) > 4096
+                    or pure.is_absolute()
+                    or any(part in {"", ".", ".."} for part in pure.parts)
+                    or entry.flag_bits & 0x1
+                    or ((entry.external_attr >> 16) & 0o170000) == 0o120000
+                ):
+                    raise GeoIngestError(
+                        "GeoTIFF archive contains an unsafe entry"
+                    )
+                if entry.is_dir():
+                    continue
+                if (
+                    len(pure.parts) == 1
+                    and pure.suffix.casefold() in {".tif", ".tiff"}
+                ):
+                    matches.append(pure.name)
+            if len(matches) != 1:
+                raise GeoIngestError(
+                    "GeoTIFF archive has no unique raster member"
+                )
+            member = matches[0]
+            with archive.open(member) as source:
+                prefix = source.read(4)
+            if prefix not in {
+                b"II*\x00",
+                b"MM\x00*",
+                b"II+\x00",
+                b"MM\x00+",
+            }:
+                raise GeoIngestError(
+                    "GeoTIFF archive raster signature is invalid"
+                )
+            return member
+    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+        if isinstance(error, GeoIngestError):
+            raise
+        raise GeoIngestError(
+            "GeoTIFF archive could not be inspected"
+        ) from error
 
 
 def _bounded_positive_integer(value: Any, *, maximum: int, message: str) -> int:
