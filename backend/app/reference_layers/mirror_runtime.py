@@ -10,6 +10,7 @@ from time import monotonic
 from typing import Sequence
 
 from app.core.config import settings
+from app.db.model_registry import register_all_models
 from app.reference_layers.catalog_watcher import (
     run_siur_catalog_update_check_job,
 )
@@ -213,6 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     try:
+        register_all_models()
         if arguments.service == "scheduler":
             run_scheduler(stop_event, once=arguments.once)
         else:

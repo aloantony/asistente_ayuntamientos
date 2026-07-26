@@ -6,6 +6,26 @@ import threading
 from app.reference_layers import mirror_runtime
 
 
+def test_cli_registers_all_models_before_running_scheduler(monkeypatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        mirror_runtime,
+        "register_all_models",
+        lambda: calls.append("register_models"),
+    )
+    monkeypatch.setattr(
+        mirror_runtime,
+        "run_scheduler",
+        lambda stop_event, *, once: calls.append(
+            f"scheduler:{once}:{stop_event.is_set()}"
+        ),
+    )
+
+    assert mirror_runtime.main(["scheduler", "--once"]) == 0
+    assert calls == ["register_models", "scheduler:True:False"]
+
+
 def test_catalog_watcher_poll_is_throttled_and_reports_evidence(
     monkeypatch,
     caplog,
