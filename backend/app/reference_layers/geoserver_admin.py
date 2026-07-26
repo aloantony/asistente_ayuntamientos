@@ -1488,9 +1488,9 @@ def _validate_sld_package(value: bytes) -> tuple[bytes, bytes]:
         raise InvalidGeoServerPublicationError(
             "invalid immutable style package"
         ) from error
-    if sld is None or not resources:
+    if sld is None:
         raise InvalidGeoServerPublicationError(
-            "style package is missing its SLD or resources"
+            "style package is missing its SLD"
         )
     normalized_sld, references = _validate_sld_document(
         sld,

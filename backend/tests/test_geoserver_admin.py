@@ -100,6 +100,17 @@ def make_sld_package(
     return package.getvalue(), sld
 
 
+def make_sld_only_package() -> bytes:
+    package = io.BytesIO()
+    with zipfile.ZipFile(
+        package,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.writestr("style.sld", VALID_SLD)
+    return package.getvalue()
+
+
 class FakeResponse:
     def __init__(
         self,
@@ -1007,6 +1018,28 @@ def test_immutable_sld_package_is_created_raw_and_is_idempotent() -> None:
     )
     assert result.created is False
     assert all(request[0] == "GET" for request in all_requests(factory))
+
+
+def test_immutable_sld_package_accepts_closed_sld_without_resources() -> None:
+    package = make_sld_only_package()
+    client, factory = make_client(
+        [
+            json_response(workspace_payload()),
+            status_response(404),
+            status_response(201),
+        ]
+    )
+
+    result = client.publish_immutable_sld_package(
+        style_name="planning_style_v_012345",
+        package=package,
+    )
+
+    assert result.created is True
+    method, _target, body, headers = all_requests(factory)[-1]
+    assert method == "POST"
+    assert body == package
+    assert headers["Content-Type"] == "application/zip"
 
 
 @pytest.mark.parametrize(

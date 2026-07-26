@@ -23,6 +23,9 @@ from app.reference_layers.models import (
     ReferenceStyleParityPlanResource,
     ReferenceSyncRun,
 )
+from app.reference_layers.local_style_adaptation import (
+    is_verified_zero_resource_local_adaptation,
+)
 from app.reference_layers.source_probes import SourceProbe
 
 
@@ -537,13 +540,21 @@ def _sld_item(
             parity_kind = "exact"
             verified = True
         elif raw_kind == "adapted" and package is not None:
-            resources = _resource_evidence(bindings, resources_by_sha)
-            if (
-                resources
-                and package.metadata_json.get("sld_sha256") == style.sha256
-            ):
+            if bindings:
+                resources = _resource_evidence(bindings, resources_by_sha)
+                verified = bool(
+                    resources
+                    and package.metadata_json.get("sld_sha256")
+                    == style.sha256
+                )
+            else:
+                verified = is_verified_zero_resource_local_adaptation(
+                    style_metadata=style.metadata_json,
+                    package_metadata=package.metadata_json,
+                    sld_sha256=style.sha256,
+                )
+            if verified:
                 parity_kind = "adapted"
-                verified = True
             else:
                 resources = ()
                 reason = "style_resource_evidence_invalid"

@@ -65,6 +65,9 @@ from app.reference_layers.local_tile_archive import (
     LocalTileArchiveError,
     LocalTileArchiveRenderer,
 )
+from app.reference_layers.local_style_adaptation import (
+    is_verified_zero_resource_local_adaptation,
+)
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
     bind_sync_run_authorization,
@@ -2656,9 +2659,16 @@ def _resolve_local_sld_artifacts(
                 )
             seen_resource_sha.add(raw_sha)
             style_resources.append(resource)
-        if not style_resources:
+        if not style_resources and not (
+            raw_bindings == []
+            and is_verified_zero_resource_local_adaptation(
+                style_metadata=artifact.metadata_json,
+                package_metadata=package.metadata_json,
+                sld_sha256=artifact.sha256,
+            )
+        ):
             raise MirrorOrchestrationError(
-                "adapted local style has no immutable resources",
+                "adapted local style has no valid authored-local evidence",
                 code="local_style_resource_missing",
             )
         resolved[style.id] = ResolvedStyleMaterial(

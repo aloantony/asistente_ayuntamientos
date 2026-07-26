@@ -31,6 +31,7 @@ from app.reference_layers.blob_store import ReferenceBlobStore, StoredReferenceB
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
     apply_catalog_definition,
 )
@@ -42,7 +43,10 @@ from app.reference_layers.models import (
     ReferenceSyncRunArtifact,
 )
 from app.reference_layers.safe_download import HTTPSDownloadResult
-from app.reference_layers.source_discovery import SourceCandidate
+from app.reference_layers.source_discovery import (
+    SourceCandidate,
+    acquisition_candidates,
+)
 
 
 @dataclass(frozen=True)
@@ -176,6 +180,48 @@ def candidate(
         draft,
         definition_sha256=source_candidate_definition_sha256(draft),
     )
+
+
+def reviewed_catalog_candidate(
+    *,
+    endpoint: str,
+    layer_name: str,
+    style_key: str,
+    style_name: str,
+) -> SourceCandidate:
+    service = ReferenceServiceDefinition(
+        source_key="service",
+        title="Reviewed service",
+        upstream_protocol="wms",
+        base_url=endpoint,
+        default_format="image/png",
+    )
+    layer = ReferenceLayerDefinition(
+        source_key="layer:siur:" + "a" * 64,
+        node_type="layer",
+        title="Reviewed layer",
+        service_key="service",
+        remote_name=layer_name,
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        bounds={
+            "west": -7.6,
+            "south": 39.9,
+            "east": -1.3,
+            "north": 43.4,
+        },
+        style_name=style_key,
+        styles=(
+            ReferenceLayerStyleDefinition(
+                source_key=style_key,
+                title=style_name,
+                remote_name=style_name,
+                is_default=True,
+            ),
+        ),
+    )
+    return acquisition_candidates(service, layer)[0]
 
 
 def json_response(value, **kwargs) -> Response:
@@ -968,6 +1014,77 @@ MITECO_OGC_SCOPE = {
 }
 
 
+def test_reviewed_ogc_api_authors_local_style_without_getstyles_network(
+    store,
+    limits,
+) -> None:
+    reviewed = reviewed_catalog_candidate(
+        endpoint=(
+            "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ10/wms.aspx"
+        ),
+        layer_name="Z.I. con alta probabilidad",
+        style_key="default",
+        style_name="default",
+    )
+
+    def handler(url, _etag, _modified):
+        path = urlsplit(url).path
+        if path.endswith("/collections"):
+            return json_response(
+                {"collections": [{"id": "agua:Zi_laminas_q10"}]}
+            )
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 1,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": "flood-1",
+                        "properties": {},
+                        "geometry": None,
+                    }
+                ],
+            }
+        )
+
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=replace(
+            limits,
+            page_size=2_000,
+            max_features=10_000,
+        ),
+        downloader_factory=transport,
+    ).acquire(reviewed)
+
+    style = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style"
+    )
+    package = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style_package"
+    )
+    with store.open_blob(style.blob.storage_key) as source:
+        document = source.read()
+    assert b"#ff0000" in document
+    assert b"#c80000" in document
+    assert style.metadata["parity_kind"] == "adapted"
+    assert style.metadata["resource_bindings"] == []
+    assert package.metadata["sld_sha256"] == style.blob.sha256
+    assert result.stats["style_count"] == 1
+    assert result.artifacts[-1].artifact_kind == "manifest"
+    assert all(
+        parse_qs(urlsplit(call["url"]).query).get("request")
+        != ["GetStyles"]
+        for call in transport.calls
+    )
+
+
 def test_ogc_api_preserves_reviewed_bbox_through_complete_pagination(
     store,
     limits,
@@ -1726,6 +1843,85 @@ def test_nested_atom_acquires_ordered_cadastral_gml_zip_snapshot(
     assert len(manifest["materialization"]["dataset_artifact_sha256"]) == 3
 
 
+def test_reviewed_catastro_atom_authors_closed_local_style_before_manifest(
+    store,
+    limits,
+) -> None:
+    reviewed = reviewed_catalog_candidate(
+        endpoint=(
+            "https://ovc.catastro.meh.es/Cartografia/WMS/"
+            "ServidorWMS.aspx"
+        ),
+        layer_name="Catastro",
+        style_key="default",
+        style_name="Default",
+    )
+    nested_urls = reviewed.config["nested_feed_urls"]
+    dataset_by_feed = {
+        feed_url: (
+            feed_url.rsplit("/", 1)[0] + f"/municipality/A.{code}001.zip",
+            f"{code}001",
+        )
+        for code, feed_url in zip(
+            ["05", "09", "24", "34", "37", "40", "42", "47", "49"],
+            nested_urls,
+            strict=True,
+        )
+    }
+
+    def handler(url, _etag, _modified):
+        if url == reviewed.endpoint_url:
+            return Response(
+                atom_feed_payload(*nested_urls),
+                "application/atom+xml",
+            )
+        if url in dataset_by_feed:
+            dataset_url, _code = dataset_by_feed[url]
+            return Response(
+                atom_feed_payload(dataset_url),
+                "application/atom+xml",
+            )
+        code = next(
+            expected_code
+            for dataset_url, expected_code in dataset_by_feed.values()
+            if dataset_url == url
+        )
+        return Response(
+            cadastral_gml_zip_payload(code),
+            "application/zip",
+        )
+
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=replace(limits, max_pages=20),
+        downloader_factory=transport,
+    ).acquire(reviewed)
+
+    style = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style"
+    )
+    package = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style_package"
+    )
+    assert style.metadata["catalog_style_source_key"] == "default"
+    assert style.metadata["remote_name"] == "Default"
+    assert style.metadata["parity_kind"] == "adapted"
+    assert package.metadata["resource_bindings"] == []
+    assert result.stats["dataset_count"] == 9
+    assert result.stats["style_count"] == 1
+    assert result.artifacts[-1].artifact_kind == "manifest"
+    assert all(
+        parse_qs(urlsplit(call["url"]).query).get("request")
+        != ["GetStyles"]
+        for call in transport.calls
+    )
+
+
 def test_nested_atom_rejects_duplicate_or_excess_dataset_sets(
     store,
     limits,
@@ -1935,6 +2131,80 @@ def test_reviewed_geotiff_zip_preserves_complete_vat_value_mapping(
         for value, class_value in sorted(mapping)
     ]
     assert len(vat["sha256"]) == 64
+
+
+def test_reviewed_ines_download_authors_colormap_from_validated_vat(
+    store,
+    limits,
+) -> None:
+    mapping = [
+        (64, 7),
+        (65, 1),
+        (66, 6),
+        (67, 5),
+        (68, 4),
+        (69, 3),
+        (75, 2),
+        (80, 9),
+        (92, 8),
+        (120, 1),
+    ]
+    payload = geotiff_zip_payload(
+        "EroPotNiveles_41.tiff",
+        vat_class_field="EroPot_pb",
+        value_class_mapping=mapping,
+    )
+    reviewed = reviewed_catalog_candidate(
+        endpoint=(
+            "https://wms.mapama.gob.es/sig/Biodiversidad/"
+            "INESErosionPotencial"
+        ),
+        layer_name="NZ.HazardArea",
+        style_key="biodiversidad_ines_erosionpotencial",
+        style_name="Biodiversidad_INES_ErosionPotencial",
+    )
+    transport = FakeTransport(
+        lambda _url, _etag, _modified: Response(
+            payload,
+            "application/zip",
+        )
+    )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+    ).acquire(reviewed)
+
+    style = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style"
+    )
+    package = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style_package"
+    )
+    with store.open_blob(style.blob.storage_key) as source:
+        root = ElementTree.fromstring(source.read())
+    entries = [
+        element
+        for element in root.iter()
+        if element.tag.endswith("}ColorMapEntry")
+    ]
+    assert [int(item.attrib["quantity"]) for item in entries] == [
+        value for value, _class_value in mapping
+    ]
+    assert package.metadata["sld_sha256"] == style.blob.sha256
+    assert package.metadata["package_members"] == [
+        {"path": "style.sld", "sha256": style.blob.sha256}
+    ]
+    assert result.stats["style_count"] == 1
+    assert len(transport.calls) == 1
+    assert parse_qs(urlsplit(transport.calls[0]["url"]).query).get(
+        "request"
+    ) is None
 
 
 def test_reviewed_geotiff_zip_rejects_duplicate_vat_values(store, limits):

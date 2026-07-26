@@ -20,6 +20,7 @@ from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
     apply_catalog_definition,
 )
@@ -37,6 +38,10 @@ from app.reference_layers.mirror_lifecycle import (
     SyncRunLease,
     claim_next_sync_run,
     enqueue_due_sources,
+)
+from app.reference_layers.local_style_adaptation import (
+    generate_reviewed_local_style,
+    local_style_package_metadata,
 )
 from app.reference_layers.mirror_authorization import MirrorAuthorizationError
 from app.reference_layers.mirror_orchestrator import (
@@ -72,7 +77,10 @@ from app.reference_layers.models import (
     ReferenceLayerStyle,
     ReferenceSyncRun,
 )
-from app.reference_layers.source_discovery import SourceCandidate
+from app.reference_layers.source_discovery import (
+    SourceCandidate,
+    acquisition_candidates,
+)
 from app.reference_layers.source_probes import SourceProbe
 from app.reference_layers.tile_seed import TileSeedResult
 from support_reference_mirror_authorization import (
@@ -763,6 +771,98 @@ def test_local_sld_artifacts_resolve_by_portable_style_source_key() -> None:
         (artifact, alternate),
     )
     assert set(resolved) == {41, 42}
+
+
+def test_local_sld_resolver_accepts_hash_bound_authored_package_without_resources() -> None:
+    candidate = acquisition_candidates(
+        ReferenceServiceDefinition(
+            source_key="service",
+            title="Catastro",
+            upstream_protocol="wms",
+            base_url=(
+                "https://ovc.catastro.meh.es/Cartografia/WMS/"
+                "ServidorWMS.aspx"
+            ),
+            default_format="image/png",
+        ),
+        ReferenceLayerDefinition(
+            source_key="layer:siur:" + "a" * 64,
+            node_type="layer",
+            title="Catastro",
+            service_key="service",
+            remote_name="Catastro",
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="mirror",
+            style_name="default",
+            styles=(
+                ReferenceLayerStyleDefinition(
+                    source_key="default",
+                    title="Default",
+                    remote_name="Default",
+                    is_default=True,
+                ),
+            ),
+        ),
+    )[0]
+    authored = generate_reviewed_local_style(candidate)
+    assert authored is not None
+    style = PersistedRunArtifact(
+        artifact_id=7,
+        artifact_kind="style",
+        roles=frozenset({"style"}),
+        media_type="application/vnd.ogc.sld+xml",
+        storage_backend="filesystem",
+        storage_key="blobs/sha256/aa/" + authored.sld_sha256,
+        size_bytes=len(authored.document),
+        sha256=authored.sld_sha256,
+        metadata_json=authored.metadata,
+    )
+    package = PersistedRunArtifact(
+        artifact_id=8,
+        artifact_kind="style_package",
+        roles=frozenset({"style_package"}),
+        media_type="application/zip",
+        storage_backend="filesystem",
+        storage_key="blobs/sha256/bb/" + "b" * 64,
+        size_bytes=512,
+        sha256="b" * 64,
+        metadata_json=local_style_package_metadata(authored),
+    )
+    context = _styled_context()
+    catalog_style = ReferenceLayerStyle(
+        id=41,
+        last_seen_snapshot_id=1,
+        layer_id=11,
+        provider_key="styled",
+        source_key="default",
+        remote_name="Default",
+        title="Default",
+        is_default=True,
+        status="active",
+    )
+    context = replace(context, styles=(catalog_style,))
+
+    resolved = _resolve_local_sld_artifacts(context, (style, package))
+
+    assert set(resolved) == {41}
+    assert resolved[41].parity_kind == "adapted"
+    assert resolved[41].effective_artifact == package
+    assert resolved[41].resources == ()
+
+    invalid_package = replace(
+        package,
+        metadata_json={
+            **package.metadata_json,
+            "authored_local_evidence_sha256": "0" * 64,
+        },
+    )
+    with pytest.raises(MirrorOrchestrationError) as captured:
+        _resolve_local_sld_artifacts(
+            context,
+            (style, invalid_package),
+        )
+    assert captured.value.code == "local_style_resource_missing"
 
 
 def test_missing_local_sld_rejects_geoserver_delivery() -> None:
