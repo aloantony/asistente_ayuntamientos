@@ -21,7 +21,9 @@ from app.reference_layers.catalog import (
     ReferenceServiceDefinition,
 )
 from app.reference_layers.mirror_coverage import (
+    SIUR_LAYER_PREFIX,
     SIUR_WMS_SUPERTILE_SIZE,
+    SIUR_WMS_SUPERTILE_COVERAGE_PROFILES,
     reviewed_tile_coverage,
     reviewed_tile_format,
 )
@@ -59,6 +61,49 @@ _WMS_INSPIRE_RE = re.compile(
     r"^(?P<prefix>/)(?:wms-inspire)(?P<suffix>/[^/]+/?$)",
     re.IGNORECASE,
 )
+_REVIEWED_NATIVE_WMS_SCHEMA = "siur-reviewed-native-wms-equivalence/v1"
+_REVIEWED_NATIVE_WMS_PRIORITY = 40
+
+
+@dataclass(frozen=True)
+class _ReviewedNativeWMS:
+    profile: str
+    catalog_endpoint_url: str
+    catalog_remote_name: str
+    endpoint_url: str
+    remote_name: str
+    image_format: str
+
+
+_REVIEWED_NATIVE_WMS = {
+    (item.catalog_endpoint_url, item.catalog_remote_name): item
+    for item in (
+        _ReviewedNativeWMS(
+            profile="ign-pnoa-current-ortho-wms-v1",
+            catalog_endpoint_url="https://www.ign.es/wmts/pnoa-ma",
+            catalog_remote_name="OI.OrthoimageCoverage",
+            endpoint_url="https://www.ign.es/wms-inspire/pnoa-ma",
+            remote_name="OI.OrthoimageCoverage",
+            image_format="image/jpeg",
+        ),
+        _ReviewedNativeWMS(
+            profile="ign-base-transparent-wms-v1",
+            catalog_endpoint_url="https://www.ign.es/wmts/ign-base",
+            catalog_remote_name="IGNBaseTodo-nofondo",
+            endpoint_url="https://www.ign.es/wms-inspire/ign-base",
+            remote_name="IGNBaseTodo-nofondo",
+            image_format="image/png",
+        ),
+        _ReviewedNativeWMS(
+            profile="ign-mtn-raster-wms-v1",
+            catalog_endpoint_url="https://www.ign.es/wmts/mapa-raster",
+            catalog_remote_name="MTN",
+            endpoint_url="https://www.ign.es/wms-inspire/mapa-raster",
+            remote_name="mtn_rasterizado",
+            image_format="image/jpeg",
+        ),
+    )
+}
 
 
 class SourceDiscoveryError(ValueError):
@@ -177,6 +222,23 @@ def acquisition_candidates(
             )
         )
     elif protocol == "wmts":
+        reviewed_wms = _reviewed_native_wms(endpoint, layer)
+        if reviewed_wms is not None:
+            candidates.append(
+                _candidate(
+                    protocol="wms_tiles",
+                    target_kind="tiles",
+                    endpoint_url=reviewed_wms.endpoint_url,
+                    remote_name=reviewed_wms.remote_name,
+                    sync_strategy="tile_seed",
+                    priority=_REVIEWED_NATIVE_WMS_PRIORITY,
+                    config=_reviewed_native_wms_config(
+                        service,
+                        layer,
+                        reviewed_wms,
+                    ),
+                )
+            )
         candidates.append(
             _candidate(
                 protocol="wmts",
@@ -240,6 +302,73 @@ def acquisition_candidates(
         raise SourceDiscoveryError(f"unsupported catalog protocol: {protocol}")
 
     return tuple(sorted(_deduplicate(candidates), key=lambda item: item.priority))
+
+
+def _reviewed_native_wms(
+    endpoint: str,
+    layer: ReferenceLayerDefinition,
+) -> _ReviewedNativeWMS | None:
+    """Return an exact, reviewed SIUR WMTS-to-WMS equivalence.
+
+    The hard-coded identity deliberately includes the catalog endpoint and
+    remote collection.  A similarly named third-party layer, a query-bearing
+    endpoint, or a non-SIUR catalog entry never inherits this preference.
+    """
+
+    if (
+        not layer.source_key.startswith(SIUR_LAYER_PREFIX)
+        or layer.role != "base"
+        or layer.renderer != "raster_tile"
+        or not layer.remote_name
+    ):
+        return None
+    parts = urlsplit(endpoint)
+    if parts.query:
+        return None
+    normalized_endpoint = urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path.rstrip("/") or "/",
+            "",
+            "",
+        )
+    )
+    return _REVIEWED_NATIVE_WMS.get((normalized_endpoint, layer.remote_name))
+
+
+def _reviewed_native_wms_config(
+    service: ReferenceServiceDefinition,
+    layer: ReferenceLayerDefinition,
+    reviewed: _ReviewedNativeWMS,
+) -> dict[str, Any]:
+    config = _tile_config(service, layer)
+    coverage_profile = config.get("coverage_profile")
+    if coverage_profile not in SIUR_WMS_SUPERTILE_COVERAGE_PROFILES:
+        raise SourceDiscoveryError(
+            "reviewed native WMS requires an allowed SIUR coverage profile"
+        )
+    config.update(
+        {
+            "format": reviewed.image_format,
+            "style_name": "",
+            "wms_supertile_size": SIUR_WMS_SUPERTILE_SIZE,
+            "reviewed_equivalence": {
+                "schema": _REVIEWED_NATIVE_WMS_SCHEMA,
+                "profile": reviewed.profile,
+                "catalog_protocol": "wmts",
+                "catalog_endpoint_url": reviewed.catalog_endpoint_url,
+                "catalog_remote_name": reviewed.catalog_remote_name,
+                "selected_protocol": "wms_tiles",
+                "selected_endpoint_url": reviewed.endpoint_url,
+                "selected_remote_name": reviewed.remote_name,
+                "image_format": reviewed.image_format,
+                "coverage_profile": coverage_profile,
+                "wms_supertile_size": SIUR_WMS_SUPERTILE_SIZE,
+            },
+        }
+    )
+    return config
 
 
 def _candidate(

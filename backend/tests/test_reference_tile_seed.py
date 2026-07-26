@@ -3,14 +3,22 @@ from io import BytesIO
 from pathlib import Path
 import sqlite3
 import struct
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 import zlib
 
 import pytest
 from PIL import Image
 
-from app.reference_layers.blob_store import ReferenceBlobStore
+import app.reference_layers.blob_store as blob_store_module
+import app.reference_layers.tile_seed as tile_seed_module
+from app.reference_layers.blob_store import (
+    ReferenceBlobStore,
+    ReferenceStorageQuotaError,
+    ReferenceStorageSpaceError,
+)
 from app.reference_layers.tile_seed import (
+    PREFLIGHT_PROJECTION_SCHEMA,
     TileCoordinate,
     TileSeedError,
     coordinate_sha256,
@@ -67,6 +75,31 @@ def _xyz_document(*, estimated: int = 1, minimum: int = 0, maximum: int = 0):
         "definition_sha256": DEFINITION_SHA256,
         "descriptor": {
             **_common(estimated=estimated, minimum=minimum, maximum=maximum),
+            "url_template": "https://tiles.example.test/base/{z}/{x}/{y}.png",
+            "scheme": "xyz",
+        },
+    }
+
+
+def _siur_xyz_document():
+    return {
+        "schema": "reference-tile-source/v1",
+        "protocol": "xyz",
+        "definition_sha256": DEFINITION_SHA256,
+        "descriptor": {
+            "bounds": {
+                "west": -7.6,
+                "south": 39.9,
+                "east": -1.3,
+                "north": 43.4,
+            },
+            "min_zoom": 0,
+            "max_zoom": 16,
+            "format": "image/png",
+            "coverage_required": True,
+            "estimated_tile_count": 1_308_502,
+            "max_tile_count": 2_000_000,
+            "layer": "IGNBaseTodo-nofondo",
             "url_template": "https://tiles.example.test/base/{z}/{x}/{y}.png",
             "scheme": "xyz",
         },
@@ -642,7 +675,103 @@ def test_preflight_reports_conservative_projection_without_writing(tmp_path) -> 
         assert result.tile_count == 4
         assert result.sample_count == 2
         assert result.largest_tile_bytes == len(_png())
+        assert result.projected_payload_bytes >= result.sample_bytes
         assert result.projected_archive_bytes > result.sample_bytes
+        assert result.projection_schema == PREFLIGHT_PROJECTION_SCHEMA
         assert not list((store.root / "blobs" / "sha256").rglob("?" * 64))
+    finally:
+        store.close()
+
+
+def test_preflight_stratified_upper_mean_does_not_apply_one_png_outlier_to_all_tiles(
+) -> None:
+    descriptor = parse_tile_source_document(_siur_xyz_document())
+    coordinates = tile_seed_module._sample_coordinates(descriptor, 64)
+    sizes = [23_000] * len(coordinates)
+    highest_zoom_index = max(
+        index
+        for index, coordinate in enumerate(coordinates)
+        if coordinate.z == descriptor.max_zoom
+    )
+    sizes[highest_zoom_index] = 75_000
+
+    projected_payload = tile_seed_module._project_tile_payload_bytes(
+        descriptor,
+        coordinates,
+        sizes,
+    )
+    projected_archive = (
+        tile_seed_module.PREFLIGHT_FIXED_BYTES
+        + projected_payload
+        + descriptor.estimated_tile_count
+        * tile_seed_module.PREFLIGHT_TILE_OVERHEAD_BYTES
+    )
+    previous_largest_tile_projection = (
+        tile_seed_module.PREFLIGHT_FIXED_BYTES
+        + descriptor.estimated_tile_count
+        * (
+            max(sizes) * 2
+            + tile_seed_module.PREFLIGHT_TILE_OVERHEAD_BYTES
+        )
+    )
+
+    assert len(coordinates) == 64
+    assert 30 * 10**9 < projected_archive < 60 * 10**9
+    assert projected_archive < previous_largest_tile_projection // 3
+
+
+def test_preflight_projection_still_enforces_real_store_quota(tmp_path) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "quota-store"),
+        max_blob_bytes=128 * 1024,
+        quota_bytes=128 * 1024,
+    )
+    try:
+        store.put_stream(BytesIO(b"x" * 70_000))
+        with pytest.raises(ReferenceStorageQuotaError):
+            preflight_tile_archive(
+                store,
+                source_document=_xyz_document(
+                    estimated=4,
+                    minimum=1,
+                    maximum=1,
+                ),
+                max_archive_bytes=120 * 1024,
+                fetcher=lambda _url, _media_type: _png(),
+            )
+    finally:
+        store.close()
+
+
+def test_preflight_projection_still_enforces_configured_free_space_reserve(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "reserve-store"),
+        max_blob_bytes=128 * 1024,
+        min_free_bytes=64 * 1024,
+    )
+    monkeypatch.setattr(
+        blob_store_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(
+            total=1024 * 1024,
+            used=904 * 1024,
+            free=120 * 1024,
+        ),
+    )
+    try:
+        with pytest.raises(ReferenceStorageSpaceError):
+            preflight_tile_archive(
+                store,
+                source_document=_xyz_document(
+                    estimated=4,
+                    minimum=1,
+                    maximum=1,
+                ),
+                max_archive_bytes=120 * 1024,
+                fetcher=lambda _url, _media_type: _png(),
+            )
     finally:
         store.close()
