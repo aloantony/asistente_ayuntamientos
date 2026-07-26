@@ -161,6 +161,43 @@ describe("local base map selection", () => {
     expect([street, topographic].every((layer) => layer.tileUrl.startsWith("/")))
       .toBe(true);
   });
+
+  it("never renders a base disabled by the SIUR layer controls", () => {
+    const hiddenStreet = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      visible: false,
+      zIndex: 1,
+    });
+    const visibleTopographic = makeMapLayer({
+      layerId: 11,
+      role: "base",
+      visible: true,
+      zIndex: 2,
+    });
+
+    expect(
+      selectLocalBaseMapLayer(
+        [hiddenStreet, visibleTopographic],
+        "street",
+      ),
+    ).toBe(visibleTopographic);
+    expect(
+      selectLocalBaseMapLayer(
+        [
+          hiddenStreet,
+          { ...visibleTopographic, visible: false },
+        ],
+        "topographic",
+      ),
+    ).toBeNull();
+    expect(
+      selectLocalBaseMapLayer(
+        [{ ...visibleTopographic, opacity: 0 }],
+        "topographic",
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("reference catalog integrity and hierarchy", () => {

@@ -702,7 +702,12 @@ export function selectLocalBaseMapLayer(
   preference: "street" | "topographic",
 ) {
   const candidates = layers
-    .filter((layer) => layer.role === "base")
+    .filter(
+      (layer) =>
+        layer.role === "base" &&
+        layer.visible &&
+        layer.opacity > 0,
+    )
     .sort(
       (left, right) =>
         left.zIndex - right.zIndex || left.layerId - right.layerId,
