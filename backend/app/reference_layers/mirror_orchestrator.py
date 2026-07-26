@@ -13,6 +13,7 @@ from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import threading
@@ -42,7 +43,7 @@ from app.reference_layers.delivery_builder import (
     PreparedDeliveryAsset,
     create_delivery_version,
 )
-from app.reference_layers import geo_ingest, mirror_lifecycle
+from app.reference_layers import geo_ingest
 from app.reference_layers.geo_ingest import (
     GeoDatabaseTarget,
     GeoIngestError,
@@ -90,11 +91,14 @@ from app.reference_layers.models import (
     ReferenceSyncRunArtifact,
 )
 from app.reference_layers.tile_seed import (
+    TileContentSample,
     TileSeedError,
     TileSeedResult,
     iter_tile_coordinates,
     parse_tile_source_document,
+    sample_tile_source,
     seed_tile_archive,
+    tile_content_sample_sha256,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,12 +200,30 @@ class TilePublicationAsset:
     smoke_z: int
     smoke_x: int
     smoke_y: int
+    catalog_style_source_key: str | None = None
 
 
 @dataclass(frozen=True)
 class TilePublicationPlan:
     assets: tuple[TilePublicationAsset, ...]
     requires_full_inspection: bool
+
+
+@dataclass(frozen=True)
+class TileContentCheck:
+    unchanged: bool
+    sample_count: int
+    remote_sha256: str
+    local_sha256: str
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "tile_content_check_schema": "reference-tile-content-check/v1",
+            "tile_content_unchanged": self.unchanged,
+            "tile_content_sample_count": self.sample_count,
+            "tile_content_remote_sha256": self.remote_sha256,
+            "tile_content_local_sha256": self.local_sha256,
+        }
 
 
 PublicationPlan: TypeAlias = GeoServerPublicationPlan | TilePublicationPlan
@@ -259,13 +281,20 @@ Materializer = Callable[
     MaterializedDelivery,
 ]
 Publisher = Callable[[RunContext, PublicationPlan, "LeaseSupervisor"], None]
+TileContentChecker = Callable[
+    [
+        RunContext,
+        AcquisitionResult,
+        tuple[PersistedRunArtifact, ...],
+        TilePublicationPlan,
+        "LeaseSupervisor",
+    ],
+    TileContentCheck,
+]
 FailureHandler = Callable[
     [SessionFactory, SyncRunLease, ClassifiedFailure],
     FailureHandlingResult,
 ]
-FollowupEnqueuer = Callable[[Session, int], int | None]
-
-
 def build_reference_blob_store(config: Settings = settings) -> ReferenceBlobStore:
     """Build the worker's quota-enforcing content-addressed store."""
 
@@ -382,6 +411,7 @@ class MirrorRunProcessor:
         stop_event: threading.Event | None = None,
         materializer: Materializer | None = None,
         publisher: Publisher | None = None,
+        tile_content_checker: TileContentChecker | None = None,
         failure_handler: FailureHandler | None = None,
     ) -> None:
         self.session_factory = session_factory
@@ -392,6 +422,9 @@ class MirrorRunProcessor:
         self.geoserver = geoserver
         self.materializer = materializer or self._materialize_delivery
         self.publisher = publisher or self._publish_and_smoke
+        self.tile_content_checker = tile_content_checker or (
+            self._check_active_tile_content
+        )
         self.failure_handler = failure_handler or (
             lambda factory, lease, failure: handle_run_failure(
                 factory,
@@ -415,6 +448,7 @@ class MirrorRunProcessor:
 
     def process_lease(self, lease: SyncRunLease) -> WorkerResult:
         current_lease = lease
+        tile_check_stats: dict[str, Any] = {}
         try:
             context = load_run_context(self.session_factory, lease)
             with LeaseSupervisor(
@@ -438,8 +472,22 @@ class MirrorRunProcessor:
                         context,
                         supervisor.lease,
                         version_id=context.existing_version_id,
-                        observed_manifest_sha256=None,
-                        stats={"resumed_existing_version": True},
+                        observed_manifest_sha256=(
+                            context.run.observed_manifest_sha256
+                        ),
+                        observed_etag=context.run.observed_etag,
+                        observed_last_modified=(
+                            context.run.observed_last_modified
+                        ),
+                        observed_version=context.run.observed_version,
+                        stats={
+                            **dict(context.run.stats_json),
+                            "delivery_kind": context.source.target_kind,
+                            "delivery_version_id": (
+                                context.existing_version_id
+                            ),
+                            "resumed_existing_version": True,
+                        },
                     )
                     return WorkerResult(
                         "succeeded",
@@ -489,19 +537,31 @@ class MirrorRunProcessor:
                         context,
                         context.active_version_id,
                     )
-                    self.publisher(context, publication, supervisor)
-                    supervisor.pulse(force=True)
-                    finish_unchanged(
-                        self.session_factory,
-                        supervisor.lease,
+                    content_check = self.tile_content_checker(
+                        context,
                         acquired,
-                        extra_stats={"reused_active_tile_archive": True},
+                        persisted,
+                        publication,
+                        supervisor,
                     )
-                    return WorkerResult(
-                        "unchanged",
-                        lease.run_id,
-                        version_id=context.active_version_id,
-                    )
+                    tile_check_stats = content_check.stats()
+                    if content_check.unchanged:
+                        self.publisher(context, publication, supervisor)
+                        supervisor.pulse(force=True)
+                        finish_unchanged(
+                            self.session_factory,
+                            supervisor.lease,
+                            acquired,
+                            extra_stats={
+                                **tile_check_stats,
+                                "reused_active_tile_archive": True,
+                            },
+                        )
+                        return WorkerResult(
+                            "unchanged",
+                            lease.run_id,
+                            version_id=context.active_version_id,
+                        )
 
                 materialized = self.materializer(
                     context,
@@ -529,6 +589,7 @@ class MirrorRunProcessor:
                     stats=_bounded_stats(
                         {
                             **acquired.stats,
+                            **tile_check_stats,
                             "total_bytes": acquired.total_bytes,
                             "delivery_kind": materialized.prepared.delivery_kind,
                             "delivery_version_id": built.version_id,
@@ -548,6 +609,21 @@ class MirrorRunProcessor:
                     lease.run_id,
                     version_id=built.version_id,
                 )
+        except MirrorWorkerStopping:
+            # Do not terminalize the run: lifecycle 0037 would correctly
+            # interpret any failed/rejected terminal state as a consumed
+            # source and enqueue a fallback. Leaving the fenced run alive lets
+            # the same run be reclaimed after lease expiry with all durable
+            # acquisition/version checkpoints intact.
+            logger.info(
+                "Reference mirror worker stopped with run left reclaimable",
+                extra={"run_id": lease.run_id, "source_id": lease.source_id},
+            )
+            return WorkerResult(
+                "cancelled",
+                lease.run_id,
+                error_code="worker_stopping",
+            )
         except MirrorLeaseLostError:
             logger.warning(
                 "Reference mirror worker lost its lease",
@@ -613,6 +689,7 @@ class MirrorRunProcessor:
                 max_output_bytes=min(
                     self.config.reference_blob_max_bytes,
                     self.config.reference_geo_max_source_bytes,
+                    geo_ingest.DEFAULT_MAX_RASTER_OUTPUT_BYTES,
                 ),
                 timeout_seconds=self.config.reference_geo_timeout_seconds,
             )
@@ -632,6 +709,27 @@ class MirrorRunProcessor:
             "reference source target kind is unsupported",
             code="unsupported_target_kind",
         )
+
+    def _check_active_tile_content(
+        self,
+        context: RunContext,
+        acquired: AcquisitionResult,
+        artifacts: tuple[PersistedRunArtifact, ...],
+        publication: TilePublicationPlan,
+        supervisor: LeaseSupervisor,
+    ) -> TileContentCheck:
+        supervisor.pulse(force=True)
+        result = compare_active_tile_content(
+            self.store,
+            context,
+            acquired,
+            artifacts,
+            publication,
+            sample_limit=self.config.reference_tile_change_check_samples,
+            concurrency=self.config.reference_tile_concurrency,
+        )
+        supervisor.pulse(force=True)
+        return result
 
     def _publish_and_smoke(
         self,
@@ -884,6 +982,21 @@ def persist_run_acquisition(
             result=result,
             lease_token=lease.token,
         )
+        # This is a resumable, non-terminal checkpoint.  A worker may have
+        # already created the immutable delivery when SIGTERM or a renderer
+        # outage interrupts publication; the reclaiming worker must promote
+        # with the exact upstream observations and acquisition statistics,
+        # rather than silently replacing them with empty values.
+        run.observed_etag = result.observed_etag
+        run.observed_last_modified = result.observed_last_modified
+        run.observed_version = result.observed_version
+        run.observed_manifest_sha256 = result.manifest_sha256
+        run.stats_json = _bounded_stats(
+            {
+                **result.stats,
+                "total_bytes": result.total_bytes,
+            }
+        )
         db.commit()
         rows = db.execute(
             select(ReferenceSourceArtifact, ReferenceSyncRunArtifact.role)
@@ -1086,27 +1199,12 @@ def classify_worker_failure(error: BaseException) -> ClassifiedFailure:
     )
 
 
-def _enqueue_lifecycle_followup(
-    db: Session,
-    failed_run_id: int,
-) -> int | None:
-    helper = getattr(mirror_lifecycle, "enqueue_fallback_source", None)
-    if helper is None:
-        return None
-    return cast(Callable[..., int | None], helper)(
-        db,
-        failed_run_id=failed_run_id,
-    )
-
-
 def handle_run_failure(
     session_factory: SessionFactory,
     lease: SyncRunLease,
     failure: ClassifiedFailure,
-    *,
-    followup_enqueuer: FollowupEnqueuer = _enqueue_lifecycle_followup,
 ) -> FailureHandlingResult:
-    """Finish once; lifecycle 0037 is the sole retry/fallback coordinator."""
+    """Finish once; lifecycle 0037 atomically owns every fallback decision."""
 
     with session_factory() as db:
         finish_sync_run(
@@ -1118,18 +1216,16 @@ def handle_run_failure(
             stats_json={"retryable_classification": failure.retryable},
         )
     with session_factory() as db:
-        child_run_id = followup_enqueuer(db, lease.run_id)
-        db.commit()
-        if child_run_id is None:
+        child = db.scalar(
+            select(ReferenceSyncRun).where(
+                ReferenceSyncRun.parent_run_id == lease.run_id
+            )
+        )
+        if child is None:
             return FailureHandlingResult(
                 lease.run_id,
                 failure.outcome,
                 "none",
-            )
-        child = db.get(ReferenceSyncRun, child_run_id)
-        if child is None:
-            raise MirrorLifecycleError(
-                "lifecycle follow-up run is unavailable"
             )
         return FailureHandlingResult(
             lease.run_id,
@@ -1575,6 +1671,9 @@ def materialize_tile_delivery(
                 smoke_z=coordinate.z,
                 smoke_x=coordinate.x,
                 smoke_y=coordinate.y,
+                catalog_style_source_key=(
+                    style.source_key if style is not None else None
+                ),
             )
         )
         validations.append(inspection.validation_json)
@@ -1750,6 +1849,12 @@ def load_existing_publication(
                 continue
             metadata = _metadata(item.metadata_json)
             coordinate = metadata.get("smoke_coordinate")
+            raw_style_key = metadata.get("catalog_style_source_key")
+            if raw_style_key is not None and not isinstance(raw_style_key, str):
+                raise MirrorOrchestrationError(
+                    "existing tile delivery has an invalid style identity",
+                    code="existing_delivery_invalid",
+                )
             tile_assets.append(
                 TilePublicationAsset(
                     storage_key=item.storage_key,
@@ -1767,6 +1872,7 @@ def load_existing_publication(
                     smoke_z=_coordinate_item(coordinate, 0),
                     smoke_x=_coordinate_item(coordinate, 1),
                     smoke_y=_coordinate_item(coordinate, 2),
+                    catalog_style_source_key=raw_style_key,
                 )
             )
         if not tile_assets:
@@ -1868,6 +1974,108 @@ def load_active_tile_publication(
             code="existing_delivery_invalid",
         )
     return publication
+
+
+def compare_active_tile_content(
+    store: ReferenceBlobStore,
+    context: RunContext,
+    acquired: AcquisitionResult,
+    artifacts: tuple[PersistedRunArtifact, ...],
+    publication: TilePublicationPlan,
+    *,
+    sample_limit: int,
+    concurrency: int,
+    sampler: Callable[..., TileContentSample] = sample_tile_source,
+) -> TileContentCheck:
+    """Compare deterministic upstream pixels with the active local archives."""
+
+    descriptors = [
+        item
+        for item in artifacts
+        if "input" in item.roles
+        and item.artifact_kind == "metadata"
+        and item.metadata_json.get("schema") == "reference-tile-source/v1"
+    ]
+    if len(descriptors) != 1:
+        raise MirrorOrchestrationError(
+            "tile content check has no unique reviewed source descriptor",
+            code="tile_content_check_invalid",
+        )
+    documents = _tile_documents_for_catalog_styles(
+        _read_json_blob(store, descriptors[0]),
+        context,
+        acquired,
+    )
+    assets_by_style: dict[str | None, TilePublicationAsset] = {}
+    for asset in publication.assets:
+        key = asset.catalog_style_source_key
+        if key in assets_by_style:
+            raise MirrorOrchestrationError(
+                "active tile archives have ambiguous style identities",
+                code="tile_content_check_invalid",
+            )
+        assets_by_style[key] = asset
+    expected_keys = {
+        style.source_key if style is not None else None
+        for style, _document in documents
+    }
+    if set(assets_by_style) != expected_keys:
+        raise MirrorOrchestrationError(
+            "active tile archives do not match reviewed catalog styles",
+            code="tile_content_check_invalid",
+        )
+
+    renderer = LocalTileArchiveRenderer(store.root)
+    remote_digest = hashlib.sha256(b"reference-tile-content-check/v1\0")
+    local_digest = hashlib.sha256(b"reference-tile-content-check/v1\0")
+    sample_count = 0
+    for style, document in documents:
+        key = style.source_key if style is not None else None
+        sample = sampler(
+            source_document=document,
+            sample_limit=sample_limit,
+            concurrency=concurrency,
+        )
+        verified_remote = tile_content_sample_sha256(
+            sample.coordinates,
+            sample.bodies,
+        )
+        if verified_remote != sample.content_sha256:
+            raise MirrorOrchestrationError(
+                "upstream tile sample digest is inconsistent",
+                code="tile_content_check_invalid",
+            )
+        asset = assets_by_style[key]
+        local_bodies = tuple(
+            renderer.render_tile(
+                storage_key=asset.storage_key,
+                archive_sha256=asset.sha256,
+                z=coordinate.z,
+                x=coordinate.x,
+                y=coordinate.y,
+            ).body
+            for coordinate in sample.coordinates
+        )
+        verified_local = tile_content_sample_sha256(
+            sample.coordinates,
+            local_bodies,
+        )
+        key_bytes = (key or "").encode("utf-8")
+        framing = len(key_bytes).to_bytes(4, "big") + key_bytes
+        remote_digest.update(framing)
+        remote_digest.update(bytes.fromhex(verified_remote))
+        local_digest.update(framing)
+        local_digest.update(bytes.fromhex(verified_local))
+        sample_count += len(sample.coordinates)
+
+    remote_sha256 = remote_digest.hexdigest()
+    local_sha256 = local_digest.hexdigest()
+    return TileContentCheck(
+        unchanged=remote_sha256 == local_sha256,
+        sample_count=sample_count,
+        remote_sha256=remote_sha256,
+        local_sha256=local_sha256,
+    )
 
 
 def _resolve_local_sld_artifacts(

@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     reference_tile_max_count: int = 10_000_000
     reference_tile_concurrency: int = 4
     reference_tile_batch_size: int = 64
-    reference_geo_max_source_bytes: int = 20 * 1024 * 1024 * 1024
+    reference_tile_change_check_samples: int = 16
+    reference_geo_max_source_bytes: int = 8 * 1024 * 1024 * 1024
     reference_geo_timeout_seconds: int = 3600
     local_geoserver_base_url: str = "http://127.0.0.1:8081/geoserver"
     local_geoserver_workspace: str = "siur"
@@ -294,6 +295,15 @@ class Settings(BaseSettings):
         if isinstance(value, bool) or not 1 <= value <= 64:
             raise ValueError(
                 "reference_tile_batch_size must be between 1 and 64"
+            )
+        return value
+
+    @field_validator("reference_tile_change_check_samples")
+    @classmethod
+    def validate_reference_tile_change_check_samples(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 256:
+            raise ValueError(
+                "reference_tile_change_check_samples must be between 1 and 256"
             )
         return value
 

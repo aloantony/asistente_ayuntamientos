@@ -43,8 +43,14 @@ from app.reference_layers.source_discovery import (
 )
 
 AUTO_SOURCE_PREFIX = "auto:"
-BOOTSTRAP_PLAN_SCHEMA = "siur-mirror-source-bootstrap-v2"
+BOOTSTRAP_PLAN_SCHEMA = "siur-mirror-source-bootstrap-v3"
 PROMOTION_EVENT_SCHEMA = "siur-mirror-promotion-event-v1"
+DEFAULT_SOURCE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_SOURCE_FULL_REFRESH_INTERVAL_SECONDS = 30 * 24 * 60 * 60
+# A daily deterministic pixel probe catches changes at stable capabilities
+# endpoints.  This weekly full rebuild is the durable upper bound for changes
+# outside that sample, so a tile mirror is never trusted unchanged for 30 days.
+TILE_SOURCE_FULL_REFRESH_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 _MIRROR_SOURCE_LOCK_DOMAIN = b"asistente/reference-mirror-sources/v1\0"
 _MIRROR_LAYER_LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -91,6 +97,8 @@ class PlannedMirrorSource:
     definition_sha256: str
     priority: int
     is_primary: bool
+    check_interval_seconds: int
+    full_refresh_interval_seconds: int
 
     def identity(self) -> dict[str, Any]:
         return {
@@ -106,6 +114,10 @@ class PlannedMirrorSource:
             "definition_sha256": self.definition_sha256,
             "priority": self.priority,
             "is_primary": self.is_primary,
+            "check_interval_seconds": self.check_interval_seconds,
+            "full_refresh_interval_seconds": (
+                self.full_refresh_interval_seconds
+            ),
         }
 
 
@@ -272,6 +284,14 @@ def build_mirror_bootstrap_plan(
                     definition_sha256=_canonical_sha256(stored_definition),
                     priority=candidate.priority,
                     is_primary=candidate.source_key == preferred_source_key,
+                    check_interval_seconds=(
+                        DEFAULT_SOURCE_CHECK_INTERVAL_SECONDS
+                    ),
+                    full_refresh_interval_seconds=(
+                        TILE_SOURCE_FULL_REFRESH_INTERVAL_SECONDS
+                        if candidate.target_kind == "tiles"
+                        else DEFAULT_SOURCE_FULL_REFRESH_INTERVAL_SECONDS
+                    ),
                 )
             )
     planned.sort(key=lambda item: (item.layer_id, item.priority, item.source_key))
@@ -432,6 +452,10 @@ def apply_mirror_bootstrap_plan(
                             not in administratively_disabled_layer_ids
                         ),
                         priority=item.priority,
+                        check_interval_seconds=item.check_interval_seconds,
+                        full_refresh_interval_seconds=(
+                            item.full_refresh_interval_seconds
+                        ),
                     )
                 )
                 created += 1
@@ -450,6 +474,12 @@ def apply_mirror_bootstrap_plan(
                     record.definition_sha256 = item.definition_sha256
                     record.enabled = expected_enabled
                     record.priority = item.priority
+                    record.check_interval_seconds = (
+                        item.check_interval_seconds
+                    )
+                    record.full_refresh_interval_seconds = (
+                        item.full_refresh_interval_seconds
+                    )
                     updated_count += 1
                 record.is_primary = item.is_primary and expected_enabled
 
@@ -1831,6 +1861,9 @@ def _source_matches_plan(
         and source.config_json == planned.config_json
         and source.definition_sha256 == planned.definition_sha256
         and source.priority == planned.priority
+        and source.check_interval_seconds == planned.check_interval_seconds
+        and source.full_refresh_interval_seconds
+        == planned.full_refresh_interval_seconds
         and _canonical_sha256(definition) == planned.definition_sha256
     )
 
