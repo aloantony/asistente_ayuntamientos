@@ -578,6 +578,8 @@ def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
                 "style_two_v_012345",
                 second.storage_key,
                 second.sha256,
+                asset_kind="style_package",
+                expected_sld_sha256="d" * 64,
             ),
         ),
         smoke_style_names=(
@@ -591,6 +593,7 @@ def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
     class Client:
         def __init__(self):
             self.smokes = []
+            self.package_publications = []
 
         def health(self):
             return None
@@ -599,6 +602,10 @@ def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
             return kwargs
 
         def publish_immutable_sld(self, **kwargs):
+            return kwargs
+
+        def publish_immutable_sld_package(self, **kwargs):
+            self.package_publications.append(kwargs)
             return kwargs
 
         def ensure_layer_style(self, **kwargs):
@@ -646,6 +653,13 @@ def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
         (item["pixel_x"], item["pixel_y"]) == (128, 128)
         for item in client.smokes
     )
+    assert client.package_publications == [
+        {
+            "style_name": "style_two_v_012345",
+            "package": b"<sld>second</sld>",
+            "expected_sld_sha256": "d" * 64,
+        }
+    ]
     assert evidence["transport"] == "numeric_loopback_http"
     assert len(evidence["style_checks"]) == 2
     assert evidence["style_checks"][0]["identify"]["feature_count"] == 0

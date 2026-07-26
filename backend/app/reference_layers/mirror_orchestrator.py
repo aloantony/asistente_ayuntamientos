@@ -194,6 +194,7 @@ class StylePublication:
     storage_key: str
     sha256: str
     asset_kind: Literal["style_sld", "style_package"] = "style_sld"
+    expected_sld_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1657,6 +1658,11 @@ def _geoserver_materialization(
                     if material.parity_kind == "adapted"
                     else "style_sld"
                 ),
+                expected_sld_sha256=(
+                    material.style_artifact.sha256
+                    if material.parity_kind == "adapted"
+                    else None
+                ),
             )
         )
         prepared_styles.append(
@@ -1699,6 +1705,7 @@ def _geoserver_materialization(
                         "style_name": style_name,
                         "parity_kind": "adapted",
                         "effective": True,
+                        "sld_sha256": material.style_artifact.sha256,
                         "resource_sha256": [
                             item.sha256 for item in material.resources
                         ],
@@ -2063,9 +2070,15 @@ def publish_geoserver_delivery(
             ),
         )
         if style.asset_kind == "style_package":
+            if style.expected_sld_sha256 is None:
+                raise MirrorOrchestrationError(
+                    "style package publication has no approved SLD digest",
+                    code="publication_plan_invalid",
+                )
             client.publish_immutable_sld_package(
                 style_name=style.style_name,
                 package=payload,
+                expected_sld_sha256=style.expected_sld_sha256,
             )
         else:
             client.publish_immutable_sld(
@@ -2303,6 +2316,28 @@ def load_existing_publication(
     layer_name = _metadata_text(metadata, "layer_name")
     style_publications: list[StylePublication] = []
     publication_style_ids: set[int] = set()
+    adapted_source_sld_sha256: dict[int, str] = {}
+    for item in assets:
+        if item.asset_kind != "style_sld":
+            continue
+        style_metadata = _metadata(item.metadata_json)
+        if (
+            style_metadata.get("parity_kind") != "adapted"
+            or style_metadata.get("effective") is not False
+        ):
+            continue
+        catalog_style_id = _metadata_integer(
+            style_metadata,
+            "catalog_style_id",
+            minimum=1,
+            maximum=2**31 - 1,
+        )
+        if catalog_style_id in adapted_source_sld_sha256:
+            raise MirrorOrchestrationError(
+                "existing delivery has duplicate adapted source SLD assets",
+                code="existing_delivery_invalid",
+            )
+        adapted_source_sld_sha256[catalog_style_id] = item.sha256
     for item in assets:
         if item.asset_kind not in {"style_sld", "style_package"}:
             continue
@@ -2320,6 +2355,20 @@ def load_existing_publication(
                 "existing delivery has duplicate effective style assets",
                 code="existing_delivery_invalid",
             )
+        expected_sld_sha256 = (
+            _metadata_sha256(style_metadata, "sld_sha256")
+            if item.asset_kind == "style_package"
+            else None
+        )
+        if (
+            item.asset_kind == "style_package"
+            and adapted_source_sld_sha256.get(catalog_style_id)
+            != expected_sld_sha256
+        ):
+            raise MirrorOrchestrationError(
+                "existing style package is not bound to its source SLD",
+                code="existing_delivery_invalid",
+            )
         publication_style_ids.add(catalog_style_id)
         style_publications.append(
             StylePublication(
@@ -2328,6 +2377,7 @@ def load_existing_publication(
                 storage_key=item.storage_key,
                 sha256=item.sha256,
                 asset_kind=cast(Any, item.asset_kind),
+                expected_sld_sha256=expected_sld_sha256,
             )
         )
     style_map = metadata.get("styles")

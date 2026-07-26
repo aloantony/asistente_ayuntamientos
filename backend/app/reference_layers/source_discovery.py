@@ -29,6 +29,10 @@ from app.reference_layers.mirror_coverage import (
     reviewed_tile_coverage,
     reviewed_tile_format,
 )
+from app.reference_layers.reviewed_style_evidence import (
+    ReviewedStyleEvidenceError,
+    reviewed_miteco_mvt_style_reference,
+)
 
 SourceProtocol = Literal[
     "wfs",
@@ -229,6 +233,19 @@ _INES_HISTORICAL_STYLE_REFERENCE = {
     "adaptation_status": "adaptation_required",
     "parity_claim": "official_historical_adaptation_not_exact",
 }
+
+
+def _required_miteco_mvt_style_reference(
+    profile: str,
+) -> dict[str, Any]:
+    reference = reviewed_miteco_mvt_style_reference(profile)
+    if reference is None:
+        raise ReviewedStyleEvidenceError(
+            "reviewed MITECO style profile is not configured"
+        )
+    return reference
+
+
 _REVIEWED_DATASET_SOURCES = {
     (item.catalog_endpoint_url, item.catalog_remote_name): item
     for item in (
@@ -273,17 +290,11 @@ _REVIEWED_DATASET_SOURCES = {
                 "official_collection": "agua:Zi_laminas_q10",
                 "wms_bulk_eligible": False,
                 "wms_terms_url": _MITECO_WMS_TERMS,
-                "official_style_reference": {
-                    "source_kind": "official-mvt-json",
-                    "url": (
-                        "https://wmts.mapama.gob.es/sig/www/styles/mvt/"
-                        "ZI_LaminasQ10.json"
-                    ),
-                    "source_layer": "ZI_LaminasQ10",
-                    "adaptation_status": "adaptation_required",
-                    "fill_color": "#ff0000",
-                    "outline_color": "#c80000",
-                },
+                "official_style_reference": (
+                    _required_miteco_mvt_style_reference(
+                        "miteco-flood-q10-ogc-api-features-v1"
+                    )
+                ),
             },
         ),
         _ReviewedDatasetSource(
@@ -303,17 +314,11 @@ _REVIEWED_DATASET_SOURCES = {
                 "official_collection": "agua:Zi_laminas_q50",
                 "wms_bulk_eligible": False,
                 "wms_terms_url": _MITECO_WMS_TERMS,
-                "official_style_reference": {
-                    "source_kind": "official-mvt-json",
-                    "url": (
-                        "https://wmts.mapama.gob.es/sig/www/styles/mvt/"
-                        "ZI_LaminasQ50.json"
-                    ),
-                    "source_layer": "ZI_LaminasQ50",
-                    "adaptation_status": "adaptation_required",
-                    "fill_color": "#ffbee8",
-                    "outline_color": "#a80084",
-                },
+                "official_style_reference": (
+                    _required_miteco_mvt_style_reference(
+                        "miteco-flood-q50-ogc-api-features-v1"
+                    )
+                ),
             },
         ),
         _ReviewedDatasetSource(
@@ -333,17 +338,11 @@ _REVIEWED_DATASET_SOURCES = {
                 "official_collection": "agua:Zi_laminas_q100",
                 "wms_bulk_eligible": False,
                 "wms_terms_url": _MITECO_WMS_TERMS,
-                "official_style_reference": {
-                    "source_kind": "official-mvt-json",
-                    "url": (
-                        "https://wmts.mapama.gob.es/sig/www/styles/mvt/"
-                        "ZI_LaminasQ100.json"
-                    ),
-                    "source_layer": "ZI_LaminasQ100",
-                    "adaptation_status": "adaptation_required",
-                    "fill_color": "#e8beff",
-                    "outline_color": "#b68cff",
-                },
+                "official_style_reference": (
+                    _required_miteco_mvt_style_reference(
+                        "miteco-flood-q100-ogc-api-features-v1"
+                    )
+                ),
             },
         ),
         _ReviewedDatasetSource(
@@ -363,17 +362,11 @@ _REVIEWED_DATASET_SOURCES = {
                 "official_collection": "agua:Zi_laminas_q500",
                 "wms_bulk_eligible": False,
                 "wms_terms_url": _MITECO_WMS_TERMS,
-                "official_style_reference": {
-                    "source_kind": "official-mvt-json",
-                    "url": (
-                        "https://wmts.mapama.gob.es/sig/www/styles/mvt/"
-                        "ZI_LaminasQ500.json"
-                    ),
-                    "source_layer": "ZI_LaminasQ500",
-                    "adaptation_status": "adaptation_required",
-                    "fill_color": "#ff73df",
-                    "outline_color": "#ff32df",
-                },
+                "official_style_reference": (
+                    _required_miteco_mvt_style_reference(
+                        "miteco-flood-q500-ogc-api-features-v1"
+                    )
+                ),
             },
         ),
         _ReviewedDatasetSource(
@@ -393,18 +386,11 @@ _REVIEWED_DATASET_SOURCES = {
                 "official_collection": "agua:ZI_Laminas_ZFP",
                 "wms_bulk_eligible": False,
                 "wms_terms_url": _MITECO_WMS_TERMS,
-                "official_style_reference": {
-                    "source_kind": "official-mvt-json",
-                    "url": (
-                        "https://wmts.mapama.gob.es/sig/www/styles/mvt/"
-                        "ZI_LaminasZFP.json"
-                    ),
-                    "source_layer": "ZI_LaminasZFP",
-                    "style_id": "zona_flujo_preferente_fill",
-                    "adaptation_status": "adaptation_required",
-                    "fill_color": "#cccccc",
-                    "outline_color": "#e6e600",
-                },
+                "official_style_reference": (
+                    _required_miteco_mvt_style_reference(
+                        "miteco-flood-zfp-ogc-api-features-v1"
+                    )
+                ),
             },
         ),
         _ReviewedDatasetSource(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import hashlib
 import io
 from types import SimpleNamespace
 from xml.etree import ElementTree
@@ -188,8 +189,8 @@ def test_local_style_never_activates_from_a_tampered_reviewed_profile() -> None:
         (
             "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ50/wms.aspx",
             "Z.I. frecuente",
-            "#ffbee8",
-            "#a80084",
+            "#df73ff",
+            "#df41ff",
         ),
         (
             "https://wms.mapama.gob.es/sig/agua/ZI_LaminasQ100/wms.aspx",
@@ -341,6 +342,38 @@ def test_zero_resource_style_package_is_deterministic_and_hash_bound(
             style_metadata=authored.metadata,
             package_metadata=tampered,
             sld_sha256=authored.sld_sha256,
+        )
+
+
+def test_zero_resource_style_rejects_rehashed_noncanonical_sld() -> None:
+    authored = generate_reviewed_local_style(_catastro_candidate())
+    assert authored is not None
+    tampered_document = authored.document.replace(
+        b"#000000",
+        b"#ff0000",
+        1,
+    )
+    assert tampered_document != authored.document
+    tampered_sha256 = hashlib.sha256(tampered_document).hexdigest()
+
+    style_metadata = deepcopy(authored.metadata)
+    evidence = style_metadata["authored_local_evidence"]
+    evidence["sld_sha256"] = tampered_sha256
+    evidence_sha256 = canonical_json_sha256(evidence)
+    style_metadata["authored_local_evidence_sha256"] = evidence_sha256
+
+    package_metadata = local_style_package_metadata(authored)
+    package_metadata["sld_sha256"] = tampered_sha256
+    package_metadata["package_members"] = [
+        {"path": "style.sld", "sha256": tampered_sha256}
+    ]
+    package_metadata["authored_local_evidence_sha256"] = evidence_sha256
+
+    with pytest.raises(LocalStyleAdaptationError):
+        validate_zero_resource_local_adaptation(
+            style_metadata=style_metadata,
+            package_metadata=package_metadata,
+            sld_sha256=tampered_sha256,
         )
 
 

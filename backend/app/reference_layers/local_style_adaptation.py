@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Any
+from typing import Any, cast
 from xml.etree import ElementTree
 
 from app.reference_layers.source_discovery import (
@@ -46,7 +46,7 @@ _INES_PALETTE = (
 )
 _FLOOD_COLORS = {
     "miteco-flood-q10-ogc-api-features-v1": ("#ff0000", "#c80000"),
-    "miteco-flood-q50-ogc-api-features-v1": ("#ffbee8", "#a80084"),
+    "miteco-flood-q50-ogc-api-features-v1": ("#df73ff", "#df41ff"),
     "miteco-flood-q100-ogc-api-features-v1": ("#e8beff", "#b68cff"),
     "miteco-flood-q500-ogc-api-features-v1": ("#ff73df", "#ff32df"),
     "miteco-flood-zfp-ogc-api-features-v1": ("#cccccc", "#e6e600"),
@@ -88,30 +88,10 @@ def generate_reviewed_local_style(
 
     if reviewed.style_kind == "catastro_parcels":
         recipe = _catastro_recipe(reviewed.style_reference)
-        document = _vector_sld(
-            layer_name=reviewed.selected_layer_name,
-            style_name=reviewed.remote_style_name,
-            title="Parcelas catastrales — adaptación local",
-            fill_color="#ffffff",
-            fill_opacity="0",
-            outline_color="#000000",
-            outline_width="1",
-            label_field="label",
-        )
     elif reviewed.style_kind == "flood_polygons":
         recipe = _flood_recipe(
             reviewed.profile,
             reviewed.style_reference,
-        )
-        document = _vector_sld(
-            layer_name=reviewed.selected_layer_name,
-            style_name=reviewed.remote_style_name,
-            title="Inundabilidad — adaptación local",
-            fill_color=recipe["fill_color"],
-            fill_opacity="1",
-            outline_color=recipe["outline_color"],
-            outline_width="1",
-            label_field=None,
         )
     elif reviewed.style_kind == "ines_raster":
         recipe = _ines_recipe(
@@ -119,18 +99,18 @@ def generate_reviewed_local_style(
             reviewed.style_reference,
             dataset_metadata,
         )
-        document = _raster_sld(
-            layer_name=reviewed.selected_layer_name,
-            style_name=reviewed.remote_style_name,
-            title="INES — adaptación local de clases históricas",
-            mapping=recipe["value_class_mapping"],
-            palette=recipe["palette"],
-        )
     else:  # pragma: no cover - source discovery constrains this literal.
         raise LocalStyleAdaptationError(
             "reviewed local style kind is unsupported",
             code="local_style_recipe_invalid",
         )
+    document = _render_recipe_sld(
+        profile=reviewed.profile,
+        style_kind=reviewed.style_kind,
+        layer_name=reviewed.selected_layer_name,
+        style_name=reviewed.remote_style_name,
+        recipe=recipe,
+    )
 
     if not document or len(document) > MAX_LOCAL_STYLE_BYTES:
         raise LocalStyleAdaptationError(
@@ -317,7 +297,18 @@ def validate_zero_resource_local_adaptation(
             "authored local style recipe hash is invalid",
             code="local_style_evidence_invalid",
         )
-    _validate_recipe(profile, identity[0], recipe)
+    expected_sld = _render_recipe_sld(
+        profile=profile,
+        style_kind=identity[0],
+        layer_name=identity[4],
+        style_name=identity[2],
+        recipe=recipe,
+    )
+    if hashlib.sha256(expected_sld).hexdigest() != sld_sha256:
+        raise LocalStyleAdaptationError(
+            "authored local SLD does not match its deterministic recipe",
+            code="local_style_evidence_invalid",
+        )
 
     expected_package_keys = {
         "schema",
@@ -432,7 +423,8 @@ def _flood_recipe(
     expected_colors = _FLOOD_COLORS.get(profile)
     if (
         expected_colors is None
-        or reference.get("source_kind") != "official-mvt-json"
+        or reference.get("source_kind")
+        != "archived-official-mvt-json"
         or reference.get("adaptation_status") != "adaptation_required"
         or reference.get("parity_claim")
         != "official_mvt_style_adapted_to_sld_not_exact"
@@ -644,6 +636,59 @@ def _validate_persisted_ines_recipe(
             "persisted INES recipe semantics are invalid",
             code="local_style_evidence_invalid",
         )
+
+
+def _render_recipe_sld(
+    *,
+    profile: str,
+    style_kind: str,
+    layer_name: str,
+    style_name: str,
+    recipe: Mapping[str, Any],
+) -> bytes:
+    """Regenerate the only SLD bytes permitted by persisted recipe evidence."""
+
+    _validate_recipe(profile, style_kind, recipe)
+    if style_kind == "catastro_parcels":
+        return _vector_sld(
+            layer_name=layer_name,
+            style_name=style_name,
+            title="Parcelas catastrales — adaptación local",
+            fill_color=cast(str, recipe["fill_color"]),
+            fill_opacity=str(recipe["fill_opacity"]),
+            outline_color=cast(str, recipe["outline_color"]),
+            outline_width=str(recipe["outline_width"]),
+            label_field=cast(str, recipe["label_field"]),
+        )
+    if style_kind == "flood_polygons":
+        return _vector_sld(
+            layer_name=layer_name,
+            style_name=style_name,
+            title="Inundabilidad — adaptación local",
+            fill_color=cast(str, recipe["fill_color"]),
+            fill_opacity=str(recipe["fill_opacity"]),
+            outline_color=cast(str, recipe["outline_color"]),
+            outline_width=str(recipe["outline_width"]),
+            label_field=None,
+        )
+    if style_kind == "ines_raster":
+        return _raster_sld(
+            layer_name=layer_name,
+            style_name=style_name,
+            title="INES — adaptación local de clases históricas",
+            mapping=cast(
+                list[dict[str, int]],
+                recipe["value_class_mapping"],
+            ),
+            palette=cast(
+                list[dict[str, Any]],
+                recipe["palette"],
+            ),
+        )
+    raise LocalStyleAdaptationError(
+        "local style recipe kind is invalid",
+        code="local_style_evidence_invalid",
+    )
 
 
 def _vector_sld(

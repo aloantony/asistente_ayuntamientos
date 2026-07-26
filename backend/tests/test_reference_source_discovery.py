@@ -588,8 +588,8 @@ def test_miteco_flood_layers_use_exact_official_ogc_api_collections(
         ),
         "agua:Zi_laminas_q50": (
             "ZI_LaminasQ50.json",
-            "#ffbee8",
-            "#a80084",
+            "#df73ff",
+            "#df41ff",
         ),
         "agua:Zi_laminas_q100": (
             "ZI_LaminasQ100.json",

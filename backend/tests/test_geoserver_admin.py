@@ -111,6 +111,11 @@ def make_sld_only_package() -> bytes:
     return package.getvalue()
 
 
+def packaged_sld_sha256(package: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        return hashlib.sha256(archive.read("style.sld")).hexdigest()
+
+
 class FakeResponse:
     def __init__(
         self,
@@ -993,6 +998,7 @@ def test_immutable_sld_package_is_created_raw_and_is_idempotent() -> None:
     result = client.publish_immutable_sld_package(
         style_name="planning_style_v_012345",
         package=package,
+        expected_sld_sha256=hashlib.sha256(sld).hexdigest(),
     )
     assert result.created is True
     method, target, body, headers = all_requests(factory)[-1]
@@ -1015,6 +1021,7 @@ def test_immutable_sld_package_is_created_raw_and_is_idempotent() -> None:
     result = client.publish_immutable_sld_package(
         style_name="planning_style_v_012345",
         package=package,
+        expected_sld_sha256=hashlib.sha256(sld).hexdigest(),
     )
     assert result.created is False
     assert all(request[0] == "GET" for request in all_requests(factory))
@@ -1033,6 +1040,7 @@ def test_immutable_sld_package_accepts_closed_sld_without_resources() -> None:
     result = client.publish_immutable_sld_package(
         style_name="planning_style_v_012345",
         package=package,
+        expected_sld_sha256=hashlib.sha256(VALID_SLD).hexdigest(),
     )
 
     assert result.created is True
@@ -1058,7 +1066,24 @@ def test_immutable_sld_package_rejects_unsafe_or_unbound_resources(
         client.publish_immutable_sld_package(
             style_name="planning_style_v_012345",
             package=package,
+            expected_sld_sha256=packaged_sld_sha256(package),
         )
+    assert factory.connections == []
+
+
+def test_immutable_sld_package_rejects_unapproved_internal_sld() -> None:
+    package, sld = make_sld_package()
+    client, factory = make_client([])
+
+    with pytest.raises(InvalidGeoServerPublicationError):
+        client.publish_immutable_sld_package(
+            style_name="planning_style_v_012345",
+            package=package,
+            expected_sld_sha256=hashlib.sha256(
+                sld.replace(b"planning", b"different", 1)
+            ).hexdigest(),
+        )
+
     assert factory.connections == []
 
 

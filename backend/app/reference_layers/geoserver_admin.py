@@ -675,11 +675,15 @@ class GeoServerAdminClient:
         *,
         style_name: str,
         package: bytes,
+        expected_sld_sha256: str,
     ) -> PublicationResult:
         """Publish one closed SLD ZIP with content-addressed local graphics."""
 
         style = _validate_versioned_name(style_name, "immutable style")
-        body, sld = _validate_sld_package(package)
+        body, sld = _validate_sld_package(
+            package,
+            expected_sld_sha256=expected_sld_sha256,
+        )
         self.ensure_workspace()
         get_path = (
             f"/workspaces/{_segment(self._workspace)}/styles/"
@@ -1410,11 +1414,17 @@ def _validate_artifact_relative_path(value: str) -> PurePosixPath:
     return path
 
 
-def _validate_sld_package(value: bytes) -> tuple[bytes, bytes]:
+def _validate_sld_package(
+    value: bytes,
+    *,
+    expected_sld_sha256: str,
+) -> tuple[bytes, bytes]:
     if (
         not isinstance(value, bytes)
         or not value
         or len(value) > MAX_STYLE_PACKAGE_BYTES
+        or not isinstance(expected_sld_sha256, str)
+        or SHA256_HEX.fullmatch(expected_sld_sha256) is None
     ):
         raise InvalidGeoServerPublicationError(
             "invalid immutable style package"
@@ -1491,6 +1501,10 @@ def _validate_sld_package(value: bytes) -> tuple[bytes, bytes]:
     if sld is None:
         raise InvalidGeoServerPublicationError(
             "style package is missing its SLD"
+        )
+    if hashlib.sha256(sld).hexdigest() != expected_sld_sha256:
+        raise InvalidGeoServerPublicationError(
+            "style package SLD does not match its approved digest"
         )
     normalized_sld, references = _validate_sld_document(
         sld,

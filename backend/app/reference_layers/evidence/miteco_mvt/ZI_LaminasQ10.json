@@ -1,0 +1,27 @@
+{
+  "version": 8,
+  "sources": {
+    "zi": {
+      "type": "vector",
+      "tiles": [
+        "https://wmts.mapama.gob.es/sig/tiles/ZI_LaminasQ10/{z}/{x}/{y}"
+      ],
+      "minzoom": 4,
+      "maxzoom": 19,
+      "minZoom": 4,
+      "maxZoom": 19
+    }
+  },
+  "layers": [
+    {
+      "id": "ZI_LaminasQ10",
+      "type": "fill",
+      "source": "zi",
+      "source-layer": "ZI_LaminasQ10",
+      "paint": {
+        "fill-color": "#ff0000",
+        "fill-outline-color": "#c80000"
+      }
+    }
+  ]
+}
