@@ -1,0 +1,93 @@
+# Temporary acceptance topology for proving that local SIUR delivery has no
+# Internet dependency.  Combine this file with docker-compose.yml only after
+# all mirror synchronization jobs have finished.
+services:
+  siur-offline-netns:
+    image: redis:7-alpine
+    command: ["sleep", "infinity"]
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
+      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:6379:6379"
+    networks:
+      siur-offline:
+        aliases:
+          - backend
+          - frontend
+          - geoserver
+          - postgres
+          - redis
+
+  backend:
+    network_mode: "service:siur-offline-netns"
+    command:
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
+      REDIS_URL: redis://127.0.0.1:6379/0
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+  worker:
+    network_mode: "service:siur-offline-netns"
+    environment:
+      DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
+      REDIS_URL: redis://127.0.0.1:6379/0
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+  reference-worker:
+    network_mode: "service:siur-offline-netns"
+    environment:
+      DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+  reference-scheduler:
+    network_mode: "service:siur-offline-netns"
+    environment:
+      DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+  frontend:
+    network_mode: "service:siur-offline-netns"
+    environment:
+      API_PROXY_TARGET: http://127.0.0.1:8000
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+  postgres:
+    network_mode: "service:siur-offline-netns"
+    ports: !reset []
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+  geoserver:
+    network_mode: "service:siur-offline-netns"
+    ports: !reset []
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+  redis:
+    network_mode: "service:siur-offline-netns"
+    ports: !reset []
+    depends_on:
+      siur-offline-netns:
+        condition: service_started
+
+networks:
+  siur-offline:
+    internal: true

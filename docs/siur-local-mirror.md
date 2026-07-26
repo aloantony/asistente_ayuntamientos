@@ -185,3 +185,40 @@ La aceptación final debe:
 
 Los fondos base forman parte de esta prueba. No se considera independiente un
 visor que aún cargue OSM u OpenTopoMap directamente desde el navegador.
+
+### Corte de red reproducible
+
+`docker-compose.siur-offline.yml` cambia temporalmente todos los procesos de
+servicio, persistencia y sincronización a un único espacio de red conectado
+solo a una red Docker `internal`. Los puertos siguen publicados exclusivamente
+en `127.0.0.1`, de modo que el navegador y el operador conservan acceso local,
+pero backend, GeoServer, workers, PostgreSQL y Redis no tienen salida a
+Internet. Los nombres históricos `postgres`, `redis` y `geoserver` resuelven al
+mismo espacio de red para que la configuración persistida de GeoServer siga
+siendo válida.
+
+La topología se activa únicamente después de terminar y comprobar todas las
+sincronizaciones:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.siur-offline.yml \
+  up -d --force-recreate
+```
+
+El cambio recrea Redis sin datos persistentes y por tanto cubre también el
+reinicio con caché vacía. Antes de aceptar el resultado se debe demostrar desde
+el contenedor backend que una conexión TCP pública falla y que PostgreSQL,
+Redis y GeoServer siguen accesibles por loopback; después se recorren mapa,
+estilos, leyenda e identify en el navegador.
+
+Para recuperar la operación periódica normal se recrea el proyecto solo con el
+archivo principal (sin borrar volúmenes):
+
+```bash
+docker compose -f docker-compose.yml up -d --force-recreate --remove-orphans
+```
+
+No se usa `down -v`: PostgreSQL, artefactos, GeoServer y GeoWebCache deben
+conservarse durante ambos cambios de topología.
