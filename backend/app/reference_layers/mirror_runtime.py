@@ -18,6 +18,9 @@ from app.reference_layers.mirror_orchestrator import (
     enqueue_reference_sources_once,
     reconcile_reference_sources_once,
 )
+from app.reference_layers.style_update_watcher import (
+    run_official_style_update_check_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,41 @@ def _poll_catalog_watcher_if_due(
     return next_attempt
 
 
+def _poll_style_watcher_if_due(
+    next_poll_at: float,
+    *,
+    now: float | None = None,
+    poll_seconds: float | None = None,
+) -> float:
+    current = monotonic() if now is None else now
+    if current < next_poll_at:
+        return next_poll_at
+    next_attempt = current + (
+        settings.reference_catalog_watcher_poll_seconds
+        if poll_seconds is None
+        else poll_seconds
+    )
+    try:
+        outcome = run_official_style_update_check_job()
+        logger.info(
+            "Official style watcher poll completed",
+            extra={
+                "source_count": outcome.get("source_count"),
+                "recorded_count": outcome.get("recorded_count"),
+                "review_required_count": outcome.get(
+                    "review_required_count"
+                ),
+                "error_count": outcome.get("error_count"),
+            },
+        )
+    except Exception as error:
+        logger.error(
+            "Official style watcher poll failed (%s)",
+            type(error).__name__,
+        )
+    return next_attempt
+
+
 def run_scheduler(
     stop_event: threading.Event,
     *,
@@ -65,6 +103,7 @@ def run_scheduler(
 ) -> None:
     first_poll = True
     next_catalog_poll_at = 0.0
+    next_style_poll_at = 0.0
     while not stop_event.is_set():
         next_catalog_poll_at = _poll_catalog_watcher_if_due(
             next_catalog_poll_at,
@@ -88,6 +127,9 @@ def run_scheduler(
                             "deactivated_count": item.deactivated_count,
                         },
                     )
+            next_style_poll_at = _poll_style_watcher_if_due(
+                next_style_poll_at,
+            )
             run_ids = enqueue_reference_sources_once(reconcile=False)
             if run_ids:
                 logger.info(

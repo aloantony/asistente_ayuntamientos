@@ -53,6 +53,9 @@ from app.reference_layers.source_discovery import (
     SourceDiscoveryError,
     acquisition_candidates,
 )
+from app.reference_layers.style_update_watcher import (
+    require_official_style_promotion_allowed,
+)
 
 AUTO_SOURCE_PREFIX = "auto:"
 BOOTSTRAP_PLAN_SCHEMA = "siur-mirror-source-bootstrap-v3"
@@ -1049,6 +1052,7 @@ def promote_delivery_version(
             source=source,
             run=run,
         )
+        require_official_style_promotion_allowed(db, source=source)
         _validate_current_version_catalog(db, version)
         _validate_version_ready(db, version)
         from_version_id = (

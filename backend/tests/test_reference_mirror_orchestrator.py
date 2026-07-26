@@ -961,6 +961,11 @@ def test_operation_smoke_evidence_is_finalized_with_the_promoted_run(
     )
     monkeypatch.setattr(
         mirror_orchestrator,
+        "revalidate_style_promotion_gate",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
         "persist_run_acquisition",
         lambda factory, lease, acquired: (),
     )
@@ -1051,6 +1056,11 @@ def test_operation_smoke_failure_prevents_promotion_and_preserves_active(
     monkeypatch.setattr(
         mirror_orchestrator,
         "revalidate_run_authorization",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "revalidate_style_promotion_gate",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(

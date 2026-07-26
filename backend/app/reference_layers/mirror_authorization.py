@@ -934,6 +934,34 @@ def require_current_source_authorization(
     return current
 
 
+def require_current_source_metadata_probe_authorization(
+    db: Session,
+    *,
+    source: ReferenceLayerSource,
+) -> ReferenceMirrorAuthorizationReview:
+    """Authorize one metadata-only request without granting dataset access."""
+
+    reviews = _authorization_chain(db, source.id)
+    if not reviews:
+        raise MirrorAuthorizationError(
+            "mirror authorization is missing",
+            code="mirror_authorization_missing",
+        )
+    if not authorization_chain_is_valid(reviews):
+        raise MirrorAuthorizationError(
+            "mirror authorization chain is invalid",
+            code="mirror_authorization_invalid",
+        )
+    current = reviews[-1]
+    _validate_review_source(current, source)
+    if current.decision != "approved" or not current.allow_metadata_probe:
+        raise MirrorAuthorizationError(
+            "current mirror authorization does not grant metadata probing",
+            code="mirror_authorization_restricted",
+        )
+    return current
+
+
 def source_authorization_blocker(
     db: Session,
     *,
