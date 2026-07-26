@@ -61,7 +61,7 @@ def test_active_status_and_failed_refresh_serve_previous_version(db) -> None:
 
 
 def test_pending_syncing_and_disabled_statuses(db) -> None:
-    layer, _, source, _, _, _ = seed_local_delivery(db)
+    layer, _, source, previous_run, _, _ = seed_local_delivery(db)
     state = db.get(
         ReferenceLayerDeliveryState,
         (layer.provider_key, layer.id),
@@ -86,7 +86,7 @@ def test_pending_syncing_and_disabled_statuses(db) -> None:
             trigger_kind="manual",
             check_mode="full",
             status="queued",
-            queued_at=NOW,
+            queued_at=previous_run.queued_at + timedelta(seconds=1),
         )
     )
     db.commit()
