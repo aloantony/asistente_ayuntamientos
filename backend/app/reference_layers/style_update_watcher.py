@@ -20,6 +20,7 @@ from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 from sqlalchemy import and_, or_, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, settings
@@ -66,6 +67,7 @@ STYLE_CHECK_INTERVAL_SECONDS = 86_400
 STYLE_REVIEW_SCHEMA = "siur-style-update-review-v1"
 MAX_STYLE_REVIEW_DOCUMENT_BYTES = 65_536
 _STYLE_WATCHER_LOCK_DOMAIN = b"asistente/reference-style-watcher/v1\0"
+_STYLE_PERSISTENCE_LOCK_TIMEOUT_MS = 5_000
 _SUCCESS_STATUSES = ("unchanged", "style_review_required")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _REVIEW_KEYS = frozenset(
@@ -464,34 +466,50 @@ def check_official_style_update(
                 body=body or sink.getvalue(),
             )
 
-    acquired = bool(
-        db.scalar(
-            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
-            {"lock_key": _style_watcher_lock_key(target)},
-        )
-    )
-    if not acquired:
-        db.rollback()
-        return StyleUpdateCheckOutcome(
-            disposition="lock_busy",
-            status=None,
-            check_id=None,
-            source_id=source_id,
-            observed_version_id=None,
-            next_check_at=None,
-        )
+    check_id = _reserve_style_check_id(db)
+    try:
+        _acquire_style_persistence_lock(db, target)
+    except OfficialStyleWatcherError as error:
+        if (
+            error.code == "style_persistence_lock_timeout"
+            and _is_changed_200_response(target, response)
+        ):
+            return _record_contended_changed_response(
+                db,
+                target=target,
+                check_id=check_id,
+                original_key=key,
+                trigger_kind=trigger_kind,
+                checked_at=at,
+                retry_at=at + min(interval, timedelta(minutes=5)),
+                duration_ms=_elapsed_ms(started),
+                request_etag=request_etag,
+                request_last_modified=request_last_modified,
+                response=cast(_ResponseEvidence, response),
+                binding=binding,
+                error=error,
+            )
+        raise
 
     try:
         duplicate = _check_by_key(db, target, key)
         if duplicate is not None:
-            outcome = _outcome_from_check("duplicate", duplicate)
-            db.commit()
-            return outcome
-        latest = _latest_check(db, target)
-        if not force and latest is not None and latest.next_check_at > at:
-            outcome = _outcome_from_check("not_due", latest)
-            db.commit()
-            return outcome
+            collision_key = _concurrent_response_key(
+                key,
+                duplicate=duplicate,
+                response=response,
+                failure=failure,
+            )
+            if collision_key is None:
+                outcome = _outcome_from_check("duplicate", duplicate)
+                db.commit()
+                return outcome
+            key = collision_key
+            collision = _check_by_key(db, target, key)
+            if collision is not None:
+                outcome = _outcome_from_check("duplicate", collision)
+                db.commit()
+                return outcome
 
         current_source = db.get(ReferenceLayerSource, source_id)
         current_target = (
@@ -533,6 +551,7 @@ def check_official_style_update(
             check = _record_error_check(
                 db,
                 target=target,
+                check_id=check_id,
                 key=key,
                 trigger_kind=trigger_kind,
                 checked_at=at,
@@ -606,6 +625,7 @@ def check_official_style_update(
             else "style_review_required"
         )
         check = ReferenceStyleUpdateCheck(
+            id=check_id,
             provider_key=target.provider_key,
             layer_id=target.layer_id,
             source_id=target.source_id,
@@ -642,23 +662,16 @@ def check_official_style_update(
         db.rollback()
         # Validation failures discovered only while resolving a 304 must still
         # become durable evidence.  Reacquire the same transaction lock.
-        db.scalar(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": _style_watcher_lock_key(target)},
-        )
+        _acquire_style_persistence_lock(db, target)
         duplicate = _check_by_key(db, target, key)
         if duplicate is not None:
             outcome = _outcome_from_check("duplicate", duplicate)
             db.commit()
             return outcome
-        latest = _latest_check(db, target)
-        if not force and latest is not None and latest.next_check_at > at:
-            outcome = _outcome_from_check("not_due", latest)
-            db.commit()
-            return outcome
         check = _record_error_check(
             db,
             target=target,
+            check_id=check_id,
             key=key,
             trigger_kind=trigger_kind,
             checked_at=at,
@@ -982,6 +995,13 @@ def plan_style_update_review(
         db.scalar(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": _style_watcher_lock_key(target)},
+        )
+        db.scalar(
+            text(
+                "SELECT set_config("
+                "'lock_timeout', '0', true"
+                ")"
+            )
         )
         current_source = db.scalar(query.with_for_update())
         current_target = (
@@ -1507,6 +1527,7 @@ def _record_error_check(
     db: Session,
     *,
     target: StyleWatchTarget,
+    check_id: int,
     key: str,
     trigger_kind: str,
     checked_at: datetime,
@@ -1521,6 +1542,7 @@ def _record_error_check(
     code = str(getattr(error, "code", "style_check_error"))[:64]
     message = str(error).strip()[:4096] or "official style check failed"
     check = ReferenceStyleUpdateCheck(
+        id=check_id,
         provider_key=target.provider_key,
         layer_id=target.layer_id,
         source_id=target.source_id,
@@ -1573,10 +1595,7 @@ def _latest_check(
             == target.source_definition_sha256,
             ReferenceStyleUpdateCheck.source_url == target.official_url,
         )
-        .order_by(
-            ReferenceStyleUpdateCheck.checked_at.desc(),
-            ReferenceStyleUpdateCheck.id.desc(),
-        )
+        .order_by(ReferenceStyleUpdateCheck.id.desc())
         .limit(1)
     )
 
@@ -1594,10 +1613,7 @@ def _latest_successful_check(
             ReferenceStyleUpdateCheck.source_url == target.official_url,
             ReferenceStyleUpdateCheck.status.in_(_SUCCESS_STATUSES),
         )
-        .order_by(
-            ReferenceStyleUpdateCheck.checked_at.desc(),
-            ReferenceStyleUpdateCheck.id.desc(),
-        )
+        .order_by(ReferenceStyleUpdateCheck.id.desc())
         .limit(1)
     )
 
@@ -1606,7 +1622,7 @@ def _latest_conclusive_check(
     db: Session,
     target: StyleWatchTarget,
 ) -> ReferenceStyleUpdateCheck | None:
-    """Ignore transient failures but preserve any conclusive raw change."""
+    """Use response order; a 304 inherits state and cannot clear a raw change."""
 
     return db.scalar(
         select(ReferenceStyleUpdateCheck)
@@ -1621,7 +1637,12 @@ def _latest_conclusive_check(
             ReferenceStyleUpdateCheck.baseline_semantic_sha256
             == target.baseline_semantic_sha256,
             or_(
-                ReferenceStyleUpdateCheck.status.in_(_SUCCESS_STATUSES),
+                and_(
+                    ReferenceStyleUpdateCheck.status.in_(
+                        _SUCCESS_STATUSES
+                    ),
+                    ReferenceStyleUpdateCheck.http_status == 200,
+                ),
                 and_(
                     ReferenceStyleUpdateCheck.status == "error",
                     ReferenceStyleUpdateCheck.http_status == 200,
@@ -1637,10 +1658,7 @@ def _latest_conclusive_check(
                 ),
             ),
         )
-        .order_by(
-            ReferenceStyleUpdateCheck.checked_at.desc(),
-            ReferenceStyleUpdateCheck.id.desc(),
-        )
+        .order_by(ReferenceStyleUpdateCheck.id.desc())
         .limit(1)
     )
 
@@ -1702,6 +1720,167 @@ def _style_watcher_lock_key(target: StyleWatchTarget) -> int:
         _STYLE_WATCHER_LOCK_DOMAIN + identity.encode("utf-8")
     ).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _reserve_style_check_id(db: Session) -> int:
+    """Reserve response order before waiting on persistence serialization."""
+
+    value = db.scalar(
+        text(
+            "SELECT nextval("
+            "pg_get_serial_sequence("
+            "'reference_style_update_checks', 'id'"
+            ")"
+            ")"
+        )
+    )
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        db.rollback()
+        raise RuntimeError("official style check sequence is unavailable")
+    return value
+
+
+def _acquire_style_persistence_lock(
+    db: Session,
+    target: StyleWatchTarget,
+) -> None:
+    """Wait a bounded time so downloaded evidence is not silently dropped."""
+
+    try:
+        db.scalar(
+            text(
+                "SELECT set_config("
+                "'lock_timeout', :lock_timeout, true"
+                ")"
+            ),
+            {
+                "lock_timeout": (
+                    f"{_STYLE_PERSISTENCE_LOCK_TIMEOUT_MS}ms"
+                )
+            },
+        )
+        db.scalar(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _style_watcher_lock_key(target)},
+        )
+    except DBAPIError as error:
+        db.rollback()
+        if getattr(error.orig, "sqlstate", None) == "55P03":
+            raise OfficialStyleWatcherError(
+                "official style evidence persistence lock timed out",
+                code="style_persistence_lock_timeout",
+                retryable=True,
+            ) from error
+        raise
+
+
+def _is_changed_200_response(
+    target: StyleWatchTarget,
+    response: _ResponseEvidence | None,
+) -> bool:
+    return bool(
+        response is not None
+        and response.http_status == 200
+        and response.not_modified is False
+        and response.final_url == target.official_url
+        and response.size_bytes > 0
+        and response.raw_sha256 is not None
+        and response.raw_sha256 != target.baseline_raw_sha256
+    )
+
+
+def _record_contended_changed_response(
+    db: Session,
+    *,
+    target: StyleWatchTarget,
+    check_id: int,
+    original_key: str,
+    trigger_kind: str,
+    checked_at: datetime,
+    retry_at: datetime,
+    duration_ms: int,
+    request_etag: str | None,
+    request_last_modified: str | None,
+    response: _ResponseEvidence,
+    binding: _AuthorizationBinding | None,
+    error: OfficialStyleWatcherError,
+) -> StyleUpdateCheckOutcome:
+    """Persist a fail-closed retry marker when serialization times out."""
+
+    digest = hashlib.sha256(
+        _STYLE_WATCHER_LOCK_DOMAIN
+        + b"persistence-contention\0"
+        + original_key.encode("utf-8")
+        + b"\0"
+        + cast(str, response.raw_sha256).encode("ascii")
+    ).hexdigest()
+    key = f"contention:{digest}"
+    existing = _check_by_key(db, target, key)
+    if existing is not None:
+        outcome = _outcome_from_check("duplicate", existing)
+        db.commit()
+        return outcome
+    try:
+        check = _record_error_check(
+            db,
+            target=target,
+            check_id=check_id,
+            key=key,
+            trigger_kind=trigger_kind,
+            checked_at=checked_at,
+            next_check_at=retry_at,
+            duration_ms=duration_ms,
+            request_etag=request_etag,
+            request_last_modified=request_last_modified,
+            response=response,
+            binding=binding,
+            error=error,
+        )
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = _check_by_key(db, target, key)
+        if existing is None:
+            raise
+        outcome = _outcome_from_check("duplicate", existing)
+        db.commit()
+        return outcome
+    return _outcome_from_check("recorded", check)
+
+
+def _concurrent_response_key(
+    original_key: str,
+    *,
+    duplicate: ReferenceStyleUpdateCheck,
+    response: _ResponseEvidence | None,
+    failure: BaseException | None,
+) -> str | None:
+    """Retain a distinct concurrent HTTP 200 despite a key collision."""
+
+    if (
+        response is None
+        or response.http_status != 200
+        or response.not_modified
+        or response.raw_sha256 is None
+    ):
+        return None
+    same_response = (
+        duplicate.http_status == 200
+        and duplicate.not_modified is False
+        and duplicate.response_raw_sha256 == response.raw_sha256
+    )
+    if same_response and not (
+        duplicate.status == "error" and failure is None
+    ):
+        return None
+    digest = hashlib.sha256(
+        _STYLE_WATCHER_LOCK_DOMAIN
+        + b"concurrent-idempotency\0"
+        + original_key.encode("utf-8")
+        + b"\0"
+        + response.raw_sha256.encode("ascii")
+    ).hexdigest()
+    return f"concurrent:{digest}"
 
 
 def _validated_interval(value: int) -> timedelta:

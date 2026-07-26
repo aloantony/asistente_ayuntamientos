@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 from importlib.resources import files
 import json
 from pathlib import Path
+from threading import Barrier, Event
+from time import monotonic
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
 
 import app.reference_layers.style_update_admin as style_update_admin
+import app.reference_layers.style_update_watcher as style_update_watcher
 from app.reference_layers.blob_store import (
     ReferenceBlobStore,
     ReferenceBlobStoreError,
@@ -184,6 +190,23 @@ def _seed_source(
             permission_overrides=permission_overrides,
         )
     return source
+
+
+@pytest.fixture
+def committed_style_source(engine):
+    """Seed rows visible to independent sessions used by race tests."""
+
+    provider_key = f"style-watch-race-{uuid4().hex[:12]}"
+    with Session(engine, expire_on_commit=False) as setup:
+        source = _seed_source(setup, provider_key=provider_key)
+        source_id = source.id
+    yield source_id
+    with Session(engine) as cleanup:
+        source = cleanup.get(ReferenceLayerSource, source_id)
+        if source is not None:
+            source.enabled = False
+            source.is_primary = False
+            cleanup.commit()
 
 
 def _source_origins(source: ReferenceLayerSource) -> set[str]:
@@ -1267,3 +1290,375 @@ def test_observation_check_and_review_rows_are_immutable(
             )
             db.commit()
         db.rollback()
+
+
+def test_changed_200_waits_for_304_persistence_and_remains_conclusive(
+    engine,
+    committed_style_source: int,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_id = committed_style_source
+    store = ReferenceBlobStore(tmp_path / "304-before-changed-200")
+    baseline = _baseline_body()
+    changed = _changed_body()
+    with Session(engine, expire_on_commit=False) as setup:
+        source = setup.get(ReferenceLayerSource, source_id)
+        target = style_watch_target_for_source(source)
+        baseline_outcome = check_official_style_update(
+            setup,
+            source_id=source_id,
+            store=store,
+            checked_at=NOW,
+            downloader=FakeDownloader(
+                body=baseline,
+                result=_result(target.official_url, baseline),
+            ),
+        )
+        assert baseline_outcome.status == "unchanged"
+
+    stale_downloaded = Event()
+    stale_holds_lock = Event()
+    release_stale = Event()
+    stale_session: list[Session] = []
+    original_validator = (
+        style_update_watcher._current_conditional_validator
+    )
+
+    def pause_stale_check_while_it_holds_the_lock(db, target):
+        validator = original_validator(db, target)
+        if (
+            stale_session
+            and db is stale_session[0]
+            and stale_downloaded.is_set()
+            and not stale_holds_lock.is_set()
+        ):
+            stale_holds_lock.set()
+            assert release_stale.wait(timeout=5)
+        return validator
+
+    monkeypatch.setattr(
+        style_update_watcher,
+        "_current_conditional_validator",
+        pause_stale_check_while_it_holds_the_lock,
+    )
+
+    class SignalingDownloader(FakeDownloader):
+        def __init__(self, signal: Event, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.signal = signal
+
+        def download(self, *args, **kwargs):
+            result = super().download(*args, **kwargs)
+            self.signal.set()
+            return result
+
+    def run_stale_304():
+        with Session(engine, expire_on_commit=False) as worker:
+            stale_session.append(worker)
+            return check_official_style_update(
+                worker,
+                source_id=source_id,
+                store=store,
+                checked_at=NOW + timedelta(days=2),
+                downloader=SignalingDownloader(
+                    stale_downloaded,
+                    result=_not_modified(target.official_url),
+                ),
+            )
+
+    def run_changed_200():
+        with engine.connect() as connection:
+            def before_cursor_execute(
+                conn,
+                cursor,
+                statement,
+                parameters,
+                context,
+                executemany,
+            ) -> None:
+                del conn, cursor, parameters, context, executemany
+                if (
+                    "pg_advisory_xact_lock" in statement
+                    and "pg_try_advisory_xact_lock" not in statement
+                ):
+                    release_stale.set()
+
+            def after_cursor_execute(
+                conn,
+                cursor,
+                statement,
+                parameters,
+                context,
+                executemany,
+            ) -> None:
+                del conn, cursor, parameters, context, executemany
+                if "pg_try_advisory_xact_lock" in statement:
+                    release_stale.set()
+
+            event.listen(
+                connection,
+                "before_cursor_execute",
+                before_cursor_execute,
+            )
+            event.listen(
+                connection,
+                "after_cursor_execute",
+                after_cursor_execute,
+            )
+            try:
+                with Session(
+                    bind=connection,
+                    expire_on_commit=False,
+                ) as worker:
+                    return check_official_style_update(
+                        worker,
+                        source_id=source_id,
+                        store=store,
+                        checked_at=NOW + timedelta(days=1),
+                        downloader=FakeDownloader(
+                            body=changed,
+                            result=_result(
+                                target.official_url,
+                                changed,
+                            ),
+                        ),
+                    )
+            finally:
+                event.remove(
+                    connection,
+                    "before_cursor_execute",
+                    before_cursor_execute,
+                )
+                event.remove(
+                    connection,
+                    "after_cursor_execute",
+                    after_cursor_execute,
+                )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stale_future = pool.submit(run_stale_304)
+            assert stale_holds_lock.wait(timeout=5)
+            changed_future = pool.submit(run_changed_200)
+            stale = stale_future.result(timeout=5)
+            changed_outcome = changed_future.result(timeout=5)
+
+        assert stale.status == "unchanged"
+        assert changed_outcome.disposition == "recorded"
+        assert changed_outcome.status == "style_review_required"
+        with Session(engine) as verification:
+            source = verification.get(ReferenceLayerSource, source_id)
+            stale_check = verification.get(
+                ReferenceStyleUpdateCheck,
+                stale.check_id,
+            )
+            changed_check = verification.get(
+                ReferenceStyleUpdateCheck,
+                changed_outcome.check_id,
+            )
+            assert changed_check.id > stale_check.id
+            assert changed_check.checked_at < stale_check.checked_at
+            with pytest.raises(OfficialStyleReviewRequiredError):
+                require_official_style_promotion_allowed(
+                    verification,
+                    source=source,
+                    store=store,
+                )
+    finally:
+        release_stale.set()
+        store.close()
+
+
+def test_concurrent_200_idempotency_preserves_distinct_evidence(
+    engine,
+    committed_style_source: int,
+    tmp_path: Path,
+) -> None:
+    source_id = committed_style_source
+    store = ReferenceBlobStore(tmp_path / "concurrent-200-idempotency")
+    baseline = _baseline_body()
+    changed = _changed_body()
+    with Session(engine) as setup:
+        source = setup.get(ReferenceLayerSource, source_id)
+        target = style_watch_target_for_source(source)
+
+    def run_pair(
+        *,
+        key: str,
+        checked_at: datetime,
+        bodies: tuple[bytes, bytes],
+    ):
+        barrier = Barrier(2)
+
+        class BarrierDownloader(FakeDownloader):
+            def download(self, *args, **kwargs):
+                result = super().download(*args, **kwargs)
+                barrier.wait(timeout=5)
+                return result
+
+        def run(body: bytes):
+            with Session(engine, expire_on_commit=False) as worker:
+                return check_official_style_update(
+                    worker,
+                    source_id=source_id,
+                    store=store,
+                    checked_at=checked_at,
+                    idempotency_key=key,
+                    trigger_kind="manual",
+                    force=True,
+                    downloader=BarrierDownloader(
+                        body=body,
+                        result=_result(target.official_url, body),
+                    ),
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            return tuple(pool.map(run, bodies))
+
+    try:
+        identical_at = NOW + timedelta(days=5)
+        identical = run_pair(
+            key="manual:concurrent-identical-200",
+            checked_at=identical_at,
+            bodies=(baseline, baseline),
+        )
+        assert {item.disposition for item in identical} == {
+            "recorded",
+            "duplicate",
+        }
+        assert identical[0].check_id == identical[1].check_id
+
+        distinct_at = NOW + timedelta(days=6)
+        distinct = run_pair(
+            key="manual:concurrent-distinct-200",
+            checked_at=distinct_at,
+            bodies=(baseline, changed),
+        )
+        assert all(item.disposition == "recorded" for item in distinct)
+        assert distinct[0].check_id != distinct[1].check_id
+
+        unused = FakeDownloader(
+            error=AssertionError("idempotent replay must not use the network")
+        )
+        with Session(engine, expire_on_commit=False) as replay_session:
+            replay = check_official_style_update(
+                replay_session,
+                source_id=source_id,
+                store=store,
+                checked_at=distinct_at,
+                idempotency_key="manual:concurrent-distinct-200",
+                trigger_kind="manual",
+                force=True,
+                downloader=unused,
+            )
+        assert replay.disposition == "duplicate"
+        assert unused.calls == []
+
+        with Session(engine) as verification:
+            identical_checks = tuple(
+                verification.scalars(
+                    select(ReferenceStyleUpdateCheck).where(
+                        ReferenceStyleUpdateCheck.source_id == source_id,
+                        ReferenceStyleUpdateCheck.checked_at == identical_at,
+                    )
+                )
+            )
+            distinct_checks = tuple(
+                verification.scalars(
+                    select(ReferenceStyleUpdateCheck).where(
+                        ReferenceStyleUpdateCheck.source_id == source_id,
+                        ReferenceStyleUpdateCheck.checked_at == distinct_at,
+                    )
+                )
+            )
+            assert len(identical_checks) == 1
+            assert len(distinct_checks) == 2
+            assert {
+                check.response_raw_sha256 for check in distinct_checks
+            } == {
+                hashlib.sha256(baseline).hexdigest(),
+                hashlib.sha256(changed).hexdigest(),
+            }
+            distinct_keys = {
+                check.idempotency_key for check in distinct_checks
+            }
+            assert "manual:concurrent-distinct-200" in distinct_keys
+            assert len(distinct_keys) == 2
+            assert any(
+                key.startswith("concurrent:") for key in distinct_keys
+            )
+    finally:
+        store.close()
+
+
+def test_changed_200_lock_timeout_persists_fail_closed_retry_evidence(
+    engine,
+    committed_style_source: int,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_id = committed_style_source
+    store = ReferenceBlobStore(tmp_path / "changed-200-lock-timeout")
+    changed = _changed_body()
+    with Session(engine) as setup:
+        source = setup.get(ReferenceLayerSource, source_id)
+        target = style_watch_target_for_source(source)
+
+    monkeypatch.setattr(
+        style_update_watcher,
+        "_STYLE_PERSISTENCE_LOCK_TIMEOUT_MS",
+        50,
+    )
+    holder = engine.connect()
+    holder_transaction = holder.begin()
+    holder.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {
+            "lock_key": style_update_watcher._style_watcher_lock_key(
+                target
+            )
+        },
+    )
+    checked_at = NOW + timedelta(days=7)
+    started = monotonic()
+    try:
+        with Session(engine, expire_on_commit=False) as contender:
+            outcome = check_official_style_update(
+                contender,
+                source_id=source_id,
+                store=store,
+                checked_at=checked_at,
+                idempotency_key="manual:changed-lock-timeout",
+                trigger_kind="manual",
+                force=True,
+                downloader=FakeDownloader(
+                    body=changed,
+                    result=_result(target.official_url, changed),
+                ),
+            )
+    finally:
+        holder_transaction.rollback()
+        holder.close()
+        store.close()
+
+    assert monotonic() - started < 2
+    assert outcome.disposition == "recorded"
+    assert outcome.status == "error"
+    with Session(engine) as verification:
+        check = verification.get(
+            ReferenceStyleUpdateCheck,
+            outcome.check_id,
+        )
+        source = verification.get(ReferenceLayerSource, source_id)
+        assert check.error_code == "style_persistence_lock_timeout"
+        assert check.error_retryable is True
+        assert check.idempotency_key.startswith("contention:")
+        assert check.response_raw_sha256 == hashlib.sha256(changed).hexdigest()
+        assert check.next_check_at == checked_at + timedelta(minutes=5)
+        with pytest.raises(OfficialStyleReviewRequiredError):
+            require_official_style_promotion_allowed(
+                verification,
+                source=source,
+                store=None,
+            )
