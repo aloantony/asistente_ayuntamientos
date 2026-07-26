@@ -166,9 +166,9 @@ disponible”, “sincronizando”, “sirviendo versión anterior” y “bloqu
 confundir un error de actualización con la indisponibilidad del mapa vigente.
 
 La recuperación documentada parte de PostgreSQL, los artefactos y el directorio
-de GeoServer. GeoServer puede reconstruirse a partir de las publicaciones
-versionadas; GeoWebCache y Redis son reconstruibles. Una copia de seguridad que
-solo incluya PostgreSQL no es suficiente.
+de GeoServer. Este último incluye toda la configuración persistente de
+GeoWebCache; únicamente su volumen separado de teselas es reconstruible, igual
+que Redis. Una copia de seguridad que solo incluya PostgreSQL no es suficiente.
 
 ## Prueba integral de independencia
 

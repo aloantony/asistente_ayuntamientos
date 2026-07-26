@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
-from typing import Sequence
+from typing import Protocol, Sequence
 
 from app.core.config import Settings, settings
 from app.reference_layers.geoserver_admin import (
@@ -30,6 +30,12 @@ class GeoWebCacheQuotaSafetyError(ValueError):
     """The requested quota cannot be proven safe for the mounted cache."""
 
 
+class _DiskUsage(Protocol):
+    total: int
+    used: int
+    free: int
+
+
 @dataclass(frozen=True)
 class GeoWebCacheCapacity:
     cache_path: str
@@ -38,9 +44,51 @@ class GeoWebCacheCapacity:
     filesystem_free_bytes: int
     configured_quota_bytes: int
     required_free_reserve_bytes: int
+    current_cache_bytes: int
+    current_cache_files: int
+    current_cache_directories: int
+    remaining_quota_growth_bytes: int
+    required_free_now_bytes: int
     capacity_margin_bytes: int
     current_free_margin_bytes: int
+    growth_reserve_margin_bytes: int
     safe_to_apply: bool
+
+
+@dataclass(frozen=True)
+class _CacheEntry:
+    path: str
+    kind: str
+    size_bytes: int
+    allocated_bytes: int
+    device: int
+    inode: int
+    mode: int
+    mtime_ns: int
+    ctime_ns: int
+    links: int
+
+
+@dataclass(frozen=True)
+class _CacheInventory:
+    entries: tuple[_CacheEntry, ...]
+
+    @property
+    def file_count(self) -> int:
+        return sum(item.kind == "file" for item in self.entries)
+
+    @property
+    def directory_count(self) -> int:
+        return sum(
+            item.kind == "directory" and item.path != "."
+            for item in self.entries
+        )
+
+    @property
+    def logical_bytes(self) -> int:
+        return sum(
+            item.size_bytes for item in self.entries if item.kind == "file"
+        )
 
 
 def cache_capacity_report(
@@ -54,9 +102,13 @@ def cache_capacity_report(
     path = _existing_absolute_directory(cache_path)
     quota_bytes = _gib(quota_gib, minimum=1, label="quota")
     reserve_bytes = _gib(min_free_gib, minimum=0, label="free reserve")
-    usage = shutil.disk_usage(path)
+    inventory = _stable_cache_inventory(path)
+    usage = _safe_disk_usage(path)
     capacity_margin = usage.total - quota_bytes - reserve_bytes
     current_free_margin = usage.free - reserve_bytes
+    remaining_growth = max(quota_bytes - inventory.logical_bytes, 0)
+    required_free_now = reserve_bytes + remaining_growth
+    growth_reserve_margin = usage.free - required_free_now
     return GeoWebCacheCapacity(
         cache_path=str(path),
         filesystem_total_bytes=usage.total,
@@ -64,9 +116,19 @@ def cache_capacity_report(
         filesystem_free_bytes=usage.free,
         configured_quota_bytes=quota_bytes,
         required_free_reserve_bytes=reserve_bytes,
+        current_cache_bytes=inventory.logical_bytes,
+        current_cache_files=inventory.file_count,
+        current_cache_directories=inventory.directory_count,
+        remaining_quota_growth_bytes=remaining_growth,
+        required_free_now_bytes=required_free_now,
         capacity_margin_bytes=capacity_margin,
         current_free_margin_bytes=current_free_margin,
-        safe_to_apply=capacity_margin >= 0 and current_free_margin >= 0,
+        growth_reserve_margin_bytes=growth_reserve_margin,
+        safe_to_apply=(
+            capacity_margin >= 0
+            and current_free_margin >= 0
+            and growth_reserve_margin >= 0
+        ),
     )
 
 
@@ -80,9 +142,10 @@ def quota_status(
     """Return current/desired quota state and optionally apply it.
 
     Capacity is checked before any REST mutation.  Apply is accepted only when
-    both the static quota-plus-reserve and current free-space margins are
-    non-negative.  ``configure_geowebcache_disk_quota`` then performs PUT +
-    GET and rejects a server that does not persist the exact requested values.
+    the filesystem can reserve both the operator free-space floor and every
+    byte by which the measured cache can still grow before reaching its
+    quota. ``configure_geowebcache_disk_quota`` then performs PUT + GET and
+    rejects a server that does not persist the exact requested values.
     """
 
     capacity = cache_capacity_report(
@@ -114,8 +177,8 @@ def quota_status(
         }
     if not capacity.safe_to_apply:
         raise GeoWebCacheQuotaSafetyError(
-            "GeoWebCache quota cannot be applied: capacity or free-space "
-            "reserve is insufficient"
+            "GeoWebCache quota cannot be applied: capacity cannot reserve "
+            "the cache's remaining growth plus the free-space floor"
         )
     after = admin.configure_geowebcache_disk_quota(
         quota_gib=configured.geowebcache_disk_quota_gib,
@@ -186,8 +249,237 @@ def _gib(value: int, *, minimum: int, label: str) -> int:
     return value * GIB
 
 
+def _stable_cache_inventory(path: Path) -> _CacheInventory:
+    """Measure cache bytes twice and reject ambiguous filesystem entries."""
+
+    first = _cache_inventory(path)
+    second = _cache_inventory(path)
+    if first != second:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache cache changed while capacity was measured"
+        )
+    return first
+
+
+def _cache_inventory(path: Path) -> _CacheInventory:
+    entries: list[_CacheEntry] = []
+    directory_flags = os.O_RDONLY
+    file_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+        file_flags |= os.O_NOFOLLOW
+
+    def record(metadata: os.stat_result, *, relative: str, kind: str) -> None:
+        permissions = stat.S_IMODE(metadata.st_mode)
+        if permissions & ~0o777:
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache cache contains special permission bits"
+            )
+        allocated = metadata.st_blocks * 512
+        if allocated < 0:
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache cache allocation cannot be measured"
+            )
+        if kind == "file":
+            if metadata.st_nlink != 1:
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache cannot contain hard-linked files"
+                )
+            # Sparse files could consume future filesystem blocks without
+            # increasing the quota-accounted logical size, so they make the
+            # remaining-growth calculation unsafe.
+            if allocated < metadata.st_size:
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache cannot contain sparse files"
+                )
+        entries.append(
+            _CacheEntry(
+                path=relative,
+                kind=kind,
+                size_bytes=metadata.st_size if kind == "file" else 0,
+                allocated_bytes=allocated,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+                mode=permissions,
+                mtime_ns=metadata.st_mtime_ns,
+                ctime_ns=metadata.st_ctime_ns,
+                links=metadata.st_nlink,
+            )
+        )
+
+    def visit(
+        directory_descriptor: int,
+        relative: str,
+        expected: os.stat_result,
+    ) -> None:
+        try:
+            before = os.fstat(directory_descriptor)
+            if (
+                not stat.S_ISDIR(before.st_mode)
+                or not _same_cache_identity(expected, before)
+            ):
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache changed during inventory"
+                )
+            with os.scandir(directory_descriptor) as iterator:
+                children = sorted(iterator, key=lambda item: item.name)
+        except OSError as error:
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache cache cannot be inventoried"
+            ) from error
+        for child in children:
+            child_relative = (
+                child.name if relative == "." else f"{relative}/{child.name}"
+            )
+            try:
+                metadata = child.stat(follow_symlinks=False)
+            except OSError as error:
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache changed during inventory"
+                ) from error
+            if stat.S_ISLNK(metadata.st_mode):
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache cannot contain symlinks"
+                )
+            if stat.S_ISDIR(metadata.st_mode):
+                try:
+                    child_descriptor = os.open(
+                        child.name,
+                        directory_flags,
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as error:
+                    raise GeoWebCacheQuotaSafetyError(
+                        "GeoWebCache cache changed during inventory"
+                    ) from error
+                try:
+                    opened = os.fstat(child_descriptor)
+                    if not _same_cache_identity(metadata, opened):
+                        raise GeoWebCacheQuotaSafetyError(
+                            "GeoWebCache cache changed during inventory"
+                        )
+                    record(
+                        opened,
+                        relative=child_relative,
+                        kind="directory",
+                    )
+                    visit(child_descriptor, child_relative, opened)
+                finally:
+                    os.close(child_descriptor)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache can contain only directories and "
+                    "regular files"
+                )
+            try:
+                child_descriptor = os.open(
+                    child.name,
+                    file_flags,
+                    dir_fd=directory_descriptor,
+                )
+            except OSError as error:
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache changed during inventory"
+                ) from error
+            try:
+                opened = os.fstat(child_descriptor)
+                if not _same_cache_identity(metadata, opened):
+                    raise GeoWebCacheQuotaSafetyError(
+                        "GeoWebCache cache changed during inventory"
+                    )
+                record(opened, relative=child_relative, kind="file")
+            finally:
+                os.close(child_descriptor)
+        after = os.fstat(directory_descriptor)
+        if not _same_cache_identity(before, after):
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache cache changed during inventory"
+            )
+
+    try:
+        root_descriptor = os.open(path, directory_flags)
+    except OSError as error:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache cache cannot be inspected"
+        ) from error
+    try:
+        root = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root.st_mode):
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache cache is not a directory"
+            )
+        record(root, relative=".", kind="directory")
+        visit(root_descriptor, ".", root)
+    except OSError as error:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache cache changed during inventory"
+        ) from error
+    finally:
+        os.close(root_descriptor)
+    return _CacheInventory(entries=tuple(entries))
+
+
+def _same_cache_identity(
+    expected: os.stat_result,
+    actual: os.stat_result,
+) -> bool:
+    return all(
+        getattr(expected, field) == getattr(actual, field)
+        for field in (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+            "st_blocks",
+        )
+    )
+
+
+def _safe_disk_usage(path: Path) -> _DiskUsage:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache filesystem cannot be measured safely"
+        ) from error
+    try:
+        before = os.fstat(descriptor)
+        usage = shutil.disk_usage(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(after.st_mode)
+            or not _same_cache_identity(before, after)
+        ):
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache filesystem changed during capacity measurement"
+            )
+        return usage
+    except OSError as error:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache filesystem cannot be measured safely"
+        ) from error
+    finally:
+        os.close(descriptor)
+
+
 def _existing_absolute_directory(path: Path) -> Path:
-    if not path.is_absolute() or path == Path("/"):
+    normalized = Path(os.path.normpath(path))
+    if (
+        not path.is_absolute()
+        or path == Path("/")
+        or normalized != path
+    ):
         raise GeoWebCacheQuotaSafetyError(
             "GeoWebCache cache path must be an explicit absolute directory"
         )
