@@ -19,6 +19,15 @@ aplicar y releer con el comando de este documento. Esta separación sigue la
 que distingue `GEOWEBCACHE_CACHE_DIR` de `gwc-layers/` y
 `gwc/geowebcache.xml`.
 
+Compose usa ahora el volumen de teselas versionado
+`geowebcache_tile_cache_v2` con `nocopy`. El antiguo `geowebcache_data` queda
+sin montar: no copiarlo ni renombrarlo automáticamente. Primero debe
+inspeccionarse fuera de línea, porque podría mezclar configuración persistente
+y teselas derivadas. Tanto el backup como el control de cuota fallan si ven
+configuración antigua dentro del volumen/mountpoint de teselas. La migración
+segura consiste en conservar la configuración canónica en `geoserver_data`,
+arrancar la caché v2 vacía y dejar que regenere únicamente teselas.
+
 La herramienta no ofrece ninguna operación de borrado al operador. `create` y
 `restore` son dry-run por defecto, nunca admiten un destino existente y dejan
 cualquier directorio `.partial-*` fallido para revisión forense. `restore` solo
@@ -26,18 +35,35 @@ acepta:
 
 - un directorio nuevo cuyo nombre empiece por `siur-drill-restore-`;
 - una base realmente vacía llamada `app_drill_*`: comprueba propietario,
-  sesiones, schemas, relaciones, funciones, tipos, extensiones y otros objetos;
+  identidad persistida, sesiones, schemas, relaciones, funciones, tipos,
+  extensiones, ACL, ajustes y etiquetas de seguridad;
+- un propietario dedicado no-superusuario, miembro de `pg_monitor`, con límite
+  de una conexión tanto en el rol como en la base; `plpgsql`, `postgis` y
+  `vector` deben estar preinstaladas por el administrador, pertenecerle y
+  coincidir exactamente en schema y versión con el backup;
 - PostgreSQL en `127.0.0.1`, en un puerto distinto del `5432` del runtime de
   desarrollo;
 - `pg_restore --single-transaction --exit-on-error`, sin `--clean`, `--create`,
-  `DROP DATABASE` ni sobrescritura.
+  comentarios, `DROP DATABASE` ni sobrescritura.
+
+El dump excluye formalmente `plpgsql`, `postgis` y `vector`: no intenta
+recrearlas ni copiar datos internos como `spatial_ref_sys`. El manifest
+conserva la identidad completa observada y las versiones requeridas. Si una
+versión exacta no está instalada y disponible en el servidor drill, la
+restauración falla antes de `pg_restore`; no actualiza ni degrada extensiones
+automáticamente. Al usar `--no-comments`, los objetos de aplicación se
+restauran sin metadatos `COMMENT`.
 
 Todos los pasos de filesystem y el `restore-report.json` se preparan antes de
 `pg_restore`. Si después del commit falla la publicación atómica, la herramienta
 ejecuta como compensación `DROP OWNED BY CURRENT_USER CASCADE` conectada
 únicamente a ese target `app_drill_*` aislado, repone el baseline estándar
-`public`/`plpgsql` y vuelve a demostrar que está vacío. Nunca elimina ni recrea
-la base.
+`public`, conserva las tres extensiones administrativas y vuelve a demostrar
+que está vacío. En la misma transacción, antes de `DROP OWNED`, comprueba nombre
+de base y usuario, `system_identifier`, OID, token drill y la identidad exacta
+de las extensiones. Una respuesta ambigua de `pg_restore` también se considera
+potencialmente mutante. Nunca elimina ni recrea la base ni ejecuta la
+compensación si cambia una identidad.
 
 La publicación final usa `renameat2(RENAME_NOREPLACE)`. Si el kernel o el
 filesystem del destino no ofrece esa garantía, la herramienta falla y conserva
@@ -92,18 +118,23 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops
 El informe distingue:
 
 - capacidad, uso y espacio libre del filesystem;
-- bytes actuales de caché medidos dos veces, rechazando cambios, symlinks,
-  hardlinks, ficheros sparse y tipos especiales;
+- bytes lógicos y bloques físicos asignados, medidos dos veces y sobre el mismo
+  `st_dev`, rechazando cambios, mounts anidados, symlinks, hardlinks, ficheros
+  sparse, configuración legacy y tipos especiales;
+- inodos usados/libres y una reserva conservadora para millones de teselas
+  pequeñas;
 - techo configurado y reserva mínima;
-- margen estático `capacidad - cuota - reserva`;
+- una ampliación física conservadora de al menos el 125 % del crecimiento
+  lógico restante;
 - margen libre actual `libre - reserva`;
-- crecimiento restante `max(cuota - caché actual, 0)` y el margen decisivo
-  `libre - reserva - crecimiento restante`;
+- crecimiento restante `max(cuota - caché actual, 0)` y los márgenes decisivos
+  de bloques físicos e inodos;
 - coincidencia exacta entre estado actual y deseado.
 
 Solo si todos los márgenes son no negativos se permite aplicar. Por ejemplo,
 con caché vacía, 6 GiB libres, cuota de 20 GiB y reserva de 5 GiB se rechaza:
-faltan 19 GiB para poder garantizar a la vez el crecimiento y la reserva.
+se reservan 25 GiB físicos para el crecimiento más 5 GiB libres, por lo que
+faltan 24 GiB, además de comprobar la reserva de inodos.
 
 ```bash
 docker compose --profile operations run --rm -T --no-deps gwc-ops \
@@ -162,11 +193,37 @@ no está sano. Registrar entonces un JSON reciente, por ejemplo
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "captured_at": "2026-07-26T12:00:00Z",
   "operator": "operador-identificado",
   "reference_artifacts_source": "/sources/reference_artifacts",
   "geoserver_data_source": "/sources/geoserver_data",
+  "postgres_database_name": "app",
+  "postgres_database_user": "app",
+  "postgres_hostname": "127.0.0.1",
+  "postgres_port": 5432,
+  "postgres_system_identifier": "7560000000000000000",
+  "postgres_database_oid": 16384,
+  "postgres_extensions": [
+    {
+      "name": "plpgsql",
+      "schema": "pg_catalog",
+      "version": "1.0",
+      "owner": "app"
+    },
+    {
+      "name": "postgis",
+      "schema": "public",
+      "version": "3.6.4",
+      "owner": "app"
+    },
+    {
+      "name": "vector",
+      "schema": "public",
+      "version": "0.8.2",
+      "owner": "app"
+    }
+  ],
   "stopped_services": [
     "backend",
     "geoserver",
@@ -178,10 +235,27 @@ no está sano. Registrar entonces un JSON reciente, por ejemplo
 }
 ```
 
+Obtener `postgres_system_identifier` y `postgres_database_oid` de la conexión
+exacta descrita por `source-db.url`, sin copiarlos de otro entorno:
+
+```sql
+SELECT system_identifier::text,
+       (SELECT oid FROM pg_database WHERE datname = current_database())
+FROM pg_control_system();
+
+SELECT e.extname, n.nspname, e.extversion,
+       pg_get_userbyid(e.extowner)
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+ORDER BY e.extname;
+```
+
 La evidencia es una afirmación del operador después de comprobar `ps`; la
-herramienta verifica esquema, paths exactos, lista completa, zona horaria y
-antigüedad máxima de una hora. No intenta controlar Docker desde el contenedor
-de backup.
+herramienta verifica esquema, paths y endpoint exactos, lista completa, zona
+horaria y antigüedad máxima de una hora. En `--apply` contrasta además nombre,
+usuario, `system_identifier`, OID y extensiones con PostgreSQL vivo antes del
+dump y vuelve a comprobar la misma identidad después. No intenta controlar
+Docker desde el contenedor de backup.
 
 ### 3. Aplicar y verificar antes de reabrir
 
@@ -202,15 +276,20 @@ docker compose --profile operations run --rm -T --no-deps \
 
 El proceso:
 
-1. inventaría y hashea todos los ficheros antes del dump;
-2. ejecuta `pg_dump` custom, serializable, sin owner ni privilegios;
+1. contrasta la identidad PostgreSQL viva con la evidencia e inventaría y
+   hashea todos los ficheros mediante descriptores abiertos, sin seguir
+   componentes sustituidos;
+2. ejecuta `pg_dump` custom, serializable, sin owner ni privilegios, excluyendo
+   las tres extensiones preinstaladas, y vuelve a comprobar toda la identidad
+   PostgreSQL al terminar;
 3. crea dos tar sin symlinks, devices ni rutas absolutas; UID/GID, permisos y
    tiempos se guardan en el manifest y no se confían a los campos del tar;
 4. vuelve a inventariar y aborta si cambió un byte o metadata;
 5. conserva los bytes exactos de `quiescence-evidence.json` dentro del backup
    y enlaza su tamaño/hash desde `manifest.json`, junto con hashes del dump,
    archives, inventario por fichero, ownership y exclusiones;
-6. hashea el manifest y renombra atómicamente el directorio parcial.
+6. hashea el manifest y publica el directorio parcial mediante
+   `renameat2(RENAME_NOREPLACE)` relativo al descriptor abierto del padre.
 
 Verificar bytes, miembros de tar y legibilidad del dump:
 
@@ -220,6 +299,12 @@ docker compose --profile operations run --rm -T --no-deps \
   siur-recovery verify \
   --backup /backups/siur-backup-20260726T120000Z
 ```
+
+El verificador conserva compatibilidad de lectura con backups schema 2 ya
+publicados, pero no los restaura automáticamente porque carecen del baseline de
+extensiones. Los backups nuevos son schema 3 y añaden identidad PostgreSQL,
+versiones requeridas de extensiones, `ctime` y número de enlaces al contrato
+verificable.
 
 Solo tras obtener `"verified": true`:
 
@@ -246,42 +331,118 @@ Nunca usar el puerto 5432 ni los volúmenes Compose del desarrollo.
    docker compose build postgres
    ```
 
-2. Arrancar un contenedor temporal en otro puerto y almacenamiento nuevo. Usar
-   `POSTGRES_PASSWORD_FILE` con un secreto montado, no una contraseña en argv:
+2. Arrancar un contenedor temporal en otro puerto y almacenamiento nuevo. El
+   usuario de bootstrap es solo el administrador del clúster; no se usará para
+   el restore. Usar `POSTGRES_PASSWORD_FILE`, no una contraseña en argv:
 
    ```bash
    docker run --rm -d \
      --name siur-drill-postgres-20260726 \
      -p 127.0.0.1:55432:5432 \
-     -e POSTGRES_DB=app_drill_20260726 \
-     -e POSTGRES_USER=app \
+     -e POSTGRES_DB=postgres \
+     -e POSTGRES_USER=drill_admin \
      -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password \
      -v /srv/siur-drill-db-20260726:/var/lib/postgresql/data \
-     -v /srv/siur-secrets/drill-password:/run/secrets/postgres-password:ro \
+     -v /srv/siur-secrets:/run/secrets:ro \
      asistente-ayuntamientos-postgres:17-postgis-pgvector
    ```
 
-3. Crear con modo `0600` `/srv/siur-secrets/drill-db.url`, apuntando únicamente
-   a:
+3. Preparar con modo `0600`
+   `/srv/siur-secrets/drill-bootstrap.sql`. Debe crear un propietario dedicado
+   no-superusuario. El token es un UUID nuevo, en minúsculas, que no se
+   reutiliza entre bases:
 
-   ```text
-   postgresql://app:CONTRASEÑA@127.0.0.1:55432/app_drill_20260726
+   ```sql
+   CREATE ROLE siur_drill_owner
+     LOGIN PASSWORD 'CONTRASEÑA-DISTINTA'
+     CONNECTION LIMIT 1
+     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+   GRANT pg_monitor TO siur_drill_owner;
+   CREATE DATABASE app_drill_20260726
+     WITH OWNER = siur_drill_owner CONNECTION LIMIT = 1;
+   REVOKE ALL ON DATABASE app_drill_20260726 FROM PUBLIC;
+   COMMENT ON DATABASE app_drill_20260726 IS
+     'siur-drill-v1:8b27db31-f75c-4f5b-b417-6ae42da7491a';
+   \connect app_drill_20260726 drill_admin
+   CREATE EXTENSION postgis VERSION '3.6.4';
+   CREATE EXTENSION vector VERSION '0.8.2';
    ```
 
-4. Ejecutar primero el dry-run. No conecta a la base target ni escribe:
+   Aplicarlo desde el contenedor temporal:
 
    ```bash
-   docker compose --profile operations run --rm -T --no-deps \
-     -v /srv/siur-backups:/backups:ro \
-     -v /srv/siur-drills:/drills \
-     -v /srv/siur-secrets:/run/siur-secrets:ro \
-     siur-recovery restore \
-     --backup /backups/siur-backup-20260726T120000Z \
-     --destination /drills/siur-drill-restore-20260726 \
-     --target-database-url-file /run/siur-secrets/drill-db.url
+   docker exec -i siur-drill-postgres-20260726 \
+     psql -X -v ON_ERROR_STOP=1 -U drill_admin -d postgres \
+     -f /run/secrets/drill-bootstrap.sql
    ```
 
-5. Repetir con `--apply`. El target debe seguir vacío:
+   Usar las versiones declaradas por `required_extensions` en el backup, no
+   copiar a ciegas las del ejemplo. Si la imagen no ofrece exactamente alguna
+   de ellas, detener el simulacro y reconciliar primero la imagen. Las tres
+   extensiones deben seguir perteneciendo a `drill_admin`; no cambiar su owner
+   al rol drill. Consultar después la identidad no secreta sobre la base
+   exacta:
+
+   ```sql
+   SELECT system_identifier::text,
+          (SELECT oid FROM pg_database
+           WHERE datname = current_database())
+   FROM pg_control_system();
+
+   SELECT e.extname, n.nspname, e.extversion,
+          pg_get_userbyid(e.extowner)
+   FROM pg_extension e
+   JOIN pg_namespace n ON n.oid = e.extnamespace
+   ORDER BY e.extname;
+   ```
+
+4. Crear con modo `0600` `/srv/siur-secrets/drill-db.url`, apuntando
+   únicamente a:
+
+   ```text
+   postgresql://siur_drill_owner:CONTRASEÑA-DISTINTA@127.0.0.1:55432/app_drill_20260726
+   ```
+
+   Crear también con modo `0600`
+   `/srv/siur-secrets/drill-identity.json`. Todos los campos son exactos; usar
+   el `system_identifier`, OID y extensiones recién consultados:
+
+   ```json
+   {
+     "schema_version": 2,
+     "database_name": "app_drill_20260726",
+     "database_user": "siur_drill_owner",
+     "system_identifier": "7560000000000000000",
+     "database_oid": 16392,
+     "drill_token": "8b27db31-f75c-4f5b-b417-6ae42da7491a",
+     "extensions": [
+       {
+         "name": "plpgsql",
+         "schema": "pg_catalog",
+         "version": "1.0",
+         "owner": "drill_admin"
+       },
+       {
+         "name": "postgis",
+         "schema": "public",
+         "version": "3.6.4",
+         "owner": "drill_admin"
+       },
+       {
+         "name": "vector",
+         "schema": "public",
+         "version": "0.8.2",
+         "owner": "drill_admin"
+       }
+     ]
+   }
+   ```
+
+   Este fichero y el comentario de la base son la atestación local de identidad
+   del target. No son permisos de licencia ni condiciones de uso de los datos.
+
+5. Ejecutar primero el dry-run. Verifica backup e identidad persistida, pero no
+   conecta a la base target ni escribe:
 
    ```bash
    docker compose --profile operations run --rm -T --no-deps \
@@ -292,10 +453,28 @@ Nunca usar el puerto 5432 ni los volúmenes Compose del desarrollo.
      --backup /backups/siur-backup-20260726T120000Z \
      --destination /drills/siur-drill-restore-20260726 \
      --target-database-url-file /run/siur-secrets/drill-db.url \
+     --target-database-identity-file \
+       /run/siur-secrets/drill-identity.json
+   ```
+
+6. Repetir con `--apply`. El target debe seguir vacío y sin ninguna otra
+   conexión:
+
+   ```bash
+   docker compose --profile operations run --rm -T --no-deps \
+     -v /srv/siur-backups:/backups:ro \
+     -v /srv/siur-drills:/drills \
+     -v /srv/siur-secrets:/run/siur-secrets:ro \
+     siur-recovery restore \
+     --backup /backups/siur-backup-20260726T120000Z \
+     --destination /drills/siur-drill-restore-20260726 \
+     --target-database-url-file /run/siur-secrets/drill-db.url \
+     --target-database-identity-file \
+       /run/siur-secrets/drill-identity.json \
      --apply
    ```
 
-6. Conservar `restore-report.json`, comprobar consultas de solo lectura en la
+7. Conservar `restore-report.json`, comprobar consultas de solo lectura en la
    base temporal y levantar, si se desea, otro GeoServer apuntando a
    `geoserver_data` y `reference_artifacts` restaurados. No montar esos paths
    sobre el runtime actual. El servicio operativo se ejecuta como

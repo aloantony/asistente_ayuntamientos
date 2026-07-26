@@ -129,7 +129,13 @@ services:
       - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
     volumes:
       - geoserver_data:/opt/geoserver_data
-      - geowebcache_data:/opt/geoserver_data/gwc-cache
+      # Versioned tile-only volume: never reuse the former mixed
+      # geowebcache_data volume that occupied this cache mountpoint.
+      - type: volume
+        source: geowebcache_tile_cache_v2
+        target: /opt/geoserver_data/gwc-cache
+        volume:
+          nocopy: true
       - reference_artifacts:/mnt/reference_artifacts:ro
     depends_on:
       postgres:
@@ -163,7 +169,12 @@ services:
         "/var/lib/geowebcache",
       ]
     volumes:
-      - geowebcache_data:/var/lib/geowebcache:ro
+      - type: volume
+        source: geowebcache_tile_cache_v2
+        target: /var/lib/geowebcache
+        read_only: true
+        volume:
+          nocopy: true
 
   siur-recovery:
     profiles: ["operations"]
@@ -184,4 +195,4 @@ volumes:
   document_storage:
   reference_artifacts:
   geoserver_data:
-  geowebcache_data:
+  geowebcache_tile_cache_v2:
