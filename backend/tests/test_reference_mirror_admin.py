@@ -28,8 +28,15 @@ from test_reference_mirror_lifecycle import (
 )
 
 
+@pytest.fixture
+def metadata_store(tmp_path):
+    with ReferenceBlobStore(tmp_path / "reference-data") as store:
+        yield store
+
+
 def test_operational_status_uses_explicit_local_mirror_authorization(
     db,
+    metadata_store,
 ) -> None:
     (
         layer,
@@ -37,7 +44,7 @@ def test_operational_status_uses_explicit_local_mirror_authorization(
         snapshot_v2,
         version_v1,
         version_v2,
-    ) = _promote_cross_snapshot_versions(db)
+    ) = _promote_cross_snapshot_versions(db, metadata_store)
     service = db.get(ReferenceService, layer.service_id)
     service.license_status = "pending"
     db.commit()
@@ -96,9 +103,10 @@ def test_operational_status_uses_explicit_local_mirror_authorization(
 def test_rollback_dry_run_is_generation_fenced_and_never_appends_event(
     db,
     make_user,
+    metadata_store,
 ) -> None:
     layer, _, _, version_v1, version_v2 = (
-        _promote_cross_snapshot_versions(db)
+        _promote_cross_snapshot_versions(db, metadata_store)
     )
     actor = make_user()
     before_count = db.scalar(
@@ -110,6 +118,7 @@ def test_rollback_dry_run_is_generation_fenced_and_never_appends_event(
 
     result = execute_transition(
         db,
+        store=metadata_store,
         action="rollback",
         provider_key=layer.provider_key,
         layer_id=layer.id,
@@ -148,13 +157,18 @@ def test_rollback_dry_run_is_generation_fenced_and_never_appends_event(
 def test_rollback_apply_records_active_actor_and_reason(
     db,
     make_user,
+    metadata_store,
 ) -> None:
-    layer, _, _, version_v1, _ = _promote_cross_snapshot_versions(db)
+    layer, _, _, version_v1, _ = _promote_cross_snapshot_versions(
+        db,
+        metadata_store,
+    )
     actor = make_user()
     reason = "restore the last validated renderer"
 
     result = execute_transition(
         db,
+        store=metadata_store,
         action="rollback",
         provider_key=layer.provider_key,
         layer_id=layer.id,
@@ -184,15 +198,17 @@ def test_rollback_apply_records_active_actor_and_reason(
 def test_transition_rejects_inactive_actor_before_lifecycle_mutation(
     db,
     make_user,
+    metadata_store,
 ) -> None:
     layer, _, _, version_v1, version_v2 = (
-        _promote_cross_snapshot_versions(db)
+        _promote_cross_snapshot_versions(db, metadata_store)
     )
     actor = make_user(is_active=False)
 
     with pytest.raises(MirrorAdminInputError, match="inactive"):
         execute_transition(
             db,
+            store=metadata_store,
             action="rollback",
             provider_key=layer.provider_key,
             layer_id=layer.id,
@@ -215,9 +231,10 @@ def test_transition_rejects_inactive_actor_before_lifecycle_mutation(
 def test_reactivation_dry_run_recovers_only_a_previously_served_version(
     db,
     make_user,
+    metadata_store,
 ) -> None:
     layer, _, _, version_v1, version_v2 = (
-        _promote_cross_snapshot_versions(db)
+        _promote_cross_snapshot_versions(db, metadata_store)
     )
     deactivate_delivery(
         db,
@@ -230,6 +247,7 @@ def test_reactivation_dry_run_recovers_only_a_previously_served_version(
 
     result = execute_transition(
         db,
+        store=metadata_store,
         action="reactivate",
         provider_key=layer.provider_key,
         layer_id=layer.id,
@@ -324,8 +342,14 @@ def test_staging_retention_setting_is_bounded(seconds) -> None:
         )
 
 
-def test_status_report_is_json_serializable(db) -> None:
-    layer, _, _, _, _ = _promote_cross_snapshot_versions(db)
+def test_status_report_is_json_serializable(
+    db,
+    metadata_store,
+) -> None:
+    layer, _, _, _, _ = _promote_cross_snapshot_versions(
+        db,
+        metadata_store,
+    )
     report = operational_status(
         db,
         provider_key=layer.provider_key,
