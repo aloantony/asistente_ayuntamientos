@@ -7,7 +7,7 @@ import hashlib
 from importlib.resources import files
 import json
 from pathlib import Path
-from threading import Barrier, Event
+from threading import Barrier, Event, Timer
 from time import monotonic
 from uuid import uuid4
 
@@ -1662,3 +1662,125 @@ def test_changed_200_lock_timeout_persists_fail_closed_retry_evidence(
                 source=source,
                 store=None,
             )
+
+
+def test_advisory_timeout_is_cleared_before_later_fk_lock(
+    engine,
+    committed_style_source: int,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_id = committed_style_source
+    store = ReferenceBlobStore(tmp_path / "post-advisory-fk-lock")
+    changed = _changed_body()
+    with Session(engine) as setup:
+        source = setup.get(ReferenceLayerSource, source_id)
+        target = style_watch_target_for_source(source)
+
+    monkeypatch.setattr(
+        style_update_watcher,
+        "_STYLE_PERSISTENCE_LOCK_TIMEOUT_MS",
+        50,
+    )
+    source_locked = Event()
+    release_source = Event()
+
+    def hold_source_row() -> None:
+        with engine.connect() as holder:
+            transaction = holder.begin()
+            holder.execute(
+                text(
+                    "SELECT id FROM reference_layer_sources "
+                    "WHERE id = :source_id FOR UPDATE"
+                ),
+                {"source_id": source_id},
+            )
+            source_locked.set()
+            assert release_source.wait(timeout=5)
+            transaction.commit()
+
+    release_timers: list[Timer] = []
+
+    def release_after_insert_starts(
+        conn,
+        cursor,
+        statement,
+        parameters,
+        context,
+        executemany,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        if (
+            "insert into reference_style_observed_versions"
+            in statement.lower()
+            and not release_timers
+        ):
+            timer = Timer(0.15, release_source.set)
+            release_timers.append(timer)
+            timer.start()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            holder_future = pool.submit(hold_source_row)
+            assert source_locked.wait(timeout=5)
+            with engine.connect() as connection:
+                event.listen(
+                    connection,
+                    "before_cursor_execute",
+                    release_after_insert_starts,
+                )
+                try:
+                    started = monotonic()
+                    with Session(
+                        bind=connection,
+                        expire_on_commit=False,
+                    ) as contender:
+                        outcome = check_official_style_update(
+                            contender,
+                            source_id=source_id,
+                            store=store,
+                            checked_at=NOW + timedelta(days=8),
+                            idempotency_key="manual:post-advisory-fk-lock",
+                            trigger_kind="manual",
+                            force=True,
+                            downloader=FakeDownloader(
+                                body=changed,
+                                result=_result(
+                                    target.official_url,
+                                    changed,
+                                ),
+                            ),
+                        )
+                    elapsed = monotonic() - started
+                finally:
+                    event.remove(
+                        connection,
+                        "before_cursor_execute",
+                        release_after_insert_starts,
+                    )
+            holder_future.result(timeout=5)
+
+        assert release_timers
+        assert elapsed >= 0.1
+        assert outcome.status == "style_review_required"
+        with Session(engine) as verification:
+            source = verification.get(ReferenceLayerSource, source_id)
+            check = verification.get(
+                ReferenceStyleUpdateCheck,
+                outcome.check_id,
+            )
+            assert check.error_code is None
+            assert check.response_raw_sha256 == hashlib.sha256(
+                changed
+            ).hexdigest()
+            with pytest.raises(OfficialStyleReviewRequiredError):
+                require_official_style_promotion_allowed(
+                    verification,
+                    source=source,
+                    store=store,
+                )
+    finally:
+        release_source.set()
+        for timer in release_timers:
+            timer.join(timeout=1)
+        store.close()
