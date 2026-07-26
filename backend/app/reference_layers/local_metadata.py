@@ -29,17 +29,22 @@ from app.reference_layers.blob_store import (
     ReferenceBlobStoreError,
 )
 from app.reference_layers.delivery_builder import (
-    LOCAL_METADATA_ASSET_KEY,
-    LOCAL_METADATA_ASSET_SCHEMA,
-    LOCAL_METADATA_DOCUMENT_SCHEMA,
     DeliveryBuildError,
+    LocalMetadataPrecommitContext,
+    LocalMetadataVerification,
     PreparedDelivery,
     PreparedDeliveryAsset,
     canonical_json_bytes,
     canonical_json_sha256,
+    require_complete_delivery_style_plan,
+)
+from app.reference_layers.local_metadata_contract import (
+    LOCAL_METADATA_ASSET_KEY,
+    LOCAL_METADATA_ASSET_SCHEMA,
+    LOCAL_METADATA_DOCUMENT_SCHEMA,
     local_metadata_asset_descriptor,
     local_metadata_binding,
-    require_complete_delivery_style_plan,
+    local_metadata_gate_matches,
 )
 from app.reference_layers.local_delivery import (
     LocalDeliveryError,
@@ -78,7 +83,11 @@ from app.reference_layers.wms_delivery import LayerDeliveryAvailability
 
 MAX_LOCAL_METADATA_BYTES = 4 * 1024 * 1024
 _FINAL_VALIDATION_ONLY_KEYS = frozenset(
-    {"continuity_gate", "style_parity_gate"}
+    {
+        "continuity_gate",
+        "style_parity_gate",
+        "local_metadata_gate",
+    }
 )
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -237,6 +246,108 @@ def attach_local_metadata_asset(
     return replace(
         prepared,
         assets=(*prepared.assets, metadata_asset),
+    )
+
+
+def verify_local_metadata_precommit(
+    store: ReferenceBlobStore,
+    context: LocalMetadataPrecommitContext,
+) -> LocalMetadataVerification:
+    """Rebuild and verify the exact CAS body inside version creation."""
+
+    service = context.db.scalar(
+        select(ReferenceService).where(
+            ReferenceService.id == context.layer.service_id,
+            ReferenceService.provider_key
+            == context.source.provider_key,
+            ReferenceService.last_seen_snapshot_id
+            == context.snapshot.id,
+        )
+    )
+    if service is None:
+        raise LocalMetadataError(
+            "local metadata service changed before version creation"
+        )
+    styles = tuple(
+        context.db.scalars(
+            select(ReferenceLayerStyle)
+            .where(
+                ReferenceLayerStyle.provider_key
+                == context.source.provider_key,
+                ReferenceLayerStyle.layer_id
+                == context.source.layer_id,
+            )
+            .order_by(
+                ReferenceLayerStyle.source_key,
+                ReferenceLayerStyle.id,
+            )
+        )
+    )
+    artifacts = {
+        artifact.id: artifact
+        for artifact in context.artifacts
+    }
+    expected_artifact_ids = {
+        artifact_id
+        for artifact_id, _role in context.artifact_links
+    }
+    if (
+        set(artifacts) != expected_artifact_ids
+        or any(
+            artifact.source_id != context.source.id
+            for artifact in artifacts.values()
+        )
+    ):
+        raise LocalMetadataError(
+            "local metadata provenance changed before version creation"
+        )
+    document = _assemble_document(
+        prepared=context.prepared,
+        source=context.source,
+        run=context.run,
+        layer=context.layer,
+        service=service,
+        snapshot=context.snapshot,
+        review=context.authorization,
+        plan=context.plan,
+        plan_items=context.plan_items,
+        styles=styles,
+        artifacts=artifacts,
+        artifact_links=context.artifact_links,
+    )
+    expected_body = canonical_json_bytes(document)
+    expected_sha256 = hashlib.sha256(expected_body).hexdigest()
+    candidates = [
+        asset
+        for asset in context.prepared.assets
+        if asset.asset_kind == "metadata"
+    ]
+    if len(candidates) != 1:
+        raise LocalMetadataError(
+            "prepared delivery has no unique metadata asset"
+        )
+    asset = candidates[0]
+    expected_descriptor = local_metadata_asset_descriptor(
+        document_sha256=expected_sha256,
+        document_size_bytes=len(expected_body),
+        binding=document["binding"],
+    )
+    if (
+        asset.sha256 != expected_sha256
+        or asset.size_bytes != len(expected_body)
+        or asset.metadata_json != expected_descriptor
+    ):
+        raise LocalMetadataError(
+            "prepared metadata does not match locked delivery rows"
+        )
+    body, parsed = _read_metadata_asset(store, asset)
+    if body != expected_body or parsed != document:
+        raise LocalMetadataError(
+            "prepared metadata blob does not match locked delivery rows"
+        )
+    return LocalMetadataVerification(
+        document_sha256=expected_sha256,
+        document_size_bytes=len(expected_body),
     )
 
 
@@ -412,14 +523,30 @@ def catalog_local_metadata_availability(
         )
     ):
         assets_by_version.setdefault(asset.version_id, []).append(asset)
-    expected_documents = _expected_documents_for_versions(
-        db,
-        versions=tuple(versions.values()),
-        assets_by_version={
-            version_id: tuple(assets)
-            for version_id, assets in assets_by_version.items()
-        },
-    )
+    run_ids = {version.sync_run_id for version in versions.values()}
+    runs = {
+        run.id: run
+        for run in db.scalars(
+            select(ReferenceSyncRun).where(
+                ReferenceSyncRun.id.in_(run_ids)
+            )
+        )
+    }
+    review_ids = {
+        version.mirror_authorization_review_id
+        for version in versions.values()
+        if version.mirror_authorization_review_id is not None
+    }
+    reviews = {
+        review.id: review
+        for review in db.scalars(
+            select(ReferenceMirrorAuthorizationReview).where(
+                ReferenceMirrorAuthorizationReview.id.in_(
+                    review_ids
+                )
+            )
+        )
+    }
     for state in states:
         if state.active_version_id is None:
             continue
@@ -439,22 +566,86 @@ def catalog_local_metadata_availability(
             or len(candidates) != 1
         ):
             continue
-        expected = expected_documents.get(version.id)
-        if expected is None:
-            continue
+        asset = candidates[0]
+        run = runs.get(version.sync_run_id)
+        review = reviews.get(
+            version.mirror_authorization_review_id
+        )
         try:
-            body, document = _read_metadata_asset(
-                store,
-                candidates[0],
+            validation_is_valid = (
+                canonical_json_sha256(version.validation_json)
+                == version.validation_sha256
             )
-            if (
-                body != canonical_json_bytes(expected)
-                or document != expected
-            ):
-                raise LocalMetadataError(
-                    "active metadata does not match its version"
-                )
-        except LocalMetadataError:
+            prepared_validation = _prepared_validation_from_version(
+                version
+            )
+            prepared_validation_sha256 = canonical_json_sha256(
+                prepared_validation
+            )
+        except (DeliveryBuildError, LocalMetadataError):
+            continue
+        if (
+            run is None
+            or review is None
+            or run.id != version.sync_run_id
+            or run.source_id != version.source_id
+            or run.source_definition_sha256
+            != review.source_definition_sha256
+            or review.id
+            != version.mirror_authorization_review_id
+            or review.review_sha256
+            != version.mirror_authorization_review_sha256
+            or review.provider_key != version.provider_key
+            or review.layer_id != version.layer_id
+            or review.source_id != version.source_id
+            or not stored_mirror_authorization_review_is_valid(
+                review
+            )
+            or not validation_is_valid
+        ):
+            continue
+        expected_binding = local_metadata_binding(
+            provider_key=version.provider_key,
+            layer_id=version.layer_id,
+            source_id=version.source_id,
+            sync_run_id=version.sync_run_id,
+            catalog_snapshot_id=version.catalog_snapshot_id,
+            catalog_definition_sha256=(
+                version.catalog_definition_sha256
+            ),
+            source_definition_sha256=(
+                run.source_definition_sha256
+            ),
+            authorization_review_id=review.id,
+            authorization_review_sha256=review.review_sha256,
+            authorization_document_sha256=(
+                review.document_sha256
+            ),
+            delivery_kind=version.delivery_kind,
+            content_sha256=version.content_sha256,
+            prepared_validation_sha256=(
+                prepared_validation_sha256
+            ),
+        )
+        expected_descriptor = local_metadata_asset_descriptor(
+            document_sha256=asset.sha256,
+            document_size_bytes=asset.size_bytes or 0,
+            binding=expected_binding,
+        )
+        if (
+            asset.metadata_json != expected_descriptor
+            or not local_metadata_gate_matches(
+                version.validation_json,
+                document_sha256=asset.sha256,
+                document_size_bytes=asset.size_bytes,
+                descriptor=asset.metadata_json,
+                binding=expected_binding,
+            )
+            or not _metadata_asset_exists_without_read(
+                store,
+                asset,
+            )
+        ):
             continue
         result[state.layer_id] = True
     return result
@@ -1473,29 +1664,9 @@ def _unique_metadata_asset(
 
 def _read_metadata_asset(
     store: ReferenceBlobStore,
-    asset: ReferenceDeliveryAsset,
+    asset: ReferenceDeliveryAsset | PreparedDeliveryAsset,
 ) -> tuple[bytes, dict[str, Any]]:
-    if (
-        asset.asset_key != LOCAL_METADATA_ASSET_KEY
-        or asset.asset_kind != "metadata"
-        or asset.is_primary
-        or asset.storage_backend != "filesystem"
-        or not isinstance(asset.sha256, str)
-        or len(asset.sha256) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in asset.sha256
-        )
-        or asset.storage_key
-        != (
-            f"blobs/sha256/{asset.sha256[:2]}/"
-            f"{asset.sha256}"
-        )
-        or asset.media_type != "application/json"
-        or not isinstance(asset.size_bytes, int)
-        or isinstance(asset.size_bytes, bool)
-        or not 1 <= asset.size_bytes <= MAX_LOCAL_METADATA_BYTES
-    ):
+    if not _metadata_asset_shape_is_valid(asset):
         raise LocalMetadataError("local metadata asset shape is invalid")
     try:
         with store.open_blob(asset.storage_key) as stream:
@@ -1530,24 +1701,63 @@ def _read_metadata_asset(
             "local metadata file failed integrity validation"
         )
     document = _parse_canonical_document(body)
-    descriptor_metadata = asset.metadata_json
-    if (
-        not isinstance(descriptor_metadata, dict)
-        or descriptor_metadata.get("schema_version")
-        != LOCAL_METADATA_ASSET_SCHEMA
-        or descriptor_metadata.get("document_schema_version")
-        != LOCAL_METADATA_DOCUMENT_SCHEMA
-        or descriptor_metadata.get("document_sha256")
-        != asset.sha256
-        or descriptor_metadata.get("document_size_bytes")
-        != asset.size_bytes
-        or descriptor_metadata.get("binding")
-        != document.get("binding")
-    ):
+    binding = document.get("binding")
+    expected_descriptor = (
+        local_metadata_asset_descriptor(
+            document_sha256=asset.sha256,
+            document_size_bytes=asset.size_bytes,
+            binding=binding,
+        )
+        if isinstance(binding, dict)
+        else None
+    )
+    if asset.metadata_json != expected_descriptor:
         raise LocalMetadataError(
             "local metadata manifest descriptor is invalid"
         )
     return body, document
+
+
+def _metadata_asset_shape_is_valid(
+    asset: ReferenceDeliveryAsset | PreparedDeliveryAsset,
+) -> bool:
+    return bool(
+        asset.asset_key == LOCAL_METADATA_ASSET_KEY
+        and asset.asset_kind == "metadata"
+        and not asset.is_primary
+        and asset.storage_backend == "filesystem"
+        and isinstance(asset.sha256, str)
+        and len(asset.sha256) == 64
+        and not any(
+            character not in "0123456789abcdef"
+            for character in asset.sha256
+        )
+        and asset.storage_key
+        == (
+            f"blobs/sha256/{asset.sha256[:2]}/"
+            f"{asset.sha256}"
+        )
+        and asset.media_type == "application/json"
+        and isinstance(asset.size_bytes, int)
+        and not isinstance(asset.size_bytes, bool)
+        and 1 <= asset.size_bytes <= MAX_LOCAL_METADATA_BYTES
+    )
+
+
+def _metadata_asset_exists_without_read(
+    store: ReferenceBlobStore,
+    asset: ReferenceDeliveryAsset,
+) -> bool:
+    if not _metadata_asset_shape_is_valid(asset):
+        return False
+    try:
+        metadata = store.resolve_blob(asset.storage_key).lstat()
+    except (OSError, ReferenceBlobStoreError):
+        return False
+    return bool(
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_size == asset.size_bytes
+    )
 
 
 def _parse_canonical_document(body: bytes) -> dict[str, Any]:
