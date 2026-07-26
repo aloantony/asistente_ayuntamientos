@@ -4,7 +4,9 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
+import struct
 from types import SimpleNamespace
+import zlib
 
 import pytest
 from sqlalchemy import select
@@ -37,12 +39,18 @@ from app.reference_layers.geoserver_admin import (
 from app.reference_layers.mirror_lifecycle import (
     SyncRunLease,
     claim_next_sync_run,
+    delivery_state_matches_promotion_head,
     enqueue_due_sources,
     enqueue_manual_sync_run,
+    stored_promotion_hash_is_valid,
 )
 from app.reference_layers.local_style_adaptation import (
     generate_reviewed_local_style,
     local_style_package_metadata,
+)
+from app.reference_layers.mirror_admin import (
+    execute_manual_enqueue,
+    execute_transition,
 )
 from app.reference_layers.mirror_authorization import MirrorAuthorizationError
 from app.reference_layers.mirror_orchestrator import (
@@ -71,6 +79,7 @@ from app.reference_layers.mirror_orchestrator import (
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
+    ReferenceDeliveryPromotion,
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
@@ -83,12 +92,37 @@ from app.reference_layers.source_discovery import (
     acquisition_candidates,
 )
 from app.reference_layers.source_probes import SourceProbe
-from app.reference_layers.tile_seed import TileSeedResult
+from app.reference_layers.tile_seed import (
+    TileSeedResult,
+    seed_tile_archive,
+)
 from support_reference_mirror_authorization import (
     ensure_authorized_mirror_source,
 )
 
 NOW = datetime.now(timezone.utc)
+
+
+def _deterministic_tile_png(red: int, green: int, blue: int) -> bytes:
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 256, 256, 8, 6, 0, 0, 0)
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(body))
+            + kind
+            + body
+            + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+        )
+
+    pixel = bytes((red, green, blue, 255))
+    rows = b"".join(b"\x00" + pixel * 256 for _ in range(256))
+    return (
+        signature
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _definition(provider_key: str = "orchestrator-test") -> ReferenceCatalogDefinition:
@@ -1445,6 +1479,299 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
         )
     )
     assert state.active_version_id == first.version_id
+
+
+def test_acceptance_tile_update_rejection_v2_and_audited_rollback(
+    db,
+    tmp_path,
+    make_user,
+) -> None:
+    """Exercise the fail-closed update lifecycle through production entrypoints."""
+
+    layer, [source] = _seed_source(db)
+    review = ensure_authorized_mirror_source(db, source, reviewed_at=NOW)
+    actor = make_user(full_name="SIUR acceptance operator")
+    labels = iter(("v1", "corrupt", "v2"))
+    bodies = {
+        "v1": _deterministic_tile_png(18, 52, 86),
+        "corrupt": b"\x89PNG\r\n\x1a\ntruncated",
+        "v2": _deterministic_tile_png(134, 78, 42),
+    }
+    store = ReferenceBlobStore(
+        Path(tmp_path, "acceptance-update-store"),
+        max_blob_bytes=8 * 1024 * 1024,
+    )
+
+    class DeterministicAcquisition:
+        def acquire(self, candidate, **kwargs):
+            del kwargs
+            label = next(labels)
+            source_document = {
+                "schema": "reference-tile-source/v1",
+                "protocol": "xyz",
+                "definition_sha256": candidate.definition_sha256,
+                "descriptor": {
+                    "bounds": dict(candidate.config_json["bounds"]),
+                    "min_zoom": 0,
+                    "max_zoom": 0,
+                    "format": "image/png",
+                    "coverage_required": True,
+                    "estimated_tile_count": 1,
+                    "max_tile_count": 1,
+                    "layer": candidate.remote_name,
+                    "url_template": candidate.endpoint_url,
+                    "scheme": "xyz",
+                },
+            }
+            payload = json.dumps(
+                source_document,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            descriptor_blob = store.put_stream(
+                io.BytesIO(payload),
+                max_bytes=1024 * 1024,
+            )
+            artifact = AcquiredArtifact(
+                artifact_kind="metadata",
+                role="input",
+                media_type="application/json",
+                blob=descriptor_blob,
+                source_url=candidate.endpoint_url,
+                final_url=candidate.endpoint_url,
+                source_version=label,
+                upstream_etag=f'"{label}"',
+                metadata={"schema": "reference-tile-source/v1"},
+                retrieved_at=NOW,
+            )
+            return AcquisitionResult(
+                source_key=candidate.source_key,
+                source_definition_sha256=candidate.definition_sha256,
+                protocol=candidate.protocol,
+                target_kind=candidate.target_kind,
+                not_modified=False,
+                artifacts=(artifact,),
+                manifest_sha256=descriptor_blob.sha256,
+                probe=None,
+                observed_etag=f'"{label}"',
+                observed_last_modified=None,
+                observed_version=label,
+                feature_count=None,
+                total_bytes=descriptor_blob.size_bytes,
+                stats={"acceptance_fixture": label},
+            )
+
+    def materialize_fixture(
+        context,
+        acquired,
+        artifacts,
+        supervisor,
+    ):
+        body = bodies[acquired.observed_version]
+
+        def seeded(local_store, **kwargs):
+            def fetcher(url: str, media_type: str) -> bytes:
+                assert url == "https://tiles.example.test/0/0/0.png"
+                assert media_type == "image/png"
+                return body
+
+            return seed_tile_archive(
+                local_store,
+                fetcher=fetcher,
+                **kwargs,
+            )
+
+        return materialize_tile_delivery(
+            store,
+            context,
+            acquired,
+            artifacts,
+            supervisor,
+            max_archive_bytes=4 * 1024 * 1024,
+            max_tiles=1,
+            concurrency=1,
+            batch_size=1,
+            seed=seeded,
+        )
+
+    def enqueue(*, generation: int, label: str) -> int:
+        queued = execute_manual_enqueue(
+            db,
+            provider_key=source.provider_key,
+            source_id=source.id,
+            expected_source_definition_sha256=source.definition_sha256,
+            expected_generation=generation,
+            check_mode="full",
+            actor_user_id=actor.id,
+            reason=f"acceptance fixture {label}",
+            apply=True,
+        )
+        assert queued["applied"] is True
+        assert queued["manual_sync"]["expected_generation"] == generation
+        return queued["manual_sync"]["run_id"]
+
+    processor = MirrorRunProcessor(
+        session_factory=lambda: nullcontext(db),
+        store=store,
+        acquisition=DeterministicAcquisition(),
+        config=Settings(
+            reference_storage_root=str(store.root),
+            reference_mirror_lease_seconds=600,
+            reference_mirror_heartbeat_seconds=100,
+            _env_file=None,
+        ),
+        materializer=materialize_fixture,
+    )
+    try:
+        v1_run_id = enqueue(generation=0, label="v1")
+        first = processor.process_next()
+        assert first.state == "succeeded", first
+        assert first.run_id == v1_run_id
+        assert first.version_id is not None
+        v1_id = first.version_id
+
+        db.expire_all()
+        state = db.get(
+            ReferenceLayerDeliveryState,
+            (layer.provider_key, layer.id),
+        )
+        assert state.active_version_id == v1_id
+        assert state.generation == 1
+
+        corrupt_run_id = enqueue(generation=1, label="corrupt")
+        rejected = processor.process_next()
+        assert rejected.state == "rejected"
+        assert rejected.run_id == corrupt_run_id
+        assert rejected.error_code == "tile_seed_rejected"
+
+        db.expire_all()
+        state = db.get(
+            ReferenceLayerDeliveryState,
+            (layer.provider_key, layer.id),
+        )
+        corrupt_run = db.get(ReferenceSyncRun, corrupt_run_id)
+        assert corrupt_run.status == "rejected"
+        assert corrupt_run.error_code == "tile_seed_rejected"
+        assert state.active_version_id == v1_id
+        assert state.generation == 1
+        assert list(
+            db.scalars(
+                select(ReferenceDeliveryVersion).where(
+                    ReferenceDeliveryVersion.provider_key
+                    == layer.provider_key,
+                    ReferenceDeliveryVersion.layer_id == layer.id,
+                )
+            )
+        ) == [db.get(ReferenceDeliveryVersion, v1_id)]
+
+        v2_run_id = enqueue(generation=1, label="v2")
+        second = processor.process_next()
+        assert second.state == "succeeded"
+        assert second.run_id == v2_run_id
+        assert second.version_id is not None
+        v2_id = second.version_id
+        assert v2_id != v1_id
+
+        db.expire_all()
+        state = db.get(
+            ReferenceLayerDeliveryState,
+            (layer.provider_key, layer.id),
+        )
+        assert state.active_version_id == v2_id
+        assert state.generation == 2
+
+        reason = "acceptance rollback to the last known-good local archive"
+        rollback = execute_transition(
+            db,
+            store=store,
+            action="rollback",
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            target_version_id=v1_id,
+            expected_generation=2,
+            actor_user_id=actor.id,
+            reason=reason,
+            apply=True,
+        )
+        assert rollback["applied"] is True
+        assert rollback["transition"]["generation"] == 3
+
+        db.expire_all()
+        state = db.get(
+            ReferenceLayerDeliveryState,
+            (layer.provider_key, layer.id),
+        )
+        versions = list(
+            db.scalars(
+                select(ReferenceDeliveryVersion)
+                .where(
+                    ReferenceDeliveryVersion.provider_key
+                    == layer.provider_key,
+                    ReferenceDeliveryVersion.layer_id == layer.id,
+                )
+                .order_by(ReferenceDeliveryVersion.sequence_number)
+            )
+        )
+        promotions = list(
+            db.scalars(
+                select(ReferenceDeliveryPromotion)
+                .where(
+                    ReferenceDeliveryPromotion.provider_key
+                    == layer.provider_key,
+                    ReferenceDeliveryPromotion.layer_id == layer.id,
+                )
+                .order_by(ReferenceDeliveryPromotion.sequence_number)
+            )
+        )
+        assert [item.id for item in versions] == [v1_id, v2_id]
+        assert [item.action for item in promotions] == [
+            "promote",
+            "promote",
+            "rollback",
+        ]
+        assert [item.sequence_number for item in promotions] == [1, 2, 3]
+        assert all(stored_promotion_hash_is_valid(item) for item in promotions)
+        assert promotions[-1].from_version_id == v2_id
+        assert promotions[-1].to_version_id == v1_id
+        assert promotions[-1].actor_id == actor.id
+        assert promotions[-1].reason == reason
+        assert corrupt_run_id not in {
+            item.run_id for item in promotions if item.run_id is not None
+        }
+        assert state.active_version_id == v1_id
+        assert state.generation == 3
+        assert delivery_state_matches_promotion_head(state, promotions[-1])
+
+        for version in versions:
+            assert version.mirror_authorization_review_id == review.id
+            assert (
+                version.mirror_authorization_review_sha256
+                == review.review_sha256
+            )
+            assert version.validation_json["local_metadata_gate"][
+                "passed"
+            ] is True
+            run = db.get(ReferenceSyncRun, version.sync_run_id)
+            assert run.stats_json["local_operation_smoke"][
+                "renderer"
+            ] == "tile_archive"
+            metadata = db.scalar(
+                select(ReferenceDeliveryAsset).where(
+                    ReferenceDeliveryAsset.version_id == version.id,
+                    ReferenceDeliveryAsset.asset_kind == "metadata",
+                )
+            )
+            assert metadata is not None
+            assert metadata.metadata_json["binding"]["sync_run_id"] == run.id
+            assert metadata.metadata_json["binding"][
+                "authorization_review_id"
+            ] == review.id
+            with store.open_blob(metadata.storage_key) as stream:
+                document = json.load(stream)
+            assert document["binding"] == metadata.metadata_json["binding"]
+            assert document["delivery"]["kind"] == "tiles"
+    finally:
+        processor.close()
 
 
 def test_reference_settings_reject_incoherent_lease_and_quota(tmp_path) -> None:
