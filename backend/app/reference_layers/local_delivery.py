@@ -11,10 +11,10 @@ from typing import Any, Literal
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
-from app.reference_layers.catalog import canonical_normalized_definition_sha256
 from app.reference_layers.mirror_lifecycle import (
+    catalog_snapshot_contains_active_layer,
     delivery_state_matches_promotion_head,
-    stored_source_definition_is_valid,
+    stored_catalog_snapshot_is_valid,
     sync_run_source_definition_is_valid,
 )
 from app.reference_layers.models import (
@@ -66,6 +66,8 @@ class LocalDeliverySelection:
 
 @dataclass(frozen=True)
 class _ActiveRecord:
+    layer: ReferenceLayer
+    current_snapshot: ReferenceCatalogSnapshot
     state: ReferenceLayerDeliveryState
     version: ReferenceDeliveryVersion
     source: ReferenceLayerSource
@@ -87,18 +89,24 @@ def resolve_local_delivery(
     not silently fall back to the remote WMS path.
     """
 
+    current_layer, current_snapshot = _load_current_layer_context(
+        db,
+        layer=layer,
+    )
     state = db.scalar(
         select(ReferenceLayerDeliveryState).where(
-            ReferenceLayerDeliveryState.provider_key == layer.provider_key,
-            ReferenceLayerDeliveryState.layer_id == layer.id,
+            ReferenceLayerDeliveryState.provider_key
+            == current_layer.provider_key,
+            ReferenceLayerDeliveryState.layer_id == current_layer.id,
         )
     )
     if state is None:
         configured = list(
             db.scalars(
                 select(ReferenceLayerSource.enabled).where(
-                    ReferenceLayerSource.provider_key == layer.provider_key,
-                    ReferenceLayerSource.layer_id == layer.id,
+                    ReferenceLayerSource.provider_key
+                    == current_layer.provider_key,
+                    ReferenceLayerSource.layer_id == current_layer.id,
                 )
             )
         )
@@ -110,8 +118,9 @@ def resolve_local_delivery(
     head = db.scalar(
         select(ReferenceDeliveryPromotion)
         .where(
-            ReferenceDeliveryPromotion.provider_key == layer.provider_key,
-            ReferenceDeliveryPromotion.layer_id == layer.id,
+            ReferenceDeliveryPromotion.provider_key
+            == current_layer.provider_key,
+            ReferenceDeliveryPromotion.layer_id == current_layer.id,
         )
         .order_by(ReferenceDeliveryPromotion.sequence_number.desc())
         .limit(1)
@@ -155,8 +164,9 @@ def resolve_local_delivery(
         )
         .where(
             ReferenceDeliveryVersion.id == state.active_version_id,
-            ReferenceDeliveryVersion.provider_key == layer.provider_key,
-            ReferenceDeliveryVersion.layer_id == layer.id,
+            ReferenceDeliveryVersion.provider_key
+            == current_layer.provider_key,
+            ReferenceDeliveryVersion.layer_id == current_layer.id,
         )
     ).one_or_none()
     if row is None:
@@ -170,7 +180,16 @@ def resolve_local_delivery(
         )
     )
     return _build_selection(
-        _ActiveRecord(state, version, source, run, snapshot, head),
+        _ActiveRecord(
+            current_layer,
+            current_snapshot,
+            state,
+            version,
+            source,
+            run,
+            snapshot,
+            head,
+        ),
         assets,
         style=style,
         operation=operation,
@@ -197,6 +216,22 @@ def catalog_local_delivery_availability(
     }
     if not leaf_ids:
         return result
+    current_snapshot = db.scalar(
+        select(ReferenceCatalogSnapshot).where(
+            ReferenceCatalogSnapshot.provider_key == provider_key,
+            ReferenceCatalogSnapshot.is_current.is_(True),
+            ReferenceCatalogSnapshot.status == "applied",
+        )
+    )
+    layer_blockers = {
+        layer.id: _current_layer_blocker(
+            layer,
+            current_snapshot,
+        )
+        for layer in layers
+        if layer.node_type == "layer"
+    }
+    layers_by_id = {layer.id: layer for layer in layers}
     states = {
         state.layer_id: state
         for state in db.scalars(
@@ -279,13 +314,19 @@ def catalog_local_delivery_availability(
         for version, source, run, snapshot in rows:
             state = states.get(version.layer_id)
             head = heads.get(version.layer_id)
+            layer = layers_by_id.get(version.layer_id)
             if (
                 state is not None
                 and head is not None
+                and layer is not None
+                and current_snapshot is not None
+                and layer_blockers.get(version.layer_id) is None
                 and state.active_version_id == version.id
                 and delivery_state_matches_promotion_head(state, head)
             ):
                 active_records[version.layer_id] = _ActiveRecord(
+                    layer,
+                    current_snapshot,
                     state,
                     version,
                     source,
@@ -311,6 +352,11 @@ def catalog_local_delivery_availability(
         if layer.node_type != "layer":
             continue
         state = states.get(layer.id)
+        layer_blocker = layer_blockers.get(layer.id)
+        if layer_blocker is not None:
+            if state is not None or source_enabled_by_layer.get(layer.id):
+                result[layer.id] = _unavailable(layer_blocker)
+            continue
         if state is None:
             configured = source_enabled_by_layer.get(layer.id)
             if configured:
@@ -391,6 +437,59 @@ def catalog_local_delivery_availability(
     return result
 
 
+def _load_current_layer_context(
+    db: Session,
+    *,
+    layer: ReferenceLayer,
+) -> tuple[ReferenceLayer, ReferenceCatalogSnapshot]:
+    row = db.execute(
+        select(ReferenceLayer, ReferenceCatalogSnapshot)
+        .join(
+            ReferenceCatalogSnapshot,
+            and_(
+                ReferenceCatalogSnapshot.id
+                == ReferenceLayer.last_seen_snapshot_id,
+                ReferenceCatalogSnapshot.provider_key
+                == ReferenceLayer.provider_key,
+            ),
+        )
+        .where(
+            ReferenceLayer.id == layer.id,
+            ReferenceLayer.provider_key == layer.provider_key,
+            ReferenceCatalogSnapshot.is_current.is_(True),
+            ReferenceCatalogSnapshot.status == "applied",
+        )
+    ).one_or_none()
+    if row is None:
+        raise LocalDeliveryError("local_disabled")
+    current_layer, current_snapshot = row
+    blocker = _current_layer_blocker(current_layer, current_snapshot)
+    if blocker is not None:
+        raise LocalDeliveryError(blocker)
+    return current_layer, current_snapshot
+
+
+def _current_layer_blocker(
+    layer: ReferenceLayer,
+    snapshot: ReferenceCatalogSnapshot | None,
+) -> str | None:
+    if (
+        snapshot is None
+        or layer.provider_key != snapshot.provider_key
+        or layer.last_seen_snapshot_id != snapshot.id
+        or layer.node_type != "layer"
+        or layer.status not in {"active", "degraded"}
+    ):
+        return "local_disabled"
+    if (
+        not snapshot.is_current
+        or not stored_catalog_snapshot_is_valid(snapshot)
+        or not catalog_snapshot_contains_active_layer(snapshot, layer)
+    ):
+        return "local_version_invalid"
+    return None
+
+
 def _build_selection(
     record: _ActiveRecord,
     assets: list[ReferenceDeliveryAsset],
@@ -424,35 +523,44 @@ def _validate_active_record(
     if not delivery_state_matches_promotion_head(record.state, record.head):
         raise LocalDeliveryError("local_version_invalid")
     if (
-        not record.source.enabled
-        or not stored_source_definition_is_valid(record.source)
-        or not sync_run_source_definition_is_valid(record.run)
+        not sync_run_source_definition_is_valid(record.run)
         or record.run.status != "succeeded"
-        or record.run.source_definition_sha256
-        != record.source.definition_sha256
     ):
         raise LocalDeliveryError("local_source_changed")
     if (
-        record.source.provider_key != record.version.provider_key
+        record.layer.id != record.version.layer_id
+        or record.layer.provider_key != record.version.provider_key
+        or record.source.provider_key != record.version.provider_key
         or record.source.layer_id != record.version.layer_id
         or record.source.id != record.version.source_id
         or record.run.id != record.version.sync_run_id
         or record.run.source_id != record.version.source_id
-        or record.source.target_kind != record.version.delivery_kind
+        or record.run.provider_key != record.version.provider_key
+        or record.run.layer_id != record.version.layer_id
+        or not isinstance(record.run.source_definition_json, dict)
+        or record.run.source_definition_json.get("target_kind")
+        != record.version.delivery_kind
     ):
         raise LocalDeliveryError("local_version_invalid")
     try:
         catalog_hash_is_valid = (
-            record.snapshot.is_current
-            and record.snapshot.status == "applied"
-            and record.snapshot.id == record.version.catalog_snapshot_id
+            record.snapshot.id == record.version.catalog_snapshot_id
             and record.snapshot.provider_key == record.version.provider_key
             and record.snapshot.definition_sha256
             == record.version.catalog_definition_sha256
-            and canonical_normalized_definition_sha256(
-                record.snapshot.normalized_definition_json
+            and stored_catalog_snapshot_is_valid(record.snapshot)
+            and catalog_snapshot_contains_active_layer(
+                record.snapshot,
+                record.layer,
             )
-            == record.snapshot.definition_sha256
+            and record.current_snapshot.id
+            == record.layer.last_seen_snapshot_id
+            and record.current_snapshot.is_current
+            and stored_catalog_snapshot_is_valid(record.current_snapshot)
+            and catalog_snapshot_contains_active_layer(
+                record.current_snapshot,
+                record.layer,
+            )
         )
         validation_hash = hashlib.sha256(
             json.dumps(
