@@ -1763,6 +1763,9 @@ def _acquire_style_persistence_lock(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": _style_watcher_lock_key(target)},
         )
+        db.scalar(
+            text("SELECT set_config('lock_timeout', '0', true)")
+        )
     except DBAPIError as error:
         db.rollback()
         if getattr(error.orig, "sqlstate", None) == "55P03":
