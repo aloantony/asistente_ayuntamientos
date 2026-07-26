@@ -269,6 +269,26 @@ def layer_styles_payload(*names: str) -> dict:
     }
 
 
+def disk_quota_payload(
+    *,
+    enabled: bool = True,
+    value: str | int = "20",
+    units: str = "GiB",
+    cleanup_frequency: int = 60,
+    cleanup_units: str = "SECONDS",
+    policy: str = "LRU",
+) -> dict:
+    return {
+        "gwcQuotaConfiguration": {
+            "enabled": enabled,
+            "cacheCleanUpFrequency": cleanup_frequency,
+            "cacheCleanUpUnits": cleanup_units,
+            "globalExpirationPolicyName": policy,
+            "globalQuota": {"value": value, "units": units},
+        }
+    }
+
+
 def make_client(
     responses: list[FakeResponse],
     *,
@@ -353,6 +373,37 @@ def test_settings_reject_unsafe_admin_and_postgis_configuration(
 ) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("geowebcache_disk_quota_gib", 0),
+        ("geowebcache_disk_quota_gib", True),
+        ("geowebcache_disk_quota_min_free_gib", -1),
+        ("geowebcache_disk_quota_cleanup_seconds", 0),
+        ("geowebcache_disk_quota_policy", "fifo"),
+    ],
+)
+def test_settings_reject_unsafe_geowebcache_quota_configuration(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
+
+
+def test_settings_parse_geowebcache_numeric_environment_values() -> None:
+    configured = Settings(
+        _env_file=None,
+        geowebcache_disk_quota_gib="21",  # type: ignore[arg-type]
+        geowebcache_disk_quota_min_free_gib="6",  # type: ignore[arg-type]
+        geowebcache_disk_quota_cleanup_seconds="90",  # type: ignore[arg-type]
+    )
+
+    assert configured.geowebcache_disk_quota_gib == 21
+    assert configured.geowebcache_disk_quota_min_free_gib == 6
+    assert configured.geowebcache_disk_quota_cleanup_seconds == 90
 
 
 def test_client_repr_and_errors_never_expose_credentials() -> None:
@@ -458,6 +509,99 @@ def test_health_rejects_malformed_or_unexpected_json() -> None:
         client, _ = make_client([response])
         with pytest.raises(GeoServerAdminResponseError):
             client.health()
+
+
+def test_geowebcache_disk_quota_reads_fixed_gwc_rest_resource() -> None:
+    client, factory = make_client([json_response(disk_quota_payload())])
+
+    quota = client.read_geowebcache_disk_quota()
+
+    assert quota.enabled is True
+    assert quota.quota_bytes == 20 * 1024**3
+    assert quota.cleanup_frequency == 60
+    assert quota.expiration_policy == "LRU"
+    method, target, body, _headers = all_requests(factory)[0]
+    assert (method, target, body) == (
+        "GET",
+        "/geoserver/gwc/rest/diskquota.json",
+        None,
+    )
+
+
+def test_geowebcache_disk_quota_puts_then_rereads_exact_state() -> None:
+    client, factory = make_client(
+        [
+            status_response(200),
+            json_response(disk_quota_payload()),
+        ]
+    )
+
+    quota = client.configure_geowebcache_disk_quota(
+        quota_gib=20,
+        cleanup_seconds=60,
+        expiration_policy="LRU",
+    )
+
+    assert quota.quota_value == 20
+    requests = all_requests(factory)
+    assert [request[:2] for request in requests] == [
+        ("PUT", "/geoserver/gwc/rest/diskquota.json"),
+        ("GET", "/geoserver/gwc/rest/diskquota.json"),
+    ]
+    assert json.loads(requests[0][2] or b"") == {
+        "gwcQuotaConfiguration": {
+            "enabled": True,
+            "cacheCleanUpFrequency": 60,
+            "cacheCleanUpUnits": "SECONDS",
+            "globalExpirationPolicyName": "LRU",
+            "globalQuota": {"value": "20", "units": "GiB"},
+        }
+    }
+    assert requests[0][3]["Authorization"].startswith("Basic ")
+    assert ADMIN_PASSWORD not in (requests[0][2] or b"").decode()
+
+
+def test_geowebcache_disk_quota_fails_closed_on_mismatch_or_bad_shape() -> None:
+    client, _ = make_client(
+        [
+            status_response(200),
+            json_response(disk_quota_payload(enabled=False)),
+        ]
+    )
+    with pytest.raises(GeoServerAdminConflictError):
+        client.configure_geowebcache_disk_quota(
+            quota_gib=20,
+            cleanup_seconds=60,
+            expiration_policy="LRU",
+        )
+
+    for payload in [
+        {},
+        disk_quota_payload(value="20.0"),
+        disk_quota_payload(units="GB"),
+        disk_quota_payload(cleanup_frequency=0),
+        disk_quota_payload(policy="FIFO"),
+    ]:
+        client, _ = make_client([json_response(payload)])
+        with pytest.raises(GeoServerAdminResponseError):
+            client.read_geowebcache_disk_quota()
+
+
+def test_geowebcache_disk_quota_rejects_unsafe_requested_values() -> None:
+    client, factory = make_client([])
+    with pytest.raises(InvalidGeoServerPublicationError):
+        client.configure_geowebcache_disk_quota(
+            quota_gib=0,
+            cleanup_seconds=60,
+            expiration_policy="LRU",
+        )
+    with pytest.raises(InvalidGeoServerPublicationError):
+        client.configure_geowebcache_disk_quota(
+            quota_gib=20,
+            cleanup_seconds=0,
+            expiration_policy="LRU",
+        )
+    assert all_requests(factory) == []
 
 
 def test_transport_failure_is_generic_and_closes_connection() -> None:
