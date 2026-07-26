@@ -2,8 +2,8 @@
 
 Checkpoint solicitado antes de agotar el límite de uso. La entrega **no está
 terminada ni lista para `main`**. El trabajo aceptado está versionado en la rama
-de integración y los dos cierres que seguían en paralelo tienen worktrees
-reservados independientes.
+de integración y los dos cierres que seguían en paralelo están versionados en
+worktrees independientes, limpios y con sus sesiones en `paused`.
 
 No se ha adquirido el lease del runtime, no se ha migrado la base de desarrollo,
 no se ha reconstruido el stack compartido y no se ha iniciado la descarga real
@@ -15,11 +15,14 @@ remoto.
 - Worktree:
   `/home/dev/proyectos/asistente_ayuntamientos-worktrees/siur-local-mirror`
 - Rama: `codex/siur-local-mirror-20260722`
-- HEAD: `441c226` (`fix: reject implausible reference feature growth`)
+- Último commit de producto integrado: `441c226`
+  (`fix: reject implausible reference feature growth`)
+- Primer commit de este handoff actualizado: `20419bc`
 - Comparación: `origin/main`
-- Divergencia al crear este checkpoint: 50 commits por delante
+- Para obtener la divergencia exacta al retomar:
+  `git rev-list --left-right --count origin/main...HEAD`
 - Sesión/owner: `root-siur-local-mirror-20260722`
-- Estado Git: limpio después de `441c226`
+- Estado Git esperado al cerrar: limpio
 - Runtime compartido: sin lease
 - Base de desarrollo observada, sin modificar: Alembic `20260722_0034`
 - Estado de datos observado, sin modificar: 227 capas hoja y 227 entregas en
@@ -98,40 +101,69 @@ una revisión de merge pura con ambas cabezas como padres.
 - Worktree:
   `/home/dev/proyectos/asistente_ayuntamientos-worktrees/catalog-update-watcher-20260726`
 - Rama: `codex/catalog-update-watcher-20260726-20260726`
-- Sesión: `catalog-update-watcher-20260726`
+- Sesión: `catalog-update-watcher-20260726`, estado `paused`
 - Base original: `b9be54c`
+- Estado Git: limpio
+- Commits, en orden:
+  - `7a7b912` (`chore: include sidebar migration dependency`);
+  - `ff610f3` (`feat: watch SIUR catalog updates safely`);
+  - `7929abe` (`fix: keep SIUR download outside database transaction`).
 
-Al redactar este checkpoint había completado la implementación y estaban
-pasando `35` pruebas de migración en `235.75s`: fresh, actualización desde las
-dos cabezas hermanas, downgrades, inmutabilidad y `alembic check`. Debe dejar
-dos commits separados:
+`7a7b912` copia byte a byte la migración hermana y la porción exacta del modelo
+`User`; debe incluirse en esta rama de integración porque todavía no contiene
+la funcionalidad sidebar. Si al retomar ya se hubiera integrado por otra vía,
+revisar y omitir únicamente ese commit para no duplicarla.
 
-1. copia byte-exacta de la migración de accesos directos y merge puro
-   `20260726_0038` con padres
-   `("20260723_0037", "20260722_0034")`;
-2. watcher en `20260726_0039`, con descarga condicional fijada, hash canónico,
-   versiones observadas inmutables, resultados `unchanged`,
-   `update_available` o `error`, idempotencia y sin autoaplicar cambios.
+`ff610f3` añade el merge puro `20260726_0038`, con padres
+`("20260723_0037", "20260722_0034")`, y el watcher en `20260726_0039`.
+Implementa descarga condicional fijada, hash canónico, versiones observadas
+inmutables, resultados `unchanged`, `update_available` o `error`, idempotencia
+y staging sin autoaplicar cambios.
 
-Antes de integrar, revisar especialmente que ningún lock transaccional de base
-de datos quede abierto durante una descarga de red y conectar el watcher al
-scheduler diario.
+La revisión encontró que la primera versión mantenía un lock transaccional
+durante la red. `7929abe` lo corrige: preflight DB corto, descarga y parseo con
+`db.in_transaction() == False`, y lock transaccional únicamente para revalidar
+y persistir. Una regresión demuestra que otra conexión puede adquirir el lock
+durante la descarga.
+
+Pruebas reales:
+
+- watcher focal final: `11 passed`;
+- catálogo/parser/downloader afectados: `114 passed`;
+- migraciones completas: `35 passed in 235.75s`, incluidos fresh, ambas
+  cabezas hermanas al merge y a `0039`, downgrades, inmutabilidad y
+  `alembic check`.
+
+Entrada de job cero-argumentos:
+`app.reference_layers.catalog_watcher.run_siur_catalog_update_check_job`.
+Queda conectar este entrypoint al scheduler diario del orquestador.
 
 ### Smoke local prepromoción de GeoServer
 
 - Worktree:
   `/home/dev/proyectos/asistente_ayuntamientos-worktrees/local-operation-smoke-20260726`
 - Rama: `codex/local-operation-smoke-20260726-20260726`
-- Sesión: `local-operation-smoke-20260726`
+- Sesión: `local-operation-smoke-20260726`, estado `paused`
 - Base original: `07e46d5`
+- Commit:
+  `0e25004` (`feat: validate local map operations before promotion`)
+- Estado Git: limpio
 
 Implementa un smoke local por estilo antes de promover: mapa, leyenda cuando
 exista e `identify` GeoJSON cuando la capa sea consultable. La evidencia queda
-en las estadísticas del run y un fallo debe impedir la promoción. Al redactar
-este checkpoint faltaban sus pruebas focales y el commit final.
+en las estadísticas del run y un fallo impide la promoción, conservando la
+versión activa. Los tiles baked registran solo su operación de mapa real. El
+transporte a GeoServer queda restringido a loopback numérico.
 
-No editar ninguno de estos worktrees mientras su sesión siga `active`; esperar
-el handoff explícito del propietario.
+Pruebas reales:
+
+- focales: `73 passed`;
+- batería cartográfica/de referencia: `524 passed`;
+- `git diff --check`: correcto.
+
+Ambos propietarios han entregado handoff explícito. Sus ramas pueden
+inspeccionarse; integrar solo después de revisar los diffs y ejecutar las
+pruebas sobre la combinación.
 
 ## Bloqueos de producto todavía abiertos
 
@@ -179,10 +211,12 @@ P1 operativo:
    scripts/codex-session runtime status
    ```
 
-2. Confirmar los handoffs de los dos workers. Revisar sus commits, diffs y
-   pruebas antes de llevarlos a `codex/siur-local-mirror-20260722`.
-3. Resolver primero el merge de migraciones y el watcher; después el smoke
-   prepromoción. Integrar la invocación diaria del watcher en el scheduler.
+2. Confirmar que ambos workers siguen `paused` y limpios. Revisar los commits,
+   diffs y pruebas antes de llevarlos a
+   `codex/siur-local-mirror-20260722`.
+3. Integrar en este orden `7a7b912`, `ff610f3`, `7929abe` y `0e25004`,
+   resolviendo cualquier solape de forma explícita. Después conectar la
+   invocación diaria del watcher en el scheduler.
 4. Ejecutar focales, suite de referencia, suite backend completa y matriz de
    migraciones desde fresh, desde `20260723_0037` y desde
    `20260722_0034`.
