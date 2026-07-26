@@ -1,9 +1,10 @@
-ARG PGVECTOR_IMAGE=pgvector/pgvector:0.8.0-pg17@sha256:40b404964359299eefdd5f8518facf1886c562848cf4de13b6eaf91cb70c2b87
+ARG PGVECTOR_IMAGE=pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
 FROM ${PGVECTOR_IMAGE}
 
-# Keep the existing PostgreSQL 17 + pgvector base and add only the PostGIS
-# runtime/control files required by CREATE EXTENSION. Alembic remains the
-# authority that enables the extension in each application database.
+# Keep PostgreSQL 17 and the exact pgvector 0.8.2 runtime/control files used by
+# existing persistent databases, then add only the PostGIS files required by
+# CREATE EXTENSION. Alembic remains the authority that enables and reconciles
+# extensions in each application database.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         postgresql-17-postgis-3 \
