@@ -2,11 +2,14 @@ from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import io
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from conftest import headers_for
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.reference_layers import (
     local_metadata as reference_local_metadata,
@@ -25,14 +28,16 @@ from app.reference_layers.delivery_builder import (
     DeliveryContinuityError,
     PreparedDelivery,
     PreparedDeliveryAsset,
+    canonical_json_bytes,
     canonical_json_sha256,
     create_delivery_version,
     evaluate_delivery_continuity,
     local_metadata_asset_descriptor,
-    local_metadata_binding,
 )
 from app.reference_layers.local_metadata import (
     attach_local_metadata_asset,
+    catalog_local_metadata_availability,
+    verify_local_metadata_precommit,
 )
 from app.reference_layers.mirror_lifecycle import (
     MirrorLeaseLostError,
@@ -54,6 +59,9 @@ from app.reference_layers.models import (
     ReferenceSyncRunArtifact,
 )
 from app.reference_layers.style_parity import persist_style_parity_plan
+from app.reference_layers.wms_delivery import (
+    LayerDeliveryAvailability,
+)
 from support_reference_mirror_authorization import (
     authorize_mirror_source,
     bind_run_authorization,
@@ -63,7 +71,7 @@ from support_reference_mirror_authorization import (
 NOW = datetime(2026, 7, 23, 8, tzinfo=timezone.utc)
 
 
-def _lease_and_input(db):
+def _lease_and_input(db, storage_root):
     definition = ReferenceCatalogDefinition(
         provider_key="delivery-builder-test",
         source_url="https://example.test/catalog.json",
@@ -173,6 +181,8 @@ def _lease_and_input(db):
     fixture.lease = lease
     fixture.snapshot = layer.last_seen_snapshot
     fixture.review = review
+    fixture.db = db
+    fixture.store = ReferenceBlobStore(Path(storage_root))
     db.commit()
     return source, lease, fixture
 
@@ -359,67 +369,7 @@ def _with_metadata_asset(
     prepared: PreparedDelivery,
     fixture,
 ) -> PreparedDelivery:
-    assets = tuple(
-        asset
-        for asset in prepared.assets
-        if asset.asset_kind != "metadata"
-    )
-    digest = hashlib.sha256(
-        (
-            f"metadata:{fixture.lease.run_id}:"
-            f"{prepared.content_sha256}:"
-            f"{canonical_json_sha256(prepared.validation_json)}"
-        ).encode()
-    ).hexdigest()
-    binding = local_metadata_binding(
-        provider_key=fixture.source.provider_key,
-        layer_id=fixture.source.layer_id,
-        source_id=fixture.source.id,
-        sync_run_id=fixture.lease.run_id,
-        catalog_snapshot_id=fixture.snapshot.id,
-        catalog_definition_sha256=(
-            fixture.snapshot.definition_sha256
-        ),
-        source_definition_sha256=fixture.source.definition_sha256,
-        authorization_review_id=fixture.review.id,
-        authorization_review_sha256=fixture.review.review_sha256,
-        authorization_document_sha256=(
-            fixture.review.document_sha256
-        ),
-        delivery_kind=prepared.delivery_kind,
-        content_sha256=prepared.content_sha256,
-        prepared_validation_sha256=canonical_json_sha256(
-            prepared.validation_json
-        ),
-    )
-    size_bytes = 512
-    metadata = PreparedDeliveryAsset(
-        asset_key="metadata",
-        asset_kind="metadata",
-        is_primary=False,
-        storage_backend="filesystem",
-        storage_key=f"blobs/sha256/{digest[:2]}/{digest}",
-        media_type="application/json",
-        sha256=digest,
-        size_bytes=size_bytes,
-        metadata_json=local_metadata_asset_descriptor(
-            document_sha256=digest,
-            document_size_bytes=size_bytes,
-            binding=binding,
-        ),
-    )
-    return PreparedDelivery(
-        **{
-            **prepared.__dict__,
-            "assets": (*assets, metadata),
-        }
-    )
-
-
-def _promoted_local_metadata_delivery(db, storage_root):
-    source, lease, fixture = _lease_and_input(db)
-    prepared = _prepared(fixture)
-    prepared = PreparedDelivery(
+    without_metadata = PreparedDelivery(
         **{
             **prepared.__dict__,
             "assets": tuple(
@@ -429,17 +379,32 @@ def _promoted_local_metadata_delivery(db, storage_root):
             ),
         }
     )
-    with ReferenceBlobStore(storage_root) as store:
-        prepared = attach_local_metadata_asset(
-            lambda: nullcontext(db),
-            store,
-            lease,
-            prepared,
-        )
+    return attach_local_metadata_asset(
+        lambda: nullcontext(fixture.db),
+        fixture.store,
+        fixture.lease,
+        without_metadata,
+    )
+
+
+def _metadata_verifier(fixture):
+    return lambda context: verify_local_metadata_precommit(
+        fixture.store,
+        context,
+    )
+
+
+def _promoted_local_metadata_delivery(db, storage_root):
+    source, lease, fixture = _lease_and_input(
+        db,
+        storage_root,
+    )
+    prepared = _prepared(fixture)
     built = create_delivery_version(
         db,
         lease=lease,
         prepared=prepared,
+        metadata_verifier=_metadata_verifier(fixture),
         now=NOW + timedelta(seconds=1),
     )
     promote_delivery_version(
@@ -452,6 +417,7 @@ def _promoted_local_metadata_delivery(db, storage_root):
     )
     return SimpleNamespace(
         source=source,
+        store=fixture.store,
         layer=db.get(ReferenceLayer, source.layer_id),
         review=fixture.review,
         version=db.get(ReferenceDeliveryVersion, built.version_id),
@@ -471,14 +437,18 @@ def _metadata_route(layer_id: int, organization_id: int) -> str:
     )
 
 
-def test_create_delivery_version_links_inputs_and_assets(db) -> None:
-    source, lease, artifact = _lease_and_input(db)
+def test_create_delivery_version_links_inputs_and_assets(
+    db,
+    tmp_path,
+) -> None:
+    source, lease, artifact = _lease_and_input(db, tmp_path)
     prepared = _prepared(artifact)
 
     built = create_delivery_version(
         db,
         lease=lease,
         prepared=prepared,
+        metadata_verifier=_metadata_verifier(artifact),
         now=NOW + timedelta(seconds=1),
     )
 
@@ -495,6 +465,9 @@ def test_create_delivery_version_links_inputs_and_assets(db) -> None:
         version.validation_json
     )
     assert version.validation_json["continuity_gate"]["passed"] is True
+    assert version.validation_json["local_metadata_gate"][
+        "passed"
+    ] is True
     assert (
         version.validation_json["continuity_gate"]["baseline_version_id"]
         is None
@@ -504,9 +477,19 @@ def test_create_delivery_version_links_inputs_and_assets(db) -> None:
     assert asset.metadata_json["renderer"] == "geoserver"
 
 
-def test_builder_requires_one_exact_version_bound_metadata_asset(db) -> None:
-    _, lease, fixture = _lease_and_input(db)
+def test_builder_requires_one_exact_version_bound_metadata_asset(
+    db,
+    tmp_path,
+) -> None:
+    _, lease, fixture = _lease_and_input(db, tmp_path)
     prepared = _prepared(fixture)
+    with pytest.raises(TypeError, match="metadata_verifier"):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=prepared,
+            now=NOW + timedelta(seconds=1),
+        )
     without_metadata = PreparedDelivery(
         **{
             **prepared.__dict__,
@@ -525,6 +508,7 @@ def test_builder_requires_one_exact_version_bound_metadata_asset(db) -> None:
             db,
             lease=lease,
             prepared=without_metadata,
+            metadata_verifier=_metadata_verifier(fixture),
             now=NOW + timedelta(seconds=1),
         )
 
@@ -549,6 +533,7 @@ def test_builder_requires_one_exact_version_bound_metadata_asset(db) -> None:
                     "assets": (*prepared.assets, duplicate),
                 }
             ),
+            metadata_verifier=_metadata_verifier(fixture),
             now=NOW + timedelta(seconds=1),
         )
 
@@ -578,8 +563,91 @@ def test_builder_requires_one_exact_version_bound_metadata_asset(db) -> None:
                     ),
                 }
             ),
+            metadata_verifier=_metadata_verifier(fixture),
             now=NOW + timedelta(seconds=1),
         )
+
+
+def test_builder_rejects_missing_metadata_blob_before_insert(
+    db,
+    tmp_path,
+) -> None:
+    _, lease, fixture = _lease_and_input(db, tmp_path)
+    prepared = _prepared(fixture)
+    metadata = next(
+        asset
+        for asset in prepared.assets
+        if asset.asset_kind == "metadata"
+    )
+    fixture.store.resolve_blob(metadata.storage_key).unlink()
+
+    with pytest.raises(
+        reference_local_metadata.LocalMetadataError,
+        match="unavailable",
+    ):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=prepared,
+            metadata_verifier=_metadata_verifier(fixture),
+            now=NOW + timedelta(seconds=1),
+        )
+    assert db.scalar(select(ReferenceDeliveryVersion.id)) is None
+
+
+def test_builder_rejects_other_canonical_json_with_valid_binding(
+    db,
+    tmp_path,
+) -> None:
+    _, lease, fixture = _lease_and_input(db, tmp_path)
+    prepared = _prepared(fixture)
+    metadata = next(
+        asset
+        for asset in prepared.assets
+        if asset.asset_kind == "metadata"
+    )
+    with fixture.store.open_blob(metadata.storage_key) as stream:
+        document = json.load(stream)
+    document["catalog"]["layer"]["title"] = "Documento ajeno"
+    body = canonical_json_bytes(document)
+    blob = fixture.store.put_stream(io.BytesIO(body))
+    other_metadata = PreparedDeliveryAsset(
+        **{
+            **metadata.__dict__,
+            "storage_key": blob.storage_key,
+            "sha256": blob.sha256,
+            "size_bytes": blob.size_bytes,
+            "metadata_json": local_metadata_asset_descriptor(
+                document_sha256=blob.sha256,
+                document_size_bytes=blob.size_bytes,
+                binding=document["binding"],
+            ),
+        }
+    )
+    candidate = PreparedDelivery(
+        **{
+            **prepared.__dict__,
+            "assets": tuple(
+                other_metadata
+                if asset.asset_kind == "metadata"
+                else asset
+                for asset in prepared.assets
+            ),
+        }
+    )
+
+    with pytest.raises(
+        reference_local_metadata.LocalMetadataError,
+        match="locked delivery rows",
+    ):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=candidate,
+            metadata_verifier=_metadata_verifier(fixture),
+            now=NOW + timedelta(seconds=1),
+        )
+    assert db.scalar(select(ReferenceDeliveryVersion.id)) is None
 
 
 def test_local_metadata_endpoint_is_authenticated_local_and_exact(
@@ -654,8 +722,106 @@ def test_local_metadata_endpoint_is_authenticated_local_and_exact(
     assert catalog_layer["metadata_available"] is True
 
 
+def test_extra_descriptor_key_disables_catalog_and_endpoint(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    delivery = _promoted_local_metadata_delivery(db, tmp_path)
+    viewer = make_user()
+    organization = make_organization()
+    grant_permissions(viewer, organization, ["map.view"])
+    delivery.metadata_asset.metadata_json = {
+        **delivery.metadata_asset.metadata_json,
+        "unexpected": True,
+    }
+    monkeypatch.setattr(
+        reference_layer_routes,
+        "_reference_blob_store",
+        lambda: ReferenceBlobStore(tmp_path),
+    )
+    headers = headers_for(viewer)
+
+    endpoint = client.get(
+        _metadata_route(delivery.layer.id, organization.id),
+        headers=headers,
+    )
+    assert endpoint.status_code == 409
+    catalog = client.get(
+        "/reference-layers/catalog"
+        f"?provider_key={delivery.source.provider_key}"
+        f"&organization_id={organization.id}",
+        headers=headers,
+    )
+    catalog_layer = next(
+        layer
+        for layer in catalog.json()["layers"]
+        if layer["id"] == delivery.layer.id
+    )
+    assert catalog_layer["metadata_available"] is False
+
+
+def test_catalog_metadata_check_is_bounded_and_never_opens_blobs(
+    db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    delivery = _promoted_local_metadata_delivery(db, tmp_path)
+
+    def reject_blob_open(_storage_key):
+        raise AssertionError("catalog must not open metadata bodies")
+
+    monkeypatch.setattr(
+        delivery.store,
+        "open_blob",
+        reject_blob_open,
+    )
+    connection = db.connection()
+    query_count = 0
+
+    def count_query(*_args):
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(
+        connection,
+        "before_cursor_execute",
+        count_query,
+    )
+    try:
+        result = catalog_local_metadata_availability(
+            db,
+            delivery.store,
+            provider_key=delivery.source.provider_key,
+            layers=[delivery.layer] * 227,
+            local_availability={
+                delivery.layer.id: LayerDeliveryAvailability(
+                    delivery_available=True,
+                    legend_available=True,
+                    identify_available=True,
+                    delivery_blocker=None,
+                    available_style_ids=(),
+                    available_legend_style_ids=(),
+                )
+            },
+        )
+    finally:
+        event.remove(
+            connection,
+            "before_cursor_execute",
+            count_query,
+        )
+
+    assert result[delivery.layer.id] is True
+    assert query_count == 5
+
+
 @pytest.mark.parametrize("tamper_kind", ["sha256", "size", "body"])
-def test_local_metadata_tampering_fails_closed_in_endpoint_and_catalog(
+def test_body_tampering_blocks_endpoint_while_catalog_checks_size_only(
     client,
     db,
     tmp_path,
@@ -706,7 +872,9 @@ def test_local_metadata_tampering_fails_closed_in_endpoint_and_catalog(
         for layer in catalog.json()["layers"]
         if layer["id"] == delivery.layer.id
     )
-    assert catalog_layer["metadata_available"] is False
+    assert catalog_layer["metadata_available"] is (
+        tamper_kind != "size"
+    )
 
 
 def test_catalog_does_not_announce_incomplete_metadata_evidence(
@@ -719,19 +887,19 @@ def test_catalog_does_not_announce_incomplete_metadata_evidence(
     grant_permissions,
 ) -> None:
     delivery = _promoted_local_metadata_delivery(db, tmp_path)
-    monkeypatch.setattr(
-        reference_local_metadata,
-        "_expected_documents_for_versions",
-        lambda *args, **kwargs: {},
-    )
+    viewer = make_user()
+    organization = make_organization()
+    grant_permissions(viewer, organization, ["map.view"])
+    validation = deepcopy(delivery.version.validation_json)
+    validation["local_metadata_gate"][
+        "descriptor_sha256"
+    ] = "0" * 64
+    delivery.version.validation_json = validation
     monkeypatch.setattr(
         reference_layer_routes,
         "_reference_blob_store",
         lambda: ReferenceBlobStore(tmp_path),
     )
-    viewer = make_user()
-    organization = make_organization()
-    grant_permissions(viewer, organization, ["map.view"])
     headers = headers_for(viewer)
 
     endpoint = client.get(
@@ -784,29 +952,41 @@ def test_revoked_authorization_disables_local_metadata(
     assert response.status_code == 409
 
 
-def test_builder_rejects_unlinked_input_and_expired_lease(db) -> None:
-    _, lease, artifact = _lease_and_input(db)
+def test_builder_rejects_unlinked_input_and_expired_lease(
+    db,
+    tmp_path,
+) -> None:
+    _, lease, artifact = _lease_and_input(db, tmp_path)
+    prepared = _prepared(artifact)
+    unlinked = PreparedDelivery(
+        **{
+            **prepared.__dict__,
+            "input_artifact_ids": (artifact.id + 999,),
+        }
+    )
     with pytest.raises(DeliveryBuildError, match="not immutable artifacts"):
         create_delivery_version(
             db,
             lease=lease,
-            prepared=_prepared(
-                artifact,
-                input_artifact_id=artifact.id + 999,
-            ),
+            prepared=unlinked,
+            metadata_verifier=_metadata_verifier(artifact),
             now=NOW + timedelta(seconds=1),
         )
     with pytest.raises(MirrorLeaseLostError):
         create_delivery_version(
             db,
             lease=lease,
-            prepared=_prepared(artifact),
+            prepared=prepared,
+            metadata_verifier=_metadata_verifier(artifact),
             now=NOW + timedelta(seconds=301),
         )
 
 
-def test_builder_rejects_unsafe_or_inconsistent_primary_asset(db) -> None:
-    _, lease, artifact = _lease_and_input(db)
+def test_builder_rejects_unsafe_or_inconsistent_primary_asset(
+    db,
+    tmp_path,
+) -> None:
+    _, lease, artifact = _lease_and_input(db, tmp_path)
     prepared = _prepared(artifact)
     unsafe = PreparedDelivery(
         **{
@@ -822,14 +1002,26 @@ def test_builder_rejects_unsafe_or_inconsistent_primary_asset(db) -> None:
         }
     )
     with pytest.raises(DeliveryBuildError, match="PostGIS storage key"):
-        create_delivery_version(db, lease=lease, prepared=unsafe, now=NOW)
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=unsafe,
+            metadata_verifier=_metadata_verifier(artifact),
+            now=NOW,
+        )
 
     mismatch = PreparedDelivery(
         **{**prepared.__dict__, "content_sha256": "c" * 64}
     )
     mismatch = _with_metadata_asset(mismatch, artifact)
     with pytest.raises(DeliveryBuildError, match="content hash"):
-        create_delivery_version(db, lease=lease, prepared=mismatch, now=NOW)
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=mismatch,
+            metadata_verifier=_metadata_verifier(artifact),
+            now=NOW,
+        )
 
     oversized_version = PreparedDelivery(
         **{**prepared.__dict__, "source_version": "v" * 2_049}
@@ -839,6 +1031,7 @@ def test_builder_rejects_unsafe_or_inconsistent_primary_asset(db) -> None:
             db,
             lease=lease,
             prepared=oversized_version,
+            metadata_verifier=_metadata_verifier(artifact),
             now=NOW,
         )
 
@@ -886,16 +1079,25 @@ def test_filesystem_assets_must_be_content_addressed() -> None:
     )
     with pytest.raises(DeliveryBuildError, match="content-addressed"):
         # Validation happens before database access, so a session is not needed.
-        create_delivery_version(None, lease=None, prepared=prepared)
+        create_delivery_version(
+            None,
+            lease=None,
+            prepared=prepared,
+            metadata_verifier=lambda context: None,
+        )
 
 
-def test_continuity_report_checks_kind_crs_bounds_schema_and_features(db) -> None:
-    _, lease, artifact = _lease_and_input(db)
+def test_continuity_report_checks_kind_crs_bounds_schema_and_features(
+    db,
+    tmp_path,
+) -> None:
+    _, lease, artifact = _lease_and_input(db, tmp_path)
     prepared = _prepared(artifact)
     built = create_delivery_version(
         db,
         lease=lease,
         prepared=prepared,
+        metadata_verifier=_metadata_verifier(artifact),
         now=NOW + timedelta(seconds=1),
     )
     active = db.get(ReferenceDeliveryVersion, built.version_id)
@@ -1031,13 +1233,15 @@ def test_continuity_report_checks_kind_crs_bounds_schema_and_features(db) -> Non
 
 def test_builder_rejects_massive_feature_collapse_before_version_creation(
     db,
+    tmp_path,
 ) -> None:
-    source, lease, artifact = _lease_and_input(db)
+    source, lease, artifact = _lease_and_input(db, tmp_path)
     first = _prepared(artifact)
     built = create_delivery_version(
         db,
         lease=lease,
         prepared=first,
+        metadata_verifier=_metadata_verifier(artifact),
         now=NOW + timedelta(seconds=1),
     )
     promote_delivery_version(
@@ -1107,6 +1311,8 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
         ReferenceMirrorAuthorizationReview,
         second_run.mirror_authorization_review_id,
     )
+    second_fixture.db = db
+    second_fixture.store = artifact.store
     db.commit()
     collapsed = _prepared(second_fixture)
     collapsed = PreparedDelivery(
@@ -1135,6 +1341,9 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
             db,
             lease=second_lease,
             prepared=collapsed,
+            metadata_verifier=_metadata_verifier(
+                second_fixture
+            ),
             now=due_at + timedelta(seconds=1),
         )
 

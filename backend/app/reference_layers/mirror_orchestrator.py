@@ -68,6 +68,7 @@ from app.reference_layers.local_tile_archive import (
 from app.reference_layers.local_metadata import (
     LocalMetadataError,
     attach_local_metadata_asset,
+    verify_local_metadata_precommit,
 )
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
@@ -679,6 +680,7 @@ class MirrorRunProcessor:
                 )
                 built = persist_delivery_version(
                     self.session_factory,
+                    self.store,
                     supervisor.lease,
                     materialized.prepared,
                 )
@@ -1251,11 +1253,19 @@ def persist_run_style_parity(
 
 def persist_delivery_version(
     session_factory: SessionFactory,
+    store: ReferenceBlobStore,
     lease: SyncRunLease,
     prepared: PreparedDelivery,
 ) -> BuiltDeliveryVersion:
     with session_factory() as db:
-        return create_delivery_version(db, lease=lease, prepared=prepared)
+        return create_delivery_version(
+            db,
+            lease=lease,
+            prepared=prepared,
+            metadata_verifier=lambda context: (
+                verify_local_metadata_precommit(store, context)
+            ),
+        )
 
 
 def finish_unchanged(

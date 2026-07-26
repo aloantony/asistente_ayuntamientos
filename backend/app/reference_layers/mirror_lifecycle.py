@@ -22,6 +22,11 @@ from sqlalchemy.orm import Session
 from app.reference_layers.catalog import (
     canonical_normalized_definition_sha256,
 )
+from app.reference_layers.local_metadata_contract import (
+    LOCAL_METADATA_ASSET_KEY,
+    local_metadata_asset_descriptor,
+    local_metadata_gate_matches,
+)
 from app.reference_layers.mirror_strategy import (
     apply_mirror_strategy_plan,
     build_mirror_strategy_plan,
@@ -1728,6 +1733,60 @@ def _validate_version_ready(
         or primary.sha256 != version.content_sha256
     ):
         raise MirrorPromotionConflict("delivery content hash is invalid")
+    metadata_assets = tuple(
+        db.scalars(
+            select(ReferenceDeliveryAsset).where(
+                ReferenceDeliveryAsset.version_id == version.id,
+                ReferenceDeliveryAsset.asset_kind == "metadata",
+            )
+        )
+    )
+    if not metadata_assets:
+        if "local_metadata_gate" in version.validation_json:
+            raise MirrorPromotionConflict(
+                "delivery metadata gate has no immutable asset"
+            )
+        _validate_version_style_parity(db, version)
+        return
+    if len(metadata_assets) != 1:
+        raise MirrorPromotionConflict(
+            "delivery version has no unique verified metadata asset"
+        )
+    metadata = metadata_assets[0]
+    descriptor = metadata.metadata_json
+    binding = (
+        descriptor.get("binding")
+        if isinstance(descriptor, dict)
+        else None
+    )
+    expected_descriptor = (
+        local_metadata_asset_descriptor(
+            document_sha256=metadata.sha256,
+            document_size_bytes=metadata.size_bytes or 0,
+            binding=binding,
+        )
+        if isinstance(binding, dict)
+        else None
+    )
+    if (
+        metadata.asset_key != LOCAL_METADATA_ASSET_KEY
+        or metadata.is_primary
+        or metadata.storage_backend != "filesystem"
+        or metadata.media_type != "application/json"
+        or metadata.size_bytes is None
+        or metadata.size_bytes < 1
+        or descriptor != expected_descriptor
+        or not local_metadata_gate_matches(
+            version.validation_json,
+            document_sha256=metadata.sha256,
+            document_size_bytes=metadata.size_bytes,
+            descriptor=descriptor,
+            binding=binding,
+        )
+    ):
+        raise MirrorPromotionConflict(
+            "delivery local metadata precommit gate is invalid"
+        )
     _validate_version_style_parity(db, version)
 
 

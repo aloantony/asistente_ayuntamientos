@@ -15,7 +15,7 @@ import hashlib
 import json
 from math import isfinite
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -30,6 +30,16 @@ from app.reference_layers.mirror_lifecycle import (
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
     require_bound_sync_run_authorization,
+)
+from app.reference_layers.local_metadata_contract import (
+    LOCAL_METADATA_ASSET_KEY,
+    LOCAL_METADATA_ASSET_SCHEMA,
+    LOCAL_METADATA_BINDING_KEYS,
+    LOCAL_METADATA_DESCRIPTOR_KEYS,
+    LOCAL_METADATA_DOCUMENT_SCHEMA,
+    local_metadata_asset_descriptor,
+    local_metadata_binding,
+    local_metadata_precommit_gate,
 )
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
@@ -69,9 +79,6 @@ _LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
 _MAX_SOURCE_VERSION_LENGTH = 2_048
 _VALIDATION_SCHEMA = "reference-delivery-validation/v1"
 _CONTINUITY_SCHEMA = "reference-delivery-continuity/v1"
-LOCAL_METADATA_DOCUMENT_SCHEMA = "siur-local-delivery-metadata/v1"
-LOCAL_METADATA_ASSET_SCHEMA = "reference-local-metadata-asset/v1"
-LOCAL_METADATA_ASSET_KEY = "metadata"
 _MIN_FEATURE_BASELINE = 100
 _MIN_FEATURE_RETAINED_RATIO = 0.10
 _MAX_FEATURE_GROWTH_RATIO = 10.0
@@ -84,32 +91,6 @@ _DATA_SCHEMA_BY_KIND = {
     "raster": "reference-raster-schema/v1",
     "tiles": "reference-tiles-schema/v1",
 }
-_LOCAL_METADATA_BINDING_KEYS = frozenset(
-    {
-        "provider_key",
-        "layer_id",
-        "source_id",
-        "sync_run_id",
-        "catalog_snapshot_id",
-        "catalog_definition_sha256",
-        "source_definition_sha256",
-        "authorization_review_id",
-        "authorization_review_sha256",
-        "authorization_document_sha256",
-        "delivery_kind",
-        "content_sha256",
-        "prepared_validation_sha256",
-    }
-)
-_LOCAL_METADATA_DESCRIPTOR_KEYS = frozenset(
-    {
-        "schema_version",
-        "document_schema_version",
-        "document_sha256",
-        "document_size_bytes",
-        "binding",
-    }
-)
 
 
 class DeliveryBuildError(MirrorLifecycleError):
@@ -163,6 +144,34 @@ class PreparedDelivery:
 
 
 @dataclass(frozen=True)
+class LocalMetadataPrecommitContext:
+    db: Session
+    prepared: PreparedDelivery
+    source: ReferenceLayerSource
+    run: ReferenceSyncRun
+    layer: ReferenceLayer
+    snapshot: ReferenceCatalogSnapshot
+    authorization: ReferenceMirrorAuthorizationReview
+    plan: ReferenceStyleParityPlan
+    plan_items: tuple[ReferenceStyleParityPlanItem, ...]
+    artifacts: tuple[ReferenceSourceArtifact, ...]
+    artifact_links: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
+class LocalMetadataVerification:
+    document_sha256: str
+    document_size_bytes: int
+
+
+class LocalMetadataPrecommitVerifier(Protocol):
+    def __call__(
+        self,
+        context: LocalMetadataPrecommitContext,
+    ) -> LocalMetadataVerification: ...
+
+
+@dataclass(frozen=True)
 class BuiltDeliveryVersion:
     version_id: int
     sequence_number: int
@@ -175,11 +184,16 @@ def create_delivery_version(
     *,
     lease: SyncRunLease,
     prepared: PreparedDelivery,
+    metadata_verifier: LocalMetadataPrecommitVerifier,
     now: datetime | None = None,
 ) -> BuiltDeliveryVersion:
     """Persist one immutable, unpromoted version for a live leased run."""
 
     normalized = _validate_prepared(prepared)
+    if not callable(metadata_verifier):
+        raise DeliveryBuildError(
+            "local metadata precommit verifier is required"
+        )
     try:
         preliminary_source = db.get(ReferenceLayerSource, lease.source_id)
         if preliminary_source is None:
@@ -348,6 +362,63 @@ def create_delivery_version(
         )
         if not continuity["passed"]:
             raise DeliveryContinuityError(continuity)
+        verification = metadata_verifier(
+            LocalMetadataPrecommitContext(
+                db=db,
+                prepared=prepared,
+                source=source,
+                run=run,
+                layer=layer,
+                snapshot=snapshot,
+                authorization=authorization,
+                plan=plan,
+                plan_items=plan_items,
+                artifacts=tuple(
+                    sorted(
+                        artifact_rows,
+                        key=lambda item: item.id,
+                    )
+                ),
+                artifact_links=tuple(
+                    sorted(
+                        artifact_links,
+                        key=lambda item: (item[1], item[0]),
+                    )
+                ),
+            )
+        )
+        metadata_asset = next(
+            asset
+            for asset in prepared.assets
+            if asset.asset_kind == "metadata"
+        )
+        if (
+            not isinstance(
+                verification,
+                LocalMetadataVerification,
+            )
+            or verification.document_sha256
+            != metadata_asset.sha256
+            or verification.document_size_bytes
+            != metadata_asset.size_bytes
+        ):
+            raise DeliveryBuildError(
+                "local metadata precommit verification is invalid"
+            )
+        if _validate_prepared(prepared) != normalized:
+            raise DeliveryBuildError(
+                "prepared delivery changed during metadata verification"
+            )
+        _validate_local_metadata_asset_binding(
+            prepared,
+            source=source,
+            run=run,
+            snapshot=snapshot,
+            authorization=authorization,
+            prepared_validation_sha256=normalized[
+                "validation_sha256"
+            ],
+        )
         stored_validation = deepcopy(prepared.validation_json)
         stored_validation["continuity_gate"] = continuity
         stored_validation["style_parity_gate"] = {
@@ -359,6 +430,17 @@ def create_delivery_version(
             "verified_style_count": len(plan_items),
             "missing_style_count": 0,
         }
+        metadata_binding = metadata_asset.metadata_json["binding"]
+        stored_validation["local_metadata_gate"] = (
+            local_metadata_precommit_gate(
+                document_sha256=metadata_asset.sha256,
+                document_size_bytes=(
+                    verification.document_size_bytes
+                ),
+                descriptor=metadata_asset.metadata_json,
+                binding=metadata_binding,
+            )
+        )
         validation_sha256 = canonical_json_sha256(stored_validation)
         normalized["validation_sha256"] = validation_sha256
 
@@ -1008,58 +1090,6 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
     }
 
 
-def local_metadata_binding(
-    *,
-    provider_key: str,
-    layer_id: int,
-    source_id: int,
-    sync_run_id: int,
-    catalog_snapshot_id: int,
-    catalog_definition_sha256: str,
-    source_definition_sha256: str,
-    authorization_review_id: int,
-    authorization_review_sha256: str,
-    authorization_document_sha256: str,
-    delivery_kind: str,
-    content_sha256: str,
-    prepared_validation_sha256: str,
-) -> dict[str, Any]:
-    """Return the exact non-recursive identity bound by a metadata asset."""
-
-    return {
-        "provider_key": provider_key,
-        "layer_id": layer_id,
-        "source_id": source_id,
-        "sync_run_id": sync_run_id,
-        "catalog_snapshot_id": catalog_snapshot_id,
-        "catalog_definition_sha256": catalog_definition_sha256,
-        "source_definition_sha256": source_definition_sha256,
-        "authorization_review_id": authorization_review_id,
-        "authorization_review_sha256": authorization_review_sha256,
-        "authorization_document_sha256": authorization_document_sha256,
-        "delivery_kind": delivery_kind,
-        "content_sha256": content_sha256,
-        "prepared_validation_sha256": prepared_validation_sha256,
-    }
-
-
-def local_metadata_asset_descriptor(
-    *,
-    document_sha256: str,
-    document_size_bytes: int,
-    binding: dict[str, Any],
-) -> dict[str, Any]:
-    """Build the manifest-side descriptor for canonical metadata bytes."""
-
-    return {
-        "schema_version": LOCAL_METADATA_ASSET_SCHEMA,
-        "document_schema_version": LOCAL_METADATA_DOCUMENT_SCHEMA,
-        "document_sha256": document_sha256,
-        "document_size_bytes": document_size_bytes,
-        "binding": binding,
-    }
-
-
 def _validate_local_metadata_asset_shape(
     prepared: PreparedDelivery,
     *,
@@ -1085,7 +1115,7 @@ def _validate_local_metadata_asset_shape(
             "prepared local metadata asset shape is invalid"
         )
     descriptor = asset.metadata_json
-    if set(descriptor) != _LOCAL_METADATA_DESCRIPTOR_KEYS:
+    if set(descriptor) != LOCAL_METADATA_DESCRIPTOR_KEYS:
         raise DeliveryBuildError(
             "prepared local metadata descriptor is invalid"
         )
@@ -1102,7 +1132,7 @@ def _validate_local_metadata_asset_shape(
     binding = descriptor.get("binding")
     if (
         not isinstance(binding, dict)
-        or set(binding) != _LOCAL_METADATA_BINDING_KEYS
+        or set(binding) != LOCAL_METADATA_BINDING_KEYS
     ):
         raise DeliveryBuildError(
             "prepared local metadata binding is invalid"
