@@ -364,6 +364,9 @@ def test_continuity_report_checks_kind_crs_bounds_schema_and_features(db) -> Non
     features = PreparedDelivery(
         **{**prepared.__dict__, "feature_count": 1}
     )
+    feature_explosion = PreparedDelivery(
+        **{**prepared.__dict__, "feature_count": 2_000}
+    )
     raster_validation = {
         "schema_version": "reference-delivery-validation/v1",
         "passed": True,
@@ -392,6 +395,7 @@ def test_continuity_report_checks_kind_crs_bounds_schema_and_features(db) -> Non
         (bounds, "bounds"),
         (schema, "data_schema"),
         (features, "feature_count"),
+        (feature_explosion, "feature_count"),
         (kind, "delivery_kind"),
     )
     for candidate, failed_check in expected:
@@ -426,6 +430,17 @@ def test_continuity_report_checks_kind_crs_bounds_schema_and_features(db) -> Non
     assert bounds_check["overlap_ratio"] == 1.0
     assert bounds_check["minimum_overlap_ratio"] == 0.8
     assert 0.5 <= bounds_check["area_ratio"] <= 2.0
+
+    growth_evidence = evaluate_delivery_continuity(
+        active_version=active,
+        candidate=feature_explosion,
+    )
+    growth_check = growth_evidence["checks"]["feature_count"]
+    assert growth_evidence["passed"] is False
+    assert growth_check["candidate"] == 2_000
+    assert growth_check["maximum_growth_ratio"] == 10.0
+    assert growth_check["absolute_growth_allowance"] == 1_000
+    assert growth_check["maximum_candidate"] == 1_230
 
     invalid_baseline_validation = {"passed": True}
     invalid_baseline = SimpleNamespace(

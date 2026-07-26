@@ -58,6 +58,8 @@ _VALIDATION_SCHEMA = "reference-delivery-validation/v1"
 _CONTINUITY_SCHEMA = "reference-delivery-continuity/v1"
 _MIN_FEATURE_BASELINE = 100
 _MIN_FEATURE_RETAINED_RATIO = 0.10
+_MAX_FEATURE_GROWTH_RATIO = 10.0
+_FEATURE_GROWTH_ALLOWANCE = 1_000
 _MIN_BOUNDS_OVERLAP_RATIO = 0.80
 _MIN_BOUNDS_AREA_RATIO = 0.50
 _MAX_BOUNDS_AREA_RATIO = 2.00
@@ -459,16 +461,34 @@ def evaluate_delivery_continuity(
             and isinstance(candidate_count, int)
             else None
         )
+        minimum_feature_count = (
+            1
+            if feature_applies
+            and isinstance(active_count, int)
+            and active_count < _MIN_FEATURE_BASELINE
+            else (
+                active_count * _MIN_FEATURE_RETAINED_RATIO
+                if feature_applies and isinstance(active_count, int)
+                else None
+            )
+        )
+        maximum_feature_count = (
+            max(
+                active_count * _MAX_FEATURE_GROWTH_RATIO,
+                active_count + _FEATURE_GROWTH_ALLOWANCE,
+            )
+            if feature_applies and isinstance(active_count, int)
+            else None
+        )
         feature_matches = bool(
             not feature_applies
             or (
                 isinstance(active_count, int)
                 and isinstance(candidate_count, int)
-                and (
-                    active_count < _MIN_FEATURE_BASELINE
-                    or candidate_count
-                    >= active_count * _MIN_FEATURE_RETAINED_RATIO
-                )
+                and minimum_feature_count is not None
+                and maximum_feature_count is not None
+                and candidate_count >= minimum_feature_count
+                and candidate_count <= maximum_feature_count
             )
         )
         checks = {
@@ -499,6 +519,10 @@ def evaluate_delivery_continuity(
                 "candidate": candidate_count,
                 "minimum_baseline": _MIN_FEATURE_BASELINE,
                 "minimum_retained_ratio": _MIN_FEATURE_RETAINED_RATIO,
+                "maximum_growth_ratio": _MAX_FEATURE_GROWTH_RATIO,
+                "absolute_growth_allowance": _FEATURE_GROWTH_ALLOWANCE,
+                "minimum_candidate": minimum_feature_count,
+                "maximum_candidate": maximum_feature_count,
                 "retained_ratio": retained_ratio,
             },
         }
