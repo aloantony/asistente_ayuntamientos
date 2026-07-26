@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from app.reference_layers.catalog import (
     apply_catalog_definition,
 )
 from app.reference_layers.models import ReferenceLayer
+from app.reference_layers.mirror_lifecycle import build_mirror_bootstrap_plan
 from app.reference_layers.source_audit import (
     _layer_definition,
     audit_current_catalog_sources,
@@ -29,6 +31,10 @@ from app.reference_layers.mirror_coverage import (
     SIUR_TILE_MIN_ZOOM,
     SIUR_TILE_PROFILE,
     SIUR_WMS_SUPERTILE_SIZE,
+)
+from app.reference_layers.siur_settings import (
+    SiurSettingsBaseline,
+    analyze_siur_settings,
 )
 
 
@@ -214,6 +220,240 @@ def test_native_delivery_protocols_always_have_a_local_candidate(
 
     assert len(candidates) == 1
     assert candidates[0].protocol == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "catalog_endpoint",
+        "catalog_remote_name",
+        "wms_endpoint",
+        "wms_remote_name",
+        "image_format",
+        "profile",
+    ),
+    [
+        (
+            "https://www.ign.es/wmts/pnoa-ma",
+            "OI.OrthoimageCoverage",
+            "https://www.ign.es/wms-inspire/pnoa-ma",
+            "OI.OrthoimageCoverage",
+            "image/jpeg",
+            "ign-pnoa-current-ortho-wms-v1",
+        ),
+        (
+            "https://www.ign.es/wmts/ign-base",
+            "IGNBaseTodo-nofondo",
+            "https://www.ign.es/wms-inspire/ign-base",
+            "IGNBaseTodo-nofondo",
+            "image/png",
+            "ign-base-transparent-wms-v1",
+        ),
+        (
+            "https://www.ign.es/wmts/mapa-raster",
+            "MTN",
+            "https://www.ign.es/wms-inspire/mapa-raster",
+            "mtn_rasterizado",
+            "image/jpeg",
+            "ign-mtn-raster-wms-v1",
+        ),
+    ],
+)
+def test_reviewed_siur_native_maps_prefer_exact_official_wms_with_wmts_fallback(
+    catalog_endpoint,
+    catalog_remote_name,
+    wms_endpoint,
+    wms_remote_name,
+    image_format,
+    profile,
+) -> None:
+    catalog_service = replace(
+        service("wmts", catalog_endpoint + "/"),
+        default_format=None,
+    )
+    catalog_layer = replace(
+        layer(catalog_remote_name),
+        source_key="layer:siur:" + "d" * 64,
+        role="base",
+        bounds=None,
+        min_zoom=None,
+        max_zoom=None,
+        style_name=None,
+        image_format=None,
+    )
+
+    candidates = acquisition_candidates(catalog_service, catalog_layer)
+
+    assert [item.protocol for item in candidates] == ["wms_tiles", "wmts"]
+    assert [item.priority for item in candidates] == [40, 50]
+    preferred, fallback = candidates
+    assert preferred.endpoint_url == wms_endpoint
+    assert preferred.remote_name == wms_remote_name
+    assert preferred.config["format"] == image_format
+    assert preferred.config["coverage_profile"] == SIUR_TILE_PROFILE
+    assert preferred.config["wms_supertile_size"] == SIUR_WMS_SUPERTILE_SIZE
+    assert preferred.config["reviewed_equivalence"] == {
+        "schema": "siur-reviewed-native-wms-equivalence/v1",
+        "profile": profile,
+        "catalog_protocol": "wmts",
+        "catalog_endpoint_url": catalog_endpoint,
+        "catalog_remote_name": catalog_remote_name,
+        "selected_protocol": "wms_tiles",
+        "selected_endpoint_url": wms_endpoint,
+        "selected_remote_name": wms_remote_name,
+        "image_format": image_format,
+        "coverage_profile": SIUR_TILE_PROFILE,
+        "wms_supertile_size": SIUR_WMS_SUPERTILE_SIZE,
+    }
+    assert candidate_definition(preferred)["config"]["reviewed_equivalence"] == (
+        preferred.config["reviewed_equivalence"]
+    )
+    assert fallback.endpoint_url == catalog_endpoint + "/"
+    assert fallback.remote_name == catalog_remote_name
+    assert fallback.config["coverage_profile"] == SIUR_TILE_PROFILE
+    assert "wms_supertile_size" not in fallback.config
+    assert acquisition_candidates(catalog_service, catalog_layer) == candidates
+
+
+@pytest.mark.parametrize(
+    ("source_key", "role", "endpoint", "remote_name"),
+    [
+        (
+            "layer:other:ortho",
+            "base",
+            "https://www.ign.es/wmts/pnoa-ma",
+            "OI.OrthoimageCoverage",
+        ),
+        (
+            "layer:siur:" + "e" * 64,
+            "overlay",
+            "https://www.ign.es/wmts/pnoa-ma",
+            "OI.OrthoimageCoverage",
+        ),
+        (
+            "layer:siur:" + "f" * 64,
+            "base",
+            "https://www.ign.es/wmts/pnoa-ma-copy",
+            "OI.OrthoimageCoverage",
+        ),
+        (
+            "layer:siur:" + "0" * 64,
+            "base",
+            "https://www.ign.es/wmts/pnoa-ma",
+            "SimilarOrthoLayer",
+        ),
+        (
+            "layer:siur:" + "1" * 64,
+            "base",
+            "https://www.ign.es/wmts/pnoa-ma?variant=other",
+            "OI.OrthoimageCoverage",
+        ),
+    ],
+)
+def test_reviewed_native_wms_equivalence_never_leaks_to_similar_sources(
+    source_key,
+    role,
+    endpoint,
+    remote_name,
+) -> None:
+    candidates = acquisition_candidates(
+        replace(service("wmts", endpoint), default_format=None),
+        replace(
+            layer(remote_name),
+            source_key=source_key,
+            role=role,
+            bounds=None,
+            min_zoom=None,
+            max_zoom=None,
+        ),
+    )
+
+    assert [item.protocol for item in candidates] == ["wmts"]
+    assert "reviewed_equivalence" not in candidates[0].config
+
+
+def test_real_native_fixture_selects_reviewed_wms_before_its_wmts_fallback() -> None:
+    document = (
+        Path(__file__).parent / "fixtures" / "siur_settings_native.json"
+    ).read_bytes()
+    probe = analyze_siur_settings(document)
+    baseline = SiurSettingsBaseline(
+        top_level_groups=probe.top_level_group_count,
+        groups=probe.group_count,
+        layers=probe.layer_count,
+        services=len(probe.services),
+        raw_sha256=probe.raw_sha256,
+        layer_keys=frozenset(
+            node.source_key
+            for node in probe.nodes
+            if node.kind == "layer" and node.source_key is not None
+        ),
+    )
+    definition = analyze_siur_settings(
+        document,
+        baseline=baseline,
+    ).require_definition()
+    services = {item.source_key: item for item in definition.services}
+    native_maps = {
+        item.remote_name: item
+        for item in definition.layers
+        if item.node_type == "layer" and item.role == "base"
+    }
+
+    for remote_name in ("OI.OrthoimageCoverage", "IGNBaseTodo-nofondo"):
+        catalog_layer = native_maps[remote_name]
+        candidates = acquisition_candidates(
+            services[catalog_layer.service_key],
+            catalog_layer,
+        )
+        assert [item.protocol for item in candidates] == ["wms_tiles", "wmts"]
+        assert candidates[0].priority < candidates[1].priority
+        assert candidates[0].config["wms_supertile_size"] == 8
+
+
+def test_mirror_bootstrap_makes_reviewed_wms_primary_and_keeps_wmts_fallback(
+    db,
+) -> None:
+    catalog_service = replace(
+        service("wmts", "https://www.ign.es/wmts/pnoa-ma"),
+        source_key="pnoa",
+        default_format=None,
+    )
+    catalog_layer = replace(
+        layer("OI.OrthoimageCoverage"),
+        source_key="layer:siur:" + "2" * 64,
+        service_key="pnoa",
+        role="base",
+        bounds=None,
+        min_zoom=None,
+        max_zoom=None,
+        style_name=None,
+    )
+    definition = ReferenceCatalogDefinition(
+        provider_key="siur",
+        source_url="https://example.es/siur-settings.json",
+        raw_catalog={"version": 1},
+        services=(catalog_service,),
+        layers=(catalog_layer,),
+        retrieved_at=datetime(2026, 7, 26, tzinfo=timezone.utc),
+    )
+    apply_catalog_definition(db, definition)
+
+    plan = build_mirror_bootstrap_plan(db, provider_key="siur")
+
+    assert len(plan.sources) == 2
+    preferred, fallback = plan.sources
+    assert preferred.protocol == "wms_tiles"
+    assert preferred.endpoint_url == "https://www.ign.es/wms-inspire/pnoa-ma"
+    assert preferred.remote_name == "OI.OrthoimageCoverage"
+    assert preferred.priority == 40
+    assert preferred.is_primary is True
+    assert preferred.config_json["reviewed_equivalence"]["profile"] == (
+        "ign-pnoa-current-ortho-wms-v1"
+    )
+    assert fallback.protocol == "wmts"
+    assert fallback.endpoint_url == "https://www.ign.es/wmts/pnoa-ma"
+    assert fallback.priority == 50
+    assert fallback.is_primary is False
 
 
 def test_siur_tile_fallback_uses_the_reviewed_finite_coverage() -> None:

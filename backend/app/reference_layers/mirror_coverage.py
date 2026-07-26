@@ -19,6 +19,12 @@ from urllib.parse import urlsplit
 SIUR_LAYER_PREFIX = "layer:siur:"
 SIUR_TILE_PROFILE = "siur-castilla-y-leon-native-z16-v1"
 SIUR_ORTHO_TILE_PROFILE = "siur-castilla-y-leon-ortho-native-z15-v1"
+SIUR_WMS_SUPERTILE_COVERAGE_PROFILES = frozenset(
+    {
+        SIUR_TILE_PROFILE,
+        SIUR_ORTHO_TILE_PROFILE,
+    }
+)
 SIUR_TILE_BOUNDS = {
     "west": -7.6,
     "south": 39.9,

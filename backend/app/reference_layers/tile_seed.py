@@ -25,8 +25,7 @@ from app.reference_layers.blob_store import (
 )
 from app.reference_layers.local_tile_archive import validate_tile_image
 from app.reference_layers.mirror_coverage import (
-    SIUR_ORTHO_TILE_PROFILE,
-    SIUR_TILE_PROFILE,
+    SIUR_WMS_SUPERTILE_COVERAGE_PROFILES,
 )
 from app.reference_layers.safe_download import (
     DownloadHTTPError,
@@ -51,6 +50,10 @@ MAX_ZOOM = 22
 DEFAULT_PREFLIGHT_SAMPLES = 64
 PREFLIGHT_FIXED_BYTES = 64 * 1024
 PREFLIGHT_TILE_OVERHEAD_BYTES = 128
+PREFLIGHT_PROJECTION_SCHEMA = "zoom-stratified-upper-mean-v1"
+PREFLIGHT_MIN_MEAN_HEADROOM = 1.25
+PREFLIGHT_STANDARD_ERROR_MULTIPLIER = 3.5
+PREFLIGHT_UPPER_PERCENTILE = 0.95
 WEB_MERCATOR_MAX_LATITUDE = 85.0511287798066
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,500}$", re.ASCII)
@@ -113,7 +116,9 @@ class TileSeedPreflight:
     sample_count: int
     sample_bytes: int
     largest_tile_bytes: int
+    projected_payload_bytes: int
     projected_archive_bytes: int
+    projection_schema: str
 
 
 @dataclass(frozen=True)
@@ -449,7 +454,9 @@ def seed_tile_archive(
                 "sample_count": preflight.sample_count,
                 "sample_bytes": preflight.sample_bytes,
                 "largest_tile_bytes": preflight.largest_tile_bytes,
+                "projected_payload_bytes": preflight.projected_payload_bytes,
                 "projected_archive_bytes": preflight.projected_archive_bytes,
+                "projection_schema": preflight.projection_schema,
             },
         },
     }
@@ -508,28 +515,24 @@ def _run_preflight(
     if not bodies:
         raise TileSeedError("tile preflight did not select any coverage")
     sizes = [len(body) for body in bodies]
-    if descriptor.estimated_tile_count <= len(coordinates):
-        projected = (
-            PREFLIGHT_FIXED_BYTES
-            + sum(sizes)
-            + descriptor.estimated_tile_count * PREFLIGHT_TILE_OVERHEAD_BYTES
-        )
-    else:
-        conservative_payload = max(
-            max(sizes) * 2,
-            math.ceil(sum(sizes) / len(sizes) * 2),
-        )
-        projected = (
-            PREFLIGHT_FIXED_BYTES
-            + descriptor.estimated_tile_count
-            * (conservative_payload + PREFLIGHT_TILE_OVERHEAD_BYTES)
-        )
+    projected_payload = _project_tile_payload_bytes(
+        descriptor,
+        coordinates,
+        sizes,
+    )
+    projected = (
+        PREFLIGHT_FIXED_BYTES
+        + projected_payload
+        + descriptor.estimated_tile_count * PREFLIGHT_TILE_OVERHEAD_BYTES
+    )
     result = TileSeedPreflight(
         tile_count=descriptor.estimated_tile_count,
         sample_count=len(coordinates),
         sample_bytes=sum(sizes),
         largest_tile_bytes=max(sizes),
+        projected_payload_bytes=projected_payload,
         projected_archive_bytes=projected,
+        projection_schema=PREFLIGHT_PROJECTION_SCHEMA,
     )
     if projected > max_archive_bytes:
         raise TileSeedError(
@@ -537,6 +540,97 @@ def _run_preflight(
         )
     store.ensure_capacity(projected)
     return result, prefetched
+
+
+def _project_tile_payload_bytes(
+    descriptor: TileSourceDescriptor,
+    coordinates: tuple[TileCoordinate, ...],
+    sizes: list[int],
+) -> int:
+    """Project payload with a zoom-stratified upper mean.
+
+    Tile pyramids are extremely imbalanced: the highest zoom contains most
+    coordinates, while isolated low-zoom labels or transparent PNGs can be
+    much larger than a typical high-zoom tile.  Applying twice the single
+    largest sample to every coordinate therefore rejects viable archives.
+
+    The estimator instead weights each zoom by its exact tile count.  Within
+    every sampled zoom it uses the largest of a 25% operational margin, a
+    3.5-standard-error upper mean, and the observed 95th percentile.  Sparse
+    and unsampled strata retain deliberately stronger fallbacks.  This is only
+    an early feasibility check: archive byte limits and store quota/free-space
+    checks still run while every batch is written.
+    """
+
+    if (
+        not coordinates
+        or len(coordinates) != len(sizes)
+        or any(
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 0 < size <= MAX_TILE_BYTES
+            for size in sizes
+        )
+    ):
+        raise TileSeedError("tile preflight samples are inconsistent")
+    if descriptor.estimated_tile_count <= len(coordinates):
+        return sum(sizes)
+
+    samples_by_window: dict[
+        tuple[int, str | None],
+        list[int],
+    ] = {}
+    for coordinate, size in zip(coordinates, sizes, strict=True):
+        samples_by_window.setdefault(
+            (coordinate.z, coordinate.matrix_identifier),
+            [],
+        ).append(size)
+
+    pooled_upper = _upper_sample_mean(sizes)
+    largest = max(sizes)
+    projected = 0
+    for window in _tile_windows(descriptor):
+        window_sizes = samples_by_window.get(
+            (window.zoom, window.matrix_identifier),
+            [],
+        )
+        if window_sizes:
+            upper_mean = _upper_sample_mean(window_sizes)
+            if len(window_sizes) < 4:
+                upper_mean = max(upper_mean, pooled_upper)
+        else:
+            upper_mean = max(
+                pooled_upper,
+                min(MAX_TILE_BYTES, largest * 2),
+            )
+        projected += window.tile_count * upper_mean
+    return projected
+
+
+def _upper_sample_mean(sizes: list[int]) -> int:
+    if not sizes:
+        raise TileSeedError("tile preflight stratum has no samples")
+    if len(sizes) == 1:
+        return min(MAX_TILE_BYTES, sizes[0] * 2)
+
+    count = len(sizes)
+    mean = math.fsum(sizes) / count
+    sample_variance = math.fsum((size - mean) ** 2 for size in sizes) / (
+        count - 1
+    )
+    standard_error = math.sqrt(sample_variance / count)
+    ordered = sorted(sizes)
+    percentile_index = max(
+        0,
+        math.ceil(PREFLIGHT_UPPER_PERCENTILE * count) - 1,
+    )
+    percentile = ordered[percentile_index]
+    upper = max(
+        mean * PREFLIGHT_MIN_MEAN_HEADROOM,
+        mean + PREFLIGHT_STANDARD_ERROR_MULTIPLIER * standard_error,
+        float(percentile),
+    )
+    return min(MAX_TILE_BYTES, math.ceil(upper))
 
 
 def _fetch_wms_preflight_samples(
@@ -1298,10 +1392,11 @@ def _validate_wms_descriptor(
         or supertile_size not in {1, 2, 4, 8}
     ):
         raise TileSeedError("WMS supertile size is invalid")
-    if supertile_size > 1 and descriptor.get("coverage_profile") not in {
-        SIUR_TILE_PROFILE,
-        SIUR_ORTHO_TILE_PROFILE,
-    }:
+    if (
+        supertile_size > 1
+        and descriptor.get("coverage_profile")
+        not in SIUR_WMS_SUPERTILE_COVERAGE_PROFILES
+    ):
         raise TileSeedError(
             "WMS supertiles require a reviewed SIUR coverage profile"
         )

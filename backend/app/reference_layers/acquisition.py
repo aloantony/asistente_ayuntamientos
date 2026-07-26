@@ -46,8 +46,7 @@ from app.reference_layers.models import (
     ReferenceSyncRunArtifact,
 )
 from app.reference_layers.mirror_coverage import (
-    SIUR_ORTHO_TILE_PROFILE,
-    SIUR_TILE_PROFILE,
+    SIUR_WMS_SUPERTILE_COVERAGE_PROFILES,
 )
 from app.reference_layers.safe_download import (
     HTTPSDownloadPolicy,
@@ -3427,10 +3426,7 @@ def _wms_tile_descriptor(
                 "WMS supertile size is outside its safe reviewed range"
             )
         coverage_profile = candidate.config.get("coverage_profile")
-        if coverage_profile not in {
-            SIUR_TILE_PROFILE,
-            SIUR_ORTHO_TILE_PROFILE,
-        }:
+        if coverage_profile not in SIUR_WMS_SUPERTILE_COVERAGE_PROFILES:
             raise AcquisitionConfigurationError(
                 "WMS supertiles require a reviewed SIUR coverage profile"
             )
