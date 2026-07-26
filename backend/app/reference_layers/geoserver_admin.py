@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import http.client
+import io
 import json
 import re
 import socket
@@ -21,6 +22,7 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 from urllib.parse import quote, urlencode, urlsplit
 from xml.etree import ElementTree
+import zipfile
 
 from pydantic import SecretStr
 
@@ -41,6 +43,8 @@ SLD_CONTENT_TYPES = frozenset(
 )
 MAX_JSON_BYTES = 1024 * 1024
 MAX_SLD_BYTES = 1024 * 1024
+MAX_STYLE_PACKAGE_BYTES = 64 * 1024 * 1024
+MAX_STYLE_PACKAGE_RESOURCES = 512
 MAX_ERROR_BYTES = 16 * 1024
 MAX_REQUEST_TARGET_BYTES = 4096
 MAX_CONTENT_LENGTH_DIGITS = 20
@@ -53,6 +57,11 @@ VERSIONED_NAME = re.compile(
     re.ASCII,
 )
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
+STYLE_PACKAGE_RESOURCE = re.compile(
+    r"^resources/(?P<sha>[0-9a-f]{64})\."
+    r"(?P<extension>png|jpg|gif|svg|webp)$",
+    re.ASCII,
+)
 SRS_NAME = re.compile(r"^EPSG:[1-9][0-9]{2,6}$", re.ASCII)
 PROJECTION_POLICIES = frozenset(
     {"NONE", "FORCE_DECLARED", "REPROJECT_TO_DECLARED"}
@@ -594,6 +603,43 @@ class GeoServerAdminClient:
         _assert_same_bytes(existing, body, "style")
         return PublicationResult("style", style, False)
 
+    def publish_immutable_sld_package(
+        self,
+        *,
+        style_name: str,
+        package: bytes,
+    ) -> PublicationResult:
+        """Publish one closed SLD ZIP with content-addressed local graphics."""
+
+        style = _validate_versioned_name(style_name, "immutable style")
+        body, sld = _validate_sld_package(package)
+        self.ensure_workspace()
+        get_path = (
+            f"/workspaces/{_segment(self._workspace)}/styles/"
+            f"{_segment(style)}.sld?quietOnNotFound=true"
+        )
+        existing = self._get_sld(get_path, allow_not_found=True)
+        if existing is not None:
+            _assert_same_bytes(existing, sld, "style")
+            return PublicationResult("style", style, False)
+
+        status = self._post_raw(
+            f"/workspaces/{_segment(self._workspace)}/styles?"
+            + urlencode({"name": style, "raw": "true"}),
+            body=body,
+            content_type="application/zip",
+            max_body_bytes=MAX_STYLE_PACKAGE_BYTES,
+        )
+        if status == 201:
+            return PublicationResult("style", style, True)
+        existing = self._get_sld(get_path, allow_not_found=True)
+        if existing is None:
+            raise GeoServerAdminConflictError(
+                "local GeoServer style package creation conflicted"
+            )
+        _assert_same_bytes(existing, sld, "style")
+        return PublicationResult("style", style, False)
+
     def ensure_layer_style(
         self,
         *,
@@ -893,8 +939,20 @@ class GeoServerAdminClient:
             content_type=JSON_CONTENT_TYPE,
         )
 
-    def _post_raw(self, path: str, *, body: bytes, content_type: str) -> int:
-        if not body or len(body) > MAX_SLD_BYTES:
+    def _post_raw(
+        self,
+        path: str,
+        *,
+        body: bytes,
+        content_type: str,
+        max_body_bytes: int = MAX_SLD_BYTES,
+    ) -> int:
+        if (
+            not body
+            or not isinstance(max_body_bytes, int)
+            or max_body_bytes < 1
+            or len(body) > max_body_bytes
+        ):
             raise InvalidGeoServerPublicationError(
                 "local GeoServer publication body is invalid"
             )
@@ -1154,7 +1212,180 @@ def _validate_artifact_relative_path(value: str) -> PurePosixPath:
     return path
 
 
+def _validate_sld_package(value: bytes) -> tuple[bytes, bytes]:
+    if (
+        not isinstance(value, bytes)
+        or not value
+        or len(value) > MAX_STYLE_PACKAGE_BYTES
+    ):
+        raise InvalidGeoServerPublicationError(
+            "invalid immutable style package"
+        )
+    try:
+        with zipfile.ZipFile(io.BytesIO(value), "r") as archive:
+            entries = archive.infolist()
+            if (
+                not entries
+                or len(entries) > MAX_STYLE_PACKAGE_RESOURCES + 1
+                or len({item.filename for item in entries}) != len(entries)
+            ):
+                raise InvalidGeoServerPublicationError(
+                    "invalid immutable style package entries"
+                )
+            resources: dict[str, bytes] = {}
+            sld: bytes | None = None
+            total_size = 0
+            for item in entries:
+                name = item.filename
+                path = PurePosixPath(name)
+                mode = item.external_attr >> 16
+                if (
+                    item.is_dir()
+                    or item.flag_bits & 0x1
+                    or not name
+                    or len(name) > 255
+                    or "\\" in name
+                    or path.is_absolute()
+                    or str(path) != name
+                    or ".." in path.parts
+                    or (mode & 0o170000) not in {0, 0o100000}
+                    or item.file_size <= 0
+                ):
+                    raise InvalidGeoServerPublicationError(
+                        "unsafe immutable style package entry"
+                    )
+                total_size += item.file_size
+                if total_size > MAX_STYLE_PACKAGE_BYTES:
+                    raise InvalidGeoServerPublicationError(
+                        "immutable style package expands beyond its limit"
+                    )
+                payload = archive.read(item)
+                if len(payload) != item.file_size:
+                    raise InvalidGeoServerPublicationError(
+                        "immutable style package entry is truncated"
+                    )
+                if name == "style.sld":
+                    sld = payload
+                    continue
+                match = STYLE_PACKAGE_RESOURCE.fullmatch(name)
+                if (
+                    match is None
+                    or hashlib.sha256(payload).hexdigest()
+                    != match.group("sha")
+                ):
+                    raise InvalidGeoServerPublicationError(
+                        "style package resource is not content-addressed"
+                    )
+                _validate_style_resource_payload(
+                    payload,
+                    match.group("extension"),
+                )
+                resources[name] = payload
+    except (
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        KeyError,
+        RuntimeError,
+    ) as error:
+        raise InvalidGeoServerPublicationError(
+            "invalid immutable style package"
+        ) from error
+    if sld is None or not resources:
+        raise InvalidGeoServerPublicationError(
+            "style package is missing its SLD or resources"
+        )
+    normalized_sld, references = _validate_sld_document(
+        sld,
+        allowed_resource_paths=frozenset(resources),
+    )
+    if references != frozenset(resources):
+        raise InvalidGeoServerPublicationError(
+            "style package contains unreferenced resources"
+        )
+    return value, normalized_sld
+
+
+def _validate_style_resource_payload(
+    payload: bytes,
+    extension: str,
+) -> None:
+    valid = {
+        "png": payload.startswith(b"\x89PNG\r\n\x1a\n"),
+        "jpg": (
+            payload.startswith(b"\xff\xd8\xff")
+            and payload.endswith(b"\xff\xd9")
+        ),
+        "gif": payload.startswith((b"GIF87a", b"GIF89a")),
+        "webp": (
+            len(payload) >= 12
+            and payload[:4] == b"RIFF"
+            and payload[8:12] == b"WEBP"
+        ),
+    }
+    if extension in valid:
+        if not valid[extension]:
+            raise InvalidGeoServerPublicationError(
+                "style package resource type is invalid"
+            )
+        return
+    if extension != "svg":
+        raise InvalidGeoServerPublicationError(
+            "style package resource type is invalid"
+        )
+    lowered = payload.lower()
+    if (
+        b"\x00" in payload
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+    ):
+        raise InvalidGeoServerPublicationError(
+            "style package SVG is unsafe"
+        )
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError as error:
+        raise InvalidGeoServerPublicationError(
+            "style package SVG is invalid"
+        ) from error
+    elements = list(root.iter())
+    if (
+        root.tag.rsplit("}", 1)[-1].casefold() != "svg"
+        or len(elements) > 20_000
+    ):
+        raise InvalidGeoServerPublicationError(
+            "style package SVG is invalid"
+        )
+    for element in elements:
+        if element.tag.rsplit("}", 1)[-1].casefold() in {
+            "script",
+            "foreignobject",
+            "iframe",
+        }:
+            raise InvalidGeoServerPublicationError(
+                "style package SVG contains active content"
+            )
+        if any(
+            attribute.rsplit("}", 1)[-1].casefold()
+            in {"href", "src", "url", "uri"}
+            for attribute in element.attrib
+        ):
+            raise InvalidGeoServerPublicationError(
+                "style package SVG has an external dependency"
+            )
+
+
 def _validate_sld(value: bytes | str) -> bytes:
+    return _validate_sld_document(
+        value,
+        allowed_resource_paths=None,
+    )[0]
+
+
+def _validate_sld_document(
+    value: bytes | str,
+    *,
+    allowed_resource_paths: frozenset[str] | None,
+) -> tuple[bytes, frozenset[str]]:
     if isinstance(value, str):
         body = value.encode("utf-8")
     elif isinstance(value, bytes):
@@ -1174,19 +1405,23 @@ def _validate_sld(value: bytes | str) -> bytes:
         raise InvalidGeoServerPublicationError("invalid immutable SLD") from error
     if root.tag != "{http://www.opengis.net/sld}StyledLayerDescriptor":
         raise InvalidGeoServerPublicationError("invalid immutable SLD root")
+    references: set[str] = set()
     for element in root.iter():
-        for attribute in element.attrib:
+        local_element = element.tag.rsplit("}", 1)[-1].casefold()
+        for attribute, raw_value in element.attrib.items():
             local_attribute = attribute.rsplit("}", 1)[-1].casefold()
             if local_attribute in {"href", "src", "url"}:
-                # A standalone SLD upload cannot atomically publish or verify
-                # auxiliary icons.  Accepting even a relative href would make
-                # the supposedly immutable style depend on mutable GeoServer
-                # data-directory state.  Package support must verify every
-                # referenced artifact before this restriction can be relaxed.
-                raise InvalidGeoServerPublicationError(
-                    "immutable SLD cannot reference auxiliary resources"
-                )
-    return body
+                if (
+                    allowed_resource_paths is None
+                    or local_element != "onlineresource"
+                    or local_attribute != "href"
+                    or raw_value not in allowed_resource_paths
+                ):
+                    raise InvalidGeoServerPublicationError(
+                        "immutable SLD cannot reference auxiliary resources"
+                    )
+                references.add(raw_value)
+    return body, frozenset(references)
 
 
 def _validate_workspace_payload(payload: Mapping[str, Any], name: str) -> None:

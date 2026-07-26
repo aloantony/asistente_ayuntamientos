@@ -92,6 +92,12 @@ from app.reference_layers.models import (
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
 )
+from app.reference_layers.style_parity import (
+    StyleParityError,
+    StyleParityPlanResult,
+    persist_style_parity_plan,
+    require_complete_style_parity,
+)
 from app.reference_layers.tile_seed import (
     TileContentSample,
     TileSeedError,
@@ -178,6 +184,15 @@ class StylePublication:
     style_name: str
     storage_key: str
     sha256: str
+    asset_kind: Literal["style_sld", "style_package"] = "style_sld"
+
+
+@dataclass(frozen=True)
+class ResolvedStyleMaterial:
+    style_artifact: PersistedRunArtifact
+    effective_artifact: PersistedRunArtifact
+    parity_kind: Literal["exact", "adapted"]
+    resources: tuple[PersistedRunArtifact, ...]
 
 
 @dataclass(frozen=True)
@@ -533,6 +548,13 @@ class MirrorRunProcessor:
                         acquired,
                     )
                     return WorkerResult("unchanged", lease.run_id)
+
+                persist_run_style_parity(
+                    self.session_factory,
+                    context,
+                    persisted,
+                    acquired,
+                )
 
                 if (
                     context.source.target_kind == "tiles"
@@ -977,6 +999,12 @@ def load_run_context(
                 .limit(1)
             )
             conditional = ConditionalRequest.from_artifact(artifact)
+            # A dataset-only 304 cannot prove that an independently served
+            # GetStyles response and its graphics are unchanged. Styled WCS
+            # sources therefore take a full snapshot so style parity is
+            # evaluated on every scheduled check.
+            if styles:
+                conditional = None
         context = RunContext(
             lease=lease,
             source=source,
@@ -1066,6 +1094,39 @@ def persist_run_acquisition(
             )
             for artifact, roles in grouped.values()
         )
+
+
+def persist_run_style_parity(
+    session_factory: SessionFactory,
+    context: RunContext,
+    artifacts: tuple[PersistedRunArtifact, ...],
+    acquired: AcquisitionResult,
+) -> StyleParityPlanResult:
+    """Persist style evidence even when its strict completeness gate fails."""
+
+    try:
+        with session_factory() as db:
+            plan = persist_style_parity_plan(
+                db,
+                provider_key=context.source.provider_key,
+                layer_id=context.source.layer_id,
+                catalog_snapshot_id=context.layer.last_seen_snapshot_id,
+                source_id=context.source.id,
+                sync_run_id=context.run.id,
+                delivery_kind=context.source.target_kind,
+                styles=context.styles,
+                artifacts=artifacts,
+                probe=acquired.probe,
+            )
+            db.commit()
+        require_complete_style_parity(plan)
+        return plan
+    except StyleParityError as error:
+        raise MirrorOrchestrationError(
+            str(error),
+            code=error.code,
+            retryable=False,
+        ) from error
 
 
 def persist_delivery_version(
@@ -1441,7 +1502,7 @@ def _geoserver_materialization(
     context: RunContext,
     acquired: AcquisitionResult,
     artifacts: tuple[PersistedRunArtifact, ...],
-    style_assets: Mapping[int, PersistedRunArtifact],
+    style_assets: Mapping[int, ResolvedStyleMaterial],
     *,
     vector: VectorIngestResult | None,
     raster: RasterIngestResult | None,
@@ -1461,7 +1522,8 @@ def _geoserver_materialization(
     style_map: dict[str, str] = {}
     default_style_name = None
     for style in context.styles:
-        artifact = style_assets[style.id]
+        material = style_assets[style.id]
+        artifact = material.effective_artifact
         style_name = _versioned_name(
             f"l{context.layer.id}_s{style.id}",
             artifact.sha256,
@@ -1475,25 +1537,59 @@ def _geoserver_materialization(
                 style_name=style_name,
                 storage_key=artifact.storage_key,
                 sha256=artifact.sha256,
+                asset_kind=(
+                    "style_package"
+                    if material.parity_kind == "adapted"
+                    else "style_sld"
+                ),
             )
         )
         prepared_styles.append(
             PreparedDeliveryAsset(
-                asset_key=f"style-{style.id}",
+                asset_key=(
+                    f"style-source-{style.id}"
+                    if material.parity_kind == "adapted"
+                    else f"style-{style.id}"
+                ),
                 asset_kind="style_sld",
                 is_primary=False,
                 storage_backend="filesystem",
-                storage_key=artifact.storage_key,
+                storage_key=material.style_artifact.storage_key,
                 media_type="application/vnd.ogc.sld+xml",
-                sha256=artifact.sha256,
-                size_bytes=artifact.size_bytes,
+                sha256=material.style_artifact.sha256,
+                size_bytes=material.style_artifact.size_bytes,
                 metadata_json={
                     "catalog_style_id": style.id,
                     "catalog_style_source_key": style.source_key,
                     "style_name": style_name,
+                    "parity_kind": material.parity_kind,
+                    "effective": material.parity_kind == "exact",
                 },
             )
         )
+        if material.parity_kind == "adapted":
+            prepared_styles.append(
+                PreparedDeliveryAsset(
+                    asset_key=f"style-{style.id}",
+                    asset_kind="style_package",
+                    is_primary=False,
+                    storage_backend="filesystem",
+                    storage_key=artifact.storage_key,
+                    media_type="application/zip",
+                    sha256=artifact.sha256,
+                    size_bytes=artifact.size_bytes,
+                    metadata_json={
+                        "catalog_style_id": style.id,
+                        "catalog_style_source_key": style.source_key,
+                        "style_name": style_name,
+                        "parity_kind": "adapted",
+                        "effective": True,
+                        "resource_sha256": [
+                            item.sha256 for item in material.resources
+                        ],
+                    },
+                )
+            )
     if context.styles and default_style_name is None:
         raise MirrorOrchestrationError(
             "catalog styles have no unique active default",
@@ -1538,6 +1634,7 @@ def _geoserver_materialization(
             validation_json=vector.validation_json,
             input_artifact_ids=_input_artifact_ids(artifacts),
             assets=(primary, *prepared_styles),
+            supporting_artifacts=_supporting_artifact_links(artifacts),
         )
         publication = GeoServerPublicationPlan(
             delivery_kind="vector",
@@ -1588,6 +1685,7 @@ def _geoserver_materialization(
         validation_json=raster.validation_json,
         input_artifact_ids=_input_artifact_ids(artifacts),
         assets=(primary, *prepared_styles),
+        supporting_artifacts=_supporting_artifact_links(artifacts),
     )
     publication = GeoServerPublicationPlan(
         delivery_kind="raster",
@@ -1741,6 +1839,24 @@ def materialize_tile_delivery(
             "tile delivery has no unique default style",
             code="tile_default_style_missing",
         )
+    expected_style_keys: tuple[str | None, ...] = (
+        tuple(style.source_key for style in context.styles)
+        if context.styles
+        else (None,)
+    )
+    actual_style_keys = tuple(
+        item.catalog_style_source_key for item in publication_assets
+    )
+    complete_style_coverage = bool(
+        len(actual_style_keys) == len(expected_style_keys)
+        and len(set(actual_style_keys)) == len(actual_style_keys)
+        and set(actual_style_keys) == set(expected_style_keys)
+    )
+    if not complete_style_coverage:
+        raise MirrorOrchestrationError(
+            "baked tile archives do not cover every required style",
+            code="tile_style_coverage_incomplete",
+        )
     primary = prepared_assets[primary_index]
     validation = {
         "schema_version": "reference-delivery-validation/v1",
@@ -1748,8 +1864,12 @@ def materialize_tile_delivery(
         "kind": "tiles",
         "checks": {
             "archive_count": len(prepared_assets),
-            "catalog_style_count": len(context.styles),
-            "complete_style_coverage": True,
+            "catalog_style_count": len(expected_style_keys),
+            "complete_style_coverage": complete_style_coverage,
+            "required_style_source_keys": [
+                item or "__implicit_default__"
+                for item in expected_style_keys
+            ],
             "archives": validations,
             "data_schema": {
                 "schema_version": "reference-tiles-schema/v1",
@@ -1768,6 +1888,7 @@ def materialize_tile_delivery(
         validation_json=validation,
         input_artifact_ids=_input_artifact_ids(artifacts),
         assets=tuple(prepared_assets),
+        supporting_artifacts=_supporting_artifact_links(artifacts),
     )
     return MaterializedDelivery(
         prepared,
@@ -1816,13 +1937,26 @@ def publish_geoserver_delivery(
         )
     supervisor.pulse()
     for style in plan.styles:
-        sld = _read_blob_bytes(
+        payload = _read_blob_bytes(
             store,
             storage_key=style.storage_key,
             expected_sha256=style.sha256,
-            max_bytes=1024 * 1024,
+            max_bytes=(
+                64 * 1024 * 1024
+                if style.asset_kind == "style_package"
+                else 1024 * 1024
+            ),
         )
-        client.publish_immutable_sld(style_name=style.style_name, sld=sld)
+        if style.asset_kind == "style_package":
+            client.publish_immutable_sld_package(
+                style_name=style.style_name,
+                package=payload,
+            )
+        else:
+            client.publish_immutable_sld(
+                style_name=style.style_name,
+                sld=payload,
+            )
         client.ensure_layer_style(
             layer_name=plan.layer_name,
             style_name=style.style_name,
@@ -2035,21 +2169,32 @@ def load_existing_publication(
     metadata = _metadata(primary[0].metadata_json)
     layer_name = _metadata_text(metadata, "layer_name")
     style_publications: list[StylePublication] = []
+    publication_style_ids: set[int] = set()
     for item in assets:
-        if item.asset_kind != "style_sld":
+        if item.asset_kind not in {"style_sld", "style_package"}:
             continue
         style_metadata = _metadata(item.metadata_json)
+        if style_metadata.get("effective", True) is not True:
+            continue
+        catalog_style_id = _metadata_integer(
+            style_metadata,
+            "catalog_style_id",
+            minimum=1,
+            maximum=2**31 - 1,
+        )
+        if catalog_style_id in publication_style_ids:
+            raise MirrorOrchestrationError(
+                "existing delivery has duplicate effective style assets",
+                code="existing_delivery_invalid",
+            )
+        publication_style_ids.add(catalog_style_id)
         style_publications.append(
             StylePublication(
-                catalog_style_id=_metadata_integer(
-                    style_metadata,
-                    "catalog_style_id",
-                    minimum=1,
-                    maximum=2**31 - 1,
-                ),
+                catalog_style_id=catalog_style_id,
                 style_name=_metadata_text(style_metadata, "style_name"),
                 storage_key=item.storage_key,
                 sha256=item.sha256,
+                asset_kind=cast(Any, item.asset_kind),
             )
         )
     style_map = metadata.get("styles")
@@ -2238,7 +2383,7 @@ def compare_active_tile_content(
 def _resolve_local_sld_artifacts(
     context: RunContext,
     artifacts: tuple[PersistedRunArtifact, ...],
-) -> dict[int, PersistedRunArtifact]:
+) -> dict[int, ResolvedStyleMaterial]:
     styles_by_id = {item.id: item for item in context.styles}
     styles_by_key = {item.source_key: item for item in context.styles}
     if len(styles_by_key) != len(context.styles):
@@ -2252,7 +2397,38 @@ def _resolve_local_sld_artifacts(
             "active catalog styles have no unique default",
             code="local_default_style_missing",
         )
-    resolved: dict[int, PersistedRunArtifact] = {}
+    package_by_key: dict[str, PersistedRunArtifact] = {}
+    resources_by_sha: dict[str, PersistedRunArtifact] = {}
+    for artifact in artifacts:
+        if "style_package" in artifact.roles:
+            raw_key = artifact.metadata_json.get(
+                "catalog_style_source_key"
+            )
+            if (
+                artifact.artifact_kind != "style_package"
+                or artifact.storage_backend != "filesystem"
+                or artifact.media_type.casefold() != "application/zip"
+                or not isinstance(raw_key, str)
+                or raw_key in package_by_key
+            ):
+                raise MirrorOrchestrationError(
+                    "local style package has an unsupported identity",
+                    code="local_style_package_invalid",
+                )
+            package_by_key[raw_key] = artifact
+        if "style_resource" in artifact.roles:
+            if (
+                artifact.artifact_kind != "style_resource"
+                or artifact.storage_backend != "filesystem"
+                or artifact.sha256 in resources_by_sha
+            ):
+                raise MirrorOrchestrationError(
+                    "local style resource has an unsupported identity",
+                    code="local_style_resource_invalid",
+                )
+            resources_by_sha[artifact.sha256] = artifact
+
+    resolved: dict[int, ResolvedStyleMaterial] = {}
     for artifact in artifacts:
         if "style" not in artifact.roles:
             continue
@@ -2289,7 +2465,78 @@ def _resolve_local_sld_artifacts(
                 "active catalog style has multiple local SLD artifacts",
                 code="local_style_ambiguous",
             )
-        resolved[style.id] = artifact
+        parity_kind = artifact.metadata_json.get("parity_kind", "exact")
+        unresolved = artifact.metadata_json.get(
+            "unresolved_resources",
+            [],
+        )
+        raw_bindings = artifact.metadata_json.get(
+            "resource_bindings",
+            [],
+        )
+        if parity_kind == "missing" or unresolved:
+            raise MirrorOrchestrationError(
+                "local style has unresolved auxiliary resources",
+                code="local_style_resource_missing",
+            )
+        if parity_kind == "exact":
+            if raw_bindings or style.source_key in package_by_key:
+                raise MirrorOrchestrationError(
+                    "exact local style has contradictory resource evidence",
+                    code="local_style_invalid",
+                )
+            resolved[style.id] = ResolvedStyleMaterial(
+                style_artifact=artifact,
+                effective_artifact=artifact,
+                parity_kind="exact",
+                resources=(),
+            )
+            continue
+        if parity_kind != "adapted" or not isinstance(raw_bindings, list):
+            raise MirrorOrchestrationError(
+                "local style parity classification is invalid",
+                code="local_style_invalid",
+            )
+        package = package_by_key.get(style.source_key)
+        if (
+            package is None
+            or package.metadata_json.get("sld_sha256") != artifact.sha256
+        ):
+            raise MirrorOrchestrationError(
+                "adapted local style has no matching immutable package",
+                code="local_style_package_missing",
+            )
+        style_resources: list[PersistedRunArtifact] = []
+        seen_resource_sha: set[str] = set()
+        for binding in raw_bindings:
+            raw_sha = (
+                binding.get("sha256")
+                if isinstance(binding, Mapping)
+                else None
+            )
+            resource = (
+                resources_by_sha.get(raw_sha)
+                if isinstance(raw_sha, str)
+                else None
+            )
+            if resource is None or raw_sha in seen_resource_sha:
+                raise MirrorOrchestrationError(
+                    "adapted local style resource evidence is incomplete",
+                    code="local_style_resource_missing",
+                )
+            seen_resource_sha.add(raw_sha)
+            style_resources.append(resource)
+        if not style_resources:
+            raise MirrorOrchestrationError(
+                "adapted local style has no immutable resources",
+                code="local_style_resource_missing",
+            )
+        resolved[style.id] = ResolvedStyleMaterial(
+            style_artifact=artifact,
+            effective_artifact=package,
+            parity_kind="adapted",
+            resources=tuple(style_resources),
+        )
     missing = sorted(set(styles_by_id) - set(resolved))
     if missing:
         raise MirrorOrchestrationError(
@@ -2444,6 +2691,26 @@ def _input_artifact_ids(
     if not values or len(values) != len(set(values)):
         raise MirrorOrchestrationError(
             "delivery has no unique immutable input artifact set",
+            code="delivery_inputs_invalid",
+        )
+    return values
+
+
+def _supporting_artifact_links(
+    artifacts: tuple[PersistedRunArtifact, ...],
+) -> tuple[tuple[int, str], ...]:
+    allowed = {"style", "style_package", "style_resource", "metadata"}
+    values = tuple(
+        sorted(
+            (item.artifact_id, role)
+            for item in artifacts
+            for role in item.roles
+            if role in allowed
+        )
+    )
+    if len(values) != len(set(values)):
+        raise MirrorOrchestrationError(
+            "delivery supporting provenance is ambiguous",
             code="delivery_inputs_invalid",
         )
     return values

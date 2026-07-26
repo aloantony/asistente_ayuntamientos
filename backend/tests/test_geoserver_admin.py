@@ -1,7 +1,9 @@
 import base64
 import hashlib
+import io
 import json
 import struct
+import zipfile
 import zlib
 from urllib.parse import parse_qs, urlsplit
 
@@ -73,6 +75,29 @@ SLD_WITH_RELATIVE_RESOURCE = b"""<?xml version="1.0" encoding="UTF-8"?>
     </ExternalGraphic></Graphic></PointSymbolizer></Rule>
   </FeatureTypeStyle></UserStyle></NamedLayer>
 </StyledLayerDescriptor>"""
+
+
+def make_sld_package(
+    *,
+    resource_name: str | None = None,
+    include_unreferenced: bool = False,
+) -> tuple[bytes, bytes]:
+    resource = make_png(1, 1)
+    digest = hashlib.sha256(resource).hexdigest()
+    local_name = resource_name or f"resources/{digest}.png"
+    sld = SLD_WITH_RELATIVE_RESOURCE.replace(
+        b"symbols/planning.png",
+        f"resources/{digest}.png".encode(),
+    )
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("style.sld", sld)
+        archive.writestr(local_name, resource)
+        if include_unreferenced:
+            extra = make_png(2, 1)
+            extra_digest = hashlib.sha256(extra).hexdigest()
+            archive.writestr(f"resources/{extra_digest}.png", extra)
+    return package.getvalue(), sld
 
 
 class FakeResponse:
@@ -799,6 +824,65 @@ def test_immutable_sld_is_created_raw_and_is_idempotent() -> None:
     )
     assert result.created is False
     assert all(request[0] == "GET" for request in all_requests(factory))
+
+
+def test_immutable_sld_package_is_created_raw_and_is_idempotent() -> None:
+    package, sld = make_sld_package()
+    client, factory = make_client(
+        [
+            json_response(workspace_payload()),
+            status_response(404),
+            status_response(201),
+        ]
+    )
+    result = client.publish_immutable_sld_package(
+        style_name="planning_style_v_012345",
+        package=package,
+    )
+    assert result.created is True
+    method, target, body, headers = all_requests(factory)[-1]
+    parsed = urlsplit(target)
+    assert method == "POST"
+    assert parsed.path == "/geoserver/rest/workspaces/siur/styles"
+    assert parse_qs(parsed.query) == {
+        "name": ["planning_style_v_012345"],
+        "raw": ["true"],
+    }
+    assert body == package
+    assert headers["Content-Type"] == "application/zip"
+
+    client, factory = make_client(
+        [
+            json_response(workspace_payload()),
+            FakeResponse(sld, content_type="application/vnd.ogc.sld+xml"),
+        ]
+    )
+    result = client.publish_immutable_sld_package(
+        style_name="planning_style_v_012345",
+        package=package,
+    )
+    assert result.created is False
+    assert all(request[0] == "GET" for request in all_requests(factory))
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        make_sld_package(resource_name="../unsafe.png")[0],
+        make_sld_package(resource_name="resources/" + "0" * 64 + ".png")[0],
+        make_sld_package(include_unreferenced=True)[0],
+    ],
+)
+def test_immutable_sld_package_rejects_unsafe_or_unbound_resources(
+    package: bytes,
+) -> None:
+    client, factory = make_client([])
+    with pytest.raises(InvalidGeoServerPublicationError):
+        client.publish_immutable_sld_package(
+            style_name="planning_style_v_012345",
+            package=package,
+        )
+    assert factory.connections == []
 
 
 def test_existing_immutable_sld_mismatch_is_never_overwritten() -> None:
