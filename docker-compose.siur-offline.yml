@@ -28,6 +28,7 @@ services:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
       REDIS_URL: redis://127.0.0.1:6379/0
       LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
+      REFERENCE_REMOTE_PROXY_ENABLED: "false"
     depends_on:
       siur-offline-netns:
         condition: service_started
