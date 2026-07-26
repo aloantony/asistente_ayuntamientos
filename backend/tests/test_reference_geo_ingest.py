@@ -52,12 +52,38 @@ def _raster_info(
     cog: bool,
     size: tuple[int, int] = (100, 200),
     driver: str = "GTiff",
+    band_types: tuple[str, ...] = ("Byte",),
+    nodata_values: tuple[float | None, ...] | None = None,
+    pixel_size: tuple[float, float] = (10.0, 10.0),
+    overview_sizes: tuple[tuple[int, int], ...] = (),
 ) -> bytes:
+    nodata_values = nodata_values or tuple(None for _ in band_types)
+    bands = []
+    for ordinal, (band_type, nodata) in enumerate(
+        zip(band_types, nodata_values, strict=True),
+        start=1,
+    ):
+        band = {
+            "band": ordinal,
+            "type": band_type,
+            "overviews": [{"size": list(item)} for item in overview_sizes],
+        }
+        if nodata is not None:
+            band["noDataValue"] = nodata
+        bands.append(band)
     return json.dumps(
         {
             "driverShortName": driver,
             "size": list(size),
-            "bands": [{"band": 1, "type": "Byte"}],
+            "bands": bands,
+            "geoTransform": [
+                500_000.0,
+                pixel_size[0],
+                0.0,
+                4_600_000.0,
+                0.0,
+                -pixel_size[1],
+            ],
             "coordinateSystem": {
                 "wkt": (
                     'PROJCRS["ETRS89 / UTM zone 30N",'
@@ -553,8 +579,139 @@ def test_raster_ingest_creates_content_addressed_cog(tmp_path) -> None:
 
     assert result.inspection.is_cog is True
     assert result.inspection.crs == "EPSG:25830"
+    assert result.inspection.band_types == ("Byte",)
+    assert result.inspection.nodata_values == (None,)
+    assert result.inspection.pixel_size_x == 10.0
+    assert result.inspection.pixel_size_y == 10.0
+    assert result.inspection.overview_sizes == ()
     assert store.resolve_blob(result.blob.storage_key).read_bytes() == b"normalized-cog"
     assert result.validation_json["passed"] is True
+    assert result.validation_json["checks"]["nodata_preserved"] is True
+    assert result.validation_json["checks"]["resolution_preserved"] is True
+    assert result.validation_json["checks"]["overviews_validated"] is True
+    store.close()
+
+
+def test_raster_ingest_validates_band_nodata_resolution_and_overviews(
+    tmp_path,
+) -> None:
+    source = Path(tmp_path, "source.tif")
+    source.write_bytes(b"II*\x00source-raster")
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=64 * 1024 * 1024,
+    )
+
+    def runner(argv, environment, timeout):
+        del environment, timeout
+        if argv[0] == "/usr/bin/gdal_translate":
+            Path(argv[-1]).write_bytes(b"normalized-cog")
+            return GeoCommandResult(b"", b"")
+        normalized = Path(argv[-1]).name == "normalized.tif"
+        return GeoCommandResult(
+            _raster_info(
+                cog=normalized,
+                size=(2048, 1024),
+                band_types=("UInt16", "UInt16"),
+                nodata_values=(-9999, -9999),
+                pixel_size=(5.0, 5.0),
+                overview_sizes=(
+                    ((1024, 512), (512, 256)) if normalized else ()
+                ),
+            ),
+            b"",
+        )
+
+    result = ingest_raster_artifact(
+        store,
+        source_path=source,
+        max_output_bytes=64 * 1024 * 1024,
+        runner=runner,
+    )
+
+    assert result.inspection.band_types == ("UInt16", "UInt16")
+    assert result.inspection.nodata_values == (-9999.0, -9999.0)
+    assert result.inspection.overview_sizes == ((1024, 512), (512, 256))
+    assert result.validation_json["checks"]["overview_count"] == 2
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("normalized_nodata", "normalized_pixel_size"),
+    [
+        ((None,), (10.0, 10.0)),
+        ((-9999,), (20.0, 10.0)),
+    ],
+)
+def test_raster_ingest_rejects_nodata_or_resolution_drift(
+    tmp_path,
+    normalized_nodata,
+    normalized_pixel_size,
+) -> None:
+    source = Path(tmp_path, "source.tif")
+    source.write_bytes(b"II*\x00source-raster")
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=1024 * 1024,
+    )
+
+    def runner(argv, environment, timeout):
+        del environment, timeout
+        if argv[0] == "/usr/bin/gdal_translate":
+            Path(argv[-1]).write_bytes(b"normalized-cog")
+            return GeoCommandResult(b"", b"")
+        normalized = Path(argv[-1]).name == "normalized.tif"
+        return GeoCommandResult(
+            _raster_info(
+                cog=normalized,
+                nodata_values=(
+                    normalized_nodata if normalized else (-9999,)
+                ),
+                pixel_size=(
+                    normalized_pixel_size if normalized else (10.0, 10.0)
+                ),
+            ),
+            b"",
+        )
+
+    with pytest.raises(GeoIngestError, match="changed raster semantics"):
+        ingest_raster_artifact(
+            store,
+            source_path=source,
+            max_output_bytes=1024 * 1024,
+            runner=runner,
+        )
+    store.close()
+
+
+def test_large_normalized_raster_requires_internal_overviews(tmp_path) -> None:
+    source = Path(tmp_path, "source.tif")
+    source.write_bytes(b"II*\x00source-raster")
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=16 * 1024 * 1024,
+    )
+
+    def runner(argv, environment, timeout):
+        del environment, timeout
+        if argv[0] == "/usr/bin/gdal_translate":
+            Path(argv[-1]).write_bytes(b"normalized-cog")
+            return GeoCommandResult(b"", b"")
+        return GeoCommandResult(
+            _raster_info(
+                cog=Path(argv[-1]).name == "normalized.tif",
+                size=(1024, 1024),
+            ),
+            b"",
+        )
+
+    with pytest.raises(GeoIngestError, match="missing internal overviews"):
+        ingest_raster_artifact(
+            store,
+            source_path=source,
+            max_output_bytes=16 * 1024 * 1024,
+            runner=runner,
+        )
     store.close()
 
 

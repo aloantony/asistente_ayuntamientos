@@ -180,6 +180,11 @@ class RasterInspection:
     width: int
     height: int
     band_count: int
+    band_types: tuple[str, ...]
+    nodata_values: tuple[float | None, ...]
+    pixel_size_x: float
+    pixel_size_y: float
+    overview_sizes: tuple[tuple[int, int], ...]
     crs: str
     bounds_json: dict[str, float]
     driver: str
@@ -749,10 +754,24 @@ def ingest_raster_artifact(
             inspection.width != original.width
             or inspection.height != original.height
             or inspection.band_count != original.band_count
+            or inspection.band_types != original.band_types
+            or inspection.nodata_values != original.nodata_values
+            or not math.isclose(
+                inspection.pixel_size_x,
+                original.pixel_size_x,
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            )
+            or not math.isclose(
+                inspection.pixel_size_y,
+                original.pixel_size_y,
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            )
             or inspection.crs != original.crs
             or inspection.bounds_json != original.bounds_json
         ):
-            raise GeoIngestError("COG conversion changed raster coverage")
+            raise GeoIngestError("COG conversion changed raster semantics")
         if _regular_file_fingerprint(output) != output_fingerprint:
             raise GeoIngestError("normalized raster changed during validation")
         output_size = output_fingerprint[3]
@@ -772,6 +791,19 @@ def ingest_raster_artifact(
             "width": inspection.width,
             "height": inspection.height,
             "band_count": inspection.band_count,
+            "band_types": list(inspection.band_types),
+            "nodata_values": list(inspection.nodata_values),
+            "pixel_size": {
+                "x": inspection.pixel_size_x,
+                "y": inspection.pixel_size_y,
+            },
+            "overview_count": len(inspection.overview_sizes),
+            "overview_sizes": [
+                list(size) for size in inspection.overview_sizes
+            ],
+            "nodata_preserved": True,
+            "resolution_preserved": True,
+            "overviews_validated": True,
             "crs": inspection.crs,
             "input_sha256": snapshot.sha256,
             "input_driver": driver,
@@ -956,15 +988,31 @@ def _inspect_raster(
     ):
         raise GeoIngestError("raster dimensions, bands or driver are invalid")
     sample_bytes: list[int] = []
+    band_types: list[str] = []
+    nodata_values: list[float | None] = []
+    band_overviews: list[tuple[tuple[int, int], ...]] = []
     for band in bands:
         band_type = band.get("type") if isinstance(band, dict) else None
         byte_width = _RASTER_SAMPLE_BYTES.get(band_type)
         if byte_width is None:
             raise GeoIngestError("raster band type is unsupported")
         sample_bytes.append(byte_width)
+        band_types.append(band_type)
+        nodata_values.append(_raster_nodata_value(band))
+        band_overviews.append(
+            _raster_overview_sizes(
+                band,
+                width=size[0],
+                height=size[1],
+            )
+        )
+    overview_sizes = band_overviews[0]
+    if any(item != overview_sizes for item in band_overviews[1:]):
+        raise GeoIngestError("raster bands have inconsistent overview pyramids")
     uncompressed_bytes = size[0] * size[1] * sum(sample_bytes)
     if uncompressed_bytes > MAX_RASTER_UNCOMPRESSED_BYTES:
         raise GeoIngestError("raster uncompressed size exceeds its limit")
+    pixel_size_x, pixel_size_y = _raster_pixel_size(payload.get("geoTransform"))
     coordinate_system = payload.get("coordinateSystem")
     wkt = coordinate_system.get("wkt") if isinstance(coordinate_system, dict) else None
     epsg_codes = _EPSG_WKT_RE.findall(wkt) if isinstance(wkt, str) else []
@@ -979,16 +1027,90 @@ def _inspect_raster(
     )
     if require_cog and (driver != "GTiff" or not is_cog):
         raise GeoIngestError("normalized raster is not a cloud-optimized GeoTIFF")
+    if require_cog and max(size) > 512 and not overview_sizes:
+        raise GeoIngestError("normalized raster is missing internal overviews")
     return RasterInspection(
         width=size[0],
         height=size[1],
         band_count=len(bands),
+        band_types=tuple(band_types),
+        nodata_values=tuple(nodata_values),
+        pixel_size_x=pixel_size_x,
+        pixel_size_y=pixel_size_y,
+        overview_sizes=overview_sizes,
         crs=f"EPSG:{epsg_codes[-1]}",
         bounds_json=bounds,
         driver=driver,
         is_cog=is_cog,
         uncompressed_bytes=uncompressed_bytes,
     )
+
+
+def _raster_nodata_value(band: dict[str, Any]) -> float | None:
+    value = band.get("noDataValue")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GeoIngestError("raster nodata value is invalid")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise GeoIngestError("raster nodata value is invalid")
+    return normalized
+
+
+def _raster_pixel_size(value: Any) -> tuple[float, float]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 6
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            for item in value
+        )
+    ):
+        raise GeoIngestError("raster geotransform is invalid")
+    pixel_size_x = math.hypot(float(value[1]), float(value[4]))
+    pixel_size_y = math.hypot(float(value[2]), float(value[5]))
+    if pixel_size_x <= 0 or pixel_size_y <= 0:
+        raise GeoIngestError("raster resolution is invalid")
+    return pixel_size_x, pixel_size_y
+
+
+def _raster_overview_sizes(
+    band: dict[str, Any],
+    *,
+    width: int,
+    height: int,
+) -> tuple[tuple[int, int], ...]:
+    value = band.get("overviews", [])
+    if not isinstance(value, list) or len(value) > 32:
+        raise GeoIngestError("raster overview pyramid is invalid")
+    result: list[tuple[int, int]] = []
+    previous = (width, height)
+    for overview in value:
+        size = overview.get("size") if isinstance(overview, dict) else None
+        if (
+            not isinstance(size, list)
+            or len(size) != 2
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or item <= 0
+                for item in size
+            )
+        ):
+            raise GeoIngestError("raster overview pyramid is invalid")
+        current = (size[0], size[1])
+        if (
+            current[0] > previous[0]
+            or current[1] > previous[1]
+            or current == previous
+        ):
+            raise GeoIngestError("raster overview pyramid is invalid")
+        result.append(current)
+        previous = current
+    return tuple(result)
 
 
 def _vector_driver(input_driver: str | None, source_path: Path) -> tuple[str, str]:
