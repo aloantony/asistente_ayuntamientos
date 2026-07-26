@@ -38,6 +38,14 @@ from app.reference_layers.local_tile_archive import (
 )
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$", re.ASCII)
+_VERSIONED_VECTOR_TABLE_RE = re.compile(
+    r"^m_l[0-9a-z]+_r[0-9a-z]+_v_[0-9a-f]{24}$",
+    re.ASCII,
+)
+_STAGING_VECTOR_TABLE_RE = re.compile(
+    r"^s_v_(?P<identity>[0-9a-f]{24})_[0-9a-f]{16}$",
+    re.ASCII,
+)
 _CONNECTION_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,255}$", re.ASCII)
 _LAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,255}$", re.ASCII)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
@@ -55,6 +63,13 @@ _ALLOWED_VECTOR_DRIVERS = {
     "FlatGeobuf": ".fgb",
     "GMLZIP": ".zip",
 }
+_VECTOR_DATA_SCHEMA = "reference_data"
+_VECTOR_STAGING_SCHEMA = "reference_data_staging"
+_VECTOR_GEOMETRY_EVIDENCE_SCHEMA = "reference-vector-geometry-evidence/v1"
+_VECTOR_TABLE_ATTESTATION_SCHEMA = "reference-vector-table-attestation/v1"
+_VECTOR_NORMALIZATION_ALGORITHM = (
+    "postgis-st-makevalid-collectionextract-promote-to-multi/v1"
+)
 _VECTOR_DRIVER_ALIASES = {
     name.casefold(): (name, suffix)
     for name, suffix in _ALLOWED_VECTOR_DRIVERS.items()
@@ -226,6 +241,36 @@ class _ArtifactSnapshot:
     path: Path
     sha256: str
     size_bytes: int
+
+
+@dataclass(frozen=True)
+class _VectorGeometryStats:
+    feature_count: int
+    source_fid_count: int
+    max_source_fid: int | None
+    null_geometry_count: int
+    empty_geometry_count: int
+    invalid_geometry_count: int
+    valid_geometry_count: int
+    multi_geometry_count: int
+    multiple_part_geometry_count: int
+    geometry_part_count: int
+    srid_count: int
+    srid: int | None
+    geometry_types: tuple[str, ...]
+    extent: str | None
+
+    def counters(self) -> dict[str, int]:
+        return {
+            "feature_count": self.feature_count,
+            "null_geometry_count": self.null_geometry_count,
+            "empty_geometry_count": self.empty_geometry_count,
+            "invalid_geometry_count": self.invalid_geometry_count,
+            "valid_geometry_count": self.valid_geometry_count,
+            "multi_geometry_count": self.multi_geometry_count,
+            "multiple_part_geometry_count": self.multiple_part_geometry_count,
+            "geometry_part_count": self.geometry_part_count,
+        }
 
 
 def _strict_gdal_environment(*, cpl_tmpdir: Path | None = None) -> dict[str, str]:
@@ -454,7 +499,7 @@ def ingest_vector_artifacts(
     timeout_seconds: int = 3600,
     runner: CommandRunner = run_geo_command,
 ) -> VectorIngestResult:
-    """Import ordered standalone vector pages as one immutable PostGIS table."""
+    """Import ordered vector pages with durable pre/post geometry evidence."""
 
     if (
         isinstance(minimum_features, bool)
@@ -518,101 +563,207 @@ def ingest_vector_artifacts(
             run_id=run_id,
             input_sha256=identity_sha256,
         )
-        storage_key = f"reference_data.{table_name}"
-        table_exists = db.execute(
-            text("SELECT to_regclass(:key)"),
-            {"key": storage_key},
-        ).scalar_one() is not None
-        reuse_existing = table_exists and _table_has_immutable_guards(
-            db,
-            table_name,
+        storage_key = f"{_VECTOR_DATA_SCHEMA}.{table_name}"
+        staging_table_name = _vector_staging_table_name(table_name)
+        staging_storage_key = (
+            f"{_VECTOR_STAGING_SCHEMA}.{staging_table_name}"
         )
-        if table_exists and not reuse_existing:
-            _drop_unpublished_table(db, table_name)
-
-        db.execute(text("CREATE SCHEMA IF NOT EXISTS reference_data"))
+        db.execute(text(f"CREATE SCHEMA IF NOT EXISTS {_VECTOR_DATA_SCHEMA}"))
+        db.execute(
+            text(f"CREATE SCHEMA IF NOT EXISTS {_VECTOR_STAGING_SCHEMA}")
+        )
+        db.execute(
+            text(
+                f"REVOKE ALL ON SCHEMA {_VECTOR_STAGING_SCHEMA} FROM PUBLIC"
+            )
+        )
         db.commit()
+        discard_unpublished_final = False
         try:
+            if not _try_vector_ingest_lock(db, table_name):
+                raise GeoIngestError(
+                    "an identical vector ingest is already in progress"
+                )
+            _cleanup_abandoned_vector_staging_tables(
+                db,
+            )
+            table_exists = _table_exists(
+                db,
+                schema_name=_VECTOR_DATA_SCHEMA,
+                table_name=table_name,
+            )
+            if table_exists and _table_has_immutable_guards(db, table_name):
+                result = _recover_vector_ingest_result(
+                    db,
+                    table_name=table_name,
+                    storage_key=storage_key,
+                    manifest=manifest,
+                    manifest_sha256=manifest_sha256,
+                    minimum_features=minimum_features,
+                )
+                db.commit()
+                return result
+            if table_exists:
+                discard_unpublished_final = True
+                _drop_vector_table_in_transaction(
+                    db,
+                    schema_name=_VECTOR_DATA_SCHEMA,
+                    table_name=table_name,
+                )
+
             environment = database.command_environment()
             environment["CPL_TMPDIR"] = str(private_directory)
-            artifact_feature_counts: list[int] | None = None
-            if not reuse_existing:
-                artifact_feature_counts = []
-                previous_feature_count = 0
-                for ordinal, (snapshot, driver, input_layer) in enumerate(snapshots):
-                    argv = _vector_import_command(
-                        database=database,
-                        storage_key=storage_key,
-                        snapshot=snapshot.path,
-                        driver=driver,
-                        input_layer=input_layer,
-                        append=ordinal > 0,
-                    )
-                    runner(argv, environment, timeout_seconds)
-                    current_feature_count = int(
-                        db.execute(
-                            text(f"SELECT count(*) FROM reference_data.{table_name}")
-                        ).scalar_one()
-                    )
-                    if current_feature_count < previous_feature_count:
-                        raise GeoIngestError("vector append reduced the imported dataset")
-                    artifact_feature_counts.append(
-                        current_feature_count - previous_feature_count
-                    )
-                    previous_feature_count = current_feature_count
-            row = db.execute(
-                text(
-                    f"""
-                    SELECT
-                        count(*)::bigint AS feature_count,
-                        count(DISTINCT source_fid)::bigint AS source_fid_count,
-                        count(*) FILTER (WHERE geom IS NULL)::bigint AS null_count,
-                        count(*) FILTER (
-                            WHERE geom IS NOT NULL AND NOT ST_IsValid(geom)
-                        )::bigint AS invalid_count,
-                        count(DISTINCT ST_SRID(geom)) FILTER (
-                            WHERE geom IS NOT NULL
-                        )::integer AS srid_count,
-                        min(ST_SRID(geom)) FILTER (
-                            WHERE geom IS NOT NULL
-                        )::integer AS srid,
-                        min(GeometryType(geom)) FILTER (
-                            WHERE geom IS NOT NULL
-                        ) AS geometry_type,
-                        max(GeometryType(geom)) FILTER (
-                            WHERE geom IS NOT NULL
-                        ) AS max_geometry_type,
-                        ST_Extent(ST_Transform(geom, 4326))::text AS extent
-                    FROM reference_data.{table_name}
-                    """
+            artifact_geometry_evidence: list[dict[str, Any]] = []
+            previous_max_source_fid: int | None = None
+            for ordinal, (snapshot, driver, input_layer) in enumerate(snapshots):
+                argv = _vector_import_command(
+                    database=database,
+                    storage_key=staging_storage_key,
+                    snapshot=snapshot.path,
+                    driver=driver,
+                    input_layer=input_layer,
+                    append=ordinal > 0,
                 )
-            ).mappings().one()
-            feature_count = int(row["feature_count"])
+                runner(argv, environment, timeout_seconds)
+                if not _table_exists(
+                    db,
+                    schema_name=_VECTOR_STAGING_SCHEMA,
+                    table_name=staging_table_name,
+                ):
+                    raise GeoIngestError(
+                        "vector importer did not create its staging table"
+                    )
+                artifact_stats = _vector_geometry_stats(
+                    db,
+                    schema_name=_VECTOR_STAGING_SCHEMA,
+                    table_name=staging_table_name,
+                    source_fid_after=previous_max_source_fid,
+                )
+                if artifact_stats.source_fid_count != (
+                    artifact_stats.feature_count
+                ):
+                    raise GeoIngestError(
+                        "vector artifact feature identifiers are not unique"
+                    )
+                if artifact_stats.feature_count > 0:
+                    if (
+                        artifact_stats.max_source_fid is None
+                        or (
+                            previous_max_source_fid is not None
+                            and artifact_stats.max_source_fid
+                            <= previous_max_source_fid
+                        )
+                    ):
+                        raise GeoIngestError(
+                            "vector append did not allocate increasing "
+                            "feature identifiers"
+                        )
+                    previous_max_source_fid = (
+                        artifact_stats.max_source_fid
+                    )
+                artifact_geometry_evidence.append(
+                    {
+                        "ordinal": ordinal,
+                        "input_sha256": snapshot.sha256,
+                        **artifact_stats.counters(),
+                    }
+                )
+
+            source_stats = _vector_geometry_stats(
+                db,
+                schema_name=_VECTOR_STAGING_SCHEMA,
+                table_name=staging_table_name,
+            )
+            _validate_source_vector_stats(source_stats)
+            geometry_family, target_geometry_type, collection_dimension = (
+                _normalization_geometry_family(source_stats.geometry_types)
+            )
+            repair_counts = _vector_repair_counts(
+                db,
+                staging_table_name=staging_table_name,
+                collection_dimension=collection_dimension,
+                target_geometry_type=target_geometry_type,
+                source_stats=source_stats,
+            )
+            _create_normalized_vector_table(
+                db,
+                staging_table_name=staging_table_name,
+                table_name=table_name,
+                collection_dimension=collection_dimension,
+                target_geometry_type=target_geometry_type,
+            )
+            discard_unpublished_final = True
+            result_stats = _vector_geometry_stats(
+                db,
+                schema_name=_VECTOR_DATA_SCHEMA,
+                table_name=table_name,
+                include_extent=True,
+            )
+            feature_count = result_stats.feature_count
             if feature_count < minimum_features:
                 raise GeoIngestError("vector feature count is below its minimum")
-            if row["source_fid_count"] != feature_count:
-                raise GeoIngestError("vector table feature identifiers are not unique")
-            if row["null_count"] or row["invalid_count"]:
-                raise GeoIngestError("vector table contains invalid geometries")
-            if row["srid_count"] != 1 or row["srid"] != 3857:
-                raise GeoIngestError("vector table CRS is inconsistent")
-            if row["geometry_type"] != row["max_geometry_type"]:
-                raise GeoIngestError("vector table mixes geometry families")
-            bounds = _postgis_extent(row["extent"])
+            _validate_result_vector_stats(
+                result_stats,
+                expected_geometry_type=target_geometry_type,
+                expected_feature_count=repair_counts["result_feature_count"],
+            )
+            bounds = _postgis_extent(result_stats.extent)
             data_schema = _vector_table_schema(db, table_name)
-            if not reuse_existing:
-                _install_table_guards(db, table_name)
-            transform_identity = {
-                "schema_version": "reference-vector-normalization-v3",
-                "input_manifest": manifest,
-                "table": storage_key,
-                "target_crs": "EPSG:3857",
-                "make_valid": True,
-                "feature_count": feature_count,
-                "geometry_type": row["geometry_type"],
-                "data_schema": data_schema,
-                "bounds": bounds,
+            data_schema_sha256 = canonical_json_sha256(data_schema)
+            source_totals = {
+                **source_stats.counters(),
+                "source_fid_count": source_stats.source_fid_count,
+                "max_source_fid": source_stats.max_source_fid,
+                "srid_count": source_stats.srid_count,
+                "srid": source_stats.srid,
+                "geometry_types": list(source_stats.geometry_types),
             }
+            if _sum_vector_artifact_evidence(
+                artifact_geometry_evidence
+            ) != source_stats.counters():
+                raise GeoIngestError(
+                    "per-artifact geometry evidence is inconsistent"
+                )
+            geometry_evidence = {
+                "schema_version": _VECTOR_GEOMETRY_EVIDENCE_SCHEMA,
+                "input_manifest_sha256": manifest_sha256,
+                "source": {
+                    "artifact_count": len(manifest),
+                    "artifacts": artifact_geometry_evidence,
+                    "total": source_totals,
+                },
+                "normalization": {
+                    "algorithm": _VECTOR_NORMALIZATION_ALGORITHM,
+                    "target_crs": "EPSG:3857",
+                    "geometry_family": geometry_family,
+                    "target_geometry_type": target_geometry_type,
+                    **repair_counts,
+                },
+                "result": {
+                    **result_stats.counters(),
+                    "source_fid_count": result_stats.source_fid_count,
+                    "max_source_fid": result_stats.max_source_fid,
+                    "srid_count": result_stats.srid_count,
+                    "srid": result_stats.srid,
+                    "crs": "EPSG:3857",
+                    "geometry_family": geometry_family,
+                    "geometry_type": target_geometry_type,
+                    "bounds": bounds,
+                    "data_schema_sha256": data_schema_sha256,
+                },
+            }
+            geometry_evidence_sha256 = canonical_json_sha256(
+                geometry_evidence
+            )
+            transform_identity = _vector_transform_identity(
+                manifest=manifest,
+                storage_key=storage_key,
+                geometry_evidence_sha256=geometry_evidence_sha256,
+                feature_count=feature_count,
+                geometry_type=target_geometry_type,
+                data_schema=data_schema,
+                bounds=bounds,
+            )
             content_sha256 = canonical_json_sha256(transform_identity)
             validation = {
                 "schema_version": "reference-delivery-validation/v1",
@@ -623,24 +774,56 @@ def ingest_vector_artifacts(
                     "input_manifest_sha256": manifest_sha256,
                     "table_identity_sha256": identity_sha256,
                     "artifact_count": len(manifest),
-                    "artifact_feature_counts": artifact_feature_counts,
+                    "artifact_feature_counts": [
+                        item["feature_count"]
+                        for item in artifact_geometry_evidence
+                    ],
                     "aggregate_source_bytes": sum(
                         item["size_bytes"] for item in manifest
                     ),
                     "standalone_snapshot": True,
                     "source_fids_regenerated": True,
-                    "idempotent_reuse": reuse_existing,
+                    "idempotent_reuse": True,
+                    "geometry_evidence": geometry_evidence,
+                    "geometry_evidence_sha256": geometry_evidence_sha256,
+                    "normalization_algorithm": _VECTOR_NORMALIZATION_ALGORITHM,
+                    "source_feature_count": source_stats.feature_count,
                     "feature_count": feature_count,
                     "minimum_features": minimum_features,
-                    "null_geometries": int(row["null_count"]),
-                    "invalid_geometries": int(row["invalid_count"]),
-                    "srid": int(row["srid"]),
-                    "geometry_type": row["geometry_type"],
+                    "null_geometries": result_stats.null_geometry_count,
+                    "empty_geometries": result_stats.empty_geometry_count,
+                    "invalid_geometries": result_stats.invalid_geometry_count,
+                    "repaired_geometries": repair_counts[
+                        "repaired_geometry_count"
+                    ],
+                    "discarded_geometries": repair_counts[
+                        "discarded_geometry_count"
+                    ],
+                    "srid": result_stats.srid,
+                    "geometry_family": geometry_family,
+                    "geometry_type": target_geometry_type,
+                    "bounds": bounds,
                     "data_schema": data_schema,
                     "immutable_guards": True,
+                    "evidence_persisted_with_table": True,
                 },
             }
+            _install_table_guards(db, table_name)
+            _persist_vector_table_attestation(
+                db,
+                table_name=table_name,
+                storage_key=storage_key,
+                manifest_sha256=manifest_sha256,
+                content_sha256=content_sha256,
+                validation=validation,
+            )
+            _drop_vector_table_in_transaction(
+                db,
+                schema_name=_VECTOR_STAGING_SCHEMA,
+                table_name=staging_table_name,
+            )
             db.commit()
+            discard_unpublished_final = False
             return VectorIngestResult(
                 table_name=table_name,
                 storage_key=storage_key,
@@ -648,13 +831,22 @@ def ingest_vector_artifacts(
                 feature_count=feature_count,
                 crs="EPSG:3857",
                 bounds_json=bounds,
-                geometry_type=str(row["geometry_type"]),
+                geometry_type=target_geometry_type,
                 validation_json=validation,
             )
         except Exception:
             db.rollback()
-            if not reuse_existing:
-                _drop_unpublished_table(db, table_name)
+            try:
+                _cleanup_failed_vector_ingest(
+                    db,
+                    table_name=table_name,
+                    staging_table_name=staging_table_name,
+                    discard_unpublished_final=discard_unpublished_final,
+                )
+            except Exception as cleanup_error:
+                raise GeoIngestError(
+                    "vector ingest failed and staging cleanup was incomplete"
+                ) from cleanup_error
             raise
 
 
@@ -1246,7 +1438,6 @@ def _vector_import_command(
             "PROMOTE_TO_MULTI",
             "-t_srs",
             "EPSG:3857",
-            "-makevalid",
             # Provider FIDs can restart on each page. Keep OBJECTID and other
             # source attributes, but let PostgreSQL allocate a unique row FID.
             "-unsetFid",
@@ -1265,6 +1456,872 @@ def _vector_import_command(
     if input_layer is not None:
         command.append(input_layer)
     return command
+
+
+def _vector_staging_table_name(table_name: str) -> str:
+    if _VERSIONED_VECTOR_TABLE_RE.fullmatch(table_name) is None:
+        raise GeoIngestError("vector table identity is invalid")
+    identity = table_name.rsplit("_v_", 1)[1]
+    value = f"s_v_{identity}_{os.urandom(8).hex()}"
+    if _IDENTIFIER_RE.fullmatch(value) is None:
+        raise GeoIngestError("vector staging table identity is invalid")
+    return value
+
+
+def _vector_ingest_lock_key_from_identity(identity: str) -> int:
+    if re.fullmatch(r"[0-9a-f]{24}", identity, re.ASCII) is None:
+        raise GeoIngestError("vector table identity is invalid")
+    digest = hashlib.sha256(
+        f"reference-vector-ingest/v1:{identity}".encode("ascii")
+    ).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _vector_ingest_lock_key(table_name: str) -> int:
+    if _VERSIONED_VECTOR_TABLE_RE.fullmatch(table_name) is None:
+        raise GeoIngestError("vector table identity is invalid")
+    return _vector_ingest_lock_key_from_identity(
+        table_name.rsplit("_v_", 1)[1]
+    )
+
+
+def _try_vector_ingest_lock(db: Session, table_name: str) -> bool:
+    return bool(
+        db.execute(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _vector_ingest_lock_key(table_name)},
+        ).scalar_one()
+    )
+
+
+def _try_vector_ingest_identity_lock(db: Session, identity: str) -> bool:
+    return bool(
+        db.execute(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _vector_ingest_lock_key_from_identity(identity)},
+        ).scalar_one()
+    )
+
+
+def _table_exists(
+    db: Session,
+    *,
+    schema_name: str,
+    table_name: str,
+) -> bool:
+    if (
+        schema_name not in {_VECTOR_DATA_SCHEMA, _VECTOR_STAGING_SCHEMA}
+        or _IDENTIFIER_RE.fullmatch(table_name) is None
+    ):
+        raise GeoIngestError("vector table lookup is invalid")
+    return (
+        db.execute(
+            text("SELECT to_regclass(:key)"),
+            {"key": f"{schema_name}.{table_name}"},
+        ).scalar_one()
+        is not None
+    )
+
+
+def _drop_vector_table_in_transaction(
+    db: Session,
+    *,
+    schema_name: str,
+    table_name: str,
+) -> None:
+    if (
+        schema_name not in {_VECTOR_DATA_SCHEMA, _VECTOR_STAGING_SCHEMA}
+        or _IDENTIFIER_RE.fullmatch(table_name) is None
+    ):
+        raise GeoIngestError("vector table cleanup identity is invalid")
+    db.execute(text(f"DROP TABLE IF EXISTS {schema_name}.{table_name}"))
+
+
+def _cleanup_abandoned_vector_staging_tables(
+    db: Session,
+) -> None:
+    """Remove only staging tables whose identity lock has no live owner."""
+
+    rows = db.execute(
+        text(
+            """
+            SELECT relation.relname
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = :schema_name
+              AND relation.relkind IN ('r', 'p')
+            ORDER BY relation.relname
+            """
+        ),
+        {"schema_name": _VECTOR_STAGING_SCHEMA},
+    ).scalars().all()
+    for staging_name in rows:
+        if not isinstance(staging_name, str):
+            continue
+        match = _STAGING_VECTOR_TABLE_RE.fullmatch(staging_name)
+        if match is None:
+            continue
+        if _try_vector_ingest_identity_lock(db, match.group("identity")):
+            _drop_vector_table_in_transaction(
+                db,
+                schema_name=_VECTOR_STAGING_SCHEMA,
+                table_name=staging_name,
+            )
+
+
+def _cleanup_failed_vector_ingest(
+    db: Session,
+    *,
+    table_name: str,
+    staging_table_name: str,
+    discard_unpublished_final: bool,
+) -> None:
+    """Compensate committed GDAL staging writes without racing a retry."""
+
+    if not _try_vector_ingest_lock(db, table_name):
+        db.rollback()
+        return
+    _drop_vector_table_in_transaction(
+        db,
+        schema_name=_VECTOR_STAGING_SCHEMA,
+        table_name=staging_table_name,
+    )
+    _cleanup_abandoned_vector_staging_tables(db)
+    if (
+        discard_unpublished_final
+        and _table_exists(
+            db,
+            schema_name=_VECTOR_DATA_SCHEMA,
+            table_name=table_name,
+        )
+        and not _table_has_immutable_guards(db, table_name)
+    ):
+        _drop_vector_table_in_transaction(
+            db,
+            schema_name=_VECTOR_DATA_SCHEMA,
+            table_name=table_name,
+        )
+    db.commit()
+
+
+def _empty_vector_geometry_stats() -> _VectorGeometryStats:
+    return _VectorGeometryStats(
+        feature_count=0,
+        source_fid_count=0,
+        max_source_fid=None,
+        null_geometry_count=0,
+        empty_geometry_count=0,
+        invalid_geometry_count=0,
+        valid_geometry_count=0,
+        multi_geometry_count=0,
+        multiple_part_geometry_count=0,
+        geometry_part_count=0,
+        srid_count=0,
+        srid=None,
+        geometry_types=(),
+        extent=None,
+    )
+
+
+def _vector_geometry_stats(
+    db: Session,
+    *,
+    schema_name: str,
+    table_name: str,
+    source_fid_after: int | None = None,
+    include_extent: bool = False,
+) -> _VectorGeometryStats:
+    if (
+        schema_name not in {_VECTOR_DATA_SCHEMA, _VECTOR_STAGING_SCHEMA}
+        or _IDENTIFIER_RE.fullmatch(table_name) is None
+    ):
+        raise GeoIngestError("vector geometry inspection identity is invalid")
+    if source_fid_after is not None and (
+        isinstance(source_fid_after, bool)
+        or not isinstance(source_fid_after, int)
+        or source_fid_after < 1
+    ):
+        raise GeoIngestError("vector geometry inspection range is invalid")
+    if not isinstance(include_extent, bool):
+        raise GeoIngestError("vector extent inspection option is invalid")
+    row_filter = (
+        ""
+        if source_fid_after is None
+        else "WHERE source_fid > :source_fid_after"
+    )
+    extent_expression = (
+        """
+        ST_Extent(ST_Transform(geom, 4326)) FILTER (
+            WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)
+        )::text
+        """
+        if include_extent
+        else "NULL::text"
+    )
+    row = db.execute(
+        text(
+            f"""
+            SELECT
+                count(*)::bigint AS feature_count,
+                count(DISTINCT source_fid)::bigint AS source_fid_count,
+                max(source_fid)::bigint AS max_source_fid,
+                count(*) FILTER (
+                    WHERE geom IS NULL
+                )::bigint AS null_geometry_count,
+                count(*) FILTER (
+                    WHERE geom IS NOT NULL AND ST_IsEmpty(geom)
+                )::bigint AS empty_geometry_count,
+                count(*) FILTER (
+                    WHERE geom IS NOT NULL
+                      AND NOT ST_IsEmpty(geom)
+                      AND NOT ST_IsValid(geom)
+                )::bigint AS invalid_geometry_count,
+                count(*) FILTER (
+                    WHERE geom IS NOT NULL
+                      AND NOT ST_IsEmpty(geom)
+                      AND ST_IsValid(geom)
+                )::bigint AS valid_geometry_count,
+                count(*) FILTER (
+                    WHERE geom IS NOT NULL
+                      AND NOT ST_IsEmpty(geom)
+                      AND GeometryType(geom) LIKE 'MULTI%'
+                )::bigint AS multi_geometry_count,
+                count(*) FILTER (
+                    WHERE geom IS NOT NULL
+                      AND NOT ST_IsEmpty(geom)
+                      AND ST_NumGeometries(geom) > 1
+                )::bigint AS multiple_part_geometry_count,
+                coalesce(sum(ST_NumGeometries(geom)) FILTER (
+                    WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)
+                ), 0)::bigint AS geometry_part_count,
+                count(DISTINCT ST_SRID(geom)) FILTER (
+                    WHERE geom IS NOT NULL
+                )::integer AS srid_count,
+                min(ST_SRID(geom)) FILTER (
+                    WHERE geom IS NOT NULL
+                )::integer AS srid,
+                coalesce(
+                    array_agg(DISTINCT GeometryType(geom)) FILTER (
+                        WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)
+                    ),
+                    ARRAY[]::text[]
+                ) AS geometry_types,
+                {extent_expression} AS extent
+            FROM {schema_name}.{table_name}
+            {row_filter}
+            """
+        ),
+        (
+            {}
+            if source_fid_after is None
+            else {"source_fid_after": source_fid_after}
+        ),
+    ).mappings().one()
+    raw_types = row["geometry_types"]
+    if not isinstance(raw_types, (list, tuple)) or any(
+        not isinstance(value, str) for value in raw_types
+    ):
+        raise GeoIngestError("vector geometry types are invalid")
+    stats = _VectorGeometryStats(
+        feature_count=int(row["feature_count"]),
+        source_fid_count=int(row["source_fid_count"]),
+        max_source_fid=(
+            int(row["max_source_fid"])
+            if row["max_source_fid"] is not None
+            else None
+        ),
+        null_geometry_count=int(row["null_geometry_count"]),
+        empty_geometry_count=int(row["empty_geometry_count"]),
+        invalid_geometry_count=int(row["invalid_geometry_count"]),
+        valid_geometry_count=int(row["valid_geometry_count"]),
+        multi_geometry_count=int(row["multi_geometry_count"]),
+        multiple_part_geometry_count=int(
+            row["multiple_part_geometry_count"]
+        ),
+        geometry_part_count=int(row["geometry_part_count"]),
+        srid_count=int(row["srid_count"]),
+        srid=int(row["srid"]) if row["srid"] is not None else None,
+        geometry_types=tuple(sorted(raw_types)),
+        extent=row["extent"],
+    )
+    _validate_vector_stats_invariants(stats)
+    return stats
+
+
+def _validate_vector_stats_invariants(stats: _VectorGeometryStats) -> None:
+    counters = stats.counters()
+    if any(value < 0 for value in counters.values()) or (
+        stats.feature_count
+        != stats.null_geometry_count
+        + stats.empty_geometry_count
+        + stats.invalid_geometry_count
+        + stats.valid_geometry_count
+    ):
+        raise GeoIngestError("vector geometry counters are inconsistent")
+    nonempty = stats.invalid_geometry_count + stats.valid_geometry_count
+    if (
+        stats.source_fid_count < 0
+        or (
+            stats.feature_count == 0
+            and stats.max_source_fid is not None
+        )
+        or (
+            stats.feature_count > 0
+            and (
+                stats.max_source_fid is None
+                or stats.max_source_fid < 1
+            )
+        )
+        or stats.srid_count < 0
+        or stats.multi_geometry_count > nonempty
+        or stats.multiple_part_geometry_count > nonempty
+        or stats.geometry_part_count < nonempty
+        or (stats.srid_count == 0) != (stats.srid is None)
+    ):
+        raise GeoIngestError("vector geometry statistics are inconsistent")
+
+
+def _sum_vector_artifact_evidence(
+    artifacts: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    totals = _empty_vector_geometry_stats().counters()
+    for artifact in artifacts:
+        for key in totals:
+            value = artifact.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise GeoIngestError(
+                    "per-artifact geometry evidence is invalid"
+                )
+            totals[key] += value
+    return totals
+
+
+def _validate_source_vector_stats(stats: _VectorGeometryStats) -> None:
+    if stats.source_fid_count != stats.feature_count:
+        raise GeoIngestError("vector staging feature identifiers are not unique")
+    if stats.invalid_geometry_count + stats.valid_geometry_count < 1:
+        raise GeoIngestError("vector staging has no usable geometry")
+    if stats.srid_count != 1 or stats.srid != 3857:
+        raise GeoIngestError("vector staging CRS is inconsistent")
+
+
+def _normalization_geometry_family(
+    geometry_types: Sequence[str],
+) -> tuple[str, str, int]:
+    family_by_type = {
+        "POINT": ("point", "MULTIPOINT", 1),
+        "MULTIPOINT": ("point", "MULTIPOINT", 1),
+        "LINESTRING": ("line", "MULTILINESTRING", 2),
+        "MULTILINESTRING": ("line", "MULTILINESTRING", 2),
+        "POLYGON": ("polygon", "MULTIPOLYGON", 3),
+        "MULTIPOLYGON": ("polygon", "MULTIPOLYGON", 3),
+    }
+    selected = {family_by_type.get(value.upper()) for value in geometry_types}
+    if None in selected or len(selected) != 1:
+        raise GeoIngestError("vector staging mixes geometry families")
+    family = selected.pop()
+    assert family is not None
+    return family
+
+
+def _normalized_geometry_sql(
+    *,
+    source_alias: str,
+    collection_dimension: int,
+    target_geometry_type: str,
+) -> str:
+    if (
+        _IDENTIFIER_RE.fullmatch(source_alias) is None
+        or collection_dimension not in {1, 2, 3}
+        or target_geometry_type
+        not in {"MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON"}
+    ):
+        raise GeoIngestError("vector normalization identity is invalid")
+    geometry = f'{source_alias}."geom"'
+    return (
+        "CAST(ST_Multi(ST_CollectionExtract("
+        f"CASE WHEN ST_IsValid({geometry}) THEN {geometry} "
+        f"ELSE ST_MakeValid({geometry}) END, {collection_dimension}"
+        f")) AS geometry({target_geometry_type}, 3857))"
+    )
+
+
+def _vector_repair_counts(
+    db: Session,
+    *,
+    staging_table_name: str,
+    collection_dimension: int,
+    target_geometry_type: str,
+    source_stats: _VectorGeometryStats,
+) -> dict[str, int]:
+    if _IDENTIFIER_RE.fullmatch(staging_table_name) is None:
+        raise GeoIngestError("vector staging table identity is invalid")
+    normalized = _normalized_geometry_sql(
+        source_alias="source",
+        collection_dimension=collection_dimension,
+        target_geometry_type=target_geometry_type,
+    )
+    row = db.execute(
+        text(
+            f"""
+            WITH candidates AS (
+                SELECT
+                    NOT ST_IsValid(source.geom) AS was_invalid,
+                    {normalized} AS normalized_geom
+                FROM {_VECTOR_STAGING_SCHEMA}.{staging_table_name} AS source
+                WHERE source.geom IS NOT NULL
+                  AND NOT ST_IsEmpty(source.geom)
+            )
+            SELECT
+                count(*) FILTER (
+                    WHERE was_invalid
+                      AND normalized_geom IS NOT NULL
+                      AND NOT ST_IsEmpty(normalized_geom)
+                )::bigint AS repaired_geometry_count,
+                count(*) FILTER (
+                    WHERE was_invalid
+                      AND (
+                        normalized_geom IS NULL
+                        OR ST_IsEmpty(normalized_geom)
+                      )
+                )::bigint AS unrepairable_geometry_count,
+                count(*) FILTER (
+                    WHERE NOT was_invalid
+                      AND normalized_geom IS NOT NULL
+                      AND NOT ST_IsEmpty(normalized_geom)
+                )::bigint AS retained_valid_geometry_count,
+                count(*) FILTER (
+                    WHERE NOT was_invalid
+                      AND (
+                        normalized_geom IS NULL
+                        OR ST_IsEmpty(normalized_geom)
+                      )
+                )::bigint AS discarded_valid_geometry_count,
+                count(*) FILTER (
+                    WHERE normalized_geom IS NOT NULL
+                      AND NOT ST_IsEmpty(normalized_geom)
+                )::bigint AS result_feature_count
+            FROM candidates
+            """
+        )
+    ).mappings().one()
+    repaired = int(row["repaired_geometry_count"])
+    unrepairable = int(row["unrepairable_geometry_count"])
+    retained_valid = int(row["retained_valid_geometry_count"])
+    discarded_valid = int(row["discarded_valid_geometry_count"])
+    result_feature_count = int(row["result_feature_count"])
+    if (
+        repaired + unrepairable != source_stats.invalid_geometry_count
+        or retained_valid + discarded_valid != source_stats.valid_geometry_count
+        or discarded_valid != 0
+        or result_feature_count != repaired + retained_valid
+    ):
+        raise GeoIngestError("vector repair accounting is inconsistent")
+    discarded = (
+        source_stats.null_geometry_count
+        + source_stats.empty_geometry_count
+        + unrepairable
+    )
+    if result_feature_count + discarded != source_stats.feature_count:
+        raise GeoIngestError("vector discard accounting is inconsistent")
+    return {
+        "repaired_geometry_count": repaired,
+        "retained_valid_geometry_count": retained_valid,
+        "discarded_null_geometry_count": source_stats.null_geometry_count,
+        "discarded_empty_geometry_count": source_stats.empty_geometry_count,
+        "discarded_unrepairable_geometry_count": unrepairable,
+        "discarded_geometry_count": discarded,
+        "result_feature_count": result_feature_count,
+    }
+
+
+def _quoted_postgres_identifier(value: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise GeoIngestError("vector column identity is invalid")
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _create_normalized_vector_table(
+    db: Session,
+    *,
+    staging_table_name: str,
+    table_name: str,
+    collection_dimension: int,
+    target_geometry_type: str,
+) -> None:
+    if (
+        _IDENTIFIER_RE.fullmatch(staging_table_name) is None
+        or _VERSIONED_VECTOR_TABLE_RE.fullmatch(table_name) is None
+    ):
+        raise GeoIngestError("vector normalization table identity is invalid")
+    staging_schema = _vector_table_schema(
+        db,
+        staging_table_name,
+        schema_name=_VECTOR_STAGING_SCHEMA,
+    )
+    columns = staging_schema["columns"]
+    names = [item["name"] for item in columns]
+    if names.count("source_fid") != 1 or names.count("geom") != 1:
+        raise GeoIngestError(
+            "vector staging requires source_fid and geom columns"
+        )
+    if any(
+        item["name"] != "geom"
+        and str(item["data_type"]).casefold().startswith(
+            ("geometry", "geography")
+        )
+        for item in columns
+    ):
+        raise GeoIngestError(
+            "vector staging contains an unsupported extra geometry column"
+        )
+    normalized = _normalized_geometry_sql(
+        source_alias="source",
+        collection_dimension=collection_dimension,
+        target_geometry_type=target_geometry_type,
+    )
+    selected_columns = ", ".join(
+        (
+            "normalized_geometry.value AS "
+            f"{_quoted_postgres_identifier(name)}"
+            if name == "geom"
+            else f"source.{_quoted_postgres_identifier(name)}"
+        )
+        for name in names
+    )
+    db.execute(
+        text(
+            f"""
+            CREATE TABLE {_VECTOR_DATA_SCHEMA}.{table_name} AS
+            SELECT {selected_columns}
+            FROM {_VECTOR_STAGING_SCHEMA}.{staging_table_name} AS source
+            CROSS JOIN LATERAL (
+                SELECT {normalized} AS value
+            ) AS normalized_geometry
+            WHERE source.geom IS NOT NULL
+              AND NOT ST_IsEmpty(source.geom)
+              AND normalized_geometry.value IS NOT NULL
+              AND NOT ST_IsEmpty(normalized_geometry.value)
+            """
+        )
+    )
+    identity = hashlib.sha256(table_name.encode("ascii")).hexdigest()[:20]
+    db.execute(
+        text(
+            f"ALTER TABLE {_VECTOR_DATA_SCHEMA}.{table_name} "
+            f"ADD CONSTRAINT vp_{identity} PRIMARY KEY (source_fid)"
+        )
+    )
+    db.execute(
+        text(
+            f"ALTER TABLE {_VECTOR_DATA_SCHEMA}.{table_name} "
+            "ALTER COLUMN geom SET NOT NULL"
+        )
+    )
+    db.execute(
+        text(
+            f"CREATE INDEX vg_{identity} "
+            f"ON {_VECTOR_DATA_SCHEMA}.{table_name} USING GIST (geom)"
+        )
+    )
+
+
+def _validate_result_vector_stats(
+    stats: _VectorGeometryStats,
+    *,
+    expected_geometry_type: str,
+    expected_feature_count: int,
+) -> None:
+    if (
+        stats.feature_count != expected_feature_count
+        or stats.source_fid_count != stats.feature_count
+        or stats.null_geometry_count != 0
+        or stats.empty_geometry_count != 0
+        or stats.invalid_geometry_count != 0
+        or stats.valid_geometry_count != stats.feature_count
+        or stats.srid_count != 1
+        or stats.srid != 3857
+        or stats.geometry_types != (expected_geometry_type,)
+        or stats.multi_geometry_count != stats.feature_count
+        or stats.extent is None
+    ):
+        raise GeoIngestError(
+            "normalized vector table failed its post-repair validation"
+        )
+
+
+def _vector_transform_identity(
+    *,
+    manifest: Sequence[Mapping[str, Any]],
+    storage_key: str,
+    geometry_evidence_sha256: str,
+    feature_count: int,
+    geometry_type: str,
+    data_schema: Mapping[str, Any],
+    bounds: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "reference-vector-normalization-v4",
+        "input_manifest": list(manifest),
+        "table": storage_key,
+        "target_crs": "EPSG:3857",
+        "normalization_algorithm": _VECTOR_NORMALIZATION_ALGORITHM,
+        "geometry_evidence_sha256": geometry_evidence_sha256,
+        "feature_count": feature_count,
+        "geometry_type": geometry_type,
+        "data_schema": dict(data_schema),
+        "bounds": dict(bounds),
+    }
+
+
+def _canonical_json_text(value: Any) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError, RecursionError) as error:
+        raise GeoIngestError("vector evidence is not canonical JSON") from error
+    if len(encoded.encode("utf-8")) > 4 * 1024 * 1024:
+        raise GeoIngestError("vector evidence is too large")
+    return encoded
+
+
+def _persist_vector_table_attestation(
+    db: Session,
+    *,
+    table_name: str,
+    storage_key: str,
+    manifest_sha256: str,
+    content_sha256: str,
+    validation: Mapping[str, Any],
+) -> None:
+    if (
+        _VERSIONED_VECTOR_TABLE_RE.fullmatch(table_name) is None
+        or storage_key != f"{_VECTOR_DATA_SCHEMA}.{table_name}"
+        or _SHA256_RE.fullmatch(manifest_sha256) is None
+        or _SHA256_RE.fullmatch(content_sha256) is None
+    ):
+        raise GeoIngestError("vector table attestation identity is invalid")
+    checks = validation.get("checks")
+    geometry_evidence_sha256 = (
+        checks.get("geometry_evidence_sha256")
+        if isinstance(checks, Mapping)
+        else None
+    )
+    if (
+        not isinstance(geometry_evidence_sha256, str)
+        or _SHA256_RE.fullmatch(geometry_evidence_sha256) is None
+    ):
+        raise GeoIngestError("vector geometry evidence digest is invalid")
+    validation_json = dict(validation)
+    validation_sha256 = canonical_json_sha256(validation_json)
+    core = {
+        "schema_version": _VECTOR_TABLE_ATTESTATION_SCHEMA,
+        "table": storage_key,
+        "input_manifest_sha256": manifest_sha256,
+        "geometry_evidence_sha256": geometry_evidence_sha256,
+        "content_sha256": content_sha256,
+        "validation_sha256": validation_sha256,
+        "validation": validation_json,
+    }
+    payload = {
+        **core,
+        "attestation_sha256": canonical_json_sha256(core),
+    }
+    canonical = _canonical_json_text(payload)
+    escaped = canonical.replace("'", "''")
+    db.execute(text("SET LOCAL standard_conforming_strings = on"))
+    db.connection().exec_driver_sql(
+        f"COMMENT ON TABLE {_VECTOR_DATA_SCHEMA}.{table_name} "
+        f"IS '{escaped}'"
+    )
+    loaded = _load_vector_table_attestation(db, table_name)
+    if loaded != payload:
+        raise GeoIngestError("vector table attestation did not persist exactly")
+
+
+def _load_vector_table_attestation(
+    db: Session,
+    table_name: str,
+) -> dict[str, Any]:
+    if _VERSIONED_VECTOR_TABLE_RE.fullmatch(table_name) is None:
+        raise GeoIngestError("vector table attestation identity is invalid")
+    value = db.execute(
+        text(
+            "SELECT obj_description(to_regclass(:key), 'pg_class')"
+        ),
+        {"key": f"{_VECTOR_DATA_SCHEMA}.{table_name}"},
+    ).scalar_one()
+    if not isinstance(value, str) or not value:
+        raise GeoIngestError(
+            "immutable vector table has no geometry attestation"
+        )
+    try:
+        payload = json.loads(
+            value,
+            object_pairs_hook=_unique_object,
+            parse_constant=lambda item: (_ for _ in ()).throw(
+                ValueError(item)
+            ),
+        )
+    except (json.JSONDecodeError, ValueError, RecursionError) as error:
+        raise GeoIngestError("vector table attestation is malformed") from error
+    expected_keys = {
+        "schema_version",
+        "table",
+        "input_manifest_sha256",
+        "geometry_evidence_sha256",
+        "content_sha256",
+        "validation_sha256",
+        "validation",
+        "attestation_sha256",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise GeoIngestError("vector table attestation is malformed")
+    core = {
+        key: value
+        for key, value in payload.items()
+        if key != "attestation_sha256"
+    }
+    if (
+        payload.get("schema_version") != _VECTOR_TABLE_ATTESTATION_SCHEMA
+        or not isinstance(payload.get("attestation_sha256"), str)
+        or canonical_json_sha256(core) != payload["attestation_sha256"]
+        or not isinstance(payload.get("validation"), dict)
+        or canonical_json_sha256(payload["validation"])
+        != payload.get("validation_sha256")
+    ):
+        raise GeoIngestError("vector table attestation hash is invalid")
+    return payload
+
+
+def _recover_vector_ingest_result(
+    db: Session,
+    *,
+    table_name: str,
+    storage_key: str,
+    manifest: Sequence[Mapping[str, Any]],
+    manifest_sha256: str,
+    minimum_features: int,
+) -> VectorIngestResult:
+    attestation = _load_vector_table_attestation(db, table_name)
+    validation = attestation["validation"]
+    checks = validation.get("checks")
+    evidence = (
+        checks.get("geometry_evidence")
+        if isinstance(checks, dict)
+        else None
+    )
+    evidence_sha256 = (
+        checks.get("geometry_evidence_sha256")
+        if isinstance(checks, dict)
+        else None
+    )
+    if (
+        attestation.get("table") != storage_key
+        or attestation.get("input_manifest_sha256") != manifest_sha256
+        or attestation.get("geometry_evidence_sha256") != evidence_sha256
+        or validation.get("schema_version")
+        != "reference-delivery-validation/v1"
+        or validation.get("passed") is not True
+        or validation.get("kind") != "vector"
+        or not isinstance(evidence, dict)
+        or evidence.get("schema_version")
+        != _VECTOR_GEOMETRY_EVIDENCE_SCHEMA
+        or evidence.get("input_manifest_sha256") != manifest_sha256
+        or canonical_json_sha256(evidence) != evidence_sha256
+        or checks.get("input_manifest") != list(manifest)
+    ):
+        raise GeoIngestError(
+            "immutable vector table geometry evidence is inconsistent"
+        )
+    result_evidence = evidence.get("result")
+    normalization = evidence.get("normalization")
+    if not isinstance(result_evidence, dict) or not isinstance(
+        normalization, dict
+    ):
+        raise GeoIngestError("vector geometry evidence is malformed")
+    geometry_type = normalization.get("target_geometry_type")
+    geometry_family = normalization.get("geometry_family")
+    expected_family = {
+        "MULTIPOINT": "point",
+        "MULTILINESTRING": "line",
+        "MULTIPOLYGON": "polygon",
+    }.get(geometry_type)
+    if expected_family is None or geometry_family != expected_family:
+        raise GeoIngestError("vector geometry evidence family is invalid")
+    stats = _vector_geometry_stats(
+        db,
+        schema_name=_VECTOR_DATA_SCHEMA,
+        table_name=table_name,
+        include_extent=True,
+    )
+    expected_feature_count = result_evidence.get("feature_count")
+    if (
+        isinstance(expected_feature_count, bool)
+        or not isinstance(expected_feature_count, int)
+    ):
+        raise GeoIngestError("vector geometry evidence count is invalid")
+    _validate_result_vector_stats(
+        stats,
+        expected_geometry_type=geometry_type,
+        expected_feature_count=expected_feature_count,
+    )
+    if stats.feature_count < minimum_features:
+        raise GeoIngestError("vector feature count is below its minimum")
+    bounds = _postgis_extent(stats.extent)
+    data_schema = _vector_table_schema(db, table_name)
+    actual_result_evidence = {
+        **stats.counters(),
+        "source_fid_count": stats.source_fid_count,
+        "max_source_fid": stats.max_source_fid,
+        "srid_count": stats.srid_count,
+        "srid": stats.srid,
+        "crs": "EPSG:3857",
+        "geometry_family": geometry_family,
+        "geometry_type": geometry_type,
+        "bounds": bounds,
+        "data_schema_sha256": canonical_json_sha256(data_schema),
+    }
+    if (
+        actual_result_evidence != result_evidence
+        or checks.get("data_schema") != data_schema
+        or checks.get("feature_count") != stats.feature_count
+        or checks.get("bounds") != bounds
+        or checks.get("null_geometries") != 0
+        or checks.get("empty_geometries") != 0
+        or checks.get("invalid_geometries") != 0
+    ):
+        raise GeoIngestError(
+            "immutable vector table no longer matches its geometry evidence"
+        )
+    transform_identity = _vector_transform_identity(
+        manifest=manifest,
+        storage_key=storage_key,
+        geometry_evidence_sha256=evidence_sha256,
+        feature_count=stats.feature_count,
+        geometry_type=geometry_type,
+        data_schema=data_schema,
+        bounds=bounds,
+    )
+    content_sha256 = canonical_json_sha256(transform_identity)
+    if content_sha256 != attestation.get("content_sha256"):
+        raise GeoIngestError("immutable vector table content hash is invalid")
+    return VectorIngestResult(
+        table_name=table_name,
+        storage_key=storage_key,
+        content_sha256=content_sha256,
+        feature_count=stats.feature_count,
+        crs="EPSG:3857",
+        bounds_json=bounds,
+        geometry_type=geometry_type,
+        validation_json=validation,
+    )
 
 
 def _raster_driver(input_driver: str | None, source_path: Path) -> tuple[str, str]:
@@ -1692,9 +2749,16 @@ def _table_has_immutable_guards(db: Session, table_name: str) -> bool:
 def _vector_table_schema(
     db: Session,
     table_name: str,
+    *,
+    schema_name: str = _VECTOR_DATA_SCHEMA,
 ) -> dict[str, Any]:
     """Return a bounded semantic fingerprint of the normalized table."""
 
+    if (
+        schema_name not in {_VECTOR_DATA_SCHEMA, _VECTOR_STAGING_SCHEMA}
+        or _IDENTIFIER_RE.fullmatch(table_name) is None
+    ):
+        raise GeoIngestError("vector table schema identity is invalid")
     rows = db.execute(
         text(
             """
@@ -1710,14 +2774,14 @@ def _vector_table_schema(
               ON relation.oid = attribute.attrelid
             JOIN pg_catalog.pg_namespace AS namespace
               ON namespace.oid = relation.relnamespace
-            WHERE namespace.nspname = 'reference_data'
+            WHERE namespace.nspname = :schema_name
               AND relation.relname = :table_name
               AND attribute.attnum > 0
               AND NOT attribute.attisdropped
             ORDER BY attribute.attnum
             """
         ),
-        {"table_name": table_name},
+        {"schema_name": schema_name, "table_name": table_name},
     ).mappings().all()
     if not 2 <= len(rows) <= 512:
         raise GeoIngestError("vector table schema is outside its safe limits")
@@ -1903,16 +2967,6 @@ def _decode_tile_image(body: bytes, image_format: str) -> None:
         ValueError,
     ) as error:
         raise GeoIngestError("tile archive image could not be decoded safely") from error
-
-
-def _drop_unpublished_table(db: Session, table_name: str) -> None:
-    if _IDENTIFIER_RE.fullmatch(table_name) is None:
-        return
-    try:
-        db.execute(text(f"DROP TABLE IF EXISTS reference_data.{table_name}"))
-        db.commit()
-    except Exception:
-        db.rollback()
 
 
 def _unique_object(values: list[tuple[str, Any]]) -> dict[str, Any]:
