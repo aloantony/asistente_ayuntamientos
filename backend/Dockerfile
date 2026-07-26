@@ -7,6 +7,9 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg gdal-bin \
+    && gdalinfo --version \
+    && gdal_translate --version \
+    && ogr2ogr --version \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
