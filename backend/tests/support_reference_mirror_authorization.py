@@ -99,6 +99,7 @@ def authorize_mirror_source(
         db,
         document,
         expected_review_sha256=evidence.review_sha256,
+        expected_document_sha256=evidence.document_sha256,
     )
 
 

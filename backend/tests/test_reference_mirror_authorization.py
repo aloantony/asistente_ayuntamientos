@@ -231,12 +231,37 @@ def test_plan_apply_requires_exact_hash_and_linear_chain(db) -> None:
             db,
             document,
             expected_review_sha256="f" * 64,
+            expected_document_sha256=plan.evidence.document_sha256,
+        )
+
+    reformatted = json.dumps(
+        json.loads(document),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    reformatted_evidence = parse_mirror_authorization(reformatted)
+    assert reformatted_evidence.review_sha256 == plan.evidence.review_sha256
+    assert (
+        reformatted_evidence.document_sha256
+        != plan.evidence.document_sha256
+    )
+    with pytest.raises(
+        MirrorAuthorizationDocumentError,
+        match="document hash changed",
+    ):
+        apply_mirror_authorization_review(
+            db,
+            reformatted,
+            expected_review_sha256=plan.evidence.review_sha256,
+            expected_document_sha256=plan.evidence.document_sha256,
         )
 
     first = apply_mirror_authorization_review(
         db,
         document,
         expected_review_sha256=plan.evidence.review_sha256,
+        expected_document_sha256=plan.evidence.document_sha256,
     )
     second_document = _approved_document(
         db,
@@ -249,6 +274,7 @@ def test_plan_apply_requires_exact_hash_and_linear_chain(db) -> None:
         db,
         second_document,
         expected_review_sha256=second_plan.evidence.review_sha256,
+        expected_document_sha256=second_plan.evidence.document_sha256,
     )
     chain = tuple(
         db.scalars(
@@ -288,7 +314,8 @@ def test_cli_is_local_dry_run_by_default_and_applies_exact_hash(
     document = _approved_document(db, source)
     document_path = tmp_path / "authorization.json"
     document_path.write_bytes(document)
-    expected = parse_mirror_authorization(document).review_sha256
+    evidence = parse_mirror_authorization(document)
+    expected = evidence.review_sha256
     monkeypatch.setattr(
         mirror_authorization,
         "register_all_models",
@@ -318,6 +345,8 @@ def test_cli_is_local_dry_run_by_default_and_applies_exact_hash(
             "--apply",
             "--expected-review-sha256",
             expected,
+            "--expected-document-sha256",
+            evidence.document_sha256,
         ]
     ) == 0
     applied = json.loads(capsys.readouterr().out)

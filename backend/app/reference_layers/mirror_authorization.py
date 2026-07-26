@@ -704,18 +704,27 @@ def apply_mirror_authorization_review(
     document: bytes,
     *,
     expected_review_sha256: str,
+    expected_document_sha256: str,
 ) -> ReferenceMirrorAuthorizationReview:
     """Append one exact reviewed plan after lock-scoped revalidation."""
 
-    expected = _sha256(
+    expected_review = _sha256(
         expected_review_sha256,
         "expected_review_sha256",
     )
+    expected_document = _sha256(
+        expected_document_sha256,
+        "expected_document_sha256",
+    )
     try:
         plan = plan_mirror_authorization_review(db, document, lock=True)
-        if plan.evidence.review_sha256 != expected:
+        if plan.evidence.review_sha256 != expected_review:
             raise MirrorAuthorizationDocumentError(
                 "review hash changed after the dry-run"
+            )
+        if plan.evidence.document_sha256 != expected_document:
+            raise MirrorAuthorizationDocumentError(
+                "document hash changed after the dry-run"
             )
         if plan.already_applied_id is not None:
             existing = db.get(
@@ -1403,22 +1412,30 @@ def _parser() -> argparse.ArgumentParser:
         help="append after exact hash confirmation; default is dry-run",
     )
     parser.add_argument("--expected-review-sha256")
+    parser.add_argument("--expected-document-sha256")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        if arguments.apply and arguments.expected_review_sha256 is None:
+        if arguments.apply and (
+            arguments.expected_review_sha256 is None
+            or arguments.expected_document_sha256 is None
+        ):
             raise MirrorAuthorizationDocumentError(
-                "--apply requires --expected-review-sha256"
+                "--apply requires --expected-review-sha256 and "
+                "--expected-document-sha256"
             )
         if (
             not arguments.apply
-            and arguments.expected_review_sha256 is not None
+            and (
+                arguments.expected_review_sha256 is not None
+                or arguments.expected_document_sha256 is not None
+            )
         ):
             raise MirrorAuthorizationDocumentError(
-                "--expected-review-sha256 is only valid with --apply"
+                "expected hashes are only valid with --apply"
             )
         document = _read_local_document(arguments.file)
         register_all_models()
@@ -1429,6 +1446,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     document,
                     expected_review_sha256=(
                         arguments.expected_review_sha256
+                    ),
+                    expected_document_sha256=(
+                        arguments.expected_document_sha256
                     ),
                 )
                 plan = plan_mirror_authorization_review(
