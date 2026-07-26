@@ -36,12 +36,15 @@ from app.reference_layers.local_geoserver import (
 from app.reference_layers.wms_schemas import parse_feature_collection
 
 JSON_CONTENT_TYPE = "application/json"
+XML_CONTENT_TYPE = "application/xml"
 SLD_CONTENT_TYPE = "application/vnd.ogc.sld+xml"
 JSON_CONTENT_TYPES = frozenset({JSON_CONTENT_TYPE, "application/geo+json"})
+XML_CONTENT_TYPES = frozenset({XML_CONTENT_TYPE, "text/xml"})
 SLD_CONTENT_TYPES = frozenset(
     {SLD_CONTENT_TYPE, "application/xml", "text/xml"}
 )
 MAX_JSON_BYTES = 1024 * 1024
+MAX_XML_BYTES = 1024 * 1024
 MAX_SLD_BYTES = 1024 * 1024
 MAX_STYLE_PACKAGE_BYTES = 64 * 1024 * 1024
 MAX_STYLE_PACKAGE_RESOURCES = 512
@@ -49,6 +52,8 @@ MAX_ERROR_BYTES = 16 * 1024
 MAX_REQUEST_TARGET_BYTES = 4096
 MAX_CONTENT_LENGTH_DIGITS = 20
 GEOSERVER_ARTIFACT_ROOT = PurePosixPath("/mnt/reference_artifacts")
+GEOWEBCACHE_TILE_BLOB_STORE_ID = "siur-tile-cache-v3"
+GEOWEBCACHE_TILE_BLOB_STORE_DIRECTORY = "/var/lib/geowebcache"
 
 RESOURCE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", re.ASCII)
 TECHNICAL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$", re.ASCII)
@@ -129,6 +134,16 @@ class GeoWebCacheDiskQuota:
     cleanup_frequency: int
     cleanup_units: Literal["SECONDS", "MINUTES", "HOURS", "DAYS"]
     expiration_policy: Literal["LRU", "LFU"]
+
+
+@dataclass(frozen=True)
+class GeoWebCacheFileBlobStore:
+    id: str
+    enabled: bool
+    default: bool
+    base_directory: str
+    file_system_block_size: int
+    path_generator_type: Literal["DEFAULT", "TMS", "SLIPPY"]
 
 
 @dataclass(frozen=True)
@@ -336,6 +351,77 @@ class GeoServerAdminClient:
                 "GeoWebCache disk quota configuration is missing"
             )
         return _parse_geowebcache_disk_quota(payload)
+
+    def read_geowebcache_file_blob_stores(
+        self,
+    ) -> tuple[GeoWebCacheFileBlobStore, ...]:
+        """Read every configured standard FileBlobStore through fixed GWC REST.
+
+        GeoWebCache's anonymous legacy default is intentionally absent from
+        this resource. Any configured non-file implementation is rejected:
+        this closed client cannot prove its default or storage semantics.
+        """
+
+        listing = self._get_xml(
+            "/blobstores.xml",
+            request_root=self._gwc_rest_root,
+        )
+        names = _parse_geowebcache_blob_store_names(listing)
+        stores: list[GeoWebCacheFileBlobStore] = []
+        for name in names:
+            payload = self._get_xml(
+                f"/blobstores/{_segment(name)}.xml",
+                request_root=self._gwc_rest_root,
+            )
+            store = _parse_geowebcache_file_blob_store(payload)
+            if store.id != name:
+                raise GeoServerAdminResponseError(
+                    "GeoWebCache blob store list and resource differ"
+                )
+            stores.append(store)
+        return tuple(sorted(stores, key=lambda item: item.id))
+
+    def ensure_geowebcache_tile_blob_store(
+        self,
+        *,
+        file_system_block_size: int,
+    ) -> GeoWebCacheFileBlobStore:
+        """Create or verify the one fixed default tile-only FileBlobStore.
+
+        Existing configuration is never modified. A differing store with the
+        reserved id, or any other configured default, fails before PUT. The
+        upsert endpoint is used only after proving the id is absent, then the
+        complete list and exact resource are re-read.
+        """
+
+        expected = expected_geowebcache_tile_blob_store(
+            file_system_block_size=file_system_block_size,
+        )
+        before = self.read_geowebcache_file_blob_stores()
+        current = _validate_geowebcache_tile_blob_store_set(
+            before,
+            expected=expected,
+            require_present=False,
+        )
+        if current is not None:
+            return current
+
+        self._put_xml(
+            f"/blobstores/{_segment(expected.id)}.xml",
+            _serialize_geowebcache_file_blob_store(expected),
+            request_root=self._gwc_rest_root,
+        )
+        after = self.read_geowebcache_file_blob_stores()
+        current = _validate_geowebcache_tile_blob_store_set(
+            after,
+            expected=expected,
+            require_present=True,
+        )
+        if current is None:  # pragma: no cover - guarded by require_present.
+            raise GeoServerAdminConflictError(
+                "GeoWebCache tile blob store is missing after configuration"
+            )
+        return current
 
     def configure_geowebcache_disk_quota(
         self,
@@ -1000,6 +1086,30 @@ class GeoServerAdminClient:
             )
         return response.body
 
+    def _get_xml(
+        self,
+        path: str,
+        *,
+        request_root: str,
+    ) -> bytes:
+        response = self._request(
+            "GET",
+            path,
+            accept=XML_CONTENT_TYPE,
+            expected_statuses=frozenset({200}),
+            max_response_bytes=MAX_XML_BYTES,
+            request_root=request_root,
+        )
+        if response.content_type not in XML_CONTENT_TYPES:
+            raise GeoServerAdminResponseError(
+                "unexpected local GeoServer XML content type"
+            )
+        if not response.body:
+            raise GeoServerAdminResponseError(
+                "empty local GeoServer XML response"
+            )
+        return response.body
+
     def _post_json(self, path: str, payload: Mapping[str, Any]) -> int:
         body = json.dumps(
             payload,
@@ -1065,6 +1175,28 @@ class GeoServerAdminClient:
             body=body,
             content_type=JSON_CONTENT_TYPE,
             accept=JSON_CONTENT_TYPE,
+            expected_statuses=frozenset({200}),
+            max_response_bytes=MAX_ERROR_BYTES,
+            request_root=request_root,
+        )
+
+    def _put_xml(
+        self,
+        path: str,
+        body: bytes,
+        *,
+        request_root: str,
+    ) -> None:
+        if not body or len(body) > MAX_XML_BYTES:
+            raise InvalidGeoServerPublicationError(
+                "local GeoServer administration body is invalid"
+            )
+        self._request(
+            "PUT",
+            path,
+            body=body,
+            content_type=XML_CONTENT_TYPE,
+            accept=XML_CONTENT_TYPE,
             expected_statuses=frozenset({200}),
             max_response_bytes=MAX_ERROR_BYTES,
             request_root=request_root,
@@ -1215,6 +1347,292 @@ def _validate_geowebcache_policy(value: str) -> Literal["LRU", "LFU"]:
             "GeoWebCache expiration policy must be LRU or LFU"
         )
     return value
+
+
+def expected_geowebcache_tile_blob_store(
+    *,
+    file_system_block_size: int,
+) -> GeoWebCacheFileBlobStore:
+    """Build the sole supported tile store without accepting a path or id."""
+
+    return GeoWebCacheFileBlobStore(
+        id=GEOWEBCACHE_TILE_BLOB_STORE_ID,
+        enabled=True,
+        default=True,
+        base_directory=GEOWEBCACHE_TILE_BLOB_STORE_DIRECTORY,
+        file_system_block_size=_validate_geowebcache_block_size(
+            file_system_block_size
+        ),
+        path_generator_type="DEFAULT",
+    )
+
+
+def _validate_geowebcache_block_size(value: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 512 <= value <= 1024 * 1024
+        or value & (value - 1)
+    ):
+        raise InvalidGeoServerPublicationError(
+            "GeoWebCache filesystem block size must be a power of two "
+            "between 512 bytes and 1 MiB"
+        )
+    return value
+
+
+def _validate_geowebcache_tile_blob_store_set(
+    stores: tuple[GeoWebCacheFileBlobStore, ...],
+    *,
+    expected: GeoWebCacheFileBlobStore,
+    require_present: bool,
+) -> GeoWebCacheFileBlobStore | None:
+    defaults = tuple(store for store in stores if store.default)
+    current = next((store for store in stores if store.id == expected.id), None)
+    if current is not None and current != expected:
+        raise GeoServerAdminConflictError(
+            "existing GeoWebCache tile blob store differs"
+        )
+    if current is None:
+        if defaults:
+            raise GeoServerAdminConflictError(
+                "another GeoWebCache default blob store is configured"
+            )
+        if require_present:
+            raise GeoServerAdminConflictError(
+                "GeoWebCache tile blob store is missing after configuration"
+            )
+        return None
+    if defaults != (current,):
+        raise GeoServerAdminConflictError(
+            "GeoWebCache has an unexpected additional default blob store"
+        )
+    return current
+
+
+def _serialize_geowebcache_file_blob_store(
+    store: GeoWebCacheFileBlobStore,
+) -> bytes:
+    if store != expected_geowebcache_tile_blob_store(
+        file_system_block_size=store.file_system_block_size,
+    ):
+        raise InvalidGeoServerPublicationError(
+            "unsupported GeoWebCache tile blob store configuration"
+        )
+    root = ElementTree.Element("FileBlobStore", {"default": "true"})
+    for name, value in (
+        ("id", store.id),
+        ("enabled", "true"),
+        ("baseDirectory", store.base_directory),
+        ("fileSystemBlockSize", str(store.file_system_block_size)),
+    ):
+        child = ElementTree.SubElement(root, name)
+        child.text = value
+    return ElementTree.tostring(
+        root,
+        encoding="utf-8",
+        xml_declaration=False,
+        short_empty_elements=False,
+    )
+
+
+def _parse_geowebcache_blob_store_names(payload: bytes) -> tuple[str, ...]:
+    root = _parse_geowebcache_xml(payload)
+    if root.tag != "blobStores" or root.attrib or not _xml_whitespace(root.text):
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache blob store list response"
+        )
+    names: list[str] = []
+    for item in root:
+        if (
+            item.tag != "blobStore"
+            or item.attrib
+            or not _xml_whitespace(item.text)
+            or not _xml_whitespace(item.tail)
+        ):
+            raise GeoServerAdminResponseError(
+                "invalid GeoWebCache blob store list response"
+            )
+        children = list(item)
+        if len(children) != 2 or children[0].tag != "name":
+            raise GeoServerAdminResponseError(
+                "invalid GeoWebCache blob store list response"
+            )
+        name = _xml_scalar(
+            children[0],
+            error="invalid GeoWebCache blob store list response",
+        )
+        if RESOURCE_NAME.fullmatch(name) is None or name in names:
+            raise GeoServerAdminResponseError(
+                "invalid GeoWebCache blob store list response"
+            )
+        link = children[1]
+        if (
+            link.tag != "{http://www.w3.org/2005/Atom}link"
+            or list(link)
+            or not _xml_whitespace(link.text)
+            or not _xml_whitespace(link.tail)
+            or set(link.attrib) != {"rel", "href", "type"}
+            or link.attrib.get("rel") != "alternate"
+            or link.attrib.get("type") not in XML_CONTENT_TYPES
+            or not _safe_xml_link(link.attrib.get("href"))
+        ):
+            raise GeoServerAdminResponseError(
+                "invalid GeoWebCache blob store list response"
+            )
+        names.append(name)
+    if not _xml_whitespace(root.tail):
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache blob store list response"
+        )
+    return tuple(names)
+
+
+def _parse_geowebcache_file_blob_store(
+    payload: bytes,
+) -> GeoWebCacheFileBlobStore:
+    root = _parse_geowebcache_xml(payload)
+    default_attribute = root.attrib.get("default")
+    if (
+        root.tag != "FileBlobStore"
+        or set(root.attrib) not in (set(), {"default"})
+        or default_attribute not in (None, "true", "false")
+        or not _xml_whitespace(root.text)
+        or not _xml_whitespace(root.tail)
+    ):
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache FileBlobStore response"
+        )
+    children = list(root)
+    tags = [child.tag for child in children]
+    if tags not in (
+        ["id", "enabled", "baseDirectory", "fileSystemBlockSize"],
+        [
+            "id",
+            "enabled",
+            "baseDirectory",
+            "fileSystemBlockSize",
+            "pathGeneratorType",
+        ],
+    ):
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache FileBlobStore response"
+        )
+    values = {
+        child.tag: _xml_scalar(
+            child,
+            error="invalid GeoWebCache FileBlobStore response",
+        )
+        for child in children
+    }
+    identifier = values["id"]
+    enabled = values["enabled"]
+    base_directory = values["baseDirectory"]
+    raw_block_size = values["fileSystemBlockSize"]
+    path_generator = values.get("pathGeneratorType", "DEFAULT")
+    if (
+        RESOURCE_NAME.fullmatch(identifier) is None
+        or enabled not in {"true", "false"}
+        or path_generator not in {"DEFAULT", "TMS", "SLIPPY"}
+        or not _canonical_absolute_posix_directory(base_directory)
+        or not raw_block_size.isascii()
+        or not raw_block_size.isdecimal()
+    ):
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache FileBlobStore response"
+        )
+    block_size = int(raw_block_size)
+    try:
+        block_size = _validate_geowebcache_block_size(block_size)
+    except InvalidGeoServerPublicationError as error:
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache FileBlobStore response"
+        ) from error
+    if str(block_size) != raw_block_size:
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache FileBlobStore response"
+        )
+    return GeoWebCacheFileBlobStore(
+        id=identifier,
+        enabled=enabled == "true",
+        default=default_attribute == "true",
+        base_directory=base_directory,
+        file_system_block_size=block_size,
+        path_generator_type=path_generator,
+    )
+
+
+def _parse_geowebcache_xml(payload: bytes) -> ElementTree.Element:
+    lowered = payload.lower()
+    if (
+        not payload
+        or len(payload) > MAX_XML_BYTES
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+    ):
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache XML response"
+        )
+    try:
+        parser = ElementTree.XMLParser(
+            target=ElementTree.TreeBuilder(
+                insert_comments=True,
+                insert_pis=True,
+            )
+        )
+        root = ElementTree.fromstring(payload, parser=parser)
+    except (ElementTree.ParseError, RecursionError, ValueError) as error:
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache XML response"
+        ) from error
+    if not isinstance(root.tag, str):
+        raise GeoServerAdminResponseError(
+            "invalid GeoWebCache XML response"
+        )
+    return root
+
+
+def _xml_scalar(element: ElementTree.Element, *, error: str) -> str:
+    value = element.text
+    if (
+        element.attrib
+        or list(element)
+        or value is None
+        or value != value.strip()
+        or not value
+        or not _xml_whitespace(element.tail)
+    ):
+        raise GeoServerAdminResponseError(error)
+    return value
+
+
+def _xml_whitespace(value: str | None) -> bool:
+    return value is None or not value.strip()
+
+
+def _safe_xml_link(value: str | None) -> bool:
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= MAX_REQUEST_TARGET_BYTES
+        and all(character >= " " and character != "\x7f" for character in value)
+    )
+
+
+def _canonical_absolute_posix_directory(value: str) -> bool:
+    if (
+        not value.startswith("/")
+        or value.startswith("//")
+        or value == "/"
+        or len(value) > 1024
+        or any(character < " " or character == "\x7f" for character in value)
+    ):
+        return False
+    path = PurePosixPath(value)
+    return (
+        str(path) == value
+        and "." not in path.parts
+        and ".." not in path.parts
+    )
 
 
 def _parse_geowebcache_disk_quota(

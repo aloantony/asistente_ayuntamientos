@@ -4,8 +4,9 @@ Este runbook cubre el estado no reconstruible del espejo local:
 
 - el dump lógico de PostgreSQL;
 - `reference_artifacts`, salvo parciales de `staging` y su lock;
-- el directorio de datos de GeoServer completo, salvo el mountpoint derivado
-  `gwc-cache`.
+- el directorio de datos de GeoServer completo; el placeholder histórico
+  `gwc-cache` se exige vacío y se excluye por compatibilidad con backups
+  anteriores.
 
 El volumen `reference_transient` se excluye deliberadamente: contiene solo
 descargas brutas de trabajo, nunca artefactos promovidos. Los parciales se
@@ -15,23 +16,29 @@ siguiente adquisición.
 Redis y las teselas de GeoWebCache **no** son fuentes de verdad. La cola se
 reconstruye desde el estado durable de PostgreSQL al reiniciar scheduler y
 workers. Las teselas se regeneran bajo demanda a partir de los artefactos
-locales restaurados. Compose fija `GEOWEBCACHE_CACHE_DIR` al volumen separado
-`/opt/geoserver_data/gwc-cache`: quedan dentro del backup `gwc-gs.xml`,
-`gwc-layers/`, `gwc/geowebcache.xml` y cualquier otra configuración persistente
-del data dir. La cuota deseada está versionada en `.env.example` y se vuelve a
-aplicar y releer con el comando de este documento. Esta separación sigue la
+locales restaurados. Compose fija `GEOWEBCACHE_CACHE_DIR` a la ruta persistente
+`/opt/geoserver_data/gwc`, dentro de `geoserver_data`: quedan en el backup
+`gwc-gs.xml`, `gwc-layers/`, `gwc/geowebcache.xml`, la definición del
+FileBlobStore y cualquier otra configuración persistente. Las teselas se
+escriben mediante el FileBlobStore explícito `siur-tile-cache-v3`, cuyo
+`baseDirectory` exacto es `/var/lib/geowebcache`, sobre un volumen distinto.
+La cuota deseada está versionada en `.env.example` y se vuelve a aplicar y
+releer con el comando de este documento. Esta separación sigue la
 [configuración oficial de GeoWebCache integrado](https://docs.geoserver.org/3.0.x/en/user/geowebcache/config/),
 que distingue `GEOWEBCACHE_CACHE_DIR` de `gwc-layers/` y
-`gwc/geowebcache.xml`.
+`gwc/geowebcache.xml`, y el
+[FileBlobStore oficial](https://geowebcache.osgeo.org/docs/current/rest/blobstores.html),
+que permite separar su `baseDirectory`.
 
 Compose usa ahora el volumen de teselas versionado
-`geowebcache_tile_cache_v2` con `nocopy`. El antiguo `geowebcache_data` queda
-sin montar: no copiarlo ni renombrarlo automáticamente. Primero debe
-inspeccionarse fuera de línea, porque podría mezclar configuración persistente
-y teselas derivadas. Tanto el backup como el control de cuota fallan si ven
-configuración antigua dentro del volumen/mountpoint de teselas. La migración
-segura consiste en conservar la configuración canónica en `geoserver_data`,
-arrancar la caché v2 vacía y dejar que regenere únicamente teselas.
+`geowebcache_tile_cache_v3` con `nocopy`. Los anteriores
+`geowebcache_tile_cache_v2` y `geowebcache_data` quedan sin montar y **no se
+borran, copian ni renombran automáticamente**. Deben conservarse para rollback
+e inspeccionarse fuera de línea, porque podrían mezclar configuración
+persistente y teselas derivadas. El control de cuota falla si encuentra
+configuración dentro de v3. La migración segura conserva la configuración
+canónica en `geoserver_data`, arranca v3 vacío y deja que regenere únicamente
+teselas.
 
 La herramienta no ofrece ninguna operación de borrado al operador. `create` y
 `restore` son dry-run por defecto, nunca admiten un destino existente y dejan
@@ -126,8 +133,9 @@ GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS
 GEOWEBCACHE_DISK_QUOTA_POLICY
 ```
 
-Con GeoServer arrancado, el dry-run lee la configuración REST actual y mide el
-filesystem real del volumen montado:
+Con GeoServer arrancado pero antes de admitir tráfico de teselas, el dry-run
+lee por REST tanto los blobstores como la cuota y mide el filesystem real de
+v3:
 
 ```bash
 docker compose --profile operations run --rm -T --no-deps gwc-ops
@@ -136,6 +144,10 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops
 El informe distingue:
 
 - capacidad, uso y espacio libre del filesystem;
+- definición actual y deseada del FileBlobStore fijo
+  `siur-tile-cache-v3` (`default=true`, `enabled=true`,
+  `baseDirectory=/var/lib/geowebcache`, layout `DEFAULT` y tamaño de bloque
+  real del filesystem);
 - bytes lógicos y bloques físicos asignados, medidos dos veces y sobre el mismo
   `st_dev`, rechazando cambios, mounts anidados, symlinks, hardlinks, ficheros
   sparse, configuración legacy y tipos especiales;
@@ -161,16 +173,50 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops \
   --apply
 ```
 
-El cliente hace `PUT /geoserver/gwc/rest/diskquota.json` y a continuación
-`GET` del mismo recurso. Un estado HTTP inesperado, JSON incompleto o cualquier
-diferencia de cuota, intervalo o política hace fallar la operación; no se
-declara éxito por haber recibido solo el `PUT`. El contrato corresponde a la
+En `--apply`, el cliente primero lista y lee por XML todos los blobstores. Si el
+identificador reservado ya existe con otra ruta, tamaño de bloque, estado o
+layout, o si hay otro blobstore configurado como predeterminado, aborta sin
+mutar. Si falta y no hay otro default configurado, hace el `PUT` XML oficial a
+`/geoserver/gwc/rest/blobstores/siur-tile-cache-v3.xml`, vuelve a listar y
+releer la representación canónica completa y solo entonces configura la cuota.
+El default anónimo que GeoWebCache genera cuando no hay ninguno configurado no
+forma parte de la lista REST; GeoWebCache 2.0.0 lo sustituye al añadir el
+default explícito, sin reescribir otro blobstore persistido.
+
+Después, el cliente hace `PUT /geoserver/gwc/rest/diskquota.json` y a
+continuación `GET` del mismo recurso. Un estado HTTP inesperado, XML/JSON
+incompleto o cualquier diferencia de blobstore, cuota, intervalo o política
+hace fallar la operación; no se declara éxito por haber recibido solo un
+`PUT`. El contrato de cuota corresponde a la
 [API oficial de cuota de GeoWebCache en GeoServer
 3.0](https://docs.geoserver.org/3.0.x/en/user/geowebcache/rest/diskquota/).
 
 Repetir el dry-run y archivar su JSON como evidencia. Después de una
-restauración, ejecutar otra vez este bloque. Solo el volumen `gwc-cache` de
-teselas se reconstruye; toda la configuración GWC se restaura con el data dir.
+restauración, ejecutar otra vez este bloque. Solo el volumen v3 de teselas se
+reconstruye; toda la configuración GWC se restaura con el data dir.
+
+### Migración desde v2 y rollback
+
+1. Adquirir el lease del runtime y detener escritores, frontend/backend y
+   GeoServer. No ejecutar `down -v`.
+2. Crear un backup verificado de `geoserver_data` y conservar intactos los
+   volúmenes v2 y `geowebcache_data`.
+3. Desplegar Compose: `GEOWEBCACHE_CACHE_DIR` debe resolver a
+   `/opt/geoserver_data/gwc`; solo v3 debe estar montado en
+   `/var/lib/geowebcache`. No montar v2 y v3 simultáneamente.
+4. Arrancar GeoServer sin admitir tráfico, ejecutar primero el dry-run y
+   después `--apply`. Archivar el JSON con `blob_store.verified=true`,
+   `disk_quota.verified=true` y `verified=true`.
+5. Generar una tesela de prueba y demostrar que aparece únicamente en v3; no
+   promover el despliegue si `geowebcache.xml`, `gwc-gs.xml`, `gwc-layers` o
+   metadatos de configuración aparecen en ese volumen.
+
+Para rollback, detener de nuevo todos los escritores y GeoServer, volver al
+Compose anterior y montar el volumen v2 original sin modificarlo. No copiar
+v3 sobre v2 ni borrar ninguno de los dos. La configuración nueva permanece en
+el backup/data dir; si la revisión anterior no la entiende, restaurar el backup
+verificado de `geoserver_data` tomado en el paso 2. Tras confirmar el rollback,
+mantener v3 desconectado para análisis o una nueva migración.
 
 ## Crear un backup consistente
 
