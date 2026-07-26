@@ -151,6 +151,274 @@ class ReferenceCatalogSnapshot(TimestampMixin, Base):
     )
 
 
+class ReferenceCatalogObservedVersion(Base):
+    """Deduplicated, immutable SIUR catalog bytes awaiting human review."""
+
+    __tablename__ = "reference_catalog_observed_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> ''",
+            name="ck_reference_catalog_observed_versions_provider_nonempty",
+        ),
+        CheckConstraint(
+            "source_url like 'https://%' and final_url like 'https://%'",
+            name="ck_reference_catalog_observed_versions_urls_https",
+        ),
+        CheckConstraint(
+            "content_sha256 ~ '^[0-9a-f]{64}$' and "
+            "raw_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_catalog_observed_versions_hashes",
+        ),
+        CheckConstraint(
+            "size_bytes > 0 and size_bytes <= 2097152",
+            name="ck_reference_catalog_observed_versions_size",
+        ),
+        CheckConstraint(
+            "length(source_url) <= 8192 and length(final_url) <= 8192 and "
+            "octet_length(raw_catalog_json::text) <= 16777216 and "
+            "octet_length(analysis_json::text) <= 1048576",
+            name="ck_reference_catalog_observed_versions_bounds",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "content_sha256",
+            name="uq_reference_catalog_observed_versions_content",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "id",
+            name="uq_reference_catalog_observed_versions_provider_id",
+        ),
+        Index(
+            "ix_reference_catalog_observed_versions_retrieved",
+            "provider_key",
+            "retrieved_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    final_url: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    raw_catalog_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    analysis_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    retrieved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    checks: Mapped[list["ReferenceCatalogUpdateCheck"]] = relationship(
+        "ReferenceCatalogUpdateCheck",
+        back_populates="observed_version",
+    )
+
+
+class ReferenceCatalogUpdateCheck(Base):
+    """Immutable evidence for one completed conditional catalog check."""
+
+    __tablename__ = "reference_catalog_update_checks"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> '' and btrim(idempotency_key) <> ''",
+            name="ck_reference_catalog_update_checks_identity_nonempty",
+        ),
+        CheckConstraint(
+            "source_url like 'https://%' and "
+            "(response_final_url is null or response_final_url like 'https://%')",
+            name="ck_reference_catalog_update_checks_urls_https",
+        ),
+        CheckConstraint(
+            "trigger_kind in ('scheduled', 'manual')",
+            name="ck_reference_catalog_update_checks_trigger_kind",
+        ),
+        CheckConstraint(
+            "status in ('unchanged', 'update_available', 'error')",
+            name="ck_reference_catalog_update_checks_status",
+        ),
+        CheckConstraint(
+            "(response_raw_sha256 is null or "
+            "response_raw_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_reference_catalog_update_checks_hash",
+        ),
+        CheckConstraint(
+            "response_size_bytes >= 0 and response_size_bytes <= 2097152 "
+            "and duration_ms >= 0 and next_check_at > checked_at",
+            name="ck_reference_catalog_update_checks_measurements",
+        ),
+        CheckConstraint(
+            "(status in ('unchanged', 'update_available') and "
+            "observed_version_id is not null and "
+            "http_status is not null and http_status in (200, 304) and "
+            "error_code is null and "
+            "error_message is null and error_retryable is null) or "
+            "(status = 'error' and observed_version_id is null and "
+            "error_code is not null and error_message is not null and "
+            "btrim(error_code) <> '' and btrim(error_message) <> '' and "
+            "error_retryable is not null)",
+            name="ck_reference_catalog_update_checks_result_shape",
+        ),
+        CheckConstraint(
+            "(not_modified and http_status = 304 and "
+            "response_size_bytes = 0 and response_raw_sha256 is null) or "
+            "(not not_modified and (http_status is null or http_status <> 304))",
+            name="ck_reference_catalog_update_checks_not_modified",
+        ),
+        CheckConstraint(
+            "length(idempotency_key) <= 128 and length(source_url) <= 8192 and "
+            "(response_final_url is null or "
+            "length(response_final_url) <= 8192) and "
+            "(request_etag is null or length(request_etag) <= 4096) and "
+            "(request_last_modified is null or "
+            "length(request_last_modified) <= 4096) and "
+            "(response_etag is null or length(response_etag) <= 4096) and "
+            "(response_last_modified is null or "
+            "length(response_last_modified) <= 4096) and "
+            "(error_message is null or length(error_message) <= 4096) and "
+            "octet_length(response_redirect_chain_json::text) <= 65536",
+            name="ck_reference_catalog_update_checks_bounds",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "idempotency_key",
+            name="uq_reference_catalog_update_checks_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "baseline_snapshot_id"],
+            [
+                "reference_catalog_snapshots.provider_key",
+                "reference_catalog_snapshots.id",
+            ],
+            name="fk_reference_catalog_update_checks_baseline",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "observed_version_id"],
+            [
+                "reference_catalog_observed_versions.provider_key",
+                "reference_catalog_observed_versions.id",
+            ],
+            name="fk_reference_catalog_update_checks_observed",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_catalog_update_checks_latest",
+            "provider_key",
+            "checked_at",
+            "id",
+        ),
+        Index(
+            "ix_reference_catalog_update_checks_status",
+            "provider_key",
+            "status",
+            "checked_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    trigger_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_snapshot_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    observed_version_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    next_check_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    duration_ms: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    request_etag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_last_modified: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    http_status: Mapped[int | None] = mapped_column(
+        SmallInteger,
+        nullable=True,
+    )
+    not_modified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )
+    response_final_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_etag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_last_modified: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    response_size_bytes: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    response_raw_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    response_redirect_chain_json: Mapped[list[str]] = mapped_column(
+        JSON,
+        default=list,
+        server_default=text("'[]'::json"),
+        nullable=False,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_retryable: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    baseline_snapshot: Mapped[ReferenceCatalogSnapshot | None] = relationship(
+        "ReferenceCatalogSnapshot",
+        foreign_keys=[baseline_snapshot_id],
+    )
+    observed_version: Mapped[
+        ReferenceCatalogObservedVersion | None
+    ] = relationship(
+        "ReferenceCatalogObservedVersion",
+        back_populates="checks",
+        foreign_keys=[observed_version_id],
+    )
+
+
 class ReferenceService(TimestampMixin, Base):
     __tablename__ = "reference_services"
     __table_args__ = (
@@ -2045,6 +2313,32 @@ def _install_immutable_reference_trigger(
     )
 
 
+def _install_immutable_reference_truncate_trigger(
+    table: Any,
+    *,
+    function_name: str,
+    trigger_name: str,
+) -> None:
+    event.listen(
+        table,
+        "after_create",
+        DDL(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE TRUNCATE ON {table.name}
+            FOR EACH STATEMENT EXECUTE FUNCTION {function_name}();
+            """
+        ).execute_if(dialect="postgresql"),
+    )
+    event.listen(
+        table,
+        "before_drop",
+        DDL(
+            f"DROP TRIGGER IF EXISTS {trigger_name} ON {table.name}"
+        ).execute_if(dialect="postgresql"),
+    )
+
+
 _install_immutable_reference_trigger(
     ReferenceWMSCapabilitiesSnapshot.__table__,
     function_name="prevent_reference_wms_capabilities_mutation",
@@ -2062,6 +2356,28 @@ _install_immutable_reference_trigger(
     function_name="prevent_reference_delivery_attestation_mutation",
     trigger_name="trg_reference_delivery_attestations_immutable",
     error_message="reference delivery evidence is immutable",
+)
+_install_immutable_reference_trigger(
+    ReferenceCatalogObservedVersion.__table__,
+    function_name="prevent_reference_catalog_observed_version_mutation",
+    trigger_name="trg_reference_catalog_observed_versions_immutable",
+    error_message="reference catalog observation evidence is immutable",
+)
+_install_immutable_reference_trigger(
+    ReferenceCatalogUpdateCheck.__table__,
+    function_name="prevent_reference_catalog_update_check_mutation",
+    trigger_name="trg_reference_catalog_update_checks_immutable",
+    error_message="reference catalog check evidence is immutable",
+)
+_install_immutable_reference_truncate_trigger(
+    ReferenceCatalogObservedVersion.__table__,
+    function_name="prevent_reference_catalog_observed_version_mutation",
+    trigger_name="trg_reference_catalog_observed_versions_truncate_immutable",
+)
+_install_immutable_reference_truncate_trigger(
+    ReferenceCatalogUpdateCheck.__table__,
+    function_name="prevent_reference_catalog_update_check_mutation",
+    trigger_name="trg_reference_catalog_update_checks_truncate_immutable",
 )
 
 for _table, _function_name, _trigger_name in (

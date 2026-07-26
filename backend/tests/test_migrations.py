@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260723_0037"
+HEAD_REVISION = "20260726_0039"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -188,6 +188,52 @@ REFERENCE_MIRROR_TABLES = {
     "reference_delivery_assets",
     "reference_delivery_promotions",
     "reference_layer_delivery_state",
+}
+REFERENCE_CATALOG_WATCHER_TABLES = {
+    "reference_catalog_observed_versions",
+    "reference_catalog_update_checks",
+}
+REFERENCE_CATALOG_WATCHER_COLUMNS = {
+    "reference_catalog_observed_versions": {
+        "id",
+        "provider_key",
+        "source_url",
+        "final_url",
+        "content_sha256",
+        "raw_sha256",
+        "size_bytes",
+        "raw_catalog_json",
+        "analysis_json",
+        "retrieved_at",
+        "created_at",
+    },
+    "reference_catalog_update_checks": {
+        "id",
+        "provider_key",
+        "idempotency_key",
+        "trigger_kind",
+        "source_url",
+        "baseline_snapshot_id",
+        "observed_version_id",
+        "status",
+        "checked_at",
+        "next_check_at",
+        "duration_ms",
+        "request_etag",
+        "request_last_modified",
+        "http_status",
+        "not_modified",
+        "response_final_url",
+        "response_etag",
+        "response_last_modified",
+        "response_size_bytes",
+        "response_raw_sha256",
+        "response_redirect_chain_json",
+        "error_code",
+        "error_message",
+        "error_retryable",
+        "created_at",
+    },
 }
 REFERENCE_MIRROR_COLUMNS = {
     "reference_layer_sources": {
@@ -1086,6 +1132,76 @@ def assert_reference_mirror_schema(
             }
 
 
+def assert_reference_catalog_watcher_schema(inspector: Inspector) -> None:
+    assert REFERENCE_CATALOG_WATCHER_TABLES <= set(
+        inspector.get_table_names()
+    )
+    for table_name, expected_columns in (
+        REFERENCE_CATALOG_WATCHER_COLUMNS.items()
+    ):
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(
+            "reference_catalog_observed_versions"
+        )
+        if not index.get("duplicates_constraint")
+    } == {"ix_reference_catalog_observed_versions_retrieved"}
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_catalog_observed_versions"
+        )
+    } == {
+        "uq_reference_catalog_observed_versions_content",
+        "uq_reference_catalog_observed_versions_provider_id",
+    }
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(
+            "reference_catalog_update_checks"
+        )
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_catalog_update_checks_latest",
+        "ix_reference_catalog_update_checks_status",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_catalog_update_checks"
+        )
+    } == {"uq_reference_catalog_update_checks_idempotency"}
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_catalog_update_checks"
+        )
+    } == {
+        ("provider_key", "baseline_snapshot_id"),
+        ("provider_key", "observed_version_id"),
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_catalog_update_checks"
+        )
+    } == {
+        "ck_reference_catalog_update_checks_bounds",
+        "ck_reference_catalog_update_checks_hash",
+        "ck_reference_catalog_update_checks_identity_nonempty",
+        "ck_reference_catalog_update_checks_measurements",
+        "ck_reference_catalog_update_checks_not_modified",
+        "ck_reference_catalog_update_checks_result_shape",
+        "ck_reference_catalog_update_checks_status",
+        "ck_reference_catalog_update_checks_trigger_kind",
+        "ck_reference_catalog_update_checks_urls_https",
+    }
+
+
 def assert_assistant_attachment_schema(inspector: Inspector) -> None:
     table_name = "assistant_message_attachments"
     assert {
@@ -1897,6 +2013,11 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_reference_geography_schema(upgraded_inspector)
         assert_assistant_attachment_schema(upgraded_inspector)
         assert_document_project_scope_is_composite(upgraded_inspector)
+        assert_reference_catalog_watcher_schema(upgraded_inspector)
+        assert "sidebar_shortcut_ids" in {
+            column["name"]
+            for column in upgraded_inspector.get_columns("users")
+        }
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -1940,6 +2061,11 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_reference_geography_schema(reupgraded_inspector)
         assert_assistant_attachment_schema(reupgraded_inspector)
         assert_document_project_scope_is_composite(reupgraded_inspector)
+        assert_reference_catalog_watcher_schema(reupgraded_inspector)
+        assert "sidebar_shortcut_ids" in {
+            column["name"]
+            for column in reupgraded_inspector.get_columns("users")
+        }
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -3241,6 +3367,214 @@ def test_reference_fallback_chain_migration_upgrades_and_guards_open_layers(
         )
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "sibling_revision",
+    ("20260723_0037", "20260722_0034"),
+)
+def test_reference_catalog_merge_reconciles_each_sibling_head(
+    migration_database_url: str,
+    sibling_revision: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", sibling_revision)
+    engine = create_engine(migration_database_url)
+    try:
+        assert REFERENCE_CATALOG_WATCHER_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        before_columns = {
+            column["name"] for column in inspect(engine).get_columns("users")
+        }
+        assert ("sidebar_shortcut_ids" in before_columns) == (
+            sibling_revision == "20260722_0034"
+        )
+        has_mirror = REFERENCE_MIRROR_TABLES <= set(
+            inspect(engine).get_table_names()
+        )
+        assert has_mirror == (sibling_revision == "20260723_0037")
+
+        run_alembic(migration_database_url, "upgrade", "20260726_0038")
+        merged = inspect(engine)
+        assert_reference_mirror_schema(merged)
+        assert "sidebar_shortcut_ids" in {
+            column["name"] for column in merged.get_columns("users")
+        }
+        assert REFERENCE_CATALOG_WATCHER_TABLES.isdisjoint(
+            merged.get_table_names()
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260726_0038"
+
+        run_alembic(migration_database_url, "upgrade", "20260726_0039")
+        assert_reference_catalog_watcher_schema(inspect(engine))
+
+        run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260726_0038",
+        )
+        assert REFERENCE_CATALOG_WATCHER_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260726_0038"
+
+        run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0033",
+        )
+        common = inspect(engine)
+        assert REFERENCE_MIRROR_TABLES.isdisjoint(common.get_table_names())
+        assert "sidebar_shortcut_ids" not in {
+            column["name"] for column in common.get_columns("users")
+        }
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0033"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_catalog_watcher_schema(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_reference_catalog_watcher_evidence_is_immutable_and_blocks_downgrade(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "head")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_snapshots (
+                        provider_key, source_url, content_sha256,
+                        definition_sha256, raw_catalog_json,
+                        normalized_definition_json, retrieved_at,
+                        service_count, group_count, layer_count,
+                        unresolved_count, status, is_current
+                    ) VALUES (
+                        'siur',
+                        'https://idecyl.jcyl.es/siur/assets/settings/settings.json',
+                        :content, :definition, CAST('{}' AS JSON),
+                        CAST('{}' AS JSON), now(), 0, 0, 0, 0,
+                        'applied', true
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "a" * 64, "definition": "b" * 64},
+            ).scalar_one()
+            observed_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_observed_versions (
+                        provider_key, source_url, final_url, content_sha256,
+                        raw_sha256, size_bytes, raw_catalog_json,
+                        analysis_json, retrieved_at
+                    ) VALUES (
+                        'siur',
+                        'https://idecyl.jcyl.es/siur/assets/settings/settings.json',
+                        'https://idecyl.jcyl.es/siur/assets/settings/settings.json',
+                        :content, :raw, 2, CAST('{}' AS JSON),
+                        CAST('{}' AS JSON), now()
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "a" * 64, "raw": "c" * 64},
+            ).scalar_one()
+            check_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_update_checks (
+                        provider_key, idempotency_key, trigger_kind,
+                        source_url, baseline_snapshot_id,
+                        observed_version_id, status, checked_at,
+                        next_check_at, duration_ms, http_status,
+                        response_final_url, response_size_bytes,
+                        response_raw_sha256,
+                        response_redirect_chain_json
+                    ) VALUES (
+                        'siur', 'scheduled:2026-07-26', 'scheduled',
+                        'https://idecyl.jcyl.es/siur/assets/settings/settings.json',
+                        :snapshot_id, :observed_id, 'unchanged', now(),
+                        now() + interval '1 day', 12, 200,
+                        'https://idecyl.jcyl.es/siur/assets/settings/settings.json',
+                        2, :raw,
+                        CAST(
+                          '["https://idecyl.jcyl.es/siur/assets/settings/settings.json"]'
+                          AS JSON
+                        )
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "snapshot_id": snapshot_id,
+                    "observed_id": observed_id,
+                    "raw": "c" * 64,
+                },
+            ).scalar_one()
+
+        for statement, row_id in (
+            (
+                "UPDATE reference_catalog_observed_versions "
+                "SET size_bytes = 3 WHERE id = :row_id",
+                observed_id,
+            ),
+            (
+                "DELETE FROM reference_catalog_observed_versions "
+                "WHERE id = :row_id",
+                observed_id,
+            ),
+            (
+                "UPDATE reference_catalog_update_checks "
+                "SET duration_ms = 13 WHERE id = :row_id",
+                check_id,
+            ),
+            (
+                "DELETE FROM reference_catalog_update_checks "
+                "WHERE id = :row_id",
+                check_id,
+            ),
+        ):
+            with pytest.raises(DBAPIError) as mutation:
+                with engine.begin() as connection:
+                    connection.execute(text(statement), {"row_id": row_id})
+            assert mutation.value.orig.sqlstate == "55000"
+
+        for table_name in REFERENCE_CATALOG_WATCHER_TABLES:
+            with pytest.raises(DBAPIError) as truncate:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(f"TRUNCATE {table_name} CASCADE")
+                    )
+            assert truncate.value.orig.sqlstate == "55000"
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260726_0038",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert (
+            "immutable reference catalog update evidence exists"
+            in refused.stderr
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
     finally:
         engine.dispose()
 
