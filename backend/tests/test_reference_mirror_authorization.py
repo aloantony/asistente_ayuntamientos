@@ -366,6 +366,22 @@ def test_cli_is_local_dry_run_by_default_and_applies_exact_hash(
     )
 
 
+def test_cli_rejects_symlink_authorization_document(
+    tmp_path,
+    capsys,
+) -> None:
+    target = tmp_path / "authorization-target.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "authorization.json"
+    link.symlink_to(target)
+
+    assert mirror_authorization.main(["--file", str(link)]) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["error_code"] == (
+        "mirror_authorization_document_rejected"
+    )
+
+
 def test_source_hash_and_unapproved_origin_changes_fail_closed(db) -> None:
     _, _, _, source = _seed_source(db)
     value = json.loads(_approved_document(db, source))

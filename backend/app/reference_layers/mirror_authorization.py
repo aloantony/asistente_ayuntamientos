@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat as stat_module
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -1377,22 +1379,64 @@ def _read_local_document(path_value: str) -> bytes:
         )
     path = Path(path_value)
     try:
-        stat = path.stat()
+        path_stat = path.lstat()
     except OSError as error:
         raise MirrorAuthorizationDocumentError(
             "authorization file is unavailable"
         ) from error
-    if not path.is_file() or not 1 <= stat.st_size <= MAX_DOCUMENT_BYTES:
+    if (
+        not stat_module.S_ISREG(path_stat.st_mode)
+        or not 1 <= path_stat.st_size <= MAX_DOCUMENT_BYTES
+    ):
         raise MirrorAuthorizationDocumentError(
             "authorization file size is invalid"
         )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        document = path.read_bytes()
+        descriptor = os.open(path, flags)
     except OSError as error:
         raise MirrorAuthorizationDocumentError(
             "authorization file is unavailable"
         ) from error
-    if len(document) != stat.st_size:
+    try:
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            opened_stat = os.fstat(stream.fileno())
+            if (
+                not stat_module.S_ISREG(opened_stat.st_mode)
+                or (opened_stat.st_dev, opened_stat.st_ino)
+                != (path_stat.st_dev, path_stat.st_ino)
+                or not 1 <= opened_stat.st_size <= MAX_DOCUMENT_BYTES
+            ):
+                raise MirrorAuthorizationDocumentError(
+                    "authorization file is unavailable"
+                )
+            document = stream.read(MAX_DOCUMENT_BYTES + 1)
+            final_stat = os.fstat(stream.fileno())
+    except MirrorAuthorizationDocumentError:
+        raise
+    except OSError as error:
+        raise MirrorAuthorizationDocumentError(
+            "authorization file is unavailable"
+        ) from error
+    if (
+        len(document) != opened_stat.st_size
+        or len(document) > MAX_DOCUMENT_BYTES
+        or (
+            opened_stat.st_dev,
+            opened_stat.st_ino,
+            opened_stat.st_size,
+            opened_stat.st_mtime_ns,
+            opened_stat.st_ctime_ns,
+        )
+        != (
+            final_stat.st_dev,
+            final_stat.st_ino,
+            final_stat.st_size,
+            final_stat.st_mtime_ns,
+            final_stat.st_ctime_ns,
+        )
+    ):
         raise MirrorAuthorizationDocumentError(
             "authorization file changed while it was read"
         )
