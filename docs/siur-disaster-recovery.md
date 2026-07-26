@@ -4,24 +4,40 @@ Este runbook cubre el estado no reconstruible del espejo local:
 
 - el dump lógico de PostgreSQL;
 - `reference_artifacts`, salvo parciales de `staging` y su lock;
-- el directorio de datos de GeoServer, salvo el subárbol `gwc`.
+- el directorio de datos de GeoServer completo, salvo el mountpoint derivado
+  `gwc-cache`.
 
 Redis y las teselas de GeoWebCache **no** son fuentes de verdad. La cola se
 reconstruye desde el estado durable de PostgreSQL al reiniciar scheduler y
 workers. Las teselas se regeneran bajo demanda a partir de los artefactos
-locales restaurados. La configuración deseada de su cuota está versionada en
-`.env.example` y se vuelve a aplicar con el comando de este documento.
+locales restaurados. Compose fija `GEOWEBCACHE_CACHE_DIR` al volumen separado
+`/opt/geoserver_data/gwc-cache`: quedan dentro del backup `gwc-gs.xml`,
+`gwc-layers/`, `gwc/geowebcache.xml` y cualquier otra configuración persistente
+del data dir. La cuota deseada está versionada en `.env.example` y se vuelve a
+aplicar y releer con el comando de este documento. Esta separación sigue la
+[configuración oficial de GeoWebCache integrado](https://docs.geoserver.org/3.0.x/en/user/geowebcache/config/),
+que distingue `GEOWEBCACHE_CACHE_DIR` de `gwc-layers/` y
+`gwc/geowebcache.xml`.
 
-La herramienta no contiene operaciones de borrado. `create` y `restore` son
-dry-run por defecto, nunca admiten un destino existente y dejan cualquier
-directorio `.partial-*` fallido para revisión forense. `restore` solo acepta:
+La herramienta no ofrece ninguna operación de borrado al operador. `create` y
+`restore` son dry-run por defecto, nunca admiten un destino existente y dejan
+cualquier directorio `.partial-*` fallido para revisión forense. `restore` solo
+acepta:
 
 - un directorio nuevo cuyo nombre empiece por `siur-drill-restore-`;
-- una base vacía llamada `app_drill_*`;
+- una base realmente vacía llamada `app_drill_*`: comprueba propietario,
+  sesiones, schemas, relaciones, funciones, tipos, extensiones y otros objetos;
 - PostgreSQL en `127.0.0.1`, en un puerto distinto del `5432` del runtime de
   desarrollo;
-- `pg_restore --single-transaction --exit-on-error`, sin `--clean`,
-  `--create`, `DROP` ni sobrescritura.
+- `pg_restore --single-transaction --exit-on-error`, sin `--clean`, `--create`,
+  `DROP DATABASE` ni sobrescritura.
+
+Todos los pasos de filesystem y el `restore-report.json` se preparan antes de
+`pg_restore`. Si después del commit falla la publicación atómica, la herramienta
+ejecuta como compensación `DROP OWNED BY CURRENT_USER CASCADE` conectada
+únicamente a ese target `app_drill_*` aislado, repone el baseline estándar
+`public`/`plpgsql` y vuelve a demostrar que está vacío. Nunca elimina ni recrea
+la base.
 
 La publicación final usa `renameat2(RENAME_NOREPLACE)`. Si el kernel o el
 filesystem del destino no ofrece esa garantía, la herramienta falla y conserva
@@ -76,12 +92,18 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops
 El informe distingue:
 
 - capacidad, uso y espacio libre del filesystem;
+- bytes actuales de caché medidos dos veces, rechazando cambios, symlinks,
+  hardlinks, ficheros sparse y tipos especiales;
 - techo configurado y reserva mínima;
 - margen estático `capacidad - cuota - reserva`;
 - margen libre actual `libre - reserva`;
+- crecimiento restante `max(cuota - caché actual, 0)` y el margen decisivo
+  `libre - reserva - crecimiento restante`;
 - coincidencia exacta entre estado actual y deseado.
 
-Solo si ambos márgenes son no negativos se permite aplicar:
+Solo si todos los márgenes son no negativos se permite aplicar. Por ejemplo,
+con caché vacía, 6 GiB libres, cuota de 20 GiB y reserva de 5 GiB se rechaza:
+faltan 19 GiB para poder garantizar a la vez el crecimiento y la reserva.
 
 ```bash
 docker compose --profile operations run --rm -T --no-deps gwc-ops \
@@ -98,8 +120,8 @@ declara éxito por haber recibido solo el `PUT`. El contrato corresponde a la
 3.0](https://docs.geoserver.org/3.0.x/en/user/geowebcache/rest/diskquota/).
 
 Repetir el dry-run y archivar su JSON como evidencia. Después de una
-restauración, ejecutar otra vez este bloque porque el volumen `gwc` completo,
-incluida su configuración derivada, se reconstruye deliberadamente.
+restauración, ejecutar otra vez este bloque. Solo el volumen `gwc-cache` de
+teselas se reconstruye; toda la configuración GWC se restaura con el data dir.
 
 ## Crear un backup consistente
 
@@ -182,10 +204,12 @@ El proceso:
 
 1. inventaría y hashea todos los ficheros antes del dump;
 2. ejecuta `pg_dump` custom, serializable, sin owner ni privilegios;
-3. crea dos tar sin symlinks, devices ni rutas absolutas;
+3. crea dos tar sin symlinks, devices ni rutas absolutas; UID/GID, permisos y
+   tiempos se guardan en el manifest y no se confían a los campos del tar;
 4. vuelve a inventariar y aborta si cambió un byte o metadata;
-5. escribe hashes de dump/archives, inventario por fichero, exclusiones y
-   evidencia en `manifest.json`;
+5. conserva los bytes exactos de `quiescence-evidence.json` dentro del backup
+   y enlaza su tamaño/hash desde `manifest.json`, junto con hashes del dump,
+   archives, inventario por fichero, ownership y exclusiones;
 6. hashea el manifest y renombra atómicamente el directorio parcial.
 
 Verificar bytes, miembros de tar y legibilidad del dump:
@@ -275,9 +299,15 @@ Nunca usar el puerto 5432 ni los volúmenes Compose del desarrollo.
    base temporal y levantar, si se desea, otro GeoServer apuntando a
    `geoserver_data` y `reference_artifacts` restaurados. No montar esos paths
    sobre el runtime actual. El servicio operativo se ejecuta como
-   `root:${REFERENCE_STORAGE_GID}`: conserva los bits de permiso inventariados
-   y crea las copias con el grupo privado que comparte GeoServer; no replica
-   UID/GID arbitrarios del host.
+   `root:${REFERENCE_STORAGE_GID}` para poder restaurar los UID/GID validados
+   del manifest (rango `0..2147483647`), además de permisos y tiempos, sin
+   confiar en los campos de ownership del tar.
+
+Si el informe devuelto indica `"durability_verified": false`, el directorio
+final y la base ya forman una pareja completa y `restore-report.json` es
+visible, pero fallaron los tres intentos de `fsync` del directorio padre. No se
+debe repetir sobre la base poblada: conservar la pareja y revisar la salud del
+filesystem del simulacro.
 
 La herramienta no detiene ni elimina el contenedor/base/directorio del
 simulacro. Cerrar y retirar esos recursos requiere una decisión posterior y

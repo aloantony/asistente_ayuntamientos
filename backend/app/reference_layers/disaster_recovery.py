@@ -7,11 +7,13 @@ mutating command is dry-run by default.  Apply mode:
 * requires explicit absolute paths and a recent quiescence evidence file;
 * rejects symlinks, special files, path overlap and existing destinations;
 * writes to a unique sibling partial directory and atomically renames it;
-* never removes a file, cleans a database, or overwrites a runtime directory;
+* never removes a file, drops a database, or overwrites a runtime directory;
+* compensates only a just-restored exact drill target if publication fails;
 * keeps database credentials out of argv, reports and exception messages.
 
 Redis queues/cache and GeoWebCache tiles are reconstructible and are therefore
-declared exclusions rather than backup inputs.
+declared exclusions rather than backup inputs. GeoWebCache configuration
+remains in the fully inventoried GeoServer data directory.
 """
 
 from __future__ import annotations
@@ -34,12 +36,15 @@ from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+QUIESCENCE_EVIDENCE_SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 256 * 1024 * 1024
 MAX_CREDENTIAL_BYTES = 8192
 COPY_CHUNK_BYTES = 1024 * 1024
+MAX_OWNERSHIP_ID = 2**31 - 1
 BACKUP_PREFIX = "siur-backup-"
 RESTORE_PREFIX = "siur-drill-restore-"
+QUIESCENCE_EVIDENCE_NAME = "quiescence-evidence.json"
 EXPECTED_STOPPED_SERVICES = frozenset(
     {
         "backend",
@@ -126,6 +131,8 @@ class _InventoryEntry:
     sha256: str | None
     mode: int
     mtime_ns: int
+    uid: int
+    gid: int
     device: int
     inode: int
 
@@ -136,6 +143,8 @@ class _InventoryEntry:
             "size_bytes": self.size_bytes,
             "mode": self.mode,
             "mtime_ns": self.mtime_ns,
+            "uid": self.uid,
+            "gid": self.gid,
         }
         if self.sha256 is not None:
             result["sha256"] = self.sha256
@@ -151,6 +160,8 @@ class _TreeInventory:
     source_inode: int
     source_mode: int
     source_mtime_ns: int
+    source_uid: int
+    source_gid: int
 
     @property
     def file_count(self) -> int:
@@ -215,19 +226,26 @@ def create_backup(
             {"staging", ".reference-blob-store.lock"}
         ),
     )
+    # GeoWebCache's generated tile bytes live on their own volume through
+    # GEOWEBCACHE_CACHE_DIR at the dedicated gwc-cache mount.  All persistent
+    # configuration, including gwc-gs.xml, gwc-layers and
+    # gwc/geowebcache.xml, remains outside that one mount and is backed up.
     geoserver_inventory = _inventory_tree(
         geoserver_source,
-        excluded_roots=frozenset({"gwc"}),
+        excluded_roots=frozenset({"gwc-cache"}),
     )
     evidence: dict[str, object] | None = None
+    evidence_bytes: bytes | None = None
     evidence_sha256: str | None = None
     if request.quiescence_evidence is not None:
-        evidence, evidence_sha256 = _validate_quiescence_evidence(
-            request.quiescence_evidence,
-            reference_source=reference_source,
-            geoserver_source=geoserver_source,
-            now=timestamp,
-            max_age_seconds=request.quiescence_max_age_seconds,
+        evidence, evidence_bytes, evidence_sha256 = (
+            _validate_quiescence_evidence(
+                request.quiescence_evidence,
+                reference_source=reference_source,
+                geoserver_source=geoserver_source,
+                now=timestamp,
+                max_age_seconds=request.quiescence_max_age_seconds,
+            )
         )
     if apply and evidence is None:
         raise DisasterRecoverySafetyError(
@@ -253,8 +271,9 @@ def create_backup(
             {
                 "component": "geowebcache",
                 "reason": (
-                    "tiles are a derivative cache rebuilt on demand from "
-                    "restored local delivery artifacts and GeoServer catalog"
+                    "only the external GEOWEBCACHE_CACHE_DIR tile volume is "
+                    "derived; all GeoWebCache configuration inside the "
+                    "GeoServer data directory is included"
                 ),
             },
         ],
@@ -280,6 +299,12 @@ def create_backup(
         geoserver_archive = partial / "geoserver_data.tar"
         _write_inventory_tar(reference_inventory, reference_archive)
         _write_inventory_tar(geoserver_inventory, geoserver_archive)
+        evidence_payload = partial / QUIESCENCE_EVIDENCE_NAME
+        if evidence_bytes is None:
+            raise DisasterRecoverySafetyError(
+                "validated quiescence evidence bytes are unavailable"
+            )
+        _write_exclusive(evidence_payload, evidence_bytes)
 
         reference_after = _inventory_tree(
             reference_source,
@@ -289,7 +314,7 @@ def create_backup(
         )
         geoserver_after = _inventory_tree(
             geoserver_source,
-            excluded_roots=frozenset({"gwc"}),
+            excluded_roots=frozenset({"gwc-cache"}),
         )
         if (
             reference_inventory != reference_after
@@ -304,7 +329,7 @@ def create_backup(
             database_name=database.database_name,
             database_dump=database_dump,
             evidence=evidence or {},
-            evidence_sha256=evidence_sha256 or "",
+            evidence_payload=evidence_payload,
             reference_inventory=reference_inventory,
             reference_archive=reference_archive,
             geoserver_inventory=geoserver_inventory,
@@ -355,6 +380,21 @@ def verify_backup(
     trees = _manifest_mapping(manifest, "trees")
     reference = _mapping_member(trees, "reference_artifacts")
     geoserver = _mapping_member(trees, "geoserver_data")
+    consistency = _manifest_mapping(manifest, "consistency")
+    evidence_description = _mapping_member(
+        consistency,
+        "quiescence_evidence",
+    )
+    evidence_path = _fixed_payload_path(
+        backup_path,
+        evidence_description,
+        expected_name=QUIESCENCE_EVIDENCE_NAME,
+    )
+    _verify_payload_hash(evidence_path, evidence_description)
+    _verify_stored_quiescence_evidence(
+        evidence_path,
+        consistency=consistency,
+    )
     dump_description = _mapping_member(database, "dump")
     dump_path = _fixed_payload_path(
         backup_path,
@@ -371,7 +411,7 @@ def verify_backup(
             "reference_artifacts.tar",
             [".reference-blob-store.lock", "staging"],
         ),
-        ("geoserver_data", geoserver, "geoserver_data.tar", ["gwc"]),
+        ("geoserver_data", geoserver, "geoserver_data.tar", ["gwc-cache"]),
     ):
         archive_description = _mapping_member(description, "archive")
         archive_path = _fixed_payload_path(
@@ -408,6 +448,7 @@ def verify_backup(
         "backup_id": backup_id,
         "manifest_sha256": actual_manifest_hash,
         "database_name": database_name,
+        "quiescence_evidence_sha256": evidence_description["sha256"],
         "trees": verified_trees,
         "verified": True,
     }
@@ -459,7 +500,9 @@ def restore_backup(
         "source_database_name": source_database_name,
         "target_database_name": target.database_name,
         "database_contract": (
-            "existing empty drill-only database; no create, clean or drop"
+            "existing empty isolated drill-only database; no create or drop; "
+            "a failed post-restore publication is compensated with DROP "
+            "OWNED only in this exact target"
         ),
         "verified": verification["verified"],
     }
@@ -489,6 +532,8 @@ def restore_backup(
                 tree,
                 "root_mtime_ns",
             ),
+            root_uid=_manifest_owner_id(tree, "root_uid"),
+            root_gid=_manifest_owner_id(tree, "root_gid"),
         )
     database_description = _manifest_mapping(manifest, "database")
     dump_description = _mapping_member(database_description, "dump")
@@ -497,13 +542,16 @@ def restore_backup(
         dump_description,
         expected_name="postgres.dump",
     )
-    _verify_payload_hash(dump_path, dump_description)
-    _run_pg_restore(command_runner, target, dump_path)
     restored_at = _utc_now(now).isoformat().replace("+00:00", "Z")
     restore_record = {
         **report,
         "mode": "applied",
         "restored_at": restored_at,
+        "completed": True,
+        "completion_contract": (
+            "this record is visible at the final no-replace destination only "
+            "after pg_restore committed successfully"
+        ),
         "reference_artifacts_path": str(
             destination / "reference_artifacts"
         ),
@@ -515,9 +563,28 @@ def restore_backup(
     )
     os.chmod(partial, 0o750)
     _fsync_directory(partial)
-    _publish_directory_noreplace(partial, destination)
-    _fsync_directory(destination.parent)
-    return {**restore_record, "completed": True}
+    _verify_payload_hash(dump_path, dump_description)
+    _assert_empty_drill_database(command_runner, target)
+
+    restored = False
+    try:
+        _run_pg_restore(command_runner, target, dump_path)
+        restored = True
+        _publish_directory_noreplace(partial, destination)
+    except BaseException:
+        if restored:
+            _compensate_restored_drill_database(command_runner, target)
+        raise
+
+    # Once the atomic rename succeeds, both the populated drill database and
+    # the self-describing final directory are present.  A parent-directory
+    # fsync error must not turn that completed pair into an unrecoverable
+    # "failed" run, so it is retried and reported explicitly.
+    durability_verified = _fsync_directory_with_retries(destination.parent)
+    return {
+        **restore_record,
+        "durability_verified": durability_verified,
+    }
 
 
 def subprocess_command_runner(
@@ -651,7 +718,7 @@ def _build_manifest(
     database_name: str,
     database_dump: Path,
     evidence: Mapping[str, object],
-    evidence_sha256: str,
+    evidence_payload: Path,
     reference_inventory: _TreeInventory,
     reference_archive: Path,
     geoserver_inventory: _TreeInventory,
@@ -663,9 +730,18 @@ def _build_manifest(
         "created_at": created_at.isoformat().replace("+00:00", "Z"),
         "consistency": {
             "method": "operator-quiescence-plus-before-after-inventory",
-            "quiescence_evidence_sha256": evidence_sha256,
+            "quiescence_evidence": _payload_description(
+                evidence_payload,
+            ),
             "operator": evidence.get("operator"),
             "captured_at": evidence.get("captured_at"),
+            "reference_artifacts_source": evidence.get(
+                "reference_artifacts_source"
+            ),
+            "geoserver_data_source": evidence.get(
+                "geoserver_data_source"
+            ),
+            "postgres_running": evidence.get("postgres_running"),
             "stopped_services": sorted(EXPECTED_STOPPED_SERVICES),
         },
         "database": {
@@ -701,10 +777,15 @@ def _build_manifest(
             {
                 "component": "geowebcache",
                 "included": False,
-                "excluded_path": "geoserver_data/gwc",
+                "excluded_scope": (
+                    "external GEOWEBCACHE_CACHE_DIR tile volume only"
+                ),
+                "configuration_included": True,
+                "cache_directory": "/opt/geoserver_data/gwc-cache",
                 "reconstruction": (
-                    "restart GeoServer/GeoWebCache and regenerate requested "
-                    "tiles from restored local delivery artifacts"
+                    "restore the complete GeoServer data directory, reapply "
+                    "and verify the declarative disk quota, then regenerate "
+                    "requested tiles from restored local delivery artifacts"
                 ),
             },
         ],
@@ -712,7 +793,9 @@ def _build_manifest(
             "directory_prefix": RESTORE_PREFIX,
             "database_prefix": "app_drill_",
             "overwrite_allowed": False,
-            "database_clean_allowed": False,
+            "database_clean_allowed": (
+                "compensation-only-drop-owned-exact-drill-target"
+            ),
             "database_drop_allowed": False,
         },
     }
@@ -730,6 +813,8 @@ def _tree_manifest(
         "excluded_paths": list(inventory.excluded_paths),
         "root_mode": inventory.source_mode,
         "root_mtime_ns": inventory.source_mtime_ns,
+        "root_uid": inventory.source_uid,
+        "root_gid": inventory.source_gid,
         "file_count": inventory.file_count,
         "directory_count": inventory.directory_count,
         "total_bytes": inventory.total_bytes,
@@ -762,6 +847,7 @@ def _inventory_tree(
         raise DisasterRecoverySafetyError(
             "backup source must remain a directory"
         )
+    _validate_source_ownership(source_before)
     entries: list[_InventoryEntry] = []
     excluded: list[str] = []
 
@@ -795,6 +881,7 @@ def _inventory_tree(
                     "backup sources cannot contain symlinks"
                 )
             permissions = stat.S_IMODE(metadata.st_mode)
+            _validate_source_ownership(metadata)
             if permissions & ~0o777:
                 raise DisasterRecoverySafetyError(
                     "backup sources cannot contain setuid, setgid or sticky "
@@ -809,6 +896,8 @@ def _inventory_tree(
                         sha256=None,
                         mode=permissions,
                         mtime_ns=metadata.st_mtime_ns,
+                        uid=metadata.st_uid,
+                        gid=metadata.st_gid,
                         device=metadata.st_dev,
                         inode=metadata.st_ino,
                     )
@@ -829,6 +918,8 @@ def _inventory_tree(
                     sha256=digest,
                     mode=permissions,
                     mtime_ns=metadata.st_mtime_ns,
+                    uid=metadata.st_uid,
+                    gid=metadata.st_gid,
                     device=metadata.st_dev,
                     inode=metadata.st_ino,
                 )
@@ -841,7 +932,14 @@ def _inventory_tree(
         raise DisasterRecoverySafetyError(
             "backup source changed during inventory"
         ) from error
-    root_fields = ("st_dev", "st_ino", "st_mode", "st_mtime_ns")
+    root_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_mtime_ns",
+        "st_uid",
+        "st_gid",
+    )
     if any(
         getattr(source_before, name) != getattr(source_after, name)
         for name in root_fields
@@ -857,7 +955,27 @@ def _inventory_tree(
         source_inode=source_before.st_ino,
         source_mode=stat.S_IMODE(source_before.st_mode) & 0o777,
         source_mtime_ns=source_before.st_mtime_ns,
+        source_uid=source_before.st_uid,
+        source_gid=source_before.st_gid,
     )
+
+
+def _valid_ownership_id(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 0 <= value <= MAX_OWNERSHIP_ID
+    )
+
+
+def _validate_source_ownership(metadata: os.stat_result) -> None:
+    if (
+        not _valid_ownership_id(metadata.st_uid)
+        or not _valid_ownership_id(metadata.st_gid)
+    ):
+        raise DisasterRecoverySafetyError(
+            "backup source ownership is outside the supported range"
+        )
 
 
 def _hash_file(path: Path, *, expected: os.stat_result) -> str:
@@ -896,6 +1014,8 @@ def _assert_same_file(
         "st_mode",
         "st_size",
         "st_mtime_ns",
+        "st_uid",
+        "st_gid",
     )
     if (
         not stat.S_ISREG(actual.st_mode)
@@ -964,6 +1084,8 @@ def _assert_entry_identity(
         or metadata.st_size != entry.size_bytes
         or metadata.st_mtime_ns != entry.mtime_ns
         or stat.S_IMODE(metadata.st_mode) != entry.mode
+        or metadata.st_uid != entry.uid
+        or metadata.st_gid != entry.gid
     ):
         raise DisasterRecoverySafetyError(
             "backup source changed while archive was being written"
@@ -1005,13 +1127,68 @@ def _assert_empty_drill_database(
     runner: CommandRunner,
     database: _DatabaseLocation,
 ) -> None:
+    # This is intentionally broader than counting tables.  A drill target is
+    # accepted only when it is owned by the connecting role, has no concurrent
+    # sessions, contains the standard public schema contract, and has no
+    # user schemas, relations, routines, types, non-built-in extensions or
+    # other database-local objects.
     query = (
-        "SELECT current_database() || '|' || count(*)::text "
-        "FROM pg_class AS c JOIN pg_namespace AS n "
-        "ON n.oid = c.relnamespace "
+        "SELECT current_database(), current_user, "
+        "(SELECT CASE WHEN pg_get_userbyid(datdba) = current_user "
+        "THEN 1 ELSE 0 END FROM pg_database "
+        "WHERE datname = current_database()), "
+        "(SELECT count(*) FROM pg_stat_activity "
+        "WHERE datname = current_database() AND pid <> pg_backend_pid()), "
+        "(SELECT count(*) FROM pg_namespace WHERE nspname <> 'public' "
+        "AND nspname NOT IN ('pg_catalog','information_schema') "
+        "AND nspname !~ '^pg_(toast|temp|toast_temp)(_|$)'), "
+        "(SELECT count(*) FROM pg_class c JOIN pg_namespace n "
+        "ON n.oid = c.relnamespace WHERE n.nspname NOT IN "
+        "('pg_catalog','information_schema') "
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)'), "
+        "(SELECT count(*) FROM pg_proc p JOIN pg_namespace n "
+        "ON n.oid = p.pronamespace WHERE n.nspname NOT IN "
+        "('pg_catalog','information_schema') "
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)'), "
+        "(SELECT count(*) FROM pg_type t JOIN pg_namespace n "
+        "ON n.oid = t.typnamespace WHERE n.nspname NOT IN "
+        "('pg_catalog','information_schema') "
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)'), "
+        "(SELECT count(*) FROM pg_extension e JOIN pg_namespace n "
+        "ON n.oid = e.extnamespace WHERE NOT "
+        "(e.extname = 'plpgsql' AND n.nspname = 'pg_catalog')), "
+        "("
+        "(SELECT CASE WHEN count(*) = 1 AND count(*) FILTER "
+        "(WHERE pg_get_userbyid(nspowner) = 'pg_database_owner') = 1 "
+        "THEN 0 ELSE 1 END FROM pg_namespace WHERE nspname = 'public') + "
+        "(SELECT count(*) FROM pg_language WHERE lanname NOT IN "
+        "('internal','c','sql','plpgsql')) + "
+        "(SELECT count(*) FROM pg_foreign_data_wrapper) + "
+        "(SELECT count(*) FROM pg_foreign_server) + "
+        "(SELECT count(*) FROM pg_user_mapping) + "
+        "(SELECT count(*) FROM pg_event_trigger) + "
+        "(SELECT count(*) FROM pg_publication) + "
+        "(SELECT count(*) FROM pg_subscription) + "
+        "(SELECT count(*) FROM pg_largeobject_metadata) + "
+        "(SELECT count(*) FROM pg_default_acl) + "
+        "(SELECT count(*) FROM pg_cast WHERE oid >= 16384) + "
+        "(SELECT count(*) FROM pg_transform WHERE oid >= 16384) + "
+        "(SELECT count(*) FROM pg_am WHERE oid >= 16384) + "
+        "(SELECT count(*) FROM ("
+        "SELECT oid, collnamespace AS namespace FROM pg_collation "
+        "UNION ALL SELECT oid, connamespace FROM pg_conversion "
+        "UNION ALL SELECT oid, oprnamespace FROM pg_operator "
+        "UNION ALL SELECT oid, opcnamespace FROM pg_opclass "
+        "UNION ALL SELECT oid, opfnamespace FROM pg_opfamily "
+        "UNION ALL SELECT oid, stxnamespace FROM pg_statistic_ext "
+        "UNION ALL SELECT oid, cfgnamespace FROM pg_ts_config "
+        "UNION ALL SELECT oid, dictnamespace FROM pg_ts_dict "
+        "UNION ALL SELECT oid, prsnamespace FROM pg_ts_parser "
+        "UNION ALL SELECT oid, tmplnamespace FROM pg_ts_template"
+        ") scoped JOIN pg_namespace n ON n.oid = scoped.namespace "
         "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
-        "AND n.nspname !~ '^pg_toast' "
-        "AND c.relkind IN ('r','p','v','m','S','f')"
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)')"
+        ")"
     )
     result = runner(
         (
@@ -1019,6 +1196,7 @@ def _assert_empty_drill_database(
             "-X",
             "--no-align",
             "--tuples-only",
+            "--field-separator=|",
             "--set=ON_ERROR_STOP=1",
             f"--command={query}",
         ),
@@ -1029,11 +1207,56 @@ def _assert_empty_drill_database(
             "drill database preflight command failed"
         )
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    expected = f"{database.database_name}|0"
+    expected = (
+        f"{database.database_name}|{database.username}|1|"
+        + "|".join("0" for _ in range(7))
+    )
     if lines != [expected]:
         raise DisasterRecoverySafetyError(
             "restore target is not the expected empty drill database"
         )
+
+
+def _compensate_restored_drill_database(
+    runner: CommandRunner,
+    database: _DatabaseLocation,
+) -> None:
+    """Return only the exact isolated drill target to its empty preflight state."""
+
+    if (
+        not database.database_name.startswith("app_drill_")
+        or database.hostname != "127.0.0.1"
+        or database.port == 5432
+    ):
+        raise DisasterRecoverySafetyError(
+            "database compensation target is not an isolated drill database"
+        )
+    result = runner(
+        (
+            "psql",
+            "-X",
+            "--set=ON_ERROR_STOP=1",
+            "--single-transaction",
+            "--command="
+            "DROP OWNED BY CURRENT_USER CASCADE; "
+            "CREATE SCHEMA IF NOT EXISTS public "
+            "AUTHORIZATION pg_database_owner; "
+            "GRANT USAGE ON SCHEMA public TO PUBLIC; "
+            "GRANT CREATE ON SCHEMA public TO pg_database_owner; "
+            "CREATE EXTENSION IF NOT EXISTS plpgsql WITH SCHEMA pg_catalog",
+        ),
+        _postgres_environment(database),
+    )
+    if result.returncode != 0:
+        raise DisasterRecoveryCommandError(
+            "post-restore database compensation failed"
+        )
+    try:
+        _assert_empty_drill_database(runner, database)
+    except DisasterRecoveryError as error:
+        raise DisasterRecoveryCommandError(
+            "post-restore database compensation could not prove an empty target"
+        ) from error
 
 
 def _run_pg_restore(
@@ -1091,7 +1314,7 @@ def _validate_quiescence_evidence(
     geoserver_source: Path,
     now: datetime,
     max_age_seconds: int,
-) -> tuple[dict[str, object], str]:
+) -> tuple[dict[str, object], bytes, str]:
     if (
         isinstance(max_age_seconds, bool)
         or not isinstance(max_age_seconds, int)
@@ -1106,7 +1329,10 @@ def _validate_quiescence_evidence(
         label="quiescence evidence",
     )
     evidence = _decode_json_object(raw, label="quiescence evidence")
-    if evidence.get("schema_version") != SCHEMA_VERSION:
+    if (
+        evidence.get("schema_version")
+        != QUIESCENCE_EVIDENCE_SCHEMA_VERSION
+    ):
         raise DisasterRecoverySafetyError(
             "quiescence evidence schema is unsupported"
         )
@@ -1126,7 +1352,8 @@ def _validate_quiescence_evidence(
     if (
         not isinstance(stopped, list)
         or any(not isinstance(item, str) for item in stopped)
-        or not EXPECTED_STOPPED_SERVICES.issubset(stopped)
+        or len(stopped) != len(set(stopped))
+        or set(stopped) != EXPECTED_STOPPED_SERVICES
     ):
         raise DisasterRecoverySafetyError(
             "quiescence evidence is missing a stopped writer service"
@@ -1158,7 +1385,69 @@ def _validate_quiescence_evidence(
         raise DisasterRecoverySafetyError(
             "quiescence evidence is stale or from the future"
         )
-    return evidence, hashlib.sha256(raw).hexdigest()
+    return evidence, raw, hashlib.sha256(raw).hexdigest()
+
+
+def _verify_stored_quiescence_evidence(
+    path: Path,
+    *,
+    consistency: Mapping[str, Any],
+) -> None:
+    """Verify the preserved exact evidence bytes against manifest semantics."""
+
+    raw = _read_regular_file(
+        path,
+        limit=64 * 1024,
+        label="stored quiescence evidence",
+    )
+    evidence = _decode_json_object(
+        raw,
+        label="stored quiescence evidence",
+    )
+    stopped = evidence.get("stopped_services")
+    if (
+        evidence.get("schema_version")
+        != QUIESCENCE_EVIDENCE_SCHEMA_VERSION
+        or evidence.get("postgres_running") is not True
+        or not isinstance(stopped, list)
+        or any(not isinstance(item, str) for item in stopped)
+        or len(stopped) != len(set(stopped))
+        or set(stopped) != EXPECTED_STOPPED_SERVICES
+        or evidence.get("operator") != consistency.get("operator")
+        or evidence.get("captured_at") != consistency.get("captured_at")
+        or evidence.get("reference_artifacts_source")
+        != consistency.get("reference_artifacts_source")
+        or evidence.get("geoserver_data_source")
+        != consistency.get("geoserver_data_source")
+        or consistency.get("postgres_running") is not True
+        or consistency.get("stopped_services")
+        != sorted(EXPECTED_STOPPED_SERVICES)
+    ):
+        raise DisasterRecoveryVerificationError(
+            "stored quiescence evidence does not match its manifest"
+        )
+    operator = evidence.get("operator")
+    captured_raw = evidence.get("captured_at")
+    if (
+        not isinstance(operator, str)
+        or OPERATOR_RE.fullmatch(operator) is None
+        or not isinstance(captured_raw, str)
+    ):
+        raise DisasterRecoveryVerificationError(
+            "stored quiescence evidence identity is invalid"
+        )
+    try:
+        captured = datetime.fromisoformat(
+            captured_raw.replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise DisasterRecoveryVerificationError(
+            "stored quiescence evidence timestamp is invalid"
+        ) from error
+    if captured.tzinfo is None or captured.utcoffset() is None:
+        raise DisasterRecoveryVerificationError(
+            "stored quiescence evidence timestamp is invalid"
+        )
 
 
 def _read_database_location(path: Path, *, target: bool) -> _DatabaseLocation:
@@ -1422,6 +1711,15 @@ def _verify_tar_archive(
                     raise DisasterRecoveryVerificationError(
                         "tar archive contains an unsafe member type"
                     )
+                if (
+                    member.uid != 0
+                    or member.gid != 0
+                    or member.uname not in {"", None}
+                    or member.gname not in {"", None}
+                ):
+                    raise DisasterRecoveryVerificationError(
+                        "tar ownership fields are not canonical"
+                    )
                 if entry.kind == "directory":
                     if not member.isdir() or member.size != 0:
                         raise DisasterRecoveryVerificationError(
@@ -1464,6 +1762,8 @@ def _safe_extract_tar(
     *,
     root_mode: int,
     root_mtime_ns: int,
+    root_uid: int,
+    root_gid: int,
 ) -> None:
     _assert_new_path(destination, label="tree restore destination")
     os.mkdir(destination, 0o700)
@@ -1531,6 +1831,12 @@ def _safe_extract_tar(
                     raise DisasterRecoveryVerificationError(
                         "extracted file does not match manifest"
                     )
+                os.chown(
+                    target,
+                    entry.uid,
+                    entry.gid,
+                    follow_symlinks=False,
+                )
                 os.chmod(target, entry.mode & 0o777, follow_symlinks=False)
                 os.utime(
                     target,
@@ -1546,12 +1852,24 @@ def _safe_extract_tar(
             "tar archive is missing a manifest member"
         )
     for target, entry in reversed(directories):
+        os.chown(
+            target,
+            entry.uid,
+            entry.gid,
+            follow_symlinks=False,
+        )
         os.chmod(target, entry.mode & 0o777, follow_symlinks=False)
         os.utime(
             target,
             ns=(entry.mtime_ns, entry.mtime_ns),
             follow_symlinks=False,
         )
+    os.chown(
+        destination,
+        root_uid,
+        root_gid,
+        follow_symlinks=False,
+    )
     os.chmod(destination, root_mode, follow_symlinks=False)
     os.utime(
         destination,
@@ -1578,6 +1896,8 @@ def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
         size = item.get("size_bytes")
         mode = item.get("mode")
         mtime_ns = item.get("mtime_ns")
+        uid = item.get("uid")
+        gid = item.get("gid")
         sha256 = item.get("sha256")
         if (
             not isinstance(path, str)
@@ -1592,6 +1912,8 @@ def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
             or isinstance(mtime_ns, bool)
             or not isinstance(mtime_ns, int)
             or mtime_ns < 0
+            or not _valid_ownership_id(uid)
+            or not _valid_ownership_id(gid)
         ):
             raise DisasterRecoveryVerificationError(
                 "backup tree entry is invalid"
@@ -1606,6 +1928,8 @@ def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
             raise DisasterRecoveryVerificationError(
                 "backup file entry is invalid"
             )
+        assert isinstance(uid, int)
+        assert isinstance(gid, int)
         result.append(
             _InventoryEntry(
                 path=path,
@@ -1614,6 +1938,8 @@ def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
                 sha256=sha256,
                 mode=mode,
                 mtime_ns=mtime_ns,
+                uid=uid,
+                gid=gid,
                 device=0,
                 inode=0,
             )
@@ -1629,6 +1955,8 @@ def _validate_tree_statistics(
 ) -> None:
     _manifest_mode(description, "root_mode")
     _manifest_nonnegative_integer(description, "root_mtime_ns")
+    _manifest_owner_id(description, "root_uid")
+    _manifest_owner_id(description, "root_gid")
     expected_files = sum(item.kind == "file" for item in entries)
     expected_directories = sum(
         item.kind == "directory" for item in entries
@@ -1682,14 +2010,40 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         raise DisasterRecoveryVerificationError(
             "backup reconstructible-state declaration is invalid"
         )
+    exclusion_map = {
+        str(item["component"]): item
+        for item in exclusions
+        if isinstance(item, Mapping)
+    }
+    geowebcache_exclusion = exclusion_map["geowebcache"]
+    if (
+        geowebcache_exclusion.get("configuration_included") is not True
+        or geowebcache_exclusion.get("excluded_scope")
+        != "external GEOWEBCACHE_CACHE_DIR tile volume only"
+        or geowebcache_exclusion.get("cache_directory")
+        != "/opt/geoserver_data/gwc-cache"
+    ):
+        raise DisasterRecoveryVerificationError(
+            "GeoWebCache backup scope declaration is invalid"
+        )
     consistency = _manifest_mapping(manifest, "consistency")
-    evidence_hash = consistency.get("quiescence_evidence_sha256")
+    evidence_description = _mapping_member(
+        consistency,
+        "quiescence_evidence",
+    )
     stopped_services = consistency.get("stopped_services")
     if (
         consistency.get("method")
         != "operator-quiescence-plus-before-after-inventory"
-        or not isinstance(evidence_hash, str)
-        or SHA256_RE.fullmatch(evidence_hash) is None
+        or evidence_description.get("path") != QUIESCENCE_EVIDENCE_NAME
+        or not isinstance(consistency.get("operator"), str)
+        or not isinstance(consistency.get("captured_at"), str)
+        or not isinstance(
+            consistency.get("reference_artifacts_source"),
+            str,
+        )
+        or not isinstance(consistency.get("geoserver_data_source"), str)
+        or consistency.get("postgres_running") is not True
         or stopped_services != sorted(EXPECTED_STOPPED_SERVICES)
     ):
         raise DisasterRecoveryVerificationError(
@@ -1714,7 +2068,9 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         "directory_prefix": RESTORE_PREFIX,
         "database_prefix": "app_drill_",
         "overwrite_allowed": False,
-        "database_clean_allowed": False,
+        "database_clean_allowed": (
+            "compensation-only-drop-owned-exact-drill-target"
+        ),
         "database_drop_allowed": False,
     }:
         raise DisasterRecoveryVerificationError(
@@ -1759,6 +2115,16 @@ def _manifest_mode(parent: Mapping[str, Any], key: str) -> int:
         raise DisasterRecoveryVerificationError(
             "backup manifest mode is invalid"
         )
+    return value
+
+
+def _manifest_owner_id(parent: Mapping[str, Any], key: str) -> int:
+    value = parent.get(key)
+    if not _valid_ownership_id(value):
+        raise DisasterRecoveryVerificationError(
+            "backup manifest ownership id is invalid"
+        )
+    assert isinstance(value, int)
     return value
 
 
@@ -1846,6 +2212,7 @@ def _assert_backup_directory_contents(path: Path) -> None:
         "postgres.dump",
         "reference_artifacts.tar",
         "geoserver_data.tar",
+        QUIESCENCE_EVIDENCE_NAME,
         "manifest.json",
         "manifest.sha256",
     }
@@ -2049,6 +2416,16 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _fsync_directory_with_retries(path: Path, *, attempts: int = 3) -> bool:
+    for _attempt in range(attempts):
+        try:
+            _fsync_directory(path)
+        except OSError:
+            continue
+        return True
+    return False
 
 
 if __name__ == "__main__":

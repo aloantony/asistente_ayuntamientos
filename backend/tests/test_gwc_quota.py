@@ -4,6 +4,7 @@ from shutil import _ntuple_diskusage
 import pytest
 
 from app.core.config import Settings
+from app.reference_layers import gwc_quota as quota_module
 from app.reference_layers.geoserver_admin import GeoWebCacheDiskQuota
 from app.reference_layers.gwc_quota import (
     GeoWebCacheQuotaSafetyError,
@@ -95,8 +96,12 @@ def test_capacity_report_exposes_quota_reserve_and_both_margins(
 
     assert report.configured_quota_bytes == 20 * GIB
     assert report.required_free_reserve_bytes == 5 * GIB
+    assert report.current_cache_bytes == 0
+    assert report.remaining_quota_growth_bytes == 20 * GIB
+    assert report.required_free_now_bytes == 25 * GIB
     assert report.capacity_margin_bytes == 75 * GIB
     assert report.current_free_margin_bytes == 70 * GIB
+    assert report.growth_reserve_margin_bytes == 50 * GIB
     assert report.safe_to_apply is True
 
 
@@ -177,6 +182,101 @@ def test_quota_apply_fails_before_mutation_without_capacity_margin(
         )
 
     assert admin.configure_calls == []
+
+
+def test_empty_cache_with_only_six_gib_free_cannot_reserve_quota_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.shutil.disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 94 * GIB, 6 * GIB),
+    )
+    admin = FakeAdmin(before=quota(enabled=False))
+
+    report = cache_capacity_report(
+        cache,
+        quota_gib=20,
+        min_free_gib=5,
+    )
+
+    assert report.current_cache_bytes == 0
+    assert report.remaining_quota_growth_bytes == 20 * GIB
+    assert report.required_free_now_bytes == 25 * GIB
+    assert report.current_free_margin_bytes == 1 * GIB
+    assert report.growth_reserve_margin_bytes == -19 * GIB
+    assert report.safe_to_apply is False
+    with pytest.raises(GeoWebCacheQuotaSafetyError):
+        quota_status(
+            cache_path=cache,
+            configured=configured(),
+            apply=True,
+            client=admin,  # type: ignore[arg-type]
+        )
+    assert admin.configure_calls == []
+
+
+def test_capacity_inventory_measures_files_and_rejects_nested_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    nested = cache / "layer"
+    nested.mkdir(parents=True)
+    (nested / "tile.png").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.shutil.disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+    )
+
+    report = cache_capacity_report(
+        cache,
+        quota_gib=20,
+        min_free_gib=5,
+    )
+
+    assert report.current_cache_bytes == 4096
+    assert report.current_cache_files == 1
+    assert report.current_cache_directories == 1
+
+    (nested / "unsafe").symlink_to(nested / "tile.png")
+    with pytest.raises(GeoWebCacheQuotaSafetyError, match="symlink"):
+        cache_capacity_report(
+            cache,
+            quota_gib=20,
+            min_free_gib=5,
+        )
+
+
+def test_capacity_inventory_fails_closed_when_cache_changes_between_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    tile = cache / "tile.png"
+    tile.write_bytes(b"first")
+    original = quota_module._cache_inventory
+    calls = 0
+
+    def inventory_then_mutate(path: Path):
+        nonlocal calls
+        result = original(path)
+        calls += 1
+        if calls == 1:
+            tile.write_bytes(b"second-version")
+        return result
+
+    monkeypatch.setattr(quota_module, "_cache_inventory", inventory_then_mutate)
+
+    with pytest.raises(GeoWebCacheQuotaSafetyError, match="changed"):
+        cache_capacity_report(
+            cache,
+            quota_gib=20,
+            min_free_gib=5,
+        )
 
 
 def test_capacity_report_rejects_relative_or_symlink_cache_paths(

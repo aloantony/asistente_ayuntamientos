@@ -119,11 +119,14 @@ services:
       RUN_WITH_USER_UID: "999"
       RUN_WITH_USER_GID: ${REFERENCE_STORAGE_GID:-2000}
       SKIP_DEMO_DATA: "true"
+      # Keep generated tiles on their own reconstructible volume. Persistent
+      # GWC configuration remains inside GEOSERVER_DATA_DIR and is backed up.
+      GEOWEBCACHE_CACHE_DIR: /opt/geoserver_data/gwc-cache
     ports:
       - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
     volumes:
       - geoserver_data:/opt/geoserver_data
-      - geowebcache_data:/opt/geoserver_data/gwc
+      - geowebcache_data:/opt/geoserver_data/gwc-cache
       - reference_artifacts:/mnt/reference_artifacts:ro
     depends_on:
       postgres:
