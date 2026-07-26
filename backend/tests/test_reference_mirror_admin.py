@@ -64,6 +64,10 @@ def test_operational_status_uses_explicit_local_mirror_authorization(
     assert report["catalog_snapshot_id"] == snapshot_v2.id
     assert report["summary"]["layer_count"] == 1
     assert report["summary"]["service_count"] == 1
+    assert report["summary"]["authorization_model"] == (
+        "source_mirror_review"
+    )
+    assert report["summary"]["legacy_wms_evidence_required"] is False
     assert report["summary"]["mirror_authorization_missing_count"] == 0
     assert (
         report["summary"]["mirror_authorization_missing_service_count"]
@@ -100,6 +104,8 @@ def test_operational_status_uses_explicit_local_mirror_authorization(
         "requires_explicit_actor_reason_and_dry_run": True,
     }
     authorization = row["mirror_authorization"]
+    assert authorization["authorization_model"] == "source_mirror_review"
+    assert authorization["legacy_wms_evidence_required"] is False
     assert authorization["mirror_authorized"] is True
     assert authorization["catalog_license_status"] == "pending"
     assert authorization["authorization_status"] == "authorized"

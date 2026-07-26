@@ -334,6 +334,8 @@ def operational_status(
         "catalog_definition_sha256": snapshot.definition_sha256,
         "generated_at": generated_at,
         "summary": {
+            "authorization_model": "source_mirror_review",
+            "legacy_wms_evidence_required": False,
             "layer_count": len(layer_rows),
             "service_count": len(services),
             "mirror_status_counts": dict(sorted(status_counts.items())),
@@ -423,6 +425,8 @@ def _service_authorization(
                 review_ids.append(review.id)
         blockers = list(dict.fromkeys(blockers))
         result[service_id] = {
+            "authorization_model": "source_mirror_review",
+            "legacy_wms_evidence_required": False,
             "mirror_authorized": not blockers,
             "authorization_status": (
                 "authorized" if not blockers else "blocked"
@@ -449,6 +453,8 @@ def _service_authorization(
 
 def _missing_service_authorization() -> dict[str, Any]:
     return {
+        "authorization_model": "source_mirror_review",
+        "legacy_wms_evidence_required": False,
         "mirror_authorized": False,
         "authorization_status": "missing",
         "blocking_reasons": ["catalog_service_missing"],

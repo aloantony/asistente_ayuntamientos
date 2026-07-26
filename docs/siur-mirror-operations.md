@@ -24,15 +24,22 @@ Se puede limitar el informe con `--layer-id`. Por cada capa se muestran:
 - versión activa y anterior, validación y bytes;
 - integridad de la cadena de promociones;
 - candidatura de rollback o reactivación;
-- revisión, atestación y permiso explícito de espejo.
+- revisiones explícitas del espejo ligadas a cada fuente exacta.
 
 `size_bytes_complete=false` significa que no se conoce el tamaño total. Es el
 resultado esperado para una entrega PostGIS mientras no exista una métrica
 fiable del tamaño físico; no se inventa un cero.
 
-Un servicio con catálogo `pending`, sin revisión, sin atestación o sin permiso
-explícito figura como `mirror_authorized=false`. Este comando no crea ni
-aprueba evidencia legal.
+El espejo nuevo usa el modelo `source_mirror_review`: exige una revisión
+humana vigente para cada fuente habilitada, ligada a su identificador, hash,
+protocolo y orígenes exactos. El `license_status` del catálogo y las antiguas
+revisiones/atestaciones WMS se muestran únicamente como contexto histórico del
+proxy y **no** autorizan ni bloquean el espejo local. Por eso un servicio puede
+seguir con catálogo `pending` y estar autorizado para el espejo cuando todas
+sus fuentes tienen revisiones explícitas válidas.
+
+El informe declara `legacy_wms_evidence_required=false` para hacer visible esta
+separación. Este comando no crea ni aprueba evidencia legal.
 
 ## Sincronización manual acotada
 
