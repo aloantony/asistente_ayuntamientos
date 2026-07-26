@@ -39,6 +39,11 @@ from app.reference_layers.blob_store import (
     ReferenceBlobStore,
     StoredReferenceBlob,
 )
+from app.reference_layers.local_style_adaptation import (
+    LocalStyleAdaptationError,
+    generate_reviewed_local_style,
+    local_style_package_metadata,
+)
 from app.reference_layers.models import (
     ReferenceLayerSource,
     ReferenceSourceArtifact,
@@ -881,6 +886,104 @@ class ReferenceAcquisitionPipeline:
             _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
         return artifacts
 
+    def _author_reviewed_local_style(
+        self,
+        candidate: SourceCandidate,
+        *,
+        dataset_artifacts: list[AcquiredArtifact],
+    ) -> list[AcquiredArtifact]:
+        """Author a closed local SLD for an exact reviewed direct dataset."""
+
+        vat_artifacts = [
+            item
+            for item in dataset_artifacts
+            if isinstance(
+                item.metadata.get("raster_value_attribute_table"),
+                Mapping,
+            )
+        ]
+        if len(vat_artifacts) > 1:
+            raise AcquisitionValidationError(
+                "reviewed raster style has ambiguous VAT evidence",
+                code="local_style_vat_invalid",
+            )
+        dataset_metadata = (
+            vat_artifacts[0].metadata if vat_artifacts else None
+        )
+        try:
+            authored = generate_reviewed_local_style(
+                candidate,
+                dataset_metadata=dataset_metadata,
+            )
+        except LocalStyleAdaptationError as error:
+            raise AcquisitionValidationError(
+                "reviewed local style could not be authored safely",
+                code=error.code,
+            ) from error
+        if authored is None:
+            return []
+
+        parsed = _parse_style_bundle(
+            authored.document,
+            layer_name=candidate.remote_name,
+            style_names=(
+                cast(str, authored.metadata["remote_name"]),
+            ),
+        )
+        if (
+            parsed.sld_version != "1.0.0"
+            or parsed.resource_hrefs
+            != ((authored.metadata["remote_name"], ()),)
+            or len(parsed.standalone_slds) != 1
+        ):
+            raise AcquisitionValidationError(
+                "authored local style did not pass closed SLD validation",
+                code="local_style_sld_invalid",
+            )
+        maximum = min(
+            self.limits.max_probe_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        style_blob = self.store.put_stream(
+            io.BytesIO(authored.document),
+            max_bytes=maximum,
+        )
+        if style_blob.sha256 != authored.sld_sha256:
+            raise AcquisitionValidationError(
+                "authored local style digest changed during storage",
+                code="local_style_integrity",
+            )
+        style = AcquiredArtifact(
+            artifact_kind="style",
+            role="style",
+            media_type="application/vnd.ogc.sld+xml",
+            blob=style_blob,
+            source_version=parsed.sld_version,
+            metadata=authored.metadata,
+        )
+        package_blob = _store_style_package(
+            self.store,
+            sld=authored.document,
+            resources=(),
+            max_bytes=min(
+                self.limits.max_page_bytes,
+                self.store.max_blob_bytes,
+                self.limits.max_total_bytes,
+            ),
+        )
+        package = AcquiredArtifact(
+            artifact_kind="style_package",
+            role="style_package",
+            media_type="application/zip",
+            blob=package_blob,
+            source_version=parsed.sld_version,
+            metadata=local_style_package_metadata(authored),
+        )
+        result = [style, package]
+        _enforce_total_bytes(result, self.limits.max_total_bytes)
+        return result
+
     def _finish(
         self,
         candidate: SourceCandidate,
@@ -1309,7 +1412,12 @@ class ReferenceAcquisitionPipeline:
                 "paginated OGC API snapshot lacks stable feature identifiers",
                 code="missing_pagination_identity",
             )
-        artifacts = [capabilities, *page_artifacts]
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=page_artifacts,
+        )
+        artifacts = [capabilities, *page_artifacts, *style_artifacts]
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
         stats = {
             "page_count": len(page_artifacts),
             "feature_count": total_features,
@@ -1318,21 +1426,26 @@ class ReferenceAcquisitionPipeline:
             "feature_ids_observed": len(seen_feature_ids),
             **scope_metadata,
         }
+        materialization = {
+            "kind": "feature-pages",
+            "format": "geojson",
+            "collection": collection,
+            **scope_metadata,
+            "page_artifact_sha256": [
+                item.blob.sha256
+                for item in page_artifacts
+                if item.role == "input"
+            ],
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
         return self._finish(
             candidate,
             probe=probe,
             artifacts=artifacts,
-            materialization={
-                "kind": "feature-pages",
-                "format": "geojson",
-                "collection": collection,
-                **scope_metadata,
-                "page_artifact_sha256": [
-                    item.blob.sha256
-                    for item in page_artifacts
-                    if item.role == "input"
-                ],
-            },
+            materialization=materialization,
             feature_count=total_features,
             stats=stats,
             observed=last_result,
@@ -1721,17 +1834,28 @@ class ReferenceAcquisitionPipeline:
                 ),
             },
         )
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=[dataset],
+        )
+        artifacts = [dataset, *style_artifacts]
+        materialization = {
+            "kind": "direct-dataset",
+            "format": data_format,
+            "dataset_sha256": dataset.blob.sha256,
+        }
+        stats = {"dataset_bytes": dataset.blob.size_bytes}
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
         return self._finish(
             candidate,
             probe=None,
-            artifacts=[dataset],
-            materialization={
-                "kind": "direct-dataset",
-                "format": data_format,
-                "dataset_sha256": dataset.blob.sha256,
-            },
+            artifacts=artifacts,
+            materialization=materialization,
             feature_count=None,
-            stats={"dataset_bytes": dataset.blob.size_bytes},
+            stats=stats,
             observed=downloaded.result,
         )
 
@@ -1813,17 +1937,28 @@ class ReferenceAcquisitionPipeline:
                 "remote_name": candidate.remote_name,
             },
         )
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=[dataset],
+        )
+        artifacts = [feed_artifact, dataset, *style_artifacts]
+        materialization = {
+            "kind": "direct-dataset",
+            "format": data_format,
+            "dataset_sha256": dataset.blob.sha256,
+        }
+        stats = {"dataset_bytes": dataset.blob.size_bytes}
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
         return self._finish(
             candidate,
             probe=None,
-            artifacts=[feed_artifact, dataset],
-            materialization={
-                "kind": "direct-dataset",
-                "format": data_format,
-                "dataset_sha256": dataset.blob.sha256,
-            },
+            artifacts=artifacts,
+            materialization=materialization,
             feature_count=None,
-            stats={"dataset_bytes": dataset.blob.size_bytes},
+            stats=stats,
             observed=downloaded.result,
         )
 
@@ -2003,25 +2138,37 @@ class ReferenceAcquisitionPipeline:
                 self.limits.max_total_bytes,
             )
         artifacts.extend(dataset_artifacts)
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=dataset_artifacts,
+        )
+        artifacts.extend(style_artifacts)
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
         dataset_sha256 = [item.blob.sha256 for item in dataset_artifacts]
+        materialization = {
+            "kind": "dataset-parts",
+            "format": data_format,
+            "dataset_artifact_sha256": dataset_sha256,
+        }
+        stats = {
+            "nested_feed_count": len(nested_feed_urls),
+            "dataset_count": len(dataset_artifacts),
+            "dataset_bytes": sum(
+                item.blob.size_bytes for item in dataset_artifacts
+            ),
+            "expanded_dataset_bytes": total_uncompressed,
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
         return self._finish(
             candidate,
             probe=None,
             artifacts=artifacts,
-            materialization={
-                "kind": "dataset-parts",
-                "format": data_format,
-                "dataset_artifact_sha256": dataset_sha256,
-            },
+            materialization=materialization,
             feature_count=None,
-            stats={
-                "nested_feed_count": len(nested_feed_urls),
-                "dataset_count": len(dataset_artifacts),
-                "dataset_bytes": sum(
-                    item.blob.size_bytes for item in dataset_artifacts
-                ),
-                "expanded_dataset_bytes": total_uncompressed,
-            },
+            stats=stats,
             observed=feed.result,
         )
 
@@ -4041,7 +4188,9 @@ def _store_style_package(
     max_bytes: int,
 ) -> StoredReferenceBlob:
     if (
-        not resources
+        not isinstance(sld, bytes)
+        or not sld
+        or len(sld) > MAX_PROBE_BYTES
         or len(resources) > _MAX_STYLE_RESOURCES_PER_SOURCE
         or len({item.local_path for item in resources}) != len(resources)
     ):

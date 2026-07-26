@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260726_0042"
+HEAD_REVISION = "20260726_0043"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1462,6 +1462,29 @@ def assert_reference_style_parity_schema(
     assert "style_package" in expanded_checks[
         "reference_delivery_assets"
     ]["ck_reference_delivery_assets_kind"]
+    parity_checks = {
+        table_name: {
+            item["name"]: item["sqltext"]
+            for item in inspector.get_check_constraints(table_name)
+        }
+        for table_name in (
+            "reference_style_parity_plan_items",
+            "reference_delivery_style_parities",
+        )
+    }
+    for table_name, constraint_name in (
+        (
+            "reference_style_parity_plan_items",
+            "ck_reference_style_parity_plan_items_artifacts",
+        ),
+        (
+            "reference_delivery_style_parities",
+            "ck_reference_delivery_style_parities_evidence",
+        ),
+    ):
+        definition = parity_checks[table_name][constraint_name]
+        assert "resource_count > 0" not in definition
+        assert "resource_count >= 0" in definition
 
     quoted_tables = ", ".join(
         f"'{table_name}'" for table_name in REFERENCE_STYLE_PARITY_TABLES
@@ -1656,6 +1679,230 @@ def test_reference_style_parity_schema_is_reversible(
         )
         run_alembic(migration_database_url, "upgrade", "head")
         assert_reference_style_parity_schema(inspect(engine), engine)
+    finally:
+        engine.dispose()
+
+
+def test_resource_free_adapted_style_constraint_upgrade_is_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0042")
+    engine = create_engine(migration_database_url)
+    try:
+        before = {
+            item["name"]: item["sqltext"]
+            for item in inspect(engine).get_check_constraints(
+                "reference_style_parity_plan_items"
+            )
+        }
+        assert "resource_count > 0" in before[
+            "ck_reference_style_parity_plan_items_artifacts"
+        ]
+
+        run_alembic(migration_database_url, "upgrade", "20260726_0043")
+        assert_reference_style_parity_schema(inspect(engine), engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260726_0043"
+
+        run_alembic(migration_database_url, "downgrade", "20260726_0042")
+        downgraded = {
+            item["name"]: item["sqltext"]
+            for item in inspect(engine).get_check_constraints(
+                "reference_style_parity_plan_items"
+            )
+        }
+        assert "resource_count > 0" in downgraded[
+            "ck_reference_style_parity_plan_items_artifacts"
+        ]
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_style_parity_schema(inspect(engine), engine)
+    finally:
+        engine.dispose()
+
+
+def test_resource_free_adapted_style_evidence_blocks_unsafe_downgrade(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "head")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            item_id = connection.execute(
+                text(
+                    """
+                    WITH snapshot AS (
+                        INSERT INTO reference_catalog_snapshots (
+                            provider_key, source_url, content_sha256,
+                            definition_sha256, raw_catalog_json,
+                            normalized_definition_json, retrieved_at,
+                            service_count, group_count, layer_count,
+                            unresolved_count, status, is_current
+                        ) VALUES (
+                            'style-0043',
+                            'https://example.test/settings.json',
+                            repeat('a', 64), repeat('b', 64),
+                            CAST('{}' AS JSON), CAST('{}' AS JSON), now(),
+                            1, 0, 1, 0, 'applied', true
+                        ) RETURNING id, definition_sha256
+                    ),
+                    service AS (
+                        INSERT INTO reference_services (
+                            last_seen_snapshot_id, provider_key, source_key,
+                            title, upstream_protocol, base_url,
+                            license_status, cache_policy, status
+                        )
+                        SELECT
+                            id, 'style-0043', 'service:style-0043',
+                            'Style 0043', 'wms',
+                            'https://example.test/geoserver/wms',
+                            'pending', 'mirror', 'active'
+                        FROM snapshot
+                        RETURNING id, last_seen_snapshot_id
+                    ),
+                    layer AS (
+                        INSERT INTO reference_layers (
+                            last_seen_snapshot_id, service_id, provider_key,
+                            source_key, node_type, title, remote_name, role,
+                            renderer, delivery_mode, sort_order,
+                            default_visible, default_opacity, queryable,
+                            downloadable, status
+                        )
+                        SELECT
+                            service.last_seen_snapshot_id, service.id,
+                            'style-0043', 'layer:style-0043', 'layer',
+                            'Style 0043 layer', 'test:style-0043', 'overlay',
+                            'vector_tile', 'mirror', 0, false, 1,
+                            true, true, 'active'
+                        FROM service
+                        RETURNING id, last_seen_snapshot_id
+                    ),
+                    style AS (
+                        INSERT INTO reference_layer_styles (
+                            last_seen_snapshot_id, layer_id, provider_key,
+                            source_key, remote_name, title, sort_order,
+                            is_default, status
+                        )
+                        SELECT
+                            layer.last_seen_snapshot_id, layer.id,
+                            'style-0043', 'style:default', 'Default',
+                            'Default', 0, true, 'active'
+                        FROM layer
+                        RETURNING id, layer_id
+                    ),
+                    source AS (
+                        INSERT INTO reference_layer_sources (
+                            provider_key, layer_id, source_key, protocol,
+                            target_kind, endpoint_url, remote_name,
+                            sync_strategy, config_json, definition_sha256,
+                            enabled, is_primary
+                        )
+                        SELECT
+                            'style-0043', layer.id, 'source:style-0043',
+                            'wfs', 'vector',
+                            'https://example.test/geoserver/wfs',
+                            'test:style-0043', 'paged_snapshot',
+                            CAST('{}' AS JSON), repeat('c', 64), true, true
+                        FROM layer
+                        RETURNING id, layer_id
+                    ),
+                    run AS (
+                        INSERT INTO reference_sync_runs (
+                            provider_key, layer_id, source_id,
+                            source_definition_json,
+                            source_definition_sha256, trigger_kind,
+                            check_mode, status, started_at, finished_at
+                        )
+                        SELECT
+                            'style-0043', source.layer_id, source.id,
+                            CAST('{}' AS JSON), repeat('c', 64), 'manual',
+                            'full', 'succeeded', now(), now()
+                        FROM source
+                        RETURNING id, source_id, layer_id
+                    ),
+                    style_artifact AS (
+                        INSERT INTO reference_source_artifacts (
+                            source_id, artifact_kind, source_version,
+                            media_type, storage_backend, storage_key,
+                            size_bytes, sha256, metadata_json, retrieved_at
+                        )
+                        SELECT
+                            source.id, 'style', '1.0.0',
+                            'application/vnd.ogc.sld+xml', 'filesystem',
+                            'blobs/sha256/dd/' || repeat('d', 64),
+                            100, repeat('d', 64), CAST('{}' AS JSON), now()
+                        FROM source
+                        RETURNING id, source_id
+                    ),
+                    package_artifact AS (
+                        INSERT INTO reference_source_artifacts (
+                            source_id, artifact_kind, source_version,
+                            media_type, storage_backend, storage_key,
+                            size_bytes, sha256, metadata_json, retrieved_at
+                        )
+                        SELECT
+                            source.id, 'style_package', '1.0.0',
+                            'application/zip', 'filesystem',
+                            'blobs/sha256/ee/' || repeat('e', 64),
+                            120, repeat('e', 64), CAST('{}' AS JSON), now()
+                        FROM source
+                        RETURNING id, source_id
+                    ),
+                    plan AS (
+                        INSERT INTO reference_style_parity_plans (
+                            provider_key, layer_id, catalog_snapshot_id,
+                            catalog_definition_sha256, source_id,
+                            sync_run_id, delivery_kind,
+                            required_style_count, missing_style_count,
+                            complete, evidence_json, evidence_sha256
+                        )
+                        SELECT
+                            'style-0043', source.layer_id, snapshot.id,
+                            snapshot.definition_sha256, source.id, run.id,
+                            'vector', 1, 0, true, CAST('{}' AS JSON),
+                            repeat('f', 64)
+                        FROM source CROSS JOIN run CROSS JOIN snapshot
+                        RETURNING id, source_id
+                    )
+                    INSERT INTO reference_style_parity_plan_items (
+                        plan_id, source_id, style_id, style_source_key,
+                        remote_name, is_default, parity_kind, verified,
+                        source_style_artifact_id,
+                        source_package_artifact_id, resource_count,
+                        reason_code, evidence_json, evidence_sha256
+                    )
+                    SELECT
+                        plan.id, source.id, style.id, 'style:default',
+                        'Default', true, 'adapted', true,
+                        style_artifact.id, package_artifact.id, 0,
+                        NULL, CAST('{}' AS JSON), repeat('1', 64)
+                    FROM plan
+                    CROSS JOIN source
+                    CROSS JOIN style
+                    CROSS JOIN style_artifact
+                    CROSS JOIN package_artifact
+                    RETURNING id
+                    """
+                )
+            ).scalar_one()
+        assert item_id > 0
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260726_0042",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert (
+            "resource-free adapted style evidence exists"
+            in refused.stderr
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260726_0043"
     finally:
         engine.dispose()
 

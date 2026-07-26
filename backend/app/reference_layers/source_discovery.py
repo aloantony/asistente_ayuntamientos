@@ -68,6 +68,7 @@ _REVIEWED_NATIVE_WMS_PRIORITY = 40
 _REVIEWED_DATASET_SOURCE_SCHEMA = "siur-reviewed-dataset-source/v1"
 _REVIEWED_DATASET_SOURCE_PRIORITY = 5
 _BULK_WMS_GUARD_SCHEMA = "siur-bulk-wms-guard/v1"
+_REVIEWED_LOCAL_STYLE_SCHEMA = "siur-reviewed-local-style-recipe/v1"
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,26 @@ class _BulkWMSGuard:
     profile: str
     catalog_endpoint_url: str
     terms_url: str
+
+
+@dataclass(frozen=True)
+class ReviewedLocalStyleRecipe:
+    """One allowlisted, locally authored adaptation for a reviewed dataset."""
+
+    schema: str
+    profile: str
+    style_kind: Literal[
+        "catastro_parcels",
+        "flood_polygons",
+        "ines_raster",
+    ]
+    catalog_style_source_key: str
+    remote_style_name: str
+    catalog_layer_name: str
+    selected_layer_name: str
+    reviewed_equivalence: dict[str, Any]
+    reviewed_equivalence_sha256: str
+    style_reference: dict[str, Any]
 
 
 _REVIEWED_NATIVE_WMS = {
@@ -489,6 +510,56 @@ _REVIEWED_DATASET_SOURCES = {
             },
         ),
     )
+}
+
+_REVIEWED_DATASET_SOURCES_BY_PROFILE = {
+    item.profile: item for item in _REVIEWED_DATASET_SOURCES.values()
+}
+_REVIEWED_LOCAL_STYLE_IDENTITIES = {
+    "catastro-cadastral-parcels-castilla-y-leon-atom-v1": {
+        "style_kind": "catastro_parcels",
+        "catalog_style_source_key": "default",
+        "remote_style_name": "Default",
+    },
+    "miteco-flood-q10-ogc-api-features-v1": {
+        "style_kind": "flood_polygons",
+        "catalog_style_source_key": "default",
+        "remote_style_name": "default",
+    },
+    "miteco-flood-q50-ogc-api-features-v1": {
+        "style_kind": "flood_polygons",
+        "catalog_style_source_key": "default",
+        "remote_style_name": "default",
+    },
+    "miteco-flood-q100-ogc-api-features-v1": {
+        "style_kind": "flood_polygons",
+        "catalog_style_source_key": "default",
+        "remote_style_name": "default",
+    },
+    "miteco-flood-q500-ogc-api-features-v1": {
+        "style_kind": "flood_polygons",
+        "catalog_style_source_key": "default",
+        "remote_style_name": "default",
+    },
+    "miteco-flood-zfp-ogc-api-features-v1": {
+        "style_kind": "flood_polygons",
+        "catalog_style_source_key": "default",
+        "remote_style_name": "default",
+    },
+    "miteco-ines-potential-cyl-geotiff-download-v1": {
+        "style_kind": "ines_raster",
+        "catalog_style_source_key": (
+            "biodiversidad_ines_erosionpotencial"
+        ),
+        "remote_style_name": "Biodiversidad_INES_ErosionPotencial",
+    },
+    "miteco-ines-laminar-cyl-geotiff-download-v1": {
+        "style_kind": "ines_raster",
+        "catalog_style_source_key": (
+            "biodiversidad_ines_erosionlaminar"
+        ),
+        "remote_style_name": "Biodiversidad_INES_ErosionLaminar",
+    },
 }
 
 _BULK_WMS_GUARDS = {
@@ -996,6 +1067,208 @@ def candidate_definition(candidate: SourceCandidate) -> dict[str, Any]:
     value.pop("source_key")
     value.pop("definition_sha256")
     return value
+
+
+def _reviewed_local_style_expected_equivalence(
+    reviewed: _ReviewedDatasetSource,
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    expected_style_evidence = {
+        "style_parity_status": "local_style_adaptation_required",
+        "original_wms_endpoint_url": reviewed.catalog_endpoint_url,
+        "original_wms_layer_name": reviewed.catalog_remote_name,
+        "catalog_default_style_source_key": (
+            identity["catalog_style_source_key"]
+        ),
+        "original_wms_style_name": identity["remote_style_name"],
+        "catalog_styles": [
+            {
+                "catalog_style_source_key": (
+                    identity["catalog_style_source_key"]
+                ),
+                "remote_name": identity["remote_style_name"],
+                "is_default": True,
+            }
+        ],
+    }
+    return {
+        "schema": _REVIEWED_DATASET_SOURCE_SCHEMA,
+        "profile": reviewed.profile,
+        "catalog_protocol": "wms",
+        "catalog_endpoint_url": reviewed.catalog_endpoint_url,
+        "catalog_remote_name": reviewed.catalog_remote_name,
+        "selected_protocol": reviewed.protocol,
+        "selected_endpoint_url": reviewed.endpoint_url,
+        "selected_remote_name": reviewed.remote_name,
+        "target_kind": reviewed.target_kind,
+        **deepcopy(reviewed.equivalence),
+        "style_evidence": expected_style_evidence,
+    }
+
+
+def _reviewed_local_style_reference(
+    reviewed: _ReviewedDatasetSource,
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    if identity["style_kind"] == "catastro_parcels":
+        return {
+            "source_kind": "reviewed-local-cartographic-reproduction",
+            "adaptation_status": "adaptation_required",
+            "parity_claim": "reviewed_local_adaptation_not_exact",
+            "polygon_fill_opacity": 0,
+            "outline_color": "#000000",
+            "outline_width": 1,
+            "label_field": "label",
+            "font_family": "DejaVu Sans",
+            "font_size": 10,
+            "label_color": "#000000",
+        }
+    if identity["style_kind"] == "flood_polygons":
+        style_reference = deepcopy(
+            reviewed.equivalence["official_style_reference"]
+        )
+        style_reference["parity_claim"] = (
+            "official_mvt_style_adapted_to_sld_not_exact"
+        )
+        return style_reference
+    return {
+        "official_style_reference": deepcopy(
+            reviewed.equivalence["official_style_reference"]
+        ),
+        "official_raster_style_evidence": deepcopy(
+            reviewed.equivalence["official_raster_style_evidence"]
+        ),
+    }
+
+
+def reviewed_local_style_profile_identity(
+    profile: str,
+) -> tuple[str, str, str, str, str, str] | None:
+    """Return the immutable style identity for an allowlisted recipe."""
+
+    identity = _REVIEWED_LOCAL_STYLE_IDENTITIES.get(profile)
+    reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
+    if identity is None or reviewed is None:
+        return None
+    equivalence_sha256 = hashlib.sha256(
+        json.dumps(
+            _reviewed_local_style_expected_equivalence(reviewed, identity),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return (
+        identity["style_kind"],
+        identity["catalog_style_source_key"],
+        identity["remote_style_name"],
+        reviewed.catalog_remote_name,
+        reviewed.remote_name,
+        equivalence_sha256,
+    )
+
+
+def reviewed_local_style_profile_reference(
+    profile: str,
+) -> dict[str, Any] | None:
+    """Return the exact official reference accepted for persisted evidence."""
+
+    identity = _REVIEWED_LOCAL_STYLE_IDENTITIES.get(profile)
+    reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
+    if identity is None or reviewed is None:
+        return None
+    return _reviewed_local_style_reference(reviewed, identity)
+
+
+def reviewed_local_style_recipe(
+    candidate: SourceCandidate,
+) -> ReviewedLocalStyleRecipe | None:
+    """Validate and expose a local recipe only for an exact reviewed source.
+
+    The persisted candidate is untrusted input at this boundary.  A matching
+    schema or profile string is insufficient: protocol, endpoints, collection,
+    dataset settings, catalog style identity, candidate digest and generated
+    source key must all still match the source-discovery allowlist.
+    """
+
+    raw_equivalence = candidate.config.get("reviewed_equivalence")
+    if raw_equivalence is None:
+        return None
+    if (
+        not isinstance(raw_equivalence, dict)
+        or raw_equivalence.get("schema") != _REVIEWED_DATASET_SOURCE_SCHEMA
+    ):
+        return None
+    profile = raw_equivalence.get("profile")
+    if not isinstance(profile, str):
+        raise SourceDiscoveryError(
+            "reviewed local style profile is invalid",
+            code="reviewed_local_style_invalid",
+        )
+    reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
+    identity = _REVIEWED_LOCAL_STYLE_IDENTITIES.get(profile)
+    if reviewed is None or identity is None:
+        raise SourceDiscoveryError(
+            "reviewed local style profile is not allowlisted",
+            code="reviewed_local_style_invalid",
+        )
+    expected_equivalence = _reviewed_local_style_expected_equivalence(
+        reviewed,
+        identity,
+    )
+    expected_config = {
+        **deepcopy(reviewed.config),
+        "reviewed_equivalence": expected_equivalence,
+    }
+    expected_candidate = _candidate(
+        protocol=reviewed.protocol,
+        target_kind=reviewed.target_kind,
+        endpoint_url=reviewed.endpoint_url,
+        remote_name=reviewed.remote_name,
+        sync_strategy=reviewed.sync_strategy,
+        priority=_REVIEWED_DATASET_SOURCE_PRIORITY,
+        config=expected_config,
+    )
+    if (
+        candidate.protocol != expected_candidate.protocol
+        or candidate.target_kind != expected_candidate.target_kind
+        or candidate.endpoint_url != expected_candidate.endpoint_url
+        or candidate.remote_name != expected_candidate.remote_name
+        or candidate.sync_strategy != expected_candidate.sync_strategy
+        or candidate.priority != expected_candidate.priority
+        or candidate.config != expected_candidate.config
+        or candidate.source_key != expected_candidate.source_key
+        or candidate.definition_sha256
+        != expected_candidate.definition_sha256
+    ):
+        raise SourceDiscoveryError(
+            "reviewed local style evidence does not match its allowlisted source",
+            code="reviewed_local_style_invalid",
+        )
+
+    style_reference = _reviewed_local_style_reference(reviewed, identity)
+    equivalence_sha256 = hashlib.sha256(
+        json.dumps(
+            expected_equivalence,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return ReviewedLocalStyleRecipe(
+        schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
+        profile=profile,
+        style_kind=identity["style_kind"],
+        catalog_style_source_key=identity["catalog_style_source_key"],
+        remote_style_name=identity["remote_style_name"],
+        catalog_layer_name=reviewed.catalog_remote_name,
+        selected_layer_name=reviewed.remote_name,
+        reviewed_equivalence=deepcopy(expected_equivalence),
+        reviewed_equivalence_sha256=equivalence_sha256,
+        style_reference=style_reference,
+    )
 
 
 def _tile_config(

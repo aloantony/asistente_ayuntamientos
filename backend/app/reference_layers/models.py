@@ -2148,7 +2148,7 @@ class ReferenceStyleParityPlanItem(Base):
             "source_package_artifact_id is null and resource_count = 0) or "
             "(parity_kind = 'adapted' and "
             "source_style_artifact_id is not null and "
-            "source_package_artifact_id is not null and resource_count > 0) "
+            "source_package_artifact_id is not null and resource_count >= 0) "
             "or (parity_kind in ('baked', 'missing') and "
             "source_style_artifact_id is null and "
             "source_package_artifact_id is null and resource_count = 0)",
@@ -2603,7 +2603,7 @@ class ReferenceDeliveryStyleParity(Base):
         ),
         CheckConstraint(
             "resource_count >= 0 and "
-            "((parity_kind = 'adapted' and resource_count > 0) or "
+            "((parity_kind = 'adapted' and resource_count >= 0) or "
             "(parity_kind in ('exact', 'baked') and resource_count = 0)) and "
             "evidence_sha256 ~ '^[0-9a-f]{64}$' and "
             "octet_length(evidence_json::text) <= 4194304",
