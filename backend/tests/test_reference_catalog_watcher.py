@@ -127,6 +127,37 @@ class FakeDownloader:
         return self.result
 
 
+class TransactionInspectingDownloader(FakeDownloader):
+    def __init__(
+        self,
+        *,
+        db: Session,
+        engine: Engine,
+        document: bytes,
+        result: HTTPSDownloadResult,
+    ) -> None:
+        super().__init__(document=document, result=result)
+        self.db = db
+        self.engine = engine
+        self.saw_transaction_free_download = False
+
+    def download(self, *args, **kwargs):
+        assert self.db.in_transaction() is False
+        connection = self.engine.connect()
+        transaction = connection.begin()
+        try:
+            acquired = connection.execute(
+                text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _catalog_watcher_lock_key("siur")},
+            ).scalar_one()
+            assert acquired is True
+        finally:
+            transaction.rollback()
+            connection.close()
+        self.saw_transaction_free_download = True
+        return super().download(*args, **kwargs)
+
+
 def create_current_snapshot(
     db: Session,
     document: bytes,
@@ -182,6 +213,30 @@ def test_matching_catalog_records_immutable_unchanged_evidence(
     assert check.observed_version.analysis_json["parser"] == "siur-settings-v1"
     assert db.scalar(select(func.count(ReferenceCatalogSnapshot.id))) == 1
     assert db.get(ReferenceCatalogSnapshot, snapshot.id).is_current is True
+
+
+def test_download_runs_without_database_transaction_or_provider_lock(
+    db: Session,
+    engine: Engine,
+) -> None:
+    document = catalog_document()
+    create_current_snapshot(db, document)
+    downloader = TransactionInspectingDownloader(
+        db=db,
+        engine=engine,
+        document=document,
+        result=download_result(document),
+    )
+
+    outcome = check_siur_catalog_update(
+        db,
+        checked_at=NOW,
+        idempotency_key="scheduled:transaction-free-download",
+        downloader=downloader,
+    )
+
+    assert outcome.disposition == "recorded"
+    assert downloader.saw_transaction_free_download is True
 
 
 def test_changed_catalog_is_staged_without_applying_it(db: Session) -> None:
@@ -416,7 +471,7 @@ def test_unexpected_redirect_chain_is_rejected_before_staging(
     )
 
 
-def test_provider_advisory_lock_makes_concurrent_invocation_nonblocking(
+def test_busy_persistence_lock_is_nonblocking_after_download(
     engine: Engine,
 ) -> None:
     holder = engine.connect()
@@ -427,8 +482,10 @@ def test_provider_advisory_lock_makes_concurrent_invocation_nonblocking(
     )
     contender_connection = engine.connect()
     contender = Session(bind=contender_connection)
+    document = catalog_document()
     fake = FakeDownloader(
-        error=AssertionError("lock-busy invocation downloaded")
+        document=document,
+        result=download_result(document),
     )
     try:
         outcome = check_siur_catalog_update(
@@ -439,7 +496,7 @@ def test_provider_advisory_lock_makes_concurrent_invocation_nonblocking(
         )
         assert outcome.disposition == "lock_busy"
         assert outcome.check_id is None
-        assert fake.calls == []
+        assert len(fake.calls) == 1
     finally:
         contender.close()
         contender_connection.close()

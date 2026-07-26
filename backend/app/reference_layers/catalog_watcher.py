@@ -97,6 +97,15 @@ class _ResponseEvidence:
     redirect_chain: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ParsedCatalogDocument:
+    content_sha256: str
+    raw_sha256: str
+    size_bytes: int
+    raw_catalog: dict[str, Any]
+    analysis: dict[str, Any]
+
+
 class _CatalogDocumentError(ValueError):
     def __init__(
         self,
@@ -163,10 +172,10 @@ def check_siur_catalog_update(
 ) -> CatalogUpdateCheckOutcome:
     """Conditionally check SIUR and persist immutable evidence.
 
-    The function owns the supplied session transaction.  It uses a PostgreSQL
-    transaction-scoped advisory lock, commits every recorded result, and
-    rolls back before returning a lock-busy disposition or re-raising an
-    unexpected programming/database failure.
+    The function owns the supplied session transaction.  It commits its
+    read-only preflight before network I/O, then uses a PostgreSQL
+    transaction-scoped advisory lock only for final revalidation and
+    persistence.
     """
 
     at = _aware_utc(checked_at or datetime.now(timezone.utc))
@@ -182,29 +191,10 @@ def check_siur_catalog_update(
         )
     )
 
-    acquired = bool(
-        db.scalar(
-            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
-            {"lock_key": _catalog_watcher_lock_key(SIUR_PROVIDER_KEY)},
-        )
-    )
-    if not acquired:
-        duplicate = _check_by_idempotency_key(db, key)
-        outcome = (
-            _outcome_from_check("duplicate", duplicate)
-            if duplicate is not None
-            else CatalogUpdateCheckOutcome(
-                disposition="lock_busy",
-                status=None,
-                check_id=None,
-                observed_content_sha256=None,
-                next_check_at=None,
-            )
-        )
-        db.rollback()
-        return outcome
-
     try:
+        # Phase one is deliberately read-only and short.  Extract every value
+        # needed by the request before committing so the network phase owns no
+        # database transaction or advisory lock.
         duplicate = _check_by_idempotency_key(db, key)
         if duplicate is not None:
             outcome = _outcome_from_check("duplicate", duplicate)
@@ -245,32 +235,107 @@ def check_siur_catalog_update(
             if validator_check is not None
             else None
         )
-        actual_downloader = downloader or build_siur_catalog_downloader()
-        started = monotonic()
-        sink = BytesIO()
-        response: _ResponseEvidence | None = None
+        validator_check_id = (
+            validator_check.id if validator_check is not None else None
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    if db.in_transaction():
+        db.rollback()
+        raise RuntimeError(
+            "catalog download cannot start inside a database transaction"
+        )
+
+    actual_downloader = downloader or build_siur_catalog_downloader()
+    started = monotonic()
+    sink = BytesIO()
+    response: _ResponseEvidence | None = None
+    parsed: _ParsedCatalogDocument | None = None
+    failure: SafeDownloadError | _CatalogDocumentError | None = None
+
+    try:
+        result = actual_downloader.download(
+            DEFAULT_SOURCE_URL,
+            sink,
+            etag=request_etag,
+            last_modified=request_last_modified,
+            accept="application/json",
+        )
+        response = _validate_download_result(result, sink.getvalue())
+        if not response.not_modified:
+            parsed = _parse_catalog_document(sink.getvalue())
+    except (SafeDownloadError, _CatalogDocumentError) as error:
+        failure = error
+        response = response or _response_from_error(
+            error,
+            sink.getvalue(),
+        )
+
+    # Phase two serializes only revalidation and persistence.  A concurrent
+    # worker may duplicate the HTTP request, but it cannot create duplicate
+    # durable evidence for the same idempotency window.
+    acquired = bool(
+        db.scalar(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _catalog_watcher_lock_key(SIUR_PROVIDER_KEY)},
+        )
+    )
+    if not acquired:
+        db.rollback()
+        return CatalogUpdateCheckOutcome(
+            disposition="lock_busy",
+            status=None,
+            check_id=None,
+            observed_content_sha256=None,
+            next_check_at=None,
+        )
+
+    try:
+        duplicate = _check_by_idempotency_key(db, key)
+        if duplicate is not None:
+            outcome = _outcome_from_check("duplicate", duplicate)
+            db.commit()
+            return outcome
+
+        latest = latest_siur_catalog_update_check(db)
+        if (
+            not force
+            and latest is not None
+            and latest.next_check_at > at
+        ):
+            outcome = _outcome_from_check("not_due", latest)
+            db.commit()
+            return outcome
+
+        assert response is not None
+        if failure is not None:
+            check = _record_error_check(
+                db,
+                key=key,
+                trigger_kind=trigger_kind,
+                checked_at=at,
+                next_check_at=at + interval,
+                duration_ms=_elapsed_ms(started),
+                request_etag=request_etag,
+                request_last_modified=request_last_modified,
+                response=response,
+                error=failure,
+            )
+            db.commit()
+            return _outcome_from_check("recorded", check)
 
         try:
-            result = actual_downloader.download(
-                DEFAULT_SOURCE_URL,
-                sink,
-                etag=request_etag,
-                last_modified=request_last_modified,
-                accept="application/json",
-            )
-            response = _validate_download_result(result, sink.getvalue())
             observed = _observed_version_from_response(
                 db,
                 response=response,
-                document=sink.getvalue(),
-                validator_check=validator_check,
+                parsed=parsed,
+                validator_check_id=validator_check_id,
                 checked_at=at,
             )
-        except (SafeDownloadError, _CatalogDocumentError) as error:
-            response = response or _response_from_error(
-                error,
-                sink.getvalue(),
-            )
+        except _CatalogDocumentError as error:
             check = _record_error_check(
                 db,
                 key=key,
@@ -286,7 +351,6 @@ def check_siur_catalog_update(
             db.commit()
             return _outcome_from_check("recorded", check)
 
-        assert response is not None
         baseline = _current_siur_snapshot(db)
         status: Literal["unchanged", "update_available"] = (
             "unchanged"
@@ -351,11 +415,16 @@ def _observed_version_from_response(
     db: Session,
     *,
     response: _ResponseEvidence,
-    document: bytes,
-    validator_check: ReferenceCatalogUpdateCheck | None,
+    parsed: _ParsedCatalogDocument | None,
+    validator_check_id: int | None,
     checked_at: datetime,
 ) -> ReferenceCatalogObservedVersion:
     if response.not_modified:
+        validator_check = (
+            db.get(ReferenceCatalogUpdateCheck, validator_check_id)
+            if validator_check_id is not None
+            else None
+        )
         if (
             validator_check is None
             or validator_check.observed_version is None
@@ -366,6 +435,37 @@ def _observed_version_from_response(
             )
         return validator_check.observed_version
 
+    if parsed is None:
+        raise _CatalogDocumentError(
+            "HTTP 200 has no parsed catalog document",
+            code="missing_catalog_document",
+            retryable=True,
+        )
+    observed = db.scalar(
+        select(ReferenceCatalogObservedVersion).where(
+            ReferenceCatalogObservedVersion.provider_key == SIUR_PROVIDER_KEY,
+            ReferenceCatalogObservedVersion.content_sha256
+            == parsed.content_sha256,
+        )
+    )
+    if observed is None:
+        observed = ReferenceCatalogObservedVersion(
+            provider_key=SIUR_PROVIDER_KEY,
+            source_url=DEFAULT_SOURCE_URL,
+            final_url=response.final_url or DEFAULT_SOURCE_URL,
+            content_sha256=parsed.content_sha256,
+            raw_sha256=parsed.raw_sha256,
+            size_bytes=parsed.size_bytes,
+            raw_catalog_json=parsed.raw_catalog,
+            analysis_json=parsed.analysis,
+            retrieved_at=checked_at,
+        )
+        db.add(observed)
+        db.flush()
+    return observed
+
+
+def _parse_catalog_document(document: bytes) -> _ParsedCatalogDocument:
     try:
         analysis = analyze_siur_settings(document)
     except SiurSettingsError as error:
@@ -385,29 +485,13 @@ def _observed_version_from_response(
             "settings root must be a JSON object",
             code="unsupported_catalog_root",
         )
-
-    content_sha256 = canonical_catalog_sha256(raw_catalog)
-    observed = db.scalar(
-        select(ReferenceCatalogObservedVersion).where(
-            ReferenceCatalogObservedVersion.provider_key == SIUR_PROVIDER_KEY,
-            ReferenceCatalogObservedVersion.content_sha256 == content_sha256,
-        )
+    return _ParsedCatalogDocument(
+        content_sha256=canonical_catalog_sha256(raw_catalog),
+        raw_sha256=hashlib.sha256(document).hexdigest(),
+        size_bytes=len(document),
+        raw_catalog=raw_catalog,
+        analysis=_analysis_summary(analysis),
     )
-    if observed is None:
-        observed = ReferenceCatalogObservedVersion(
-            provider_key=SIUR_PROVIDER_KEY,
-            source_url=DEFAULT_SOURCE_URL,
-            final_url=response.final_url or DEFAULT_SOURCE_URL,
-            content_sha256=content_sha256,
-            raw_sha256=response.raw_sha256 or hashlib.sha256(document).hexdigest(),
-            size_bytes=len(document),
-            raw_catalog_json=raw_catalog,
-            analysis_json=_analysis_summary(analysis),
-            retrieved_at=checked_at,
-        )
-        db.add(observed)
-        db.flush()
-    return observed
 
 
 def _validate_download_result(
@@ -514,7 +598,7 @@ def _record_error_check(
         request_etag=request_etag,
         request_last_modified=request_last_modified,
         http_status=response.http_status,
-        not_modified=False,
+        not_modified=response.not_modified,
         response_final_url=response.final_url,
         response_etag=response.etag,
         response_last_modified=response.last_modified,
