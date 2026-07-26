@@ -447,7 +447,14 @@ def test_settings_parse_geowebcache_numeric_environment_values() -> None:
     assert configured.geowebcache_disk_quota_cleanup_seconds == 90
 
 
-def test_client_repr_and_errors_never_expose_credentials() -> None:
+def test_client_repr_and_errors_never_expose_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.reference_layers.geoserver_admin.settings."
+        "local_geoserver_postgis_password",
+        None,
+    )
     client, _ = make_client([], with_postgis_password=False)
     assert ADMIN_PASSWORD not in repr(client)
     assert POSTGIS_PASSWORD not in repr(client)
