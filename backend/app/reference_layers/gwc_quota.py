@@ -24,6 +24,19 @@ from app.reference_layers.geoserver_admin import (
 )
 
 GIB = 1024**3
+PHYSICAL_GROWTH_MIN_BASIS_POINTS = 12_500
+CONSERVATIVE_LOGICAL_BYTES_PER_INODE = 4 * 1024
+FUTURE_INODE_OVERHEAD_NUMERATOR = 11
+FUTURE_INODE_OVERHEAD_DENOMINATOR = 10
+MIN_FREE_CACHE_INODES = 100_000
+LEGACY_GWC_CONFIGURATION_NAMES = frozenset(
+    {
+        "geowebcache.xml",
+        "geowebcache-diskquota.xml",
+        "gwc-gs.xml",
+        "gwc-layers",
+    }
+)
 
 
 class GeoWebCacheQuotaSafetyError(ValueError):
@@ -36,22 +49,40 @@ class _DiskUsage(Protocol):
     free: int
 
 
+class _FileSystemStats(Protocol):
+    f_bsize: int
+    f_frsize: int
+    f_files: int
+    f_favail: int
+
+
 @dataclass(frozen=True)
 class GeoWebCacheCapacity:
     cache_path: str
     filesystem_total_bytes: int
     filesystem_used_bytes: int
     filesystem_free_bytes: int
+    filesystem_block_size_bytes: int
+    filesystem_total_inodes: int
+    filesystem_free_inodes: int
     configured_quota_bytes: int
     required_free_reserve_bytes: int
     current_cache_bytes: int
+    current_cache_allocated_bytes: int
     current_cache_files: int
     current_cache_directories: int
+    current_cache_inodes: int
     remaining_quota_growth_bytes: int
+    physical_growth_safety_basis_points: int
+    required_physical_growth_bytes: int
+    conservative_logical_bytes_per_inode: int
+    required_future_inodes: int
+    required_free_inode_reserve: int
     required_free_now_bytes: int
     capacity_margin_bytes: int
     current_free_margin_bytes: int
     growth_reserve_margin_bytes: int
+    inode_reserve_margin: int
     safe_to_apply: bool
 
 
@@ -90,6 +121,22 @@ class _CacheInventory:
             item.size_bytes for item in self.entries if item.kind == "file"
         )
 
+    @property
+    def allocated_file_bytes(self) -> int:
+        return sum(
+            item.allocated_bytes
+            for item in self.entries
+            if item.kind == "file"
+        )
+
+    @property
+    def allocated_bytes(self) -> int:
+        return sum(item.allocated_bytes for item in self.entries)
+
+    @property
+    def inode_count(self) -> int:
+        return len(self.entries)
+
 
 def cache_capacity_report(
     cache_path: Path,
@@ -103,31 +150,74 @@ def cache_capacity_report(
     quota_bytes = _gib(quota_gib, minimum=1, label="quota")
     reserve_bytes = _gib(min_free_gib, minimum=0, label="free reserve")
     inventory = _stable_cache_inventory(path)
-    usage = _safe_disk_usage(path)
-    capacity_margin = usage.total - quota_bytes - reserve_bytes
-    current_free_margin = usage.free - reserve_bytes
+    root_entry = inventory.entries[0]
+    usage, filesystem = _safe_filesystem_usage(
+        path,
+        expected_root=root_entry,
+    )
+    physical_growth_basis_points = max(
+        PHYSICAL_GROWTH_MIN_BASIS_POINTS,
+        _allocation_basis_points(inventory),
+    )
     remaining_growth = max(quota_bytes - inventory.logical_bytes, 0)
-    required_free_now = reserve_bytes + remaining_growth
+    required_physical_growth = _ceil_ratio(
+        remaining_growth * physical_growth_basis_points,
+        10_000,
+    )
+    logical_bytes_per_inode = _conservative_bytes_per_inode(inventory)
+    future_file_inodes = _ceil_ratio(
+        remaining_growth,
+        logical_bytes_per_inode,
+    )
+    required_future_inodes = _ceil_ratio(
+        future_file_inodes * FUTURE_INODE_OVERHEAD_NUMERATOR,
+        FUTURE_INODE_OVERHEAD_DENOMINATOR,
+    )
+    required_free_inodes = MIN_FREE_CACHE_INODES + required_future_inodes
+    projected_cache_allocation = (
+        inventory.allocated_bytes + required_physical_growth
+    )
+    capacity_margin = (
+        usage.total - projected_cache_allocation - reserve_bytes
+    )
+    current_free_margin = usage.free - reserve_bytes
+    required_free_now = reserve_bytes + required_physical_growth
     growth_reserve_margin = usage.free - required_free_now
+    inode_reserve_margin = filesystem.f_favail - required_free_inodes
     return GeoWebCacheCapacity(
         cache_path=str(path),
         filesystem_total_bytes=usage.total,
         filesystem_used_bytes=usage.used,
         filesystem_free_bytes=usage.free,
+        filesystem_block_size_bytes=max(
+            filesystem.f_frsize,
+            filesystem.f_bsize,
+        ),
+        filesystem_total_inodes=filesystem.f_files,
+        filesystem_free_inodes=filesystem.f_favail,
         configured_quota_bytes=quota_bytes,
         required_free_reserve_bytes=reserve_bytes,
         current_cache_bytes=inventory.logical_bytes,
+        current_cache_allocated_bytes=inventory.allocated_bytes,
         current_cache_files=inventory.file_count,
         current_cache_directories=inventory.directory_count,
+        current_cache_inodes=inventory.inode_count,
         remaining_quota_growth_bytes=remaining_growth,
+        physical_growth_safety_basis_points=physical_growth_basis_points,
+        required_physical_growth_bytes=required_physical_growth,
+        conservative_logical_bytes_per_inode=logical_bytes_per_inode,
+        required_future_inodes=required_future_inodes,
+        required_free_inode_reserve=required_free_inodes,
         required_free_now_bytes=required_free_now,
         capacity_margin_bytes=capacity_margin,
         current_free_margin_bytes=current_free_margin,
         growth_reserve_margin_bytes=growth_reserve_margin,
+        inode_reserve_margin=inode_reserve_margin,
         safe_to_apply=(
             capacity_margin >= 0
             and current_free_margin >= 0
             and growth_reserve_margin >= 0
+            and inode_reserve_margin >= 0
         ),
     )
 
@@ -175,10 +265,20 @@ def quota_status(
             "desired": desired,
             "verified": _matches(before, desired),
         }
+    apply_capacity = cache_capacity_report(
+        cache_path,
+        quota_gib=configured.geowebcache_disk_quota_gib,
+        min_free_gib=configured.geowebcache_disk_quota_min_free_gib,
+    )
+    if apply_capacity != capacity:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache cache or filesystem changed before quota application"
+        )
+    capacity = apply_capacity
     if not capacity.safe_to_apply:
         raise GeoWebCacheQuotaSafetyError(
             "GeoWebCache quota cannot be applied: capacity cannot reserve "
-            "the cache's remaining growth plus the free-space floor"
+            "physical cache growth, inodes and the free-space floor"
         )
     after = admin.configure_geowebcache_disk_quota(
         quota_gib=configured.geowebcache_disk_quota_gib,
@@ -298,7 +398,7 @@ def _cache_inventory(path: Path) -> _CacheInventory:
             _CacheEntry(
                 path=relative,
                 kind=kind,
-                size_bytes=metadata.st_size if kind == "file" else 0,
+                size_bytes=metadata.st_size,
                 allocated_bytes=allocated,
                 device=metadata.st_dev,
                 inode=metadata.st_ino,
@@ -313,6 +413,7 @@ def _cache_inventory(path: Path) -> _CacheInventory:
         directory_descriptor: int,
         relative: str,
         expected: os.stat_result,
+        root_device: int,
     ) -> None:
         try:
             before = os.fstat(directory_descriptor)
@@ -343,6 +444,17 @@ def _cache_inventory(path: Path) -> _CacheInventory:
                 raise GeoWebCacheQuotaSafetyError(
                     "GeoWebCache cache cannot contain symlinks"
                 )
+            if metadata.st_dev != root_device:
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache cache cannot cross filesystem boundaries"
+                )
+            if (
+                relative == "."
+                and child.name in LEGACY_GWC_CONFIGURATION_NAMES
+            ):
+                raise GeoWebCacheQuotaSafetyError(
+                    "GeoWebCache tile volume contains legacy configuration"
+                )
             if stat.S_ISDIR(metadata.st_mode):
                 try:
                     child_descriptor = os.open(
@@ -365,7 +477,12 @@ def _cache_inventory(path: Path) -> _CacheInventory:
                         relative=child_relative,
                         kind="directory",
                     )
-                    visit(child_descriptor, child_relative, opened)
+                    visit(
+                        child_descriptor,
+                        child_relative,
+                        opened,
+                        root_device,
+                    )
                 finally:
                     os.close(child_descriptor)
                 continue
@@ -412,7 +529,7 @@ def _cache_inventory(path: Path) -> _CacheInventory:
                 "GeoWebCache cache is not a directory"
             )
         record(root, relative=".", kind="directory")
-        visit(root_descriptor, ".", root)
+        visit(root_descriptor, ".", root, root.st_dev)
     except OSError as error:
         raise GeoWebCacheQuotaSafetyError(
             "GeoWebCache cache changed during inventory"
@@ -441,7 +558,11 @@ def _same_cache_identity(
     )
 
 
-def _safe_disk_usage(path: Path) -> _DiskUsage:
+def _safe_filesystem_usage(
+    path: Path,
+    *,
+    expected_root: _CacheEntry,
+) -> tuple[_DiskUsage, _FileSystemStats]:
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
@@ -455,7 +576,12 @@ def _safe_disk_usage(path: Path) -> _DiskUsage:
         ) from error
     try:
         before = os.fstat(descriptor)
+        if not _same_cache_entry(expected_root, before):
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache cache root changed before capacity measurement"
+            )
         usage = shutil.disk_usage(descriptor)
+        filesystem = os.fstatvfs(descriptor)
         after = os.fstat(descriptor)
         if (
             not stat.S_ISDIR(after.st_mode)
@@ -464,13 +590,61 @@ def _safe_disk_usage(path: Path) -> _DiskUsage:
             raise GeoWebCacheQuotaSafetyError(
                 "GeoWebCache filesystem changed during capacity measurement"
             )
-        return usage
+        if (
+            filesystem.f_bsize <= 0
+            or filesystem.f_frsize <= 0
+            or filesystem.f_files <= 0
+            or filesystem.f_favail < 0
+            or filesystem.f_favail > filesystem.f_files
+        ):
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache filesystem inode capacity is unavailable"
+            )
+        return usage, filesystem
     except OSError as error:
         raise GeoWebCacheQuotaSafetyError(
             "GeoWebCache filesystem cannot be measured safely"
         ) from error
     finally:
         os.close(descriptor)
+
+
+def _same_cache_entry(
+    expected: _CacheEntry,
+    actual: os.stat_result,
+) -> bool:
+    return (
+        expected.device == actual.st_dev
+        and expected.inode == actual.st_ino
+        and expected.mode == stat.S_IMODE(actual.st_mode)
+        and expected.size_bytes == actual.st_size
+        and expected.mtime_ns == actual.st_mtime_ns
+        and expected.ctime_ns == actual.st_ctime_ns
+        and expected.links == actual.st_nlink
+        and expected.allocated_bytes == actual.st_blocks * 512
+    )
+
+
+def _allocation_basis_points(inventory: _CacheInventory) -> int:
+    logical = inventory.logical_bytes
+    if logical == 0:
+        return 10_000
+    return _ceil_ratio(inventory.allocated_file_bytes * 10_000, logical)
+
+
+def _conservative_bytes_per_inode(inventory: _CacheInventory) -> int:
+    if inventory.file_count == 0 or inventory.logical_bytes == 0:
+        return CONSERVATIVE_LOGICAL_BYTES_PER_INODE
+    observed = max(inventory.logical_bytes // inventory.file_count, 1)
+    return min(CONSERVATIVE_LOGICAL_BYTES_PER_INODE, observed)
+
+
+def _ceil_ratio(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache capacity ratio is invalid"
+        )
+    return (numerator + denominator - 1) // denominator
 
 
 def _existing_absolute_directory(path: Path) -> Path:

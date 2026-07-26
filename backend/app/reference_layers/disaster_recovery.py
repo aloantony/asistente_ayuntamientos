@@ -36,8 +36,12 @@ from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
-SCHEMA_VERSION = 2
-QUIESCENCE_EVIDENCE_SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
+LEGACY_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
+QUIESCENCE_EVIDENCE_SCHEMA_VERSION = 2
+LEGACY_QUIESCENCE_EVIDENCE_SCHEMA_VERSION = 1
+DRILL_IDENTITY_SCHEMA_VERSION = 2
 MAX_JSON_BYTES = 256 * 1024 * 1024
 MAX_CREDENTIAL_BYTES = 8192
 COPY_CHUNK_BYTES = 1024 * 1024
@@ -45,6 +49,14 @@ MAX_OWNERSHIP_ID = 2**31 - 1
 BACKUP_PREFIX = "siur-backup-"
 RESTORE_PREFIX = "siur-drill-restore-"
 QUIESCENCE_EVIDENCE_NAME = "quiescence-evidence.json"
+DRILL_MARKER_PREFIX = "siur-drill-v1:"
+DRILL_BASELINE_ZERO_COUNT = 12
+REQUIRED_EXTENSION_SCHEMAS = {
+    "plpgsql": "pg_catalog",
+    "postgis": "public",
+    "vector": "public",
+}
+PG_DUMP_EXTENSION_EXCLUSIONS = tuple(sorted(REQUIRED_EXTENSION_SCHEMAS))
 EXPECTED_STOPPED_SERVICES = frozenset(
     {
         "backend",
@@ -64,6 +76,16 @@ PROTECTED_RUNTIME_PATHS = (
 DATABASE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,62}$", re.ASCII)
 OPERATOR_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$", re.ASCII)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
+SYSTEM_IDENTIFIER_RE = re.compile(r"^[1-9][0-9]{0,31}$", re.ASCII)
+DRILL_TOKEN_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.ASCII,
+)
+EXTENSION_VERSION_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$",
+    re.ASCII,
+)
 
 
 class DisasterRecoveryError(RuntimeError):
@@ -112,6 +134,7 @@ class RestoreBackupRequest:
     backup: Path
     destination: Path
     target_database_url_file: Path
+    target_database_identity_file: Path
 
 
 @dataclass(frozen=True)
@@ -124,6 +147,34 @@ class _DatabaseLocation:
 
 
 @dataclass(frozen=True)
+class _DatabaseExtension:
+    name: str
+    schema: str
+    version: str
+    owner: str
+
+    def manifest_value(self, *, include_owner: bool) -> dict[str, object]:
+        result = {
+            "name": self.name,
+            "schema": self.schema,
+            "version": self.version,
+        }
+        if include_owner:
+            result["owner"] = self.owner
+        return result
+
+
+@dataclass(frozen=True)
+class _DatabaseIdentity:
+    database_name: str
+    database_user: str
+    system_identifier: str
+    database_oid: int
+    extensions: tuple[_DatabaseExtension, ...]
+    drill_token: str | None = None
+
+
+@dataclass(frozen=True)
 class _InventoryEntry:
     path: str
     kind: Literal["directory", "file"]
@@ -131,6 +182,8 @@ class _InventoryEntry:
     sha256: str | None
     mode: int
     mtime_ns: int
+    ctime_ns: int
+    links: int
     uid: int
     gid: int
     device: int
@@ -143,6 +196,8 @@ class _InventoryEntry:
             "size_bytes": self.size_bytes,
             "mode": self.mode,
             "mtime_ns": self.mtime_ns,
+            "ctime_ns": self.ctime_ns,
+            "links": self.links,
             "uid": self.uid,
             "gid": self.gid,
         }
@@ -160,6 +215,8 @@ class _TreeInventory:
     source_inode: int
     source_mode: int
     source_mtime_ns: int
+    source_ctime_ns: int
+    source_links: int
     source_uid: int
     source_gid: int
 
@@ -220,20 +277,6 @@ def create_backup(
         credential_path,
         target=False,
     )
-    reference_inventory = _inventory_tree(
-        reference_source,
-        excluded_roots=frozenset(
-            {"staging", ".reference-blob-store.lock"}
-        ),
-    )
-    # GeoWebCache's generated tile bytes live on their own volume through
-    # GEOWEBCACHE_CACHE_DIR at the dedicated gwc-cache mount.  All persistent
-    # configuration, including gwc-gs.xml, gwc-layers and
-    # gwc/geowebcache.xml, remains outside that one mount and is backed up.
-    geoserver_inventory = _inventory_tree(
-        geoserver_source,
-        excluded_roots=frozenset({"gwc-cache"}),
-    )
     evidence: dict[str, object] | None = None
     evidence_bytes: bytes | None = None
     evidence_sha256: str | None = None
@@ -243,6 +286,7 @@ def create_backup(
                 request.quiescence_evidence,
                 reference_source=reference_source,
                 geoserver_source=geoserver_source,
+                database=database,
                 now=timestamp,
                 max_age_seconds=request.quiescence_max_age_seconds,
             )
@@ -251,6 +295,37 @@ def create_backup(
         raise DisasterRecoverySafetyError(
             "apply requires a recent quiescence evidence file"
         )
+    command_runner = runner or subprocess_command_runner
+    source_identity: _DatabaseIdentity | None = None
+    if apply:
+        if evidence is None:
+            raise DisasterRecoverySafetyError(
+                "validated quiescence evidence is unavailable"
+            )
+        source_identity = _read_database_identity(
+            command_runner,
+            database,
+            require_drill_marker=False,
+        )
+        _assert_evidence_database_identity(evidence, source_identity)
+
+    reference_inventory = _inventory_tree(
+        reference_source,
+        excluded_roots=frozenset(
+            {"staging", ".reference-blob-store.lock"}
+        ),
+    )
+    # The actual tile volume is a distinct versioned Docker volume and is not
+    # mounted in the recovery container.  The directory visible through the
+    # parent GeoServer data volume must therefore be an empty mountpoint.  Any
+    # content here could be configuration left by the former mixed gwc volume.
+    _assert_empty_geowebcache_placeholder(
+        geoserver_source / "gwc-cache",
+    )
+    geoserver_inventory = _inventory_tree(
+        geoserver_source,
+        excluded_roots=frozenset({"gwc-cache"}),
+    )
 
     plan = {
         "schema_version": SCHEMA_VERSION,
@@ -281,19 +356,28 @@ def create_backup(
     if not apply:
         return plan
 
-    command_runner = runner or subprocess_command_runner
     partial = destination.parent / (
         f".{destination.name}.partial-{uuid4().hex}"
     )
     _assert_new_path(partial, label="partial backup destination")
     try:
-        os.mkdir(partial, 0o700)
+        _mkdir_new_directory(partial, 0o700)
         database_dump = partial / "postgres.dump"
         # Pre-create privately inside the 0700 staging directory so pg_dump
         # cannot inherit a permissive process umask or encounter a symlink.
         _write_exclusive(database_dump, b"")
         _run_pg_dump(command_runner, database, database_dump)
         _assert_regular_payload(database_dump, label="PostgreSQL dump")
+        source_identity_after = _read_database_identity(
+            command_runner,
+            database,
+            require_drill_marker=False,
+        )
+        if source_identity_after != source_identity:
+            raise DisasterRecoverySafetyError(
+                "source PostgreSQL identity changed while the dump was "
+                "being created"
+            )
 
         reference_archive = partial / "reference_artifacts.tar"
         geoserver_archive = partial / "geoserver_data.tar"
@@ -312,6 +396,9 @@ def create_backup(
                 {"staging", ".reference-blob-store.lock"}
             ),
         )
+        _assert_empty_geowebcache_placeholder(
+            geoserver_source / "gwc-cache",
+        )
         geoserver_after = _inventory_tree(
             geoserver_source,
             excluded_roots=frozenset({"gwc-cache"}),
@@ -322,6 +409,16 @@ def create_backup(
         ):
             raise DisasterRecoverySafetyError(
                 "backup sources changed while the snapshot was being created"
+            )
+        source_identity_final = _read_database_identity(
+            command_runner,
+            database,
+            require_drill_marker=False,
+        )
+        if source_identity_final != source_identity:
+            raise DisasterRecoverySafetyError(
+                "source PostgreSQL identity changed before backup "
+                "publication"
             )
 
         manifest = _build_manifest(
@@ -347,8 +444,10 @@ def create_backup(
             f"{manifest_sha}  manifest.json\n".encode("ascii"),
         )
         _fsync_directory(partial)
-        _publish_directory_noreplace(partial, destination)
-        _fsync_directory(destination.parent)
+        durability_verified = _publish_directory_noreplace(
+            partial,
+            destination,
+        )
     except Exception:
         # Deliberately leave an unmistakable partial directory for forensic
         # inspection.  This tool has no delete path.
@@ -358,6 +457,7 @@ def create_backup(
         "backup_id": manifest["backup_id"],
         "manifest_sha256": manifest_sha,
         "completed": True,
+        "durability_verified": durability_verified,
     }
 
 
@@ -375,6 +475,7 @@ def verify_backup(
     )
     _assert_backup_directory_contents(backup_path)
     manifest, actual_manifest_hash = _read_checked_manifest(backup_path)
+    manifest_schema_version = int(manifest["schema_version"])
     database = _manifest_mapping(manifest, "database")
     database_name = _database_name_from_manifest(database)
     trees = _manifest_mapping(manifest, "trees")
@@ -394,6 +495,7 @@ def verify_backup(
     _verify_stored_quiescence_evidence(
         evidence_path,
         consistency=consistency,
+        manifest_schema_version=int(manifest["schema_version"]),
     )
     dump_description = _mapping_member(database, "dump")
     dump_path = _fixed_payload_path(
@@ -420,11 +522,15 @@ def verify_backup(
             expected_name=expected_archive,
         )
         _verify_payload_hash(archive_path, archive_description)
-        entries = _parse_manifest_entries(description.get("entries"))
+        entries = _parse_manifest_entries(
+            description.get("entries"),
+            manifest_schema_version=manifest_schema_version,
+        )
         _validate_tree_statistics(
             description,
             entries,
             expected_exclusions=expected_exclusions,
+            manifest_schema_version=manifest_schema_version,
         )
         _verify_tar_archive(archive_path, entries)
         verified_trees[name] = {
@@ -441,14 +547,23 @@ def verify_backup(
     backup_id = manifest.get("backup_id")
     if not isinstance(backup_id, str):
         raise DisasterRecoveryVerificationError("backup id is invalid")
+    required_extensions = (
+        _parse_required_extension_manifest(
+            database.get("required_extensions")
+        )
+        if manifest_schema_version == SCHEMA_VERSION
+        else None
+    )
     return {
         "schema_version": SCHEMA_VERSION,
+        "manifest_schema_version": manifest_schema_version,
         "mode": "verify",
         "backup": str(backup_path),
         "backup_id": backup_id,
         "manifest_sha256": actual_manifest_hash,
         "database_name": database_name,
         "quiescence_evidence_sha256": evidence_description["sha256"],
+        "required_extensions": required_extensions,
         "trees": verified_trees,
         "verified": True,
     }
@@ -475,17 +590,43 @@ def restore_backup(
         request.target_database_url_file,
         label="target database credential file",
     )
+    target_identity_path = _absolute_path(
+        request.target_database_identity_file,
+        label="target database identity file",
+    )
     _reject_overlaps(
         {
             "backup": backup_path,
             "restore destination": destination,
             "target database credential file": target_credential_path,
+            "target database identity file": target_identity_path,
         }
     )
     target = _read_database_location(
         target_credential_path,
         target=True,
     )
+    expected_target_identity = _read_drill_identity(
+        target_identity_path,
+        database=target,
+    )
+    required_extensions = verification.get("required_extensions")
+    if (
+        verification.get("manifest_schema_version") != SCHEMA_VERSION
+        or not isinstance(required_extensions, list)
+    ):
+        raise DisasterRecoverySafetyError(
+            "legacy backup lacks a verified extension baseline and cannot "
+            "be restored automatically"
+        )
+    if required_extensions != [
+        item.manifest_value(include_owner=False)
+        for item in expected_target_identity.extensions
+    ]:
+        raise DisasterRecoverySafetyError(
+            "target database identity does not preinstall the exact source "
+            "extension versions"
+        )
     source_database_name = str(verification["database_name"])
     if target.database_name == source_database_name:
         raise DisasterRecoverySafetyError(
@@ -499,6 +640,12 @@ def restore_backup(
         "destination": str(destination),
         "source_database_name": source_database_name,
         "target_database_name": target.database_name,
+        "target_system_identifier": (
+            expected_target_identity.system_identifier
+        ),
+        "target_database_oid": expected_target_identity.database_oid,
+        "target_drill_token": expected_target_identity.drill_token,
+        "required_extensions": required_extensions,
         "database_contract": (
             "existing empty isolated drill-only database; no create or drop; "
             "a failed post-restore publication is compensated with DROP "
@@ -509,20 +656,28 @@ def restore_backup(
     if not apply:
         return report
 
-    _assert_empty_drill_database(command_runner, target)
+    _assert_empty_drill_database(
+        command_runner,
+        target,
+        expected_target_identity,
+    )
     partial = destination.parent / (
         f".{destination.name}.partial-{uuid4().hex}"
     )
     _assert_new_path(partial, label="partial restore destination")
-    os.mkdir(partial, 0o700)
+    _mkdir_new_directory(partial, 0o700)
     manifest, _manifest_hash = _read_checked_manifest(backup_path)
+    manifest_schema_version = int(manifest["schema_version"])
     trees = _manifest_mapping(manifest, "trees")
     for tree_name, archive_name in (
         ("reference_artifacts", "reference_artifacts.tar"),
         ("geoserver_data", "geoserver_data.tar"),
     ):
         tree = _mapping_member(trees, tree_name)
-        entries = _parse_manifest_entries(tree.get("entries"))
+        entries = _parse_manifest_entries(
+            tree.get("entries"),
+            manifest_schema_version=manifest_schema_version,
+        )
         _safe_extract_tar(
             backup_path / archive_name,
             partial / tree_name,
@@ -547,11 +702,12 @@ def restore_backup(
         **report,
         "mode": "applied",
         "restored_at": restored_at,
-        "completed": True,
         "completion_contract": (
-            "this record is visible at the final no-replace destination only "
-            "after pg_restore committed successfully"
+            "the restore is complete only when this report is contained by "
+            "the exact final no-replace destination and the returned result "
+            "confirms completed=true"
         ),
+        "prepared": True,
         "reference_artifacts_path": str(
             destination / "reference_artifacts"
         ),
@@ -564,25 +720,47 @@ def restore_backup(
     os.chmod(partial, 0o750)
     _fsync_directory(partial)
     _verify_payload_hash(dump_path, dump_description)
-    _assert_empty_drill_database(command_runner, target)
+    _assert_empty_drill_database(
+        command_runner,
+        target,
+        expected_target_identity,
+    )
 
-    restored = False
+    restore_attempted = False
     try:
+        restore_attempted = True
         _run_pg_restore(command_runner, target, dump_path)
-        restored = True
-        _publish_directory_noreplace(partial, destination)
+        _assert_database_identity(
+            command_runner,
+            target,
+            expected_target_identity,
+        )
+        durability_verified = _publish_directory_noreplace(
+            partial,
+            destination,
+        )
     except BaseException:
-        if restored:
-            _compensate_restored_drill_database(command_runner, target)
+        if restore_attempted:
+            try:
+                _compensate_restored_drill_database(
+                    command_runner,
+                    target,
+                    expected_target_identity,
+                )
+            except DisasterRecoveryError as compensation_error:
+                raise DisasterRecoveryCommandError(
+                    "restore failed and exact-target compensation could not "
+                    "be proven"
+                ) from compensation_error
         raise
 
     # Once the atomic rename succeeds, both the populated drill database and
     # the self-describing final directory are present.  A parent-directory
     # fsync error must not turn that completed pair into an unrecoverable
     # "failed" run, so it is retried and reported explicitly.
-    durability_verified = _fsync_directory_with_retries(destination.parent)
     return {
         **restore_record,
+        "completed": True,
         "durability_verified": durability_verified,
     }
 
@@ -655,6 +833,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
     )
+    restore.add_argument(
+        "--target-database-identity-file",
+        type=Path,
+        required=True,
+    )
     restore.add_argument("--apply", action="store_true")
     return parser
 
@@ -683,6 +866,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backup=args.backup,
                 destination=args.destination,
                 target_database_url_file=args.target_database_url_file,
+                target_database_identity_file=(
+                    args.target_database_identity_file
+                ),
             ),
             apply=args.apply,
         )
@@ -742,6 +928,21 @@ def _build_manifest(
                 "geoserver_data_source"
             ),
             "postgres_running": evidence.get("postgres_running"),
+            "postgres_database_name": evidence.get(
+                "postgres_database_name"
+            ),
+            "postgres_database_user": evidence.get(
+                "postgres_database_user"
+            ),
+            "postgres_hostname": evidence.get("postgres_hostname"),
+            "postgres_port": evidence.get("postgres_port"),
+            "postgres_system_identifier": evidence.get(
+                "postgres_system_identifier"
+            ),
+            "postgres_database_oid": evidence.get(
+                "postgres_database_oid"
+            ),
+            "postgres_extensions": evidence.get("postgres_extensions"),
             "stopped_services": sorted(EXPECTED_STOPPED_SERVICES),
         },
         "database": {
@@ -753,6 +954,19 @@ def _build_manifest(
                 "--serializable-deferrable",
                 "--no-owner",
                 "--no-privileges",
+                *[
+                    f"--exclude-extension={name}"
+                    for name in PG_DUMP_EXTENSION_EXCLUSIONS
+                ],
+            ],
+            "required_extensions": [
+                {
+                    "name": item["name"],
+                    "schema": item["schema"],
+                    "version": item["version"],
+                }
+                for item in evidence.get("postgres_extensions", [])
+                if isinstance(item, Mapping)
             ],
         },
         "trees": {
@@ -797,6 +1011,25 @@ def _build_manifest(
                 "compensation-only-drop-owned-exact-drill-target"
             ),
             "database_drop_allowed": False,
+            "stable_identity_required": [
+                "system_identifier",
+                "database_oid",
+                "drill_token",
+            ],
+            "connection_limit": 1,
+            "connection_exclusivity": {
+                "database_connection_limit": 1,
+                "role_connection_limit": 1,
+                "role_must_be_non_superuser": True,
+                "required_role_membership": "pg_monitor",
+                "plpgsql_owner_must_differ": True,
+            },
+            "extensions": {
+                "preinstalled_by_administrator": True,
+                "exact_versions_required": True,
+                "owners_must_differ_from_restore_role": True,
+                "restore_comments": False,
+            },
         },
     }
 
@@ -813,6 +1046,8 @@ def _tree_manifest(
         "excluded_paths": list(inventory.excluded_paths),
         "root_mode": inventory.source_mode,
         "root_mtime_ns": inventory.source_mtime_ns,
+        "root_ctime_ns": inventory.source_ctime_ns,
+        "root_links": inventory.source_links,
         "root_uid": inventory.source_uid,
         "root_gid": inventory.source_gid,
         "file_count": inventory.file_count,
@@ -837,127 +1072,309 @@ def _inventory_tree(
     *,
     excluded_roots: frozenset[str],
 ) -> _TreeInventory:
+    directory_flags = os.O_RDONLY
+    file_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+        file_flags |= os.O_NOFOLLOW
     try:
-        source_before = source.lstat()
+        source_path_metadata = source.lstat()
+        root_descriptor = os.open(source, directory_flags)
     except OSError as error:
         raise DisasterRecoverySafetyError(
             "backup source cannot be inspected"
         ) from error
-    if not stat.S_ISDIR(source_before.st_mode):
-        raise DisasterRecoverySafetyError(
-            "backup source must remain a directory"
+    try:
+        source_before = os.fstat(root_descriptor)
+        _assert_same_node(
+            source_path_metadata,
+            source_before,
+            kind="directory",
         )
-    _validate_source_ownership(source_before)
-    entries: list[_InventoryEntry] = []
-    excluded: list[str] = []
+        _validate_source_metadata(source_before, root=True)
+        entries: list[_InventoryEntry] = []
 
-    def visit(directory: Path, relative: PurePosixPath) -> None:
-        try:
-            with os.scandir(directory) as iterator:
-                children = sorted(iterator, key=lambda item: item.name)
-        except OSError as error:
-            raise DisasterRecoverySafetyError(
-                "backup source cannot be inventoried"
-            ) from error
-        for child in children:
-            child_relative = (
-                PurePosixPath(child.name)
-                if not relative.parts
-                else relative / child.name
-            )
-            relative_text = child_relative.as_posix()
-            if not relative.parts and child.name in excluded_roots:
-                excluded.append(relative_text)
-                continue
-            _validate_relative_path(relative_text)
-            try:
-                metadata = child.stat(follow_symlinks=False)
-            except OSError as error:
+        def visit(
+            directory_descriptor: int,
+            relative: PurePosixPath,
+        ) -> None:
+            directory_before = os.fstat(directory_descriptor)
+            if not stat.S_ISDIR(directory_before.st_mode):
                 raise DisasterRecoverySafetyError(
                     "backup source changed during inventory"
+                )
+            try:
+                with os.scandir(directory_descriptor) as iterator:
+                    children = sorted(iterator, key=lambda item: item.name)
+            except OSError as error:
+                raise DisasterRecoverySafetyError(
+                    "backup source cannot be inventoried"
                 ) from error
-            if stat.S_ISLNK(metadata.st_mode):
-                raise DisasterRecoverySafetyError(
-                    "backup sources cannot contain symlinks"
+            for child in children:
+                child_relative = (
+                    PurePosixPath(child.name)
+                    if not relative.parts
+                    else relative / child.name
                 )
-            permissions = stat.S_IMODE(metadata.st_mode)
-            _validate_source_ownership(metadata)
-            if permissions & ~0o777:
-                raise DisasterRecoverySafetyError(
-                    "backup sources cannot contain setuid, setgid or sticky "
-                    "entries"
-                )
-            if stat.S_ISDIR(metadata.st_mode):
-                entries.append(
-                    _InventoryEntry(
-                        path=relative_text,
-                        kind="directory",
-                        size_bytes=0,
-                        sha256=None,
-                        mode=permissions,
-                        mtime_ns=metadata.st_mtime_ns,
-                        uid=metadata.st_uid,
-                        gid=metadata.st_gid,
-                        device=metadata.st_dev,
-                        inode=metadata.st_ino,
+                relative_text = child_relative.as_posix()
+                _validate_relative_path(relative_text)
+                try:
+                    metadata = child.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise DisasterRecoverySafetyError(
+                        "backup source changed during inventory"
+                    ) from error
+                if not relative.parts and child.name in excluded_roots:
+                    if stat.S_ISLNK(metadata.st_mode):
+                        raise DisasterRecoverySafetyError(
+                            "excluded backup roots cannot be symlinks"
+                        )
+                    continue
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise DisasterRecoverySafetyError(
+                        "backup sources cannot contain symlinks"
                     )
-                )
-                visit(Path(child.path), child_relative)
-                continue
-            if not stat.S_ISREG(metadata.st_mode):
-                raise DisasterRecoverySafetyError(
-                    "backup sources can contain only directories and "
-                    "regular files"
-                )
-            digest = _hash_file(Path(child.path), expected=metadata)
-            entries.append(
-                _InventoryEntry(
-                    path=relative_text,
-                    kind="file",
-                    size_bytes=metadata.st_size,
-                    sha256=digest,
-                    mode=permissions,
-                    mtime_ns=metadata.st_mtime_ns,
-                    uid=metadata.st_uid,
-                    gid=metadata.st_gid,
-                    device=metadata.st_dev,
-                    inode=metadata.st_ino,
-                )
+                permissions = stat.S_IMODE(metadata.st_mode)
+                _validate_source_metadata(metadata, root=False)
+                if stat.S_ISDIR(metadata.st_mode):
+                    try:
+                        child_descriptor = os.open(
+                            child.name,
+                            directory_flags,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise DisasterRecoverySafetyError(
+                            "backup source changed during inventory"
+                        ) from error
+                    try:
+                        opened = os.fstat(child_descriptor)
+                        _assert_same_node(
+                            metadata,
+                            opened,
+                            kind="directory",
+                        )
+                        entries.append(
+                            _InventoryEntry(
+                                path=relative_text,
+                                kind="directory",
+                                size_bytes=0,
+                                sha256=None,
+                                mode=permissions,
+                                mtime_ns=opened.st_mtime_ns,
+                                ctime_ns=opened.st_ctime_ns,
+                                links=opened.st_nlink,
+                                uid=opened.st_uid,
+                                gid=opened.st_gid,
+                                device=opened.st_dev,
+                                inode=opened.st_ino,
+                            )
+                        )
+                        visit(child_descriptor, child_relative)
+                    finally:
+                        os.close(child_descriptor)
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise DisasterRecoverySafetyError(
+                        "backup sources can contain only directories and "
+                        "regular files"
+                    )
+                if metadata.st_nlink != 1:
+                    raise DisasterRecoverySafetyError(
+                        "backup sources cannot contain hard-linked files"
+                    )
+                try:
+                    child_descriptor = os.open(
+                        child.name,
+                        file_flags,
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as error:
+                    raise DisasterRecoverySafetyError(
+                        "backup source changed during inventory"
+                    ) from error
+                try:
+                    opened = os.fstat(child_descriptor)
+                    _assert_same_node(metadata, opened, kind="file")
+                    digest = _hash_descriptor(
+                        child_descriptor,
+                        expected=opened,
+                    )
+                    entries.append(
+                        _InventoryEntry(
+                            path=relative_text,
+                            kind="file",
+                            size_bytes=opened.st_size,
+                            sha256=digest,
+                            mode=permissions,
+                            mtime_ns=opened.st_mtime_ns,
+                            ctime_ns=opened.st_ctime_ns,
+                            links=opened.st_nlink,
+                            uid=opened.st_uid,
+                            gid=opened.st_gid,
+                            device=opened.st_dev,
+                            inode=opened.st_ino,
+                        )
+                    )
+                finally:
+                    os.close(child_descriptor)
+            directory_after = os.fstat(directory_descriptor)
+            _assert_same_node(
+                directory_before,
+                directory_after,
+                kind="directory",
             )
 
-    visit(source, PurePosixPath())
+        visit(root_descriptor, PurePosixPath())
+        source_after = os.fstat(root_descriptor)
+        _assert_same_node(source_before, source_after, kind="directory")
+        return _TreeInventory(
+            source=source,
+            entries=tuple(entries),
+            excluded_paths=tuple(sorted(excluded_roots)),
+            source_device=source_before.st_dev,
+            source_inode=source_before.st_ino,
+            source_mode=stat.S_IMODE(source_before.st_mode),
+            source_mtime_ns=source_before.st_mtime_ns,
+            source_ctime_ns=source_before.st_ctime_ns,
+            source_links=source_before.st_nlink,
+            source_uid=source_before.st_uid,
+            source_gid=source_before.st_gid,
+        )
+    finally:
+        os.close(root_descriptor)
+
+
+def _assert_empty_geowebcache_placeholder(path: Path) -> None:
+    """Require the parent-volume view of the external tile mount to be empty."""
+
+    parent = _existing_directory(
+        path.parent,
+        label="GeoServer data source",
+    )
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
     try:
-        source_after = source.lstat()
+        parent_descriptor = os.open(parent, directory_flags)
+        try:
+            descriptor = os.open(
+                path.name,
+                directory_flags,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as error:
+            raise DisasterRecoverySafetyError(
+                "GeoWebCache tile mountpoint must exist in the GeoServer "
+                "parent volume"
+            ) from error
+        try:
+            parent_metadata = os.fstat(parent_descriptor)
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(before.st_mode)
+                or before.st_dev != parent_metadata.st_dev
+            ):
+                raise DisasterRecoverySafetyError(
+                    "GeoWebCache tile data must not be mounted or copied into "
+                    "the recovery source"
+                )
+            with os.scandir(descriptor) as iterator:
+                if next(iterator, None) is not None:
+                    raise DisasterRecoverySafetyError(
+                        "GeoWebCache tile mountpoint in the parent volume is "
+                        "not empty; legacy configuration or cache data may be "
+                        "present"
+                    )
+            after = os.fstat(descriptor)
+            _assert_same_node(before, after, kind="directory")
+        finally:
+            os.close(descriptor)
     except OSError as error:
         raise DisasterRecoverySafetyError(
-            "backup source changed during inventory"
+            "GeoWebCache tile mountpoint cannot be inspected safely"
         ) from error
-    root_fields = (
+    finally:
+        if "parent_descriptor" in locals():
+            os.close(parent_descriptor)
+
+
+def _validate_source_metadata(
+    metadata: os.stat_result,
+    *,
+    root: bool,
+) -> None:
+    _validate_source_ownership(metadata)
+    permissions = stat.S_IMODE(metadata.st_mode)
+    if permissions & ~0o777:
+        subject = "backup source root" if root else "backup source"
+        raise DisasterRecoverySafetyError(
+            f"{subject} cannot contain setuid, setgid or sticky bits"
+        )
+
+
+def _assert_same_node(
+    expected: os.stat_result,
+    actual: os.stat_result,
+    *,
+    kind: Literal["directory", "file"],
+) -> None:
+    expected_kind = (
+        stat.S_ISDIR(expected.st_mode)
+        if kind == "directory"
+        else stat.S_ISREG(expected.st_mode)
+    )
+    actual_kind = (
+        stat.S_ISDIR(actual.st_mode)
+        if kind == "directory"
+        else stat.S_ISREG(actual.st_mode)
+    )
+    fields = (
         "st_dev",
         "st_ino",
         "st_mode",
+        "st_size",
         "st_mtime_ns",
+        "st_ctime_ns",
         "st_uid",
         "st_gid",
+        "st_nlink",
     )
-    if any(
-        getattr(source_before, name) != getattr(source_after, name)
-        for name in root_fields
+    if (
+        not expected_kind
+        or not actual_kind
+        or any(
+            getattr(expected, field) != getattr(actual, field)
+            for field in fields
+        )
     ):
         raise DisasterRecoverySafetyError(
-            "backup source changed during inventory"
+            "backup source changed while it was being traversed"
         )
-    return _TreeInventory(
-        source=source,
-        entries=tuple(entries),
-        excluded_paths=tuple(sorted(excluded)),
-        source_device=source_before.st_dev,
-        source_inode=source_before.st_ino,
-        source_mode=stat.S_IMODE(source_before.st_mode) & 0o777,
-        source_mtime_ns=source_before.st_mtime_ns,
-        source_uid=source_before.st_uid,
-        source_gid=source_before.st_gid,
-    )
+
+
+def _hash_descriptor(
+    descriptor: int,
+    *,
+    expected: os.stat_result,
+) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    before = os.fstat(descriptor)
+    _assert_same_node(expected, before, kind="file")
+    while True:
+        chunk = os.read(descriptor, COPY_CHUNK_BYTES)
+        if not chunk:
+            break
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    _assert_same_node(before, after, kind="file")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest()
 
 
 def _valid_ownership_id(value: object) -> bool:
@@ -1035,6 +1452,7 @@ def _write_inventory_tar(
         flags |= os.O_NOFOLLOW
     descriptor = os.open(destination, flags, 0o600)
     output = os.fdopen(descriptor, "wb", closefd=True)
+    root_descriptor = _open_inventory_root(inventory)
     try:
         with tarfile.open(
             fileobj=output,
@@ -1052,17 +1470,25 @@ def _write_inventory_tar(
                 if entry.kind == "directory":
                     info.type = tarfile.DIRTYPE
                     info.size = 0
-                    archive.addfile(info)
+                    entry_descriptor = _open_inventory_entry(
+                        root_descriptor,
+                        entry,
+                    )
+                    try:
+                        _assert_entry_identity(
+                            entry,
+                            os.fstat(entry_descriptor),
+                        )
+                        archive.addfile(info)
+                    finally:
+                        os.close(entry_descriptor)
                     continue
                 info.type = tarfile.REGTYPE
                 info.size = entry.size_bytes
-                source_path = inventory.source / Path(entry.path)
-                metadata = source_path.lstat()
-                _assert_entry_identity(entry, metadata)
-                flags = os.O_RDONLY
-                if hasattr(os, "O_NOFOLLOW"):
-                    flags |= os.O_NOFOLLOW
-                file_descriptor = os.open(source_path, flags)
+                file_descriptor = _open_inventory_entry(
+                    root_descriptor,
+                    entry,
+                )
                 with os.fdopen(file_descriptor, "rb", closefd=True) as source:
                     _assert_entry_identity(entry, os.fstat(source.fileno()))
                     archive.addfile(info, source)
@@ -1070,19 +1496,94 @@ def _write_inventory_tar(
         output.flush()
         os.fsync(output.fileno())
     finally:
+        os.close(root_descriptor)
         output.close()
+
+
+def _open_inventory_root(inventory: _TreeInventory) -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(inventory.source, flags)
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        raise DisasterRecoverySafetyError(
+            "backup source root cannot be reopened safely"
+        ) from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_dev != inventory.source_device
+        or metadata.st_ino != inventory.source_inode
+        or stat.S_IMODE(metadata.st_mode) != inventory.source_mode
+        or metadata.st_mtime_ns != inventory.source_mtime_ns
+        or metadata.st_ctime_ns != inventory.source_ctime_ns
+        or metadata.st_nlink != inventory.source_links
+        or metadata.st_uid != inventory.source_uid
+        or metadata.st_gid != inventory.source_gid
+    ):
+        os.close(descriptor)
+        raise DisasterRecoverySafetyError(
+            "backup source root changed before archive creation"
+        )
+    return descriptor
+
+
+def _open_inventory_entry(
+    root_descriptor: int,
+    entry: _InventoryEntry,
+) -> int:
+    directory_flags = os.O_RDONLY
+    file_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+        file_flags |= os.O_NOFOLLOW
+    current = os.dup(root_descriptor)
+    parts = PurePosixPath(entry.path).parts
+    try:
+        for part in parts[:-1]:
+            next_descriptor = os.open(
+                part,
+                directory_flags,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = next_descriptor
+        flags = directory_flags if entry.kind == "directory" else file_flags
+        result = os.open(parts[-1], flags, dir_fd=current)
+    except OSError as error:
+        raise DisasterRecoverySafetyError(
+            "backup entry cannot be reopened beneath its source root"
+        ) from error
+    finally:
+        os.close(current)
+    return result
 
 
 def _assert_entry_identity(
     entry: _InventoryEntry,
     metadata: os.stat_result,
 ) -> None:
+    correct_kind = (
+        stat.S_ISDIR(metadata.st_mode)
+        if entry.kind == "directory"
+        else stat.S_ISREG(metadata.st_mode)
+    )
     if (
-        not stat.S_ISREG(metadata.st_mode)
+        not correct_kind
         or metadata.st_dev != entry.device
         or metadata.st_ino != entry.inode
-        or metadata.st_size != entry.size_bytes
+        or (
+            entry.kind == "file"
+            and metadata.st_size != entry.size_bytes
+        )
         or metadata.st_mtime_ns != entry.mtime_ns
+        or metadata.st_ctime_ns != entry.ctime_ns
+        or metadata.st_nlink != entry.links
         or stat.S_IMODE(metadata.st_mode) != entry.mode
         or metadata.st_uid != entry.uid
         or metadata.st_gid != entry.gid
@@ -1104,6 +1605,10 @@ def _run_pg_dump(
             "--serializable-deferrable",
             "--no-owner",
             "--no-privileges",
+            *(
+                f"--exclude-extension={name}"
+                for name in PG_DUMP_EXTENSION_EXCLUSIONS
+            ),
             f"--file={output}",
         ),
         _postgres_environment(database),
@@ -1126,17 +1631,60 @@ def _run_pg_restore_list(runner: CommandRunner, dump: Path) -> None:
 def _assert_empty_drill_database(
     runner: CommandRunner,
     database: _DatabaseLocation,
+    expected_identity: _DatabaseIdentity,
 ) -> None:
     # This is intentionally broader than counting tables.  A drill target is
     # accepted only when it is owned by the connecting role, has no concurrent
     # sessions, contains the standard public schema contract, and has no
-    # user schemas, relations, routines, types, non-built-in extensions or
-    # other database-local objects.
+    # user schemas or objects outside the exact admin-owned extension baseline.
+    _assert_database_identity(runner, database, expected_identity)
+    marker = _drill_marker(expected_identity)
     query = (
+        "WITH RECURSIVE extension_objects(classid, objid) AS ("
+        "SELECT d.classid, d.objid FROM pg_depend d "
+        "WHERE d.refclassid = 'pg_extension'::regclass "
+        "AND d.deptype = 'e' "
+        "UNION "
+        "SELECT d.classid, d.objid FROM pg_depend d "
+        "JOIN extension_objects parent "
+        "ON d.refclassid = parent.classid "
+        "AND d.refobjid = parent.objid "
+        "WHERE d.deptype IN ('a', 'i')) "
         "SELECT current_database(), current_user, "
+        "(SELECT system_identifier::text FROM pg_control_system()), "
+        "(SELECT oid::text FROM pg_database "
+        "WHERE datname = current_database()), "
+        "COALESCE((SELECT shobj_description(oid, 'pg_database') "
+        "FROM pg_database WHERE datname = current_database()), ''), "
         "(SELECT CASE WHEN pg_get_userbyid(datdba) = current_user "
         "THEN 1 ELSE 0 END FROM pg_database "
         "WHERE datname = current_database()), "
+        "(SELECT CASE WHEN datconnlimit = 1 THEN 1 ELSE 0 END "
+        "FROM pg_database WHERE datname = current_database()), "
+        "(SELECT CASE WHEN datallowconn THEN 1 ELSE 0 END "
+        "FROM pg_database WHERE datname = current_database()), "
+        "(SELECT CASE WHEN has_database_privilege("
+        "current_user, current_database(), 'CONNECT,CREATE,TEMPORARY') "
+        "THEN 1 ELSE 0 END), "
+        "(SELECT CASE WHEN rolcanlogin AND NOT rolsuper "
+        "AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication "
+        "AND NOT rolbypassrls AND rolconnlimit = 1 "
+        "AND pg_has_role(current_user, 'pg_monitor', 'MEMBER') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_auth_members memberships "
+        "JOIN pg_roles granted_role "
+        "ON granted_role.oid = memberships.roleid "
+        "WHERE memberships.member = pg_roles.oid "
+        "AND granted_role.rolname <> 'pg_monitor') "
+        "AND NOT EXISTS (SELECT 1 FROM pg_database other_database "
+        "WHERE other_database.datdba = pg_roles.oid "
+        "AND other_database.datname <> current_database()) "
+        "AND NOT EXISTS (SELECT 1 FROM pg_tablespace tablespace "
+        "WHERE tablespace.spcowner = pg_roles.oid) "
+        "THEN 1 ELSE 0 END FROM pg_roles "
+        "WHERE rolname = current_user), "
+        "(SELECT CASE WHEN count(*) = 3 AND count(*) FILTER "
+        "(WHERE pg_get_userbyid(extowner) <> current_user) = 3 "
+        "THEN 1 ELSE 0 END FROM pg_extension), "
         "(SELECT count(*) FROM pg_stat_activity "
         "WHERE datname = current_database() AND pid <> pg_backend_pid()), "
         "(SELECT count(*) FROM pg_namespace WHERE nspname <> 'public' "
@@ -1145,50 +1693,108 @@ def _assert_empty_drill_database(
         "(SELECT count(*) FROM pg_class c JOIN pg_namespace n "
         "ON n.oid = c.relnamespace WHERE n.nspname NOT IN "
         "('pg_catalog','information_schema') "
-        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)'), "
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)' "
+        "AND NOT EXISTS (SELECT 1 FROM extension_objects d "
+        "WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid "
+        ")), "
         "(SELECT count(*) FROM pg_proc p JOIN pg_namespace n "
         "ON n.oid = p.pronamespace WHERE n.nspname NOT IN "
         "('pg_catalog','information_schema') "
-        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)'), "
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)' "
+        "AND NOT EXISTS (SELECT 1 FROM extension_objects d "
+        "WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid "
+        ")), "
         "(SELECT count(*) FROM pg_type t JOIN pg_namespace n "
         "ON n.oid = t.typnamespace WHERE n.nspname NOT IN "
         "('pg_catalog','information_schema') "
-        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)'), "
-        "(SELECT count(*) FROM pg_extension e JOIN pg_namespace n "
-        "ON n.oid = e.extnamespace WHERE NOT "
-        "(e.extname = 'plpgsql' AND n.nspname = 'pg_catalog')), "
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)' "
+        "AND NOT EXISTS (SELECT 1 FROM extension_objects d "
+        "WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid "
+        ")), "
+        "(SELECT count(*) FROM pg_extension "
+        "WHERE pg_get_userbyid(extowner) = current_user), "
         "("
         "(SELECT CASE WHEN count(*) = 1 AND count(*) FILTER "
         "(WHERE pg_get_userbyid(nspowner) = 'pg_database_owner') = 1 "
         "THEN 0 ELSE 1 END FROM pg_namespace WHERE nspname = 'public') + "
         "(SELECT count(*) FROM pg_language WHERE lanname NOT IN "
         "('internal','c','sql','plpgsql')) + "
-        "(SELECT count(*) FROM pg_foreign_data_wrapper) + "
-        "(SELECT count(*) FROM pg_foreign_server) + "
-        "(SELECT count(*) FROM pg_user_mapping) + "
-        "(SELECT count(*) FROM pg_event_trigger) + "
+        "(SELECT count(*) FROM pg_foreign_data_wrapper o WHERE NOT EXISTS "
+        "(SELECT 1 FROM extension_objects d WHERE "
+        "d.classid = 'pg_foreign_data_wrapper'::regclass "
+        "AND d.objid = o.oid)) + "
+        "(SELECT count(*) FROM pg_foreign_server o WHERE NOT EXISTS "
+        "(SELECT 1 FROM extension_objects d WHERE "
+        "d.classid = 'pg_foreign_server'::regclass "
+        "AND d.objid = o.oid)) + "
+        "(SELECT count(*) FROM pg_event_trigger o WHERE NOT EXISTS "
+        "(SELECT 1 FROM extension_objects d WHERE "
+        "d.classid = 'pg_event_trigger'::regclass "
+        "AND d.objid = o.oid)) + "
         "(SELECT count(*) FROM pg_publication) + "
         "(SELECT count(*) FROM pg_subscription) + "
         "(SELECT count(*) FROM pg_largeobject_metadata) + "
         "(SELECT count(*) FROM pg_default_acl) + "
-        "(SELECT count(*) FROM pg_cast WHERE oid >= 16384) + "
-        "(SELECT count(*) FROM pg_transform WHERE oid >= 16384) + "
-        "(SELECT count(*) FROM pg_am WHERE oid >= 16384) + "
+        "(SELECT count(*) FROM pg_cast o WHERE oid >= 16384 "
+        "AND NOT EXISTS (SELECT 1 FROM extension_objects d WHERE "
+        "d.classid = 'pg_cast'::regclass AND d.objid = o.oid "
+        ")) + "
+        "(SELECT count(*) FROM pg_transform o WHERE oid >= 16384 "
+        "AND NOT EXISTS (SELECT 1 FROM extension_objects d WHERE "
+        "d.classid = 'pg_transform'::regclass AND d.objid = o.oid "
+        ")) + "
+        "(SELECT count(*) FROM pg_am o WHERE oid >= 16384 "
+        "AND NOT EXISTS (SELECT 1 FROM extension_objects d WHERE "
+        "d.classid = 'pg_am'::regclass AND d.objid = o.oid "
+        ")) + "
         "(SELECT count(*) FROM ("
-        "SELECT oid, collnamespace AS namespace FROM pg_collation "
-        "UNION ALL SELECT oid, connamespace FROM pg_conversion "
-        "UNION ALL SELECT oid, oprnamespace FROM pg_operator "
-        "UNION ALL SELECT oid, opcnamespace FROM pg_opclass "
-        "UNION ALL SELECT oid, opfnamespace FROM pg_opfamily "
-        "UNION ALL SELECT oid, stxnamespace FROM pg_statistic_ext "
-        "UNION ALL SELECT oid, cfgnamespace FROM pg_ts_config "
-        "UNION ALL SELECT oid, dictnamespace FROM pg_ts_dict "
-        "UNION ALL SELECT oid, prsnamespace FROM pg_ts_parser "
-        "UNION ALL SELECT oid, tmplnamespace FROM pg_ts_template"
+        "SELECT 'pg_collation'::regclass AS classid, oid, "
+        "collnamespace AS namespace FROM pg_collation "
+        "UNION ALL SELECT 'pg_conversion'::regclass, oid, connamespace "
+        "FROM pg_conversion "
+        "UNION ALL SELECT 'pg_operator'::regclass, oid, oprnamespace "
+        "FROM pg_operator "
+        "UNION ALL SELECT 'pg_opclass'::regclass, oid, opcnamespace "
+        "FROM pg_opclass "
+        "UNION ALL SELECT 'pg_opfamily'::regclass, oid, opfnamespace "
+        "FROM pg_opfamily "
+        "UNION ALL SELECT 'pg_statistic_ext'::regclass, oid, stxnamespace "
+        "FROM pg_statistic_ext "
+        "UNION ALL SELECT 'pg_ts_config'::regclass, oid, cfgnamespace "
+        "FROM pg_ts_config "
+        "UNION ALL SELECT 'pg_ts_dict'::regclass, oid, dictnamespace "
+        "FROM pg_ts_dict "
+        "UNION ALL SELECT 'pg_ts_parser'::regclass, oid, prsnamespace "
+        "FROM pg_ts_parser "
+        "UNION ALL SELECT 'pg_ts_template'::regclass, oid, tmplnamespace "
+        "FROM pg_ts_template"
         ") scoped JOIN pg_namespace n ON n.oid = scoped.namespace "
         "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
-        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)')"
-        ")"
+        "AND n.nspname !~ '^pg_(toast|temp|toast_temp)(_|$)' "
+        "AND NOT EXISTS (SELECT 1 FROM extension_objects d "
+        "WHERE d.classid = scoped.classid AND d.objid = scoped.oid "
+        "))"
+        "), "
+        "(SELECT count(*) FROM pg_database d CROSS JOIN LATERAL "
+        "aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) acl "
+        "WHERE d.datname = current_database() "
+        "AND acl.grantee <> d.datdba), "
+        "(SELECT count(*) FROM pg_namespace n CROSS JOIN LATERAL "
+        "aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl "
+        "WHERE n.nspname = 'public' AND NOT (NOT acl.is_grantable AND "
+        "((acl.grantee = 0 AND acl.privilege_type = 'USAGE') OR "
+        "(acl.grantee = n.nspowner AND acl.privilege_type IN "
+        "('USAGE','CREATE'))))), "
+        "(SELECT count(*) FROM pg_db_role_setting s "
+        "WHERE s.setdatabase IN (0, "
+        "(SELECT oid FROM pg_database WHERE datname = current_database())) "
+        "AND s.setrole IN (0, "
+        "(SELECT oid FROM pg_roles WHERE rolname = current_user))), "
+        "(SELECT count(*) FROM pg_shseclabel "
+        "WHERE classoid = 'pg_database'::regclass "
+        "AND objoid = (SELECT oid FROM pg_database "
+        "WHERE datname = current_database())), "
+        "(SELECT count(*) FROM pg_seclabel)"
     )
     result = runner(
         (
@@ -1206,10 +1812,13 @@ def _assert_empty_drill_database(
         raise DisasterRecoveryCommandError(
             "drill database preflight command failed"
         )
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    lines = _command_output_lines(result)
     expected = (
-        f"{database.database_name}|{database.username}|1|"
-        + "|".join("0" for _ in range(7))
+        f"{database.database_name}|{database.username}|"
+        f"{expected_identity.system_identifier}|"
+        f"{expected_identity.database_oid}|{marker}|1|1|1|1|"
+        "1|1|"
+        + "|".join("0" for _ in range(DRILL_BASELINE_ZERO_COUNT))
     )
     if lines != [expected]:
         raise DisasterRecoverySafetyError(
@@ -1220,6 +1829,7 @@ def _assert_empty_drill_database(
 def _compensate_restored_drill_database(
     runner: CommandRunner,
     database: _DatabaseLocation,
+    expected_identity: _DatabaseIdentity,
 ) -> None:
     """Return only the exact isolated drill target to its empty preflight state."""
 
@@ -1231,6 +1841,44 @@ def _compensate_restored_drill_database(
         raise DisasterRecoverySafetyError(
             "database compensation target is not an isolated drill database"
         )
+    database_identifier = _quote_sql_identifier(database.database_name)
+    user_identifier = _quote_sql_identifier(database.username)
+    marker = _drill_marker(expected_identity)
+    extension_guard = (
+        f"OR (SELECT count(*) FROM pg_extension) <> "
+        f"{len(expected_identity.extensions)} "
+    )
+    for extension in expected_identity.extensions:
+        extension_guard += (
+            "OR NOT EXISTS (SELECT 1 FROM pg_extension e "
+            "JOIN pg_namespace n ON n.oid = e.extnamespace "
+            "WHERE e.extname = "
+            f"{_quote_sql_literal(extension.name)} "
+            f"AND n.nspname = {_quote_sql_literal(extension.schema)} "
+            f"AND e.extversion = {_quote_sql_literal(extension.version)} "
+            "AND pg_get_userbyid(e.extowner) = "
+            f"{_quote_sql_literal(extension.owner)} "
+            "AND EXISTS (SELECT 1 FROM pg_available_extension_versions a "
+            "WHERE a.name = e.extname AND a.version = e.extversion)) "
+        )
+    identity_guard = (
+        "DO $siur$ DECLARE actual_system text; actual_oid oid; "
+        "actual_marker text; BEGIN "
+        "SELECT system_identifier::text INTO actual_system "
+        "FROM pg_control_system(); "
+        "SELECT oid, COALESCE(shobj_description(oid, 'pg_database'), '') "
+        "INTO actual_oid, actual_marker FROM pg_database "
+        "WHERE datname = current_database(); "
+        f"IF current_database() <> {_quote_sql_literal(database.database_name)} "
+        f"OR current_user <> {_quote_sql_literal(database.username)} "
+        f"OR actual_system <> "
+        f"{_quote_sql_literal(expected_identity.system_identifier)} "
+        f"OR actual_oid <> {expected_identity.database_oid} "
+        f"OR actual_marker <> {_quote_sql_literal(marker)} "
+        f"{extension_guard}"
+        "THEN RAISE EXCEPTION 'SIUR drill identity mismatch'; END IF; "
+        "END $siur$"
+    )
     result = runner(
         (
             "psql",
@@ -1238,12 +1886,20 @@ def _compensate_restored_drill_database(
             "--set=ON_ERROR_STOP=1",
             "--single-transaction",
             "--command="
+            f"{identity_guard}; "
             "DROP OWNED BY CURRENT_USER CASCADE; "
             "CREATE SCHEMA IF NOT EXISTS public "
             "AUTHORIZATION pg_database_owner; "
+            "REVOKE ALL ON SCHEMA public FROM PUBLIC; "
             "GRANT USAGE ON SCHEMA public TO PUBLIC; "
-            "GRANT CREATE ON SCHEMA public TO pg_database_owner; "
-            "CREATE EXTENSION IF NOT EXISTS plpgsql WITH SCHEMA pg_catalog",
+            "GRANT CREATE, USAGE ON SCHEMA public TO pg_database_owner; "
+            f"ALTER DATABASE {database_identifier} RESET ALL; "
+            f"ALTER ROLE {user_identifier} IN DATABASE "
+            f"{database_identifier} RESET ALL; "
+            f"ALTER DATABASE {database_identifier} CONNECTION LIMIT 1; "
+            f"REVOKE ALL ON DATABASE {database_identifier} FROM PUBLIC; "
+            f"COMMENT ON DATABASE {database_identifier} IS "
+            f"{_quote_sql_literal(marker)}",
         ),
         _postgres_environment(database),
     )
@@ -1252,7 +1908,11 @@ def _compensate_restored_drill_database(
             "post-restore database compensation failed"
         )
     try:
-        _assert_empty_drill_database(runner, database)
+        _assert_empty_drill_database(
+            runner,
+            database,
+            expected_identity,
+        )
     except DisasterRecoveryError as error:
         raise DisasterRecoveryCommandError(
             "post-restore database compensation could not prove an empty target"
@@ -1271,6 +1931,7 @@ def _run_pg_restore(
             "--single-transaction",
             "--no-owner",
             "--no-privileges",
+            "--no-comments",
             f"--dbname={database.database_name}",
             str(dump),
         ),
@@ -1307,11 +1968,371 @@ def _postgres_environment(
     return result
 
 
+def _read_drill_identity(
+    path: Path,
+    *,
+    database: _DatabaseLocation,
+) -> _DatabaseIdentity:
+    raw = _read_regular_file(
+        path,
+        limit=64 * 1024,
+        label="target database identity file",
+        private=True,
+    )
+    value = _decode_json_object(raw, label="target database identity file")
+    expected_keys = {
+        "schema_version",
+        "database_name",
+        "database_user",
+        "system_identifier",
+        "database_oid",
+        "drill_token",
+        "extensions",
+    }
+    database_name = value.get("database_name")
+    database_user = value.get("database_user")
+    system_identifier = value.get("system_identifier")
+    database_oid = value.get("database_oid")
+    drill_token = value.get("drill_token")
+    extensions = _parse_database_extensions(
+        value.get("extensions"),
+        label="target database identity extensions",
+        error_type=DisasterRecoverySafetyError,
+    )
+    if (
+        set(value) != expected_keys
+        or value.get("schema_version") != DRILL_IDENTITY_SCHEMA_VERSION
+        or database_name != database.database_name
+        or database_user != database.username
+        or not isinstance(system_identifier, str)
+        or SYSTEM_IDENTIFIER_RE.fullmatch(system_identifier) is None
+        or isinstance(database_oid, bool)
+        or not isinstance(database_oid, int)
+        or not 1 <= database_oid <= 2**32 - 1
+        or not isinstance(drill_token, str)
+        or DRILL_TOKEN_RE.fullmatch(drill_token) is None
+        or any(item.owner == database.username for item in extensions)
+    ):
+        raise DisasterRecoverySafetyError(
+            "target database identity file is invalid or does not match "
+            "the credential target"
+        )
+    return _DatabaseIdentity(
+        database_name=database_name,
+        database_user=database_user,
+        system_identifier=system_identifier,
+        database_oid=database_oid,
+        extensions=extensions,
+        drill_token=drill_token,
+    )
+
+
+def _read_database_identity(
+    runner: CommandRunner,
+    database: _DatabaseLocation,
+    *,
+    require_drill_marker: bool,
+) -> _DatabaseIdentity:
+    marker_expression = (
+        "COALESCE((SELECT shobj_description(oid, 'pg_database') "
+        "FROM pg_database WHERE datname = current_database()), '')"
+        if require_drill_marker
+        else "''"
+    )
+    query = (
+        "SELECT current_database(), current_user, "
+        "(SELECT system_identifier::text FROM pg_control_system()), "
+        "(SELECT oid::text FROM pg_database "
+        "WHERE datname = current_database()), "
+        f"{marker_expression}"
+    )
+    result = runner(
+        (
+            "psql",
+            "-X",
+            "--no-align",
+            "--tuples-only",
+            "--field-separator=|",
+            "--set=ON_ERROR_STOP=1",
+            f"--command={query}",
+        ),
+        _postgres_environment(database),
+    )
+    if result.returncode != 0:
+        raise DisasterRecoveryCommandError(
+            "database identity command failed"
+        )
+    lines = _command_output_lines(result)
+    if len(lines) != 1:
+        raise DisasterRecoverySafetyError(
+            "database identity output is invalid"
+        )
+    parts = lines[0].split("|")
+    if len(parts) != 5:
+        raise DisasterRecoverySafetyError(
+            "database identity output is invalid"
+        )
+    database_name, database_user, system_identifier, oid_raw, marker = parts
+    try:
+        database_oid = int(oid_raw)
+    except ValueError as error:
+        raise DisasterRecoverySafetyError(
+            "database identity output is invalid"
+        ) from error
+    drill_token: str | None = None
+    if require_drill_marker:
+        if not marker.startswith(DRILL_MARKER_PREFIX):
+            raise DisasterRecoverySafetyError(
+                "drill database marker is missing"
+            )
+        drill_token = marker.removeprefix(DRILL_MARKER_PREFIX)
+    if (
+        database_name != database.database_name
+        or database_user != database.username
+        or SYSTEM_IDENTIFIER_RE.fullmatch(system_identifier) is None
+        or not 1 <= database_oid <= 2**32 - 1
+        or (
+            require_drill_marker
+            and (
+                drill_token is None
+                or DRILL_TOKEN_RE.fullmatch(drill_token) is None
+            )
+        )
+    ):
+        raise DisasterRecoverySafetyError(
+            "database identity does not match the requested endpoint"
+        )
+    return _DatabaseIdentity(
+        database_name=database_name,
+        database_user=database_user,
+        system_identifier=system_identifier,
+        database_oid=database_oid,
+        extensions=_read_database_extensions(runner, database),
+        drill_token=drill_token,
+    )
+
+
+def _read_database_extensions(
+    runner: CommandRunner,
+    database: _DatabaseLocation,
+) -> tuple[_DatabaseExtension, ...]:
+    query = (
+        "SELECT e.extname, n.nspname, e.extversion, "
+        "pg_get_userbyid(e.extowner), "
+        "CASE WHEN EXISTS (SELECT 1 FROM pg_available_extension_versions a "
+        "WHERE a.name = e.extname AND a.version = e.extversion) "
+        "THEN 1 ELSE 0 END "
+        "FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace "
+        "ORDER BY e.extname"
+    )
+    result = runner(
+        (
+            "psql",
+            "-X",
+            "--no-align",
+            "--tuples-only",
+            "--field-separator=|",
+            "--set=ON_ERROR_STOP=1",
+            f"--command={query}",
+        ),
+        _postgres_environment(database),
+    )
+    if result.returncode != 0:
+        raise DisasterRecoveryCommandError(
+            "database extension identity command failed"
+        )
+    values: list[dict[str, str]] = []
+    for line in _command_output_lines(result):
+        parts = line.split("|")
+        if len(parts) != 5 or parts[4] != "1":
+            raise DisasterRecoverySafetyError(
+                "an installed database extension version is unavailable"
+            )
+        values.append(
+            {
+                "name": parts[0],
+                "schema": parts[1],
+                "version": parts[2],
+                "owner": parts[3],
+            }
+        )
+    return _parse_database_extensions(
+        values,
+        label="live database extensions",
+        error_type=DisasterRecoverySafetyError,
+    )
+
+
+def _parse_database_extensions(
+    value: object,
+    *,
+    label: str,
+    error_type: type[DisasterRecoveryError],
+) -> tuple[_DatabaseExtension, ...]:
+    if not isinstance(value, list):
+        raise error_type(f"{label} are invalid")
+    result: list[_DatabaseExtension] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {
+            "name",
+            "schema",
+            "version",
+            "owner",
+        }:
+            raise error_type(f"{label} are invalid")
+        name = item.get("name")
+        schema = item.get("schema")
+        version = item.get("version")
+        owner = item.get("owner")
+        if (
+            not isinstance(name, str)
+            or name not in REQUIRED_EXTENSION_SCHEMAS
+            or schema != REQUIRED_EXTENSION_SCHEMAS.get(name)
+            or not isinstance(version, str)
+            or EXTENSION_VERSION_RE.fullmatch(version) is None
+            or not isinstance(owner, str)
+            or re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.-]{0,127}",
+                owner,
+            )
+            is None
+        ):
+            raise error_type(f"{label} are invalid")
+        result.append(
+            _DatabaseExtension(
+                name=name,
+                schema=schema,
+                version=version,
+                owner=owner,
+            )
+        )
+    if (
+        [item.name for item in result] != sorted(REQUIRED_EXTENSION_SCHEMAS)
+        or len(result) != len(REQUIRED_EXTENSION_SCHEMAS)
+    ):
+        raise error_type(f"{label} must contain the exact reviewed baseline")
+    return tuple(result)
+
+
+def _parse_required_extension_manifest(
+    value: object,
+) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise DisasterRecoveryVerificationError(
+            "backup required extension baseline is invalid"
+        )
+    result: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {
+            "name",
+            "schema",
+            "version",
+        }:
+            raise DisasterRecoveryVerificationError(
+                "backup required extension baseline is invalid"
+            )
+        name = item.get("name")
+        schema = item.get("schema")
+        version = item.get("version")
+        if (
+            not isinstance(name, str)
+            or name not in REQUIRED_EXTENSION_SCHEMAS
+            or schema != REQUIRED_EXTENSION_SCHEMAS.get(name)
+            or not isinstance(version, str)
+            or EXTENSION_VERSION_RE.fullmatch(version) is None
+        ):
+            raise DisasterRecoveryVerificationError(
+                "backup required extension baseline is invalid"
+            )
+        result.append(
+            {"name": name, "schema": schema, "version": version}
+        )
+    if (
+        [item["name"] for item in result]
+        != sorted(REQUIRED_EXTENSION_SCHEMAS)
+        or len(result) != len(REQUIRED_EXTENSION_SCHEMAS)
+    ):
+        raise DisasterRecoveryVerificationError(
+            "backup required extension baseline is incomplete"
+        )
+    return result
+
+
+def _assert_database_identity(
+    runner: CommandRunner,
+    database: _DatabaseLocation,
+    expected: _DatabaseIdentity,
+) -> None:
+    actual = _read_database_identity(
+        runner,
+        database,
+        require_drill_marker=True,
+    )
+    if actual != expected:
+        raise DisasterRecoverySafetyError(
+            "drill database identity changed during restore"
+        )
+
+
+def _assert_evidence_database_identity(
+    evidence: Mapping[str, object],
+    actual: _DatabaseIdentity,
+) -> None:
+    if (
+        evidence.get("postgres_database_name") != actual.database_name
+        or evidence.get("postgres_database_user") != actual.database_user
+        or evidence.get("postgres_system_identifier")
+        != actual.system_identifier
+        or evidence.get("postgres_database_oid") != actual.database_oid
+        or evidence.get("postgres_extensions")
+        != [
+            item.manifest_value(include_owner=True)
+            for item in actual.extensions
+        ]
+    ):
+        raise DisasterRecoverySafetyError(
+            "quiescence evidence does not match the live PostgreSQL identity"
+        )
+
+
+def _drill_marker(identity: _DatabaseIdentity) -> str:
+    token = identity.drill_token
+    if token is None or DRILL_TOKEN_RE.fullmatch(token) is None:
+        raise DisasterRecoverySafetyError(
+            "drill database identity token is invalid"
+        )
+    return f"{DRILL_MARKER_PREFIX}{token}"
+
+
+def _command_output_lines(result: CommandResult) -> list[str]:
+    return [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def _quote_sql_literal(value: str) -> str:
+    if "\x00" in value:
+        raise DisasterRecoverySafetyError("SQL identity value is invalid")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _quote_sql_identifier(value: str) -> str:
+    if DATABASE_NAME_RE.fullmatch(value) is None and re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_.-]{0,127}",
+        value,
+    ) is None:
+        raise DisasterRecoverySafetyError("SQL identity name is invalid")
+    return '"' + value.replace('"', '""') + '"'
+
+
 def _validate_quiescence_evidence(
     path: Path,
     *,
     reference_source: Path,
     geoserver_source: Path,
+    database: _DatabaseLocation,
     now: datetime,
     max_age_seconds: int,
 ) -> tuple[dict[str, object], bytes, str]:
@@ -1347,6 +2368,27 @@ def _validate_quiescence_evidence(
     if evidence.get("postgres_running") is not True:
         raise DisasterRecoverySafetyError(
             "quiescence evidence must confirm PostgreSQL remained running"
+        )
+    system_identifier = evidence.get("postgres_system_identifier")
+    database_oid = evidence.get("postgres_database_oid")
+    _parse_database_extensions(
+        evidence.get("postgres_extensions"),
+        label="quiescence PostgreSQL extensions",
+        error_type=DisasterRecoverySafetyError,
+    )
+    if (
+        evidence.get("postgres_database_name") != database.database_name
+        or evidence.get("postgres_database_user") != database.username
+        or evidence.get("postgres_hostname") != database.hostname
+        or evidence.get("postgres_port") != database.port
+        or not isinstance(system_identifier, str)
+        or SYSTEM_IDENTIFIER_RE.fullmatch(system_identifier) is None
+        or isinstance(database_oid, bool)
+        or not isinstance(database_oid, int)
+        or not 1 <= database_oid <= 2**32 - 1
+    ):
+        raise DisasterRecoverySafetyError(
+            "quiescence evidence does not bind the PostgreSQL identity"
         )
     stopped = evidence.get("stopped_services")
     if (
@@ -1392,6 +2434,7 @@ def _verify_stored_quiescence_evidence(
     path: Path,
     *,
     consistency: Mapping[str, Any],
+    manifest_schema_version: int,
 ) -> None:
     """Verify the preserved exact evidence bytes against manifest semantics."""
 
@@ -1405,9 +2448,13 @@ def _verify_stored_quiescence_evidence(
         label="stored quiescence evidence",
     )
     stopped = evidence.get("stopped_services")
+    expected_evidence_schema = (
+        QUIESCENCE_EVIDENCE_SCHEMA_VERSION
+        if manifest_schema_version == SCHEMA_VERSION
+        else LEGACY_QUIESCENCE_EVIDENCE_SCHEMA_VERSION
+    )
     if (
-        evidence.get("schema_version")
-        != QUIESCENCE_EVIDENCE_SCHEMA_VERSION
+        evidence.get("schema_version") != expected_evidence_schema
         or evidence.get("postgres_running") is not True
         or not isinstance(stopped, list)
         or any(not isinstance(item, str) for item in stopped)
@@ -1425,6 +2472,27 @@ def _verify_stored_quiescence_evidence(
     ):
         raise DisasterRecoveryVerificationError(
             "stored quiescence evidence does not match its manifest"
+        )
+    if manifest_schema_version == SCHEMA_VERSION and any(
+        evidence.get(key) != consistency.get(key)
+        for key in (
+            "postgres_database_name",
+            "postgres_database_user",
+            "postgres_hostname",
+            "postgres_port",
+            "postgres_system_identifier",
+            "postgres_database_oid",
+            "postgres_extensions",
+        )
+    ):
+        raise DisasterRecoveryVerificationError(
+            "stored PostgreSQL quiescence identity does not match its manifest"
+        )
+    if manifest_schema_version == SCHEMA_VERSION:
+        _parse_database_extensions(
+            evidence.get("postgres_extensions"),
+            label="stored PostgreSQL extensions",
+            error_type=DisasterRecoveryVerificationError,
         )
     operator = evidence.get("operator")
     captured_raw = evidence.get("captured_at")
@@ -1766,10 +2834,11 @@ def _safe_extract_tar(
     root_gid: int,
 ) -> None:
     _assert_new_path(destination, label="tree restore destination")
-    os.mkdir(destination, 0o700)
+    _mkdir_new_directory(destination, 0o700)
+    root_descriptor = _open_absolute_directory_descriptor(destination)
     expected = {entry.path: entry for entry in entries}
     seen: set[str] = set()
-    directories: list[tuple[Path, _InventoryEntry]] = []
+    directories: list[_InventoryEntry] = []
     try:
         with tarfile.open(archive_path, mode="r:") as archive:
             for member in archive:
@@ -1780,106 +2849,161 @@ def _safe_extract_tar(
                     )
                 seen.add(name)
                 entry = expected[name]
-                target = destination.joinpath(*PurePosixPath(name).parts)
-                if destination not in target.parents:
-                    raise DisasterRecoveryVerificationError(
-                        "tar member escapes restore destination"
-                    )
+                parts = PurePosixPath(name).parts
+                parent_descriptor = _open_relative_parent_descriptor(
+                    root_descriptor,
+                    parts[:-1],
+                )
                 if entry.kind == "directory":
-                    if not member.isdir():
-                        raise DisasterRecoveryVerificationError(
-                            "tar directory does not match manifest"
+                    try:
+                        if not member.isdir():
+                            raise DisasterRecoveryVerificationError(
+                                "tar directory does not match manifest"
+                            )
+                        os.mkdir(
+                            parts[-1],
+                            entry.mode & 0o777,
+                            dir_fd=parent_descriptor,
                         )
-                    os.mkdir(target, entry.mode & 0o777)
-                    directories.append((target, entry))
+                        directories.append(entry)
+                    finally:
+                        os.close(parent_descriptor)
                     continue
-                if not member.isfile() or member.size != entry.size_bytes:
-                    raise DisasterRecoveryVerificationError(
-                        "tar file does not match manifest"
-                    )
-                parent = target.parent
-                if parent != destination and not parent.is_dir():
-                    raise DisasterRecoveryVerificationError(
-                        "tar member parent is missing"
-                    )
-                source = archive.extractfile(member)
-                if source is None:
-                    raise DisasterRecoveryVerificationError(
-                        "tar file cannot be read"
-                    )
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                if hasattr(os, "O_NOFOLLOW"):
-                    flags |= os.O_NOFOLLOW
-                descriptor = os.open(target, flags, entry.mode & 0o777)
-                digest = hashlib.sha256()
-                size = 0
                 try:
-                    while True:
-                        chunk = source.read(COPY_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        digest.update(chunk)
-                        size += len(chunk)
-                        view = memoryview(chunk)
-                        while view:
-                            written = os.write(descriptor, view)
-                            view = view[written:]
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                if size != entry.size_bytes or digest.hexdigest() != entry.sha256:
-                    raise DisasterRecoveryVerificationError(
-                        "extracted file does not match manifest"
+                    if not member.isfile() or member.size != entry.size_bytes:
+                        raise DisasterRecoveryVerificationError(
+                            "tar file does not match manifest"
+                        )
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise DisasterRecoveryVerificationError(
+                            "tar file cannot be read"
+                        )
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    if hasattr(os, "O_NOFOLLOW"):
+                        flags |= os.O_NOFOLLOW
+                    descriptor = os.open(
+                        parts[-1],
+                        flags,
+                        entry.mode & 0o777,
+                        dir_fd=parent_descriptor,
                     )
-                os.chown(
-                    target,
-                    entry.uid,
-                    entry.gid,
-                    follow_symlinks=False,
-                )
-                os.chmod(target, entry.mode & 0o777, follow_symlinks=False)
-                os.utime(
-                    target,
-                    ns=(entry.mtime_ns, entry.mtime_ns),
-                    follow_symlinks=False,
-                )
+                    digest = hashlib.sha256()
+                    size = 0
+                    try:
+                        while True:
+                            chunk = source.read(COPY_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                            size += len(chunk)
+                            view = memoryview(chunk)
+                            while view:
+                                written = os.write(descriptor, view)
+                                view = view[written:]
+                        if (
+                            size != entry.size_bytes
+                            or digest.hexdigest() != entry.sha256
+                        ):
+                            raise DisasterRecoveryVerificationError(
+                                "extracted file does not match manifest"
+                            )
+                        os.fchown(descriptor, entry.uid, entry.gid)
+                        os.fchmod(descriptor, entry.mode & 0o777)
+                        os.utime(
+                            descriptor,
+                            ns=(entry.mtime_ns, entry.mtime_ns),
+                        )
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                finally:
+                    os.close(parent_descriptor)
+    except DisasterRecoveryVerificationError:
+        os.close(root_descriptor)
+        raise
     except (tarfile.TarError, OSError) as error:
+        os.close(root_descriptor)
         raise DisasterRecoveryVerificationError(
             "tar archive cannot be extracted safely"
         ) from error
-    if seen != set(expected):
-        raise DisasterRecoveryVerificationError(
-            "tar archive is missing a manifest member"
-        )
-    for target, entry in reversed(directories):
-        os.chown(
-            target,
-            entry.uid,
-            entry.gid,
-            follow_symlinks=False,
-        )
-        os.chmod(target, entry.mode & 0o777, follow_symlinks=False)
+    try:
+        if seen != set(expected):
+            raise DisasterRecoveryVerificationError(
+                "tar archive is missing a manifest member"
+            )
+        for entry in reversed(directories):
+            descriptor = _open_relative_directory_descriptor(
+                root_descriptor,
+                PurePosixPath(entry.path).parts,
+            )
+            try:
+                os.fchown(descriptor, entry.uid, entry.gid)
+                os.fchmod(descriptor, entry.mode & 0o777)
+                os.utime(
+                    descriptor,
+                    ns=(entry.mtime_ns, entry.mtime_ns),
+                )
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.fchown(root_descriptor, root_uid, root_gid)
+        os.fchmod(root_descriptor, root_mode)
         os.utime(
-            target,
-            ns=(entry.mtime_ns, entry.mtime_ns),
-            follow_symlinks=False,
+            root_descriptor,
+            ns=(root_mtime_ns, root_mtime_ns),
         )
-    os.chown(
-        destination,
-        root_uid,
-        root_gid,
-        follow_symlinks=False,
-    )
-    os.chmod(destination, root_mode, follow_symlinks=False)
-    os.utime(
-        destination,
-        ns=(root_mtime_ns, root_mtime_ns),
-        follow_symlinks=False,
-    )
-    _fsync_directory(destination)
+        os.fsync(root_descriptor)
+    except OSError as error:
+        raise DisasterRecoveryVerificationError(
+            "restored ownership or metadata could not be applied safely"
+        ) from error
+    finally:
+        os.close(root_descriptor)
 
 
-def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
+def _open_relative_parent_descriptor(
+    root_descriptor: int,
+    parts: Sequence[str],
+) -> int:
+    return _open_relative_directory_descriptor(
+        root_descriptor,
+        tuple(parts),
+    )
+
+
+def _open_relative_directory_descriptor(
+    root_descriptor: int,
+    parts: Sequence[str],
+) -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in parts:
+            next_descriptor = os.open(
+                part,
+                flags,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as error:
+        os.close(descriptor)
+        raise DisasterRecoveryVerificationError(
+            "tar member parent cannot be opened beneath restore root"
+        ) from error
+    return descriptor
+
+
+def _parse_manifest_entries(
+    value: object,
+    *,
+    manifest_schema_version: int,
+) -> tuple[_InventoryEntry, ...]:
     if not isinstance(value, list):
         raise DisasterRecoveryVerificationError(
             "backup tree entries are invalid"
@@ -1896,11 +3020,17 @@ def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
         size = item.get("size_bytes")
         mode = item.get("mode")
         mtime_ns = item.get("mtime_ns")
+        ctime_ns = item.get("ctime_ns", mtime_ns)
+        links = item.get("links", 1)
         uid = item.get("uid")
         gid = item.get("gid")
         sha256 = item.get("sha256")
         if (
-            not isinstance(path, str)
+            (
+                manifest_schema_version == SCHEMA_VERSION
+                and ("ctime_ns" not in item or "links" not in item)
+            )
+            or not isinstance(path, str)
             or _validate_relative_path(path) in seen
             or kind not in {"directory", "file"}
             or isinstance(size, bool)
@@ -1912,6 +3042,12 @@ def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
             or isinstance(mtime_ns, bool)
             or not isinstance(mtime_ns, int)
             or mtime_ns < 0
+            or isinstance(ctime_ns, bool)
+            or not isinstance(ctime_ns, int)
+            or ctime_ns < 0
+            or isinstance(links, bool)
+            or not isinstance(links, int)
+            or links < 1
             or not _valid_ownership_id(uid)
             or not _valid_ownership_id(gid)
         ):
@@ -1938,6 +3074,8 @@ def _parse_manifest_entries(value: object) -> tuple[_InventoryEntry, ...]:
                 sha256=sha256,
                 mode=mode,
                 mtime_ns=mtime_ns,
+                ctime_ns=ctime_ns,
+                links=links,
                 uid=uid,
                 gid=gid,
                 device=0,
@@ -1952,9 +3090,28 @@ def _validate_tree_statistics(
     entries: tuple[_InventoryEntry, ...],
     *,
     expected_exclusions: list[str],
+    manifest_schema_version: int,
 ) -> None:
     _manifest_mode(description, "root_mode")
     _manifest_nonnegative_integer(description, "root_mtime_ns")
+    if manifest_schema_version == SCHEMA_VERSION and (
+        "root_ctime_ns" not in description
+        or "root_links" not in description
+    ):
+        raise DisasterRecoveryVerificationError(
+            "backup manifest root identity is incomplete"
+        )
+    if "root_ctime_ns" in description:
+        _manifest_nonnegative_integer(description, "root_ctime_ns")
+    if "root_links" in description:
+        root_links = _manifest_nonnegative_integer(
+            description,
+            "root_links",
+        )
+        if root_links < 1:
+            raise DisasterRecoveryVerificationError(
+                "backup manifest root link count is invalid"
+            )
     _manifest_owner_id(description, "root_uid")
     _manifest_owner_id(description, "root_gid")
     expected_files = sum(item.kind == "file" for item in entries)
@@ -1976,7 +3133,8 @@ def _validate_tree_statistics(
 
 
 def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
-    if manifest.get("schema_version") != SCHEMA_VERSION:
+    manifest_schema_version = manifest.get("schema_version")
+    if manifest_schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise DisasterRecoveryVerificationError(
             "backup manifest schema is unsupported"
         )
@@ -2049,22 +3207,84 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         raise DisasterRecoveryVerificationError(
             "backup consistency evidence declaration is invalid"
         )
+    if manifest_schema_version == SCHEMA_VERSION:
+        system_identifier = consistency.get("postgres_system_identifier")
+        database_oid = consistency.get("postgres_database_oid")
+        if (
+            not isinstance(
+                consistency.get("postgres_database_name"),
+                str,
+            )
+            or not isinstance(
+                consistency.get("postgres_database_user"),
+                str,
+            )
+            or not isinstance(consistency.get("postgres_hostname"), str)
+            or isinstance(consistency.get("postgres_port"), bool)
+            or not isinstance(consistency.get("postgres_port"), int)
+            or not isinstance(system_identifier, str)
+            or SYSTEM_IDENTIFIER_RE.fullmatch(system_identifier) is None
+            or isinstance(database_oid, bool)
+            or not isinstance(database_oid, int)
+            or not 1 <= database_oid <= 2**32 - 1
+        ):
+            raise DisasterRecoveryVerificationError(
+                "backup PostgreSQL consistency identity is invalid"
+            )
+        source_extensions = _parse_database_extensions(
+            consistency.get("postgres_extensions"),
+            label="backup PostgreSQL extensions",
+            error_type=DisasterRecoveryVerificationError,
+        )
+    else:
+        source_extensions = ()
     database = _manifest_mapping(manifest, "database")
+    database_name = _database_name_from_manifest(database)
+    if (
+        manifest_schema_version == SCHEMA_VERSION
+        and consistency.get("postgres_database_name") != database_name
+    ):
+        raise DisasterRecoveryVerificationError(
+            "backup PostgreSQL identity does not match its dump declaration"
+        )
+    if manifest_schema_version == SCHEMA_VERSION:
+        required_extensions = _parse_required_extension_manifest(
+            database.get("required_extensions")
+        )
+        if required_extensions != [
+            item.manifest_value(include_owner=False)
+            for item in source_extensions
+        ]:
+            raise DisasterRecoveryVerificationError(
+                "backup extension baseline does not match its source identity"
+            )
+    legacy_pg_dump_contract = [
+        "--format=custom",
+        "--serializable-deferrable",
+        "--no-owner",
+        "--no-privileges",
+    ]
+    current_pg_dump_contract = [
+        *legacy_pg_dump_contract,
+        *[
+            f"--exclude-extension={name}"
+            for name in PG_DUMP_EXTENSION_EXCLUSIONS
+        ],
+    ]
+    expected_pg_dump_contract = (
+        current_pg_dump_contract
+        if manifest_schema_version == SCHEMA_VERSION
+        else legacy_pg_dump_contract
+    )
     if (
         database.get("format") != "postgresql-custom"
-        or database.get("pg_dump_contract")
-        != [
-            "--format=custom",
-            "--serializable-deferrable",
-            "--no-owner",
-            "--no-privileges",
-        ]
+        or database.get("pg_dump_contract") != expected_pg_dump_contract
     ):
         raise DisasterRecoveryVerificationError(
             "backup PostgreSQL contract is invalid"
         )
     restore_contract = _manifest_mapping(manifest, "restore_contract")
-    if restore_contract != {
+    legacy_restore_contract = {
         "directory_prefix": RESTORE_PREFIX,
         "database_prefix": "app_drill_",
         "overwrite_allowed": False,
@@ -2072,7 +3292,35 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
             "compensation-only-drop-owned-exact-drill-target"
         ),
         "database_drop_allowed": False,
-    }:
+    }
+    current_restore_contract = {
+        **legacy_restore_contract,
+        "stable_identity_required": [
+            "system_identifier",
+            "database_oid",
+            "drill_token",
+        ],
+        "connection_limit": 1,
+        "connection_exclusivity": {
+            "database_connection_limit": 1,
+            "role_connection_limit": 1,
+            "role_must_be_non_superuser": True,
+            "required_role_membership": "pg_monitor",
+            "plpgsql_owner_must_differ": True,
+        },
+        "extensions": {
+            "preinstalled_by_administrator": True,
+            "exact_versions_required": True,
+            "owners_must_differ_from_restore_role": True,
+            "restore_comments": False,
+        },
+    }
+    expected_restore_contract = (
+        current_restore_contract
+        if manifest_schema_version == SCHEMA_VERSION
+        else legacy_restore_contract
+    )
+    if restore_contract != expected_restore_contract:
         raise DisasterRecoveryVerificationError(
             "backup restore contract is invalid"
         )
@@ -2231,9 +3479,79 @@ def _assert_backup_directory_contents(path: Path) -> None:
         )
 
 
-def _publish_directory_noreplace(source: Path, destination: Path) -> None:
+def _publish_directory_noreplace(source: Path, destination: Path) -> bool:
     """Atomically publish a directory without POSIX rename replacement."""
 
+    if source.parent != destination.parent:
+        raise DisasterRecoverySafetyError(
+            "atomic publication requires one exact destination parent"
+        )
+    parent_descriptor = _open_absolute_directory_descriptor(source.parent)
+    published = False
+    durability_verified = False
+    try:
+        try:
+            source_metadata = os.stat(
+                source.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise DisasterRecoverySafetyError(
+                "publication source cannot be inspected safely"
+            ) from error
+        try:
+            os.stat(
+                destination.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise DisasterRecoverySafetyError(
+                "publication destination cannot be inspected safely"
+            ) from error
+        else:
+            raise DisasterRecoverySafetyError(
+                "destination appeared before atomic publication"
+            )
+        if not stat.S_ISDIR(source_metadata.st_mode):
+            raise DisasterRecoverySafetyError(
+                "publication source must remain a directory"
+            )
+        _rename_directory_noreplace(
+            parent_descriptor,
+            source.name,
+            destination.name,
+        )
+        published = True
+        try:
+            durability_verified = _fsync_descriptor_with_retries(
+                parent_descriptor
+            )
+        except BaseException:
+            # Atomic publication is already committed. Treat even an
+            # interruption during the durability probe as an unverified but
+            # completed publication.
+            durability_verified = False
+    finally:
+        try:
+            os.close(parent_descriptor)
+        except OSError:
+            # Once renameat2 succeeded, a close error cannot turn the
+            # published directory back into a failure: restore would otherwise
+            # compensate its database while leaving a visible final tree.
+            if published:
+                durability_verified = False
+    return durability_verified
+
+
+def _rename_directory_noreplace(
+    parent_descriptor: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = libc.renameat2
@@ -2249,13 +3567,12 @@ def _publish_directory_noreplace(source: Path, destination: Path) -> None:
         ctypes.c_uint,
     )
     renameat2.restype = ctypes.c_int
-    at_fdcwd = -100
     rename_noreplace = 1
     result = renameat2(
-        at_fdcwd,
-        os.fsencode(source),
-        at_fdcwd,
-        os.fsencode(destination),
+        parent_descriptor,
+        os.fsencode(source_name),
+        parent_descriptor,
+        os.fsencode(destination_name),
         rename_noreplace,
     )
     if result == 0:
@@ -2272,6 +3589,32 @@ def _publish_directory_noreplace(source: Path, destination: Path) -> None:
     raise DisasterRecoverySafetyError(
         "backup or restore directory could not be published atomically"
     ) from OSError(error_number, os.strerror(error_number))
+
+
+def _open_absolute_directory_descriptor(path: Path) -> int:
+    absolute = _absolute_path(path, label="directory")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(Path(absolute.anchor), flags)
+        for component in absolute.parts[1:]:
+            next_descriptor = os.open(
+                component,
+                flags,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as error:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise DisasterRecoverySafetyError(
+            "directory path cannot be opened without following symlinks"
+        ) from error
+    return descriptor
 
 
 def _new_named_destination(path: Path, *, prefix: str) -> Path:
@@ -2347,6 +3690,32 @@ def _assert_new_path(path: Path, *, label: str) -> None:
     raise DisasterRecoverySafetyError(f"{label} must not already exist")
 
 
+def _mkdir_new_directory(path: Path, mode: int) -> None:
+    parent_descriptor = _open_absolute_directory_descriptor(path.parent)
+    try:
+        os.mkdir(path.name, mode, dir_fd=parent_descriptor)
+        metadata = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise DisasterRecoverySafetyError(
+                "new staging path is not a directory"
+            )
+        os.fsync(parent_descriptor)
+    except FileExistsError as error:
+        raise DisasterRecoverySafetyError(
+            "new staging path appeared before creation"
+        ) from error
+    except OSError as error:
+        raise DisasterRecoverySafetyError(
+            "new staging directory cannot be created safely"
+        ) from error
+    finally:
+        os.close(parent_descriptor)
+
+
 def _reject_symlink_components(path: Path) -> None:
     current = Path(path.anchor)
     for part in path.parts[1:]:
@@ -2408,20 +3777,21 @@ def _validate_relative_path(value: str) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    descriptor = os.open(path, flags)
+    descriptor = _open_absolute_directory_descriptor(path)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
 
-def _fsync_directory_with_retries(path: Path, *, attempts: int = 3) -> bool:
+def _fsync_descriptor_with_retries(
+    descriptor: int,
+    *,
+    attempts: int = 3,
+) -> bool:
     for _attempt in range(attempts):
         try:
-            _fsync_directory(path)
+            os.fsync(descriptor)
         except OSError:
             continue
         return True

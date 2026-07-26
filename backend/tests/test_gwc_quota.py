@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 from shutil import _ntuple_diskusage
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,10 +100,20 @@ def test_capacity_report_exposes_quota_reserve_and_both_margins(
     assert report.required_free_reserve_bytes == 5 * GIB
     assert report.current_cache_bytes == 0
     assert report.remaining_quota_growth_bytes == 20 * GIB
-    assert report.required_free_now_bytes == 25 * GIB
-    assert report.capacity_margin_bytes == 75 * GIB
+    assert report.physical_growth_safety_basis_points == 12_500
+    assert report.required_physical_growth_bytes == 25 * GIB
+    assert report.required_free_now_bytes == 30 * GIB
+    assert report.capacity_margin_bytes == (
+        100 * GIB
+        - report.current_cache_allocated_bytes
+        - 25 * GIB
+        - 5 * GIB
+    )
     assert report.current_free_margin_bytes == 70 * GIB
-    assert report.growth_reserve_margin_bytes == 50 * GIB
+    assert report.growth_reserve_margin_bytes == 45 * GIB
+    assert report.current_cache_inodes == 1
+    assert report.required_future_inodes > 5_000_000
+    assert report.inode_reserve_margin >= 0
     assert report.safe_to_apply is True
 
 
@@ -204,9 +216,10 @@ def test_empty_cache_with_only_six_gib_free_cannot_reserve_quota_growth(
 
     assert report.current_cache_bytes == 0
     assert report.remaining_quota_growth_bytes == 20 * GIB
-    assert report.required_free_now_bytes == 25 * GIB
+    assert report.required_physical_growth_bytes == 25 * GIB
+    assert report.required_free_now_bytes == 30 * GIB
     assert report.current_free_margin_bytes == 1 * GIB
-    assert report.growth_reserve_margin_bytes == -19 * GIB
+    assert report.growth_reserve_margin_bytes == -24 * GIB
     assert report.safe_to_apply is False
     with pytest.raises(GeoWebCacheQuotaSafetyError):
         quota_status(
@@ -238,6 +251,7 @@ def test_capacity_inventory_measures_files_and_rejects_nested_links(
     )
 
     assert report.current_cache_bytes == 4096
+    assert report.current_cache_allocated_bytes >= 4096
     assert report.current_cache_files == 1
     assert report.current_cache_directories == 1
 
@@ -299,3 +313,98 @@ def test_capacity_report_rejects_relative_or_symlink_cache_paths(
             quota_gib=20,
             min_free_gib=5,
         )
+
+
+def test_capacity_inventory_rejects_legacy_mixed_volume_configuration(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    (cache / "geowebcache.xml").write_text("<legacy/>", encoding="utf-8")
+
+    with pytest.raises(
+        GeoWebCacheQuotaSafetyError,
+        match="legacy configuration",
+    ):
+        cache_capacity_report(
+            cache,
+            quota_gib=20,
+            min_free_gib=5,
+        )
+
+
+def test_capacity_fails_closed_without_required_inode_reserve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.shutil.disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+    )
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.os.fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_bsize=4096,
+            f_frsize=4096,
+            f_files=10_000,
+            f_favail=9_000,
+        ),
+    )
+
+    report = cache_capacity_report(
+        cache,
+        quota_gib=20,
+        min_free_gib=5,
+    )
+
+    assert report.growth_reserve_margin_bytes > 0
+    assert report.inode_reserve_margin < 0
+    assert report.safe_to_apply is False
+
+
+def test_capacity_inventory_rejects_cross_device_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    tile = cache / "tile.png"
+    tile.write_bytes(b"tile")
+    real_scandir = quota_module.os.scandir
+
+    class CrossDeviceEntry:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self._entry = entry
+            self.name = entry.name
+
+        def stat(self, *, follow_symlinks: bool = True):
+            metadata = self._entry.stat(follow_symlinks=follow_symlinks)
+            values = list(metadata)
+            values[2] = metadata.st_dev + 1
+            return os.stat_result(values)
+
+    class CrossDeviceIterator:
+        def __init__(self, value: int) -> None:
+            self._delegate = real_scandir(value)
+
+        def __enter__(self):
+            return iter(
+                CrossDeviceEntry(entry) for entry in self._delegate
+            )
+
+        def __exit__(self, *args: object) -> None:
+            self._delegate.close()
+
+    monkeypatch.setattr(
+        quota_module.os,
+        "scandir",
+        lambda descriptor: CrossDeviceIterator(descriptor),
+    )
+
+    with pytest.raises(
+        GeoWebCacheQuotaSafetyError,
+        match="filesystem boundaries",
+    ):
+        quota_module._cache_inventory(cache)
