@@ -1788,6 +1788,8 @@ def test_persistence_links_content_addressed_artifacts_idempotently(
     db.flush()
     now = datetime(2026, 7, 23, 9, tzinfo=timezone.utc)
     run = ReferenceSyncRun(
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
         source_id=source.id,
         source_definition_json={"source_key": source.source_key},
         source_definition_sha256=source.definition_sha256,
