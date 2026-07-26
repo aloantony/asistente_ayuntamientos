@@ -339,6 +339,11 @@ def _resolve_delivery_context(
             delivery=local_delivery,
         )
 
+    if not settings.reference_remote_proxy_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Local reference layer is unavailable",
+        )
     if not layer.remote_name:
         raise HTTPException(status_code=409, detail="Layer cannot be rendered")
     service = layer.service
