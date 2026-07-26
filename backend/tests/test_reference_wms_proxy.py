@@ -394,11 +394,14 @@ def test_remote_proxy_disabled_blocks_all_routes_before_cache_or_network(
     )
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("disabled remote proxy must not touch cache or network")
+        raise AssertionError(
+            "disabled remote proxy must not enter the remote delivery path"
+        )
 
     monkeypatch.setattr(wms_routes, "get_cached_wms_response", forbidden)
     monkeypatch.setattr(wms_routes, "store_cached_wms_response", forbidden)
     monkeypatch.setattr(wms_routes, "fetch_wms_response", forbidden)
+    monkeypatch.setattr(wms_routes, "resolve_attested_wms_delivery", forbidden)
     prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
     responses = (
         client.get(
@@ -2198,6 +2201,11 @@ def test_tile_route_prefers_active_local_delivery_without_wms_evidence(
         lambda db, layer, style, operation: _local_geoserver_selection(layer),
     )
     monkeypatch.setattr(
+        wms_routes.settings,
+        "reference_remote_proxy_enabled",
+        False,
+    )
+    monkeypatch.setattr(
         wms_routes,
         "LocalGeoServerRenderer",
         FakeLocalGeoServerRenderer,
@@ -2246,9 +2254,19 @@ def test_local_legend_and_identify_keep_authenticated_public_contract(
         lambda db, layer, style, operation: _local_geoserver_selection(layer),
     )
     monkeypatch.setattr(
+        wms_routes.settings,
+        "reference_remote_proxy_enabled",
+        False,
+    )
+    monkeypatch.setattr(
         wms_routes,
         "LocalGeoServerRenderer",
         FakeLocalGeoServerRenderer,
+    )
+    monkeypatch.setattr(
+        wms_routes,
+        "fetch_wms_response",
+        lambda request: pytest.fail("the upstream WMS must not be contacted"),
     )
     prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
 

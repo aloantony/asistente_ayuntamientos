@@ -1530,6 +1530,17 @@ button:disabled {
   background: color-mix(in srgb, #c0603a 10%, var(--surface));
 }
 
+.siur-layer-blocker-code {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+}
+
+.siur-layer-blocker-code code {
+  overflow-wrap: anywhere;
+  font-size: 0.92em;
+}
+
 .siur-layer-warning {
   color: var(--text-secondary);
   background: color-mix(in srgb, #d9a520 12%, var(--surface));

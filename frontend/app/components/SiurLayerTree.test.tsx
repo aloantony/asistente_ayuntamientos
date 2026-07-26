@@ -217,4 +217,81 @@ describe("SiurLayerTree", () => {
     expect(screen.getByText(/se mantiene la versión local anterior/i)).toBeTruthy();
     expect(screen.getByText(/copia local todavía no está lista/i)).toBeTruthy();
   });
+
+  it("keeps incomplete style delivery disabled and exposes its technical reason", () => {
+    const catalog = catalogFixture();
+    catalog.layers[1] = {
+      ...catalog.layers[1],
+      delivery_available: false,
+      delivery_blocker: "style_unsupported",
+    };
+    const tree = buildReferenceLayerTree(catalog.layers);
+
+    render(
+      <SiurLayerTree
+        catalog={catalog}
+        error=""
+        isLoading={false}
+        onControlChange={vi.fn()}
+        onMove={vi.fn()}
+        preferences={{
+          layers: {
+            "2": { visible: true, opacity: 1, styleId: 12 },
+            "3": { visible: false, opacity: 1, styleId: null },
+          },
+          stackOrder: [2, 3],
+        }}
+        structuralWarnings={[]}
+        tree={tree.roots}
+      />,
+    );
+
+    const checkbox = screen.getByRole("checkbox", {
+      name: "Clasificación del suelo",
+    });
+    expect(checkbox.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("style_unsupported")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Ver leyenda" }),
+    ).toBeNull();
+  });
+
+  it("blocks a nominally available layer when one current style is missing", () => {
+    const catalog = catalogFixture();
+    catalog.styles.push({
+      ...catalog.styles[0],
+      id: 13,
+      is_default: false,
+      sort_order: 1,
+      title: "Trama alternativa",
+    });
+    const tree = buildReferenceLayerTree(catalog.layers);
+
+    render(
+      <SiurLayerTree
+        catalog={catalog}
+        error=""
+        isLoading={false}
+        onControlChange={vi.fn()}
+        onMove={vi.fn()}
+        preferences={{
+          layers: {
+            "2": { visible: true, opacity: 1, styleId: 12 },
+            "3": { visible: false, opacity: 1, styleId: null },
+          },
+          stackOrder: [2, 3],
+        }}
+        structuralWarnings={[]}
+        tree={tree.roots}
+      />,
+    );
+
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Clasificación del suelo",
+      }).hasAttribute("disabled"),
+    ).toBe(true);
+    expect(screen.getByText("style_coverage_incomplete")).toBeTruthy();
+    expect(screen.queryByRole("slider")).toBeNull();
+  });
 });

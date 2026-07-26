@@ -28,9 +28,22 @@ const BLOCKER_LABELS: Record<string, string> = {
   attestation_missing: "Falta la evidencia técnica vigente.",
   bounds_invalid: "Los límites geográficos no son válidos.",
   catalog_stale: "La capa no pertenece a la instantánea actual.",
+  catalog_service_missing: "La capa no tiene un servicio vigente en el catálogo.",
+  composition_dependency_blocked:
+    "La composición depende de una capa que todavía está bloqueada.",
+  composition_dependency_cycle:
+    "La composición contiene un ciclo entre capas dependientes.",
+  composition_dependency_invalid:
+    "La composición no declara dependencias locales válidas.",
+  composition_dependency_missing:
+    "Falta una capa requerida por esta composición.",
+  composition_not_materialized:
+    "La composición local todavía no se ha materializado.",
   disabled: "La capa está desactivada.",
   layer_missing: "La capa no figura en GetCapabilities.",
   license_not_approved: "La licencia todavía no tiene aprobación humana.",
+  local_delivery_not_active:
+    "No hay una versión local validada y activa para servir esta capa.",
   local_disabled: "La réplica local de esta capa está desactivada.",
   local_identify_unavailable:
     "La versión local no permite consultar elementos en este punto.",
@@ -40,9 +53,25 @@ const BLOCKER_LABELS: Record<string, string> = {
     "La definición de la fuente ha cambiado y requiere una nueva sincronización.",
   local_version_invalid: "La versión local activa no ha superado la validación.",
   missing: "La capa ya no está presente en la fuente.",
+  migration_backfill_required:
+    "Esta capa requiere recalcular su estrategia después de la migración.",
   not_deliverable: "Este tipo de entrega aún no tiene renderizador.",
+  remote_proxy_disabled:
+    "No hay copia local activa y el proxy remoto está desactivado.",
   service_mismatch: "El servicio no coincide con la evidencia verificada.",
-  style_unsupported: "El estilo predeterminado no está verificado.",
+  source_candidate_missing:
+    "No se ha encontrado una fuente segura para replicar esta capa.",
+  source_discovery_error:
+    "No se pudo determinar una fuente local segura para esta capa.",
+  source_target_unsupported:
+    "La fuente encontrada aún no tiene una estrategia local compatible.",
+  strategy_delivery_kind_mismatch:
+    "La versión activa no coincide con la estrategia local aprobada.",
+  strategy_missing: "Falta clasificar la estrategia local de esta capa.",
+  style_coverage_incomplete:
+    "La copia local no cubre todos los estilos vigentes de la capa.",
+  style_unsupported:
+    "La copia local no incluye uno de los estilos vigentes de la capa.",
   web_mercator_unsupported: "La capa no declara EPSG:3857 literal.",
 };
 
@@ -188,7 +217,10 @@ export function SiurLayerTree({
             ) : null}
             {blockerText ? (
               <p className="siur-layer-blocker" role="status">
-                {blockerText}
+                <span>{blockerText}</span>
+                <small className="siur-layer-blocker-code">
+                  Motivo técnico: <code>{blocker}</code>
+                </small>
               </p>
             ) : null}
             {control && !blocker ? (
