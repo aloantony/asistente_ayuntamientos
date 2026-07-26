@@ -5,6 +5,7 @@ import {
   buildReferenceTileUrl,
   buildSiurMapLayers,
   parseReferenceLayerBounds,
+  referenceLayerBlocker,
   reconcileSiurPreferences,
   selectLocalBaseMapLayer,
   selectTopIdentifyLayer,
@@ -252,7 +253,7 @@ describe("reference catalog integrity and hierarchy", () => {
 });
 
 describe("approved SIUR delivery descriptors", () => {
-  it("falls back to the first allowed numeric style and builds only internal paths", () => {
+  it("normalizes the style preference but rejects a backend-declared incomplete delivery", () => {
     const group = makeLayer({
       id: 1,
       node_type: "group",
@@ -291,6 +292,31 @@ describe("approved SIUR delivery descriptors", () => {
 
     expect(preferences.layers["2"].styleId).toBe(12);
     expect(preferences.stackOrder).toEqual([2]);
+    expect(referenceLayerBlocker(catalog, layer)).toBe("style_unsupported");
+    expect(descriptors).toEqual([]);
+  });
+
+  it("builds only internal paths for complete active local style coverage", () => {
+    const layer = makeLayer({
+      id: 2,
+      service_id: 8,
+      available_style_ids: [12],
+      effective_visible: true,
+      effective_opacity: 0.65,
+    });
+    const catalog = makeCatalog(
+      [layer],
+      [makeStyle({ id: 12, is_default: true, title: "Verificado" })],
+    );
+    const preferences = reconcileSiurPreferences(catalog, {
+      layers: {
+        "2": { visible: true, opacity: 0.4, styleId: 12 },
+      },
+      stackOrder: [2],
+    });
+
+    const descriptors = buildSiurMapLayers(catalog, preferences);
+
     expect(descriptors).toHaveLength(1);
     expect(descriptors[0].tileUrl).toBe(
       "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12",
@@ -298,6 +324,49 @@ describe("approved SIUR delivery descriptors", () => {
     expect(descriptors[0].attribution).toContain("&lt;script&gt;");
     expect(descriptors[0].attribution).not.toContain("<script>");
     expect(() => buildReferenceTileUrl(7, 2, -1)).toThrow(TypeError);
+  });
+
+  it("rejects locally active layers with only partial style coverage", () => {
+    const layer = makeLayer({
+      id: 2,
+      service_id: 8,
+      available_style_ids: [11],
+      delivery_available: true,
+      delivery_blocker: "style_unsupported",
+    });
+    const catalog = makeCatalog(
+      [layer],
+      [
+        makeStyle({ id: 11, is_default: true, title: "Principal" }),
+        makeStyle({ id: 12, sort_order: 2, title: "Alternativo" }),
+      ],
+    );
+    const preferences = reconcileSiurPreferences(catalog);
+
+    expect(referenceLayerBlocker(catalog, layer)).toBe(
+      "style_coverage_incomplete",
+    );
+    expect(buildSiurMapLayers(catalog, preferences)).toEqual([]);
+  });
+
+  it("does not turn an attested remote proxy into a map descriptor", () => {
+    const layer = makeLayer({
+      id: 2,
+      service_id: 8,
+      delivery_available: true,
+      mirror_status: "legacy",
+      active_version_id: null,
+      active_generation: null,
+    });
+    const catalog = makeCatalog([layer]);
+    const preferences = reconcileSiurPreferences(catalog);
+    const descriptors = buildSiurMapLayers(catalog, preferences);
+
+    expect(referenceLayerBlocker(catalog, layer)).toBe(
+      "local_delivery_not_active",
+    );
+    expect(descriptors).toEqual([]);
+    expect(selectTopIdentifyLayer(descriptors, 8, 42, -4)).toBeNull();
   });
 
   it("uses only the top visible queryable layer within zoom and bounds", () => {

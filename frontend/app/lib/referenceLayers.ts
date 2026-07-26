@@ -2,6 +2,11 @@ import { adminRequest, API_BASE_URL } from "./api";
 
 const SIUR_PROVIDER_KEY = "siur";
 const TILE_SIZE = 256;
+const LOCALLY_SERVING_MIRROR_STATUSES = new Set([
+  "active",
+  "serving_previous",
+  "syncing",
+]);
 
 export type ReferenceCatalogSnapshot = {
   id: number;
@@ -255,6 +260,7 @@ export function validateReferenceCatalog(
   }
 
   for (const layer of catalog.layers) {
+    const availableStyleIds = new Set<number>();
     if (
       (layer.node_type === "group" && layer.mirror_status !== "not_applicable") ||
       (layer.node_type === "layer" && layer.mirror_status === "not_applicable")
@@ -282,11 +288,12 @@ export function validateReferenceCatalog(
       );
     }
     for (const styleId of layer.available_style_ids) {
-      if (!styleIds.has(styleId)) {
+      if (availableStyleIds.has(styleId) || !styleIds.has(styleId)) {
         throw new ReferenceCatalogIntegrityError(
-          "Una capa SIUR anuncia un estilo interno ausente.",
+          "Una capa SIUR anuncia un estilo interno ausente o duplicado.",
         );
       }
+      availableStyleIds.add(styleId);
     }
   }
   const layersById = new Map(catalog.layers.map((layer) => [layer.id, layer]));
@@ -548,14 +555,28 @@ export function referenceLayerBlocker(
   if (layer.status !== "active" && layer.status !== "degraded") {
     return layer.status;
   }
-  if (
-    !layer.delivery_available &&
-    !(
-      layer.delivery_blocker === "style_unsupported" &&
-      availableStylesForLayer(catalog, layer).length > 0
-    )
-  ) {
+  if (!layer.delivery_available) {
     return layer.delivery_blocker ?? "not_deliverable";
+  }
+  if (
+    layer.active_version_id === null ||
+    layer.active_generation === null ||
+    !LOCALLY_SERVING_MIRROR_STATUSES.has(layer.mirror_status)
+  ) {
+    return "local_delivery_not_active";
+  }
+  const availableStyleIds = new Set(layer.available_style_ids);
+  const hasIncompleteStyleCoverage = catalog.styles.some(
+    (style) =>
+      style.layer_id === layer.id &&
+      (style.status === "active" || style.status === "degraded") &&
+      !availableStyleIds.has(style.id),
+  );
+  if (hasIncompleteStyleCoverage) {
+    return "style_coverage_incomplete";
+  }
+  if (layer.delivery_blocker) {
+    return layer.delivery_blocker;
   }
   return null;
 }
