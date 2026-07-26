@@ -114,6 +114,10 @@ from app.reference_layers.style_parity import (
     persist_style_parity_plan,
     require_complete_style_parity,
 )
+from app.reference_layers.style_update_watcher import (
+    OfficialStyleReviewRequiredError,
+    require_official_style_promotion_allowed,
+)
 from app.reference_layers.tile_seed import (
     TileContentSample,
     TileSeedError,
@@ -513,6 +517,10 @@ class MirrorRunProcessor:
                         self.session_factory,
                         context,
                     )
+                    revalidate_style_promotion_gate(
+                        self.session_factory,
+                        context,
+                    )
                     publication_stats = (
                         self.publisher(context, publication, supervisor) or {}
                     )
@@ -695,6 +703,10 @@ class MirrorRunProcessor:
                     self.session_factory,
                     context,
                     acquired=acquired,
+                )
+                revalidate_style_promotion_gate(
+                    self.session_factory,
+                    context,
                 )
                 publication_stats = (
                     self.publisher(
@@ -1151,6 +1163,27 @@ def revalidate_run_authorization(
         )
 
 
+def revalidate_style_promotion_gate(
+    session_factory: SessionFactory,
+    context: RunContext,
+) -> None:
+    """Recheck the independent style watcher immediately before publish."""
+
+    with session_factory() as db:
+        source = db.get(ReferenceLayerSource, context.source.id)
+        if source is None or (
+            source.provider_key != context.source.provider_key
+            or source.layer_id != context.source.layer_id
+            or source.definition_sha256
+            != context.source.definition_sha256
+        ):
+            raise MirrorOrchestrationError(
+                "reference source changed before style promotion gate",
+                code="source_definition_changed",
+            )
+        require_official_style_promotion_allowed(db, source=source)
+
+
 def persist_run_acquisition(
     session_factory: SessionFactory,
     lease: SyncRunLease,
@@ -1358,6 +1391,13 @@ def classify_worker_failure(error: BaseException) -> ClassifiedFailure:
         return ClassifiedFailure(
             error.code[:64],
             _safe_summary(str(error)),
+            False,
+            "rejected",
+        )
+    if isinstance(error, OfficialStyleReviewRequiredError):
+        return ClassifiedFailure(
+            error.code,
+            "The live official style changed and awaits explicit review.",
             False,
             "rejected",
         )

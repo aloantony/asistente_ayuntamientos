@@ -1630,6 +1630,495 @@ class ReferenceMirrorAuthorizationReview(Base):
     )
 
 
+class ReferenceStyleObservedVersion(Base):
+    """Immutable CAS candidate from one exact live official-style URL."""
+
+    __tablename__ = "reference_style_observed_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> '' and btrim(profile) <> ''",
+            name="ck_reference_style_observed_identity",
+        ),
+        CheckConstraint(
+            "source_definition_sha256 ~ '^[0-9a-f]{64}$' and "
+            "raw_sha256 ~ '^[0-9a-f]{64}$' and "
+            "semantic_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_style_observed_hashes",
+        ),
+        CheckConstraint(
+            "source_url like 'https://%' and final_url = source_url",
+            name="ck_reference_style_observed_url",
+        ),
+        CheckConstraint(
+            "size_bytes between 1 and 65536",
+            name="ck_reference_style_observed_size",
+        ),
+        CheckConstraint(
+            "storage_backend = 'filesystem' and "
+            "storage_key ~ '^blobs/sha256/[0-9a-f]{2}/[0-9a-f]{64}$'",
+            name="ck_reference_style_observed_storage",
+        ),
+        CheckConstraint(
+            "length(profile) <= 128 and length(source_url) <= 8192 and "
+            "length(final_url) <= 8192 and length(storage_key) <= 256 and "
+            "json_typeof(semantic_summary_json) = 'object' and "
+            "octet_length(semantic_summary_json::text) <= 65536",
+            name="ck_reference_style_observed_bounds",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "source_definition_sha256",
+            "source_url",
+            "raw_sha256",
+            name="uq_reference_style_observed_content",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "source_definition_sha256",
+            "id",
+            name="uq_reference_style_observed_target",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id", "source_id"],
+            [
+                "reference_layer_sources.provider_key",
+                "reference_layer_sources.layer_id",
+                "reference_layer_sources.id",
+            ],
+            name="fk_reference_style_observed_source",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_style_observed_source_retrieved",
+            "source_id",
+            "retrieved_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_definition_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    profile: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    final_url: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    semantic_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_backend: Mapped[str] = mapped_column(String(32), nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    semantic_summary_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    retrieved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceStyleUpdateCheck(Base):
+    """Append-only result for an independent official-style metadata probe."""
+
+    __tablename__ = "reference_style_update_checks"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> '' and btrim(profile) <> '' and "
+            "btrim(idempotency_key) <> ''",
+            name="ck_reference_style_checks_identity",
+        ),
+        CheckConstraint(
+            "source_definition_sha256 ~ '^[0-9a-f]{64}$' and "
+            "baseline_raw_sha256 ~ '^[0-9a-f]{64}$' and "
+            "baseline_semantic_sha256 ~ '^[0-9a-f]{64}$' and "
+            "(authorization_review_sha256 is null or "
+            "authorization_review_sha256 ~ '^[0-9a-f]{64}$') and "
+            "(response_raw_sha256 is null or "
+            "response_raw_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_reference_style_checks_hashes",
+        ),
+        CheckConstraint(
+            "source_url like 'https://%' and "
+            "(response_final_url is null or response_final_url = source_url)",
+            name="ck_reference_style_checks_urls",
+        ),
+        CheckConstraint(
+            "trigger_kind in ('scheduled', 'manual') and "
+            "status in ('unchanged', 'style_review_required', 'error')",
+            name="ck_reference_style_checks_status",
+        ),
+        CheckConstraint(
+            "(authorization_review_id is null and "
+            "authorization_review_sha256 is null) or "
+            "(authorization_review_id is not null and "
+            "authorization_review_sha256 is not null)",
+            name="ck_reference_style_checks_authorization",
+        ),
+        CheckConstraint(
+            "duration_ms >= 0 and next_check_at > checked_at and "
+            "response_size_bytes between 0 and 65536",
+            name="ck_reference_style_checks_measurements",
+        ),
+        CheckConstraint(
+            "(status in ('unchanged', 'style_review_required') and "
+            "authorization_review_id is not null and "
+            "http_status in (200, 304) and error_code is null and "
+            "error_message is null and error_retryable is null) or "
+            "(status = 'error' and observed_version_id is null and "
+            "error_code is not null and btrim(error_code) <> '' and "
+            "error_message is not null and btrim(error_message) <> '' and "
+            "error_retryable is not null)",
+            name="ck_reference_style_checks_result",
+        ),
+        CheckConstraint(
+            "(status = 'style_review_required' and "
+            "observed_version_id is not null) or "
+            "status <> 'style_review_required'",
+            name="ck_reference_style_checks_candidate",
+        ),
+        CheckConstraint(
+            "(not_modified and http_status = 304 and "
+            "response_size_bytes = 0 and response_raw_sha256 is null) or "
+            "(not not_modified and "
+            "(http_status is null or http_status <> 304 or "
+            "status = 'error'))",
+            name="ck_reference_style_checks_not_modified",
+        ),
+        CheckConstraint(
+            "(http_status = 200 and response_size_bytes > 0 and "
+            "response_raw_sha256 is not null) or "
+            "(http_status is null or http_status <> 200)",
+            name="ck_reference_style_checks_http_200",
+        ),
+        CheckConstraint(
+            "length(profile) <= 128 and length(idempotency_key) <= 160 and "
+            "length(source_url) <= 8192 and "
+            "(request_etag is null or length(request_etag) <= 4096) and "
+            "(request_last_modified is null or "
+            "length(request_last_modified) <= 4096) and "
+            "(response_etag is null or length(response_etag) <= 4096) and "
+            "(response_last_modified is null or "
+            "length(response_last_modified) <= 4096) and "
+            "(error_message is null or length(error_message) <= 4096) and "
+            "json_typeof(response_redirect_chain_json) = 'array' and "
+            "octet_length(response_redirect_chain_json::text) <= 65536",
+            name="ck_reference_style_checks_bounds",
+        ),
+        UniqueConstraint(
+            "source_id",
+            "source_definition_sha256",
+            "idempotency_key",
+            name="uq_reference_style_checks_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["provider_key", "layer_id", "source_id"],
+            [
+                "reference_layer_sources.provider_key",
+                "reference_layer_sources.layer_id",
+                "reference_layer_sources.id",
+            ],
+            name="fk_reference_style_checks_source",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "layer_id",
+                "source_id",
+                "source_definition_sha256",
+                "observed_version_id",
+            ],
+            [
+                "reference_style_observed_versions.provider_key",
+                "reference_style_observed_versions.layer_id",
+                "reference_style_observed_versions.source_id",
+                "reference_style_observed_versions.source_definition_sha256",
+                "reference_style_observed_versions.id",
+            ],
+            name="fk_reference_style_checks_observed",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "layer_id",
+                "source_id",
+                "source_definition_sha256",
+                "authorization_review_id",
+                "authorization_review_sha256",
+            ],
+            [
+                "reference_mirror_authorization_reviews.provider_key",
+                "reference_mirror_authorization_reviews.layer_id",
+                "reference_mirror_authorization_reviews.source_id",
+                (
+                    "reference_mirror_authorization_reviews."
+                    "source_definition_sha256"
+                ),
+                "reference_mirror_authorization_reviews.id",
+                "reference_mirror_authorization_reviews.review_sha256",
+            ],
+            name="fk_reference_style_checks_authorization",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_style_checks_latest",
+            "source_id",
+            "source_definition_sha256",
+            "checked_at",
+            "id",
+        ),
+        Index(
+            "ix_reference_style_checks_pending",
+            "source_id",
+            "status",
+            "checked_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_definition_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    profile: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(160),
+        nullable=False,
+    )
+    trigger_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_raw_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    baseline_semantic_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    observed_version_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    authorization_review_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    authorization_review_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    next_check_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    duration_ms: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    request_etag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_last_modified: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    http_status: Mapped[int | None] = mapped_column(
+        SmallInteger,
+        nullable=True,
+    )
+    not_modified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+    )
+    response_final_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    response_etag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_last_modified: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    response_size_bytes: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    response_raw_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    response_redirect_chain_json: Mapped[list[str]] = mapped_column(
+        JSON,
+        default=list,
+        server_default=text("'[]'::json"),
+        nullable=False,
+    )
+    error_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_retryable: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ReferenceStyleUpdateReview(Base):
+    """One exact human decision for a staged official-style candidate."""
+
+    __tablename__ = "reference_style_update_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(provider_key) <> '' and btrim(profile) <> '' and "
+            "btrim(reviewer) <> '' and btrim(rationale) <> ''",
+            name="ck_reference_style_reviews_identity",
+        ),
+        CheckConstraint(
+            "source_definition_sha256 ~ '^[0-9a-f]{64}$' and "
+            "baseline_raw_sha256 ~ '^[0-9a-f]{64}$' and "
+            "baseline_semantic_sha256 ~ '^[0-9a-f]{64}$' and "
+            "observed_raw_sha256 ~ '^[0-9a-f]{64}$' and "
+            "observed_semantic_sha256 ~ '^[0-9a-f]{64}$' and "
+            "document_sha256 ~ '^[0-9a-f]{64}$' and "
+            "review_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_reference_style_reviews_hashes",
+        ),
+        CheckConstraint(
+            "source_url like 'https://%' and "
+            "decision in ('retain_vendored', 'vendor_update_required')",
+            name="ck_reference_style_reviews_decision",
+        ),
+        CheckConstraint(
+            "document_size_bytes between 1 and 65536 and "
+            "document_size_bytes = octet_length(reviewed_document)",
+            name="ck_reference_style_reviews_document",
+        ),
+        CheckConstraint(
+            "length(profile) <= 128 and length(source_url) <= 8192 and "
+            "length(reviewer) <= 255 and length(rationale) <= 4096",
+            name="ck_reference_style_reviews_bounds",
+        ),
+        UniqueConstraint(
+            "observed_version_id",
+            name="uq_reference_style_reviews_observed",
+        ),
+        UniqueConstraint(
+            "provider_key",
+            "layer_id",
+            "source_id",
+            "review_sha256",
+            name="uq_reference_style_reviews_hash",
+        ),
+        ForeignKeyConstraint(
+            [
+                "provider_key",
+                "layer_id",
+                "source_id",
+                "source_definition_sha256",
+                "observed_version_id",
+            ],
+            [
+                "reference_style_observed_versions.provider_key",
+                "reference_style_observed_versions.layer_id",
+                "reference_style_observed_versions.source_id",
+                "reference_style_observed_versions.source_definition_sha256",
+                "reference_style_observed_versions.id",
+            ],
+            name="fk_reference_style_reviews_observed",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_reference_style_reviews_source_reviewed",
+            "source_id",
+            "reviewed_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    layer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_definition_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    profile: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_raw_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    baseline_semantic_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    observed_version_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+    observed_raw_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    observed_semantic_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    reviewer: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewed_document: Mapped[bytes] = mapped_column(
+        LargeBinary,
+        nullable=False,
+    )
+    document_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class ReferenceSyncRun(TimestampMixin, Base):
     __tablename__ = "reference_sync_runs"
     __table_args__ = (
@@ -3255,6 +3744,54 @@ _install_immutable_reference_truncate_trigger(
     function_name="prevent_reference_catalog_update_check_mutation",
     trigger_name="trg_reference_catalog_update_checks_truncate_immutable",
 )
+for _table, _function_name, _trigger_name, _message in (
+    (
+        ReferenceStyleObservedVersion.__table__,
+        "prevent_reference_style_observed_mutation",
+        "trg_reference_style_observed_immutable",
+        "reference style observation evidence is immutable",
+    ),
+    (
+        ReferenceStyleUpdateCheck.__table__,
+        "prevent_reference_style_check_mutation",
+        "trg_reference_style_checks_immutable",
+        "reference style check evidence is immutable",
+    ),
+    (
+        ReferenceStyleUpdateReview.__table__,
+        "prevent_reference_style_review_mutation",
+        "trg_reference_style_reviews_immutable",
+        "reference style review evidence is immutable",
+    ),
+):
+    _install_immutable_reference_trigger(
+        _table,
+        function_name=_function_name,
+        trigger_name=_trigger_name,
+        error_message=_message,
+    )
+for _table, _function_name, _trigger_name in (
+    (
+        ReferenceStyleObservedVersion.__table__,
+        "prevent_reference_style_observed_mutation",
+        "trg_reference_style_observed_truncate_immutable",
+    ),
+    (
+        ReferenceStyleUpdateCheck.__table__,
+        "prevent_reference_style_check_mutation",
+        "trg_reference_style_checks_truncate_immutable",
+    ),
+    (
+        ReferenceStyleUpdateReview.__table__,
+        "prevent_reference_style_review_mutation",
+        "trg_reference_style_reviews_truncate_immutable",
+    ),
+):
+    _install_immutable_reference_truncate_trigger(
+        _table,
+        function_name=_function_name,
+        trigger_name=_trigger_name,
+    )
 
 for _table, _function_name, _trigger_name in (
     (

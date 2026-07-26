@@ -90,7 +90,41 @@ def test_catalog_watcher_invalid_job_result_is_isolated(
     assert "AttributeError" in caplog.text
 
 
-def test_scheduler_once_checks_catalog_then_reconciles_and_enqueues(
+def test_style_watcher_poll_is_throttled_and_reports_review_required(
+    monkeypatch,
+    caplog,
+) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        mirror_runtime,
+        "run_official_style_update_check_job",
+        lambda: calls.append("styles")
+        or {
+            "source_count": 5,
+            "recorded_count": 5,
+            "review_required_count": 1,
+            "error_count": 0,
+        },
+    )
+    caplog.set_level(logging.INFO)
+
+    assert mirror_runtime._poll_style_watcher_if_due(
+        100.0,
+        now=99.0,
+        poll_seconds=300.0,
+    ) == 100.0
+    assert calls == []
+    assert mirror_runtime._poll_style_watcher_if_due(
+        100.0,
+        now=100.0,
+        poll_seconds=300.0,
+    ) == 400.0
+    assert calls == ["styles"]
+    assert "Official style watcher poll completed" in caplog.text
+
+
+def test_scheduler_once_checks_catalog_reconciles_styles_and_enqueues(
     monkeypatch,
 ) -> None:
     calls: list[object] = []
@@ -113,10 +147,26 @@ def test_scheduler_once_checks_catalog_then_reconciles_and_enqueues(
     )
     monkeypatch.setattr(
         mirror_runtime,
+        "run_official_style_update_check_job",
+        lambda: calls.append("styles")
+        or {
+            "source_count": 5,
+            "recorded_count": 0,
+            "review_required_count": 0,
+            "error_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        mirror_runtime,
         "enqueue_reference_sources_once",
         lambda *, reconcile: calls.append(("enqueue", reconcile)) or [],
     )
 
     mirror_runtime.run_scheduler(threading.Event(), once=True)
 
-    assert calls == ["catalog", "reconcile", ("enqueue", False)]
+    assert calls == [
+        "catalog",
+        "reconcile",
+        "styles",
+        ("enqueue", False),
+    ]

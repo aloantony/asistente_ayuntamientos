@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260726_0043"
+HEAD_REVISION = "20260726_0044"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -322,6 +322,88 @@ REFERENCE_STYLE_PARITY_TRIGGERS = {
 REFERENCE_CATALOG_WATCHER_TABLES = {
     "reference_catalog_observed_versions",
     "reference_catalog_update_checks",
+}
+REFERENCE_STYLE_WATCHER_TABLES = {
+    "reference_style_observed_versions",
+    "reference_style_update_checks",
+    "reference_style_update_reviews",
+}
+REFERENCE_STYLE_WATCHER_COLUMNS = {
+    "reference_style_observed_versions": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "source_id",
+        "source_definition_sha256",
+        "profile",
+        "source_url",
+        "final_url",
+        "raw_sha256",
+        "semantic_sha256",
+        "size_bytes",
+        "storage_backend",
+        "storage_key",
+        "semantic_summary_json",
+        "retrieved_at",
+        "created_at",
+    },
+    "reference_style_update_checks": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "source_id",
+        "source_definition_sha256",
+        "profile",
+        "idempotency_key",
+        "trigger_kind",
+        "source_url",
+        "baseline_raw_sha256",
+        "baseline_semantic_sha256",
+        "observed_version_id",
+        "authorization_review_id",
+        "authorization_review_sha256",
+        "status",
+        "checked_at",
+        "next_check_at",
+        "duration_ms",
+        "request_etag",
+        "request_last_modified",
+        "http_status",
+        "not_modified",
+        "response_final_url",
+        "response_etag",
+        "response_last_modified",
+        "response_size_bytes",
+        "response_raw_sha256",
+        "response_redirect_chain_json",
+        "error_code",
+        "error_message",
+        "error_retryable",
+        "created_at",
+    },
+    "reference_style_update_reviews": {
+        "id",
+        "provider_key",
+        "layer_id",
+        "source_id",
+        "source_definition_sha256",
+        "profile",
+        "source_url",
+        "baseline_raw_sha256",
+        "baseline_semantic_sha256",
+        "observed_version_id",
+        "observed_raw_sha256",
+        "observed_semantic_sha256",
+        "decision",
+        "reviewer",
+        "reviewed_at",
+        "rationale",
+        "reviewed_document",
+        "document_size_bytes",
+        "document_sha256",
+        "review_sha256",
+        "created_at",
+    },
 }
 REFERENCE_MIRROR_STRATEGY_TABLES = {
     "reference_layer_mirror_strategies",
@@ -1584,6 +1666,106 @@ def assert_reference_catalog_watcher_schema(inspector: Inspector) -> None:
     }
 
 
+def assert_reference_style_watcher_schema(
+    inspector: Inspector,
+    engine: Engine,
+) -> None:
+    assert REFERENCE_STYLE_WATCHER_TABLES <= set(inspector.get_table_names())
+    for table_name, expected_columns in (
+        REFERENCE_STYLE_WATCHER_COLUMNS.items()
+    ):
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(
+            "reference_style_observed_versions"
+        )
+        if not index.get("duplicates_constraint")
+    } == {"ix_reference_style_observed_source_retrieved"}
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(
+            "reference_style_update_checks"
+        )
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_style_checks_latest",
+        "ix_reference_style_checks_pending",
+    }
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(
+            "reference_style_update_reviews"
+        )
+        if not index.get("duplicates_constraint")
+    } == {"ix_reference_style_reviews_source_reviewed"}
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_style_observed_versions"
+        )
+    } == {
+        "uq_reference_style_observed_content",
+        "uq_reference_style_observed_target",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_style_update_checks"
+        )
+    } == {"uq_reference_style_checks_idempotency"}
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_style_update_reviews"
+        )
+    } == {
+        "uq_reference_style_reviews_hash",
+        "uq_reference_style_reviews_observed",
+    }
+    expected_triggers = {
+        "reference_style_observed_versions": {
+            "trg_reference_style_observed_immutable",
+            "trg_reference_style_observed_truncate_immutable",
+        },
+        "reference_style_update_checks": {
+            "trg_reference_style_checks_immutable",
+            "trg_reference_style_checks_truncate_immutable",
+        },
+        "reference_style_update_reviews": {
+            "trg_reference_style_reviews_immutable",
+            "trg_reference_style_reviews_truncate_immutable",
+        },
+    }
+    quoted = ", ".join(
+        f"'{table_name}'" for table_name in REFERENCE_STYLE_WATCHER_TABLES
+    )
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT relation.relname, trigger.tgname
+                FROM pg_trigger AS trigger
+                JOIN pg_class AS relation
+                  ON relation.oid = trigger.tgrelid
+                WHERE NOT trigger.tgisinternal
+                  AND relation.relname IN ("""
+                + quoted
+                + ")"
+            )
+        ).all()
+    assert {
+        table_name: {
+            trigger_name
+            for observed_table, trigger_name in rows
+            if observed_table == table_name
+        }
+        for table_name in REFERENCE_STYLE_WATCHER_TABLES
+    } == expected_triggers
+
+
 def assert_reference_mirror_strategy_schema(inspector: Inspector) -> None:
     assert REFERENCE_MIRROR_STRATEGY_TABLES <= set(inspector.get_table_names())
     for table_name, expected_columns in REFERENCE_MIRROR_STRATEGY_COLUMNS.items():
@@ -1718,6 +1900,33 @@ def test_resource_free_adapted_style_constraint_upgrade_is_reversible(
         ]
         run_alembic(migration_database_url, "upgrade", "head")
         assert_reference_style_parity_schema(inspect(engine), engine)
+    finally:
+        engine.dispose()
+
+
+def test_official_style_watcher_schema_is_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0043")
+    engine = create_engine(migration_database_url)
+    try:
+        assert REFERENCE_STYLE_WATCHER_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "20260726_0044")
+        assert_reference_style_watcher_schema(inspect(engine), engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260726_0044"
+
+        run_alembic(migration_database_url, "downgrade", "20260726_0043")
+        assert REFERENCE_STYLE_WATCHER_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_style_watcher_schema(inspect(engine), engine)
+        run_alembic(migration_database_url, "check")
     finally:
         engine.dispose()
 

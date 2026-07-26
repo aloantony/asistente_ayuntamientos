@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from importlib.resources import files
+
 import pytest
 
 from app.reference_layers.reviewed_style_evidence import (
     EVIDENCE_SCHEMA,
+    observe_miteco_style_document,
     reviewed_miteco_mvt_style_reference,
+    reviewed_miteco_style_watch_target,
 )
 
 
@@ -86,6 +90,19 @@ def test_reviewed_miteco_style_is_local_hash_bound_and_reproducible(
     assert reference["url"].startswith(
         "https://wmts.mapama.gob.es/sig/www/styles/mvt/"
     )
+    target = reviewed_miteco_style_watch_target(profile)
+    assert target is not None
+    assert target.official_url == reference["url"]
+    assert target.baseline_raw_sha256 == local_sha256
+    assert "web.archive.org" not in target.official_url
+    resource = (
+        files("app.reference_layers")
+        .joinpath(reference["local_evidence_resource"])
+        .read_bytes()
+    )
+    observed = observe_miteco_style_document(profile, resource)
+    assert observed.matches_vendored_bytes is True
+    assert observed.matches_vendored_semantics is True
 
 
 def test_reviewed_miteco_style_returns_fresh_projection() -> None:

@@ -36,6 +36,28 @@ class _MitecoStyleSpec:
     style_id: str
 
 
+@dataclass(frozen=True)
+class ReviewedMitecoStyleWatchTarget:
+    """Exact live URL and committed baseline for one reviewed adaptation."""
+
+    profile: str
+    official_url: str
+    baseline_raw_sha256: str
+    baseline_semantic_sha256: str
+    baseline_size_bytes: int
+
+
+@dataclass(frozen=True)
+class ObservedMitecoStyleDocument:
+    """Strict, bounded identity of one live official style response."""
+
+    raw_sha256: str
+    semantic_sha256: str
+    size_bytes: int
+    matches_vendored_bytes: bool
+    matches_vendored_semantics: bool
+
+
 _MITECO_STYLE_SPECS = {
     "miteco-flood-q10-ogc-api-features-v1": _MitecoStyleSpec(
         filename="ZI_LaminasQ10.json",
@@ -148,25 +170,7 @@ def reviewed_miteco_mvt_style_reference(
     spec = _MITECO_STYLE_SPECS.get(profile)
     if spec is None:
         return None
-    resource = (
-        files("app.reference_layers")
-        .joinpath("evidence")
-        .joinpath("miteco_mvt")
-        .joinpath(spec.filename)
-    )
-    try:
-        body = resource.read_bytes()
-    except (OSError, FileNotFoundError) as error:
-        raise ReviewedStyleEvidenceError(
-            "reviewed MITECO style evidence is unavailable"
-        ) from error
-    if (
-        not 1 <= len(body) <= MAX_EVIDENCE_BYTES
-        or hashlib.sha256(body).hexdigest() != spec.local_sha256
-    ):
-        raise ReviewedStyleEvidenceError(
-            "reviewed MITECO style evidence failed its local digest"
-        )
+    body = _reviewed_resource_body(spec)
     document = _strict_json_object(body)
     fill_color, outline_color = _validate_miteco_document(
         document,
@@ -197,6 +201,87 @@ def reviewed_miteco_mvt_style_reference(
     }
 
 
+def reviewed_miteco_style_watch_target(
+    profile: str,
+) -> ReviewedMitecoStyleWatchTarget | None:
+    """Return the only live style URL accepted for a reviewed profile."""
+
+    spec = _MITECO_STYLE_SPECS.get(profile)
+    if spec is None:
+        return None
+    body = _reviewed_resource_body(spec)
+    document = _strict_json_object(body)
+    _validate_json_limits(document)
+    semantic_sha256 = _canonical_json_sha256(document)
+    return ReviewedMitecoStyleWatchTarget(
+        profile=profile,
+        official_url=spec.official_url,
+        baseline_raw_sha256=spec.local_sha256,
+        baseline_semantic_sha256=semantic_sha256,
+        baseline_size_bytes=len(body),
+    )
+
+
+def observe_miteco_style_document(
+    profile: str,
+    body: bytes,
+) -> ObservedMitecoStyleDocument:
+    """Parse a live response without treating changed colors as reviewed.
+
+    A changed but syntactically safe document is deliberately reduced to
+    hashes only.  Its cartographic values are never projected into the local
+    recipe until a later code review updates the committed evidence.
+    """
+
+    target = reviewed_miteco_style_watch_target(profile)
+    if target is None:
+        raise ReviewedStyleEvidenceError(
+            "reviewed MITECO style profile is not configured"
+        )
+    if not isinstance(body, bytes) or not 1 <= len(body) <= MAX_EVIDENCE_BYTES:
+        raise ReviewedStyleEvidenceError(
+            "observed MITECO style exceeds its byte limit"
+        )
+    document = _strict_json_object(body)
+    _validate_json_limits(document)
+    raw_sha256 = hashlib.sha256(body).hexdigest()
+    semantic_sha256 = _canonical_json_sha256(document)
+    return ObservedMitecoStyleDocument(
+        raw_sha256=raw_sha256,
+        semantic_sha256=semantic_sha256,
+        size_bytes=len(body),
+        matches_vendored_bytes=(
+            raw_sha256 == target.baseline_raw_sha256
+        ),
+        matches_vendored_semantics=(
+            semantic_sha256 == target.baseline_semantic_sha256
+        ),
+    )
+
+
+def _reviewed_resource_body(spec: _MitecoStyleSpec) -> bytes:
+    resource = (
+        files("app.reference_layers")
+        .joinpath("evidence")
+        .joinpath("miteco_mvt")
+        .joinpath(spec.filename)
+    )
+    try:
+        body = resource.read_bytes()
+    except (OSError, FileNotFoundError) as error:
+        raise ReviewedStyleEvidenceError(
+            "reviewed MITECO style evidence is unavailable"
+        ) from error
+    if (
+        not 1 <= len(body) <= MAX_EVIDENCE_BYTES
+        or hashlib.sha256(body).hexdigest() != spec.local_sha256
+    ):
+        raise ReviewedStyleEvidenceError(
+            "reviewed MITECO style evidence failed its local digest"
+        )
+    return body
+
+
 def _strict_json_object(body: bytes) -> dict[str, Any]:
     if body.startswith(b"\xef\xbb\xbf"):
         raise ReviewedStyleEvidenceError(
@@ -223,6 +308,51 @@ def _strict_json_object(body: bytes) -> dict[str, Any]:
             "reviewed MITECO style evidence root is invalid"
         )
     return value
+
+
+def _validate_json_limits(value: Any) -> None:
+    remaining = 10_000
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        remaining -= 1
+        if remaining < 0 or depth > 32:
+            raise ReviewedStyleEvidenceError(
+                "observed MITECO style exceeds its structural limits"
+            )
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str) or len(key) > 1_024:
+                    raise ReviewedStyleEvidenceError(
+                        "observed MITECO style key is invalid"
+                    )
+                stack.append((child, depth + 1))
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+        elif isinstance(item, str) and len(item) > 8_192:
+            raise ReviewedStyleEvidenceError(
+                "observed MITECO style string exceeds its limit"
+            )
+        elif not isinstance(item, (str, int, float, bool, type(None))):
+            raise ReviewedStyleEvidenceError(
+                "observed MITECO style value is invalid"
+            )
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ReviewedStyleEvidenceError(
+            "observed MITECO style is not canonical JSON"
+        ) from error
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _validate_miteco_document(
