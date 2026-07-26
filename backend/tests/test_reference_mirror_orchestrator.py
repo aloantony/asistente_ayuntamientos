@@ -38,6 +38,7 @@ from app.reference_layers.mirror_lifecycle import (
     claim_next_sync_run,
     enqueue_due_sources,
 )
+from app.reference_layers.mirror_authorization import MirrorAuthorizationError
 from app.reference_layers.mirror_orchestrator import (
     ClassifiedFailure,
     FailureHandlingResult,
@@ -55,12 +56,16 @@ from app.reference_layers.mirror_orchestrator import (
     enqueue_reference_sources_once,
     classify_worker_failure,
     handle_run_failure,
+    load_existing_publication,
     load_run_context,
     materialize_tile_delivery,
     publish_geoserver_delivery,
     reconcile_reference_sources_once,
 )
 from app.reference_layers.models import (
+    ReferenceCatalogSnapshot,
+    ReferenceDeliveryAsset,
+    ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerSource,
@@ -70,6 +75,9 @@ from app.reference_layers.models import (
 from app.reference_layers.source_discovery import SourceCandidate
 from app.reference_layers.source_probes import SourceProbe
 from app.reference_layers.tile_seed import TileSeedResult
+from support_reference_mirror_authorization import (
+    ensure_authorized_mirror_source,
+)
 
 NOW = datetime.now(timezone.utc)
 
@@ -169,7 +177,74 @@ def _seed_source(db, *, two_sources: bool = False):
         )
     db.add_all(sources)
     db.commit()
+    for source in sources:
+        ensure_authorized_mirror_source(db, source, reviewed_at=NOW)
     return layer, sources
+
+
+def test_existing_publication_rejects_legacy_unlinked_authorization(db) -> None:
+    layer, [source] = _seed_source(db)
+    enqueue_due_sources(db, now=NOW)
+    lease = claim_next_sync_run(
+        db,
+        now=NOW,
+        token_factory=lambda: "8" * 64,
+    )
+    context = load_run_context(lambda: nullcontext(db), lease)
+    snapshot = db.scalar(
+        select(ReferenceCatalogSnapshot).where(
+            ReferenceCatalogSnapshot.provider_key == layer.provider_key,
+            ReferenceCatalogSnapshot.is_current.is_(True),
+        )
+    )
+    version = ReferenceDeliveryVersion(
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
+        source_id=source.id,
+        sync_run_id=lease.run_id,
+        catalog_snapshot_id=snapshot.id,
+        catalog_definition_sha256=snapshot.definition_sha256,
+        mirror_authorization_review_id=None,
+        mirror_authorization_review_sha256=None,
+        sequence_number=1,
+        delivery_kind="tiles",
+        source_version="legacy",
+        content_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        validation_sha256="c" * 64,
+        reference_at=NOW,
+        crs="EPSG:3857",
+        bounds_json={"west": -7, "south": 40, "east": -1, "north": 44},
+        feature_count=None,
+        validation_json={"passed": True},
+        created_at=NOW,
+    )
+    db.add(version)
+    db.flush()
+    db.add(
+        ReferenceDeliveryAsset(
+            version_id=version.id,
+            asset_key="primary",
+            asset_kind="tile_archive",
+            is_primary=True,
+            storage_backend="filesystem",
+            storage_key="mirror/legacy.mbtiles",
+            media_type="application/vnd.mapbox.mbtiles",
+            sha256=version.content_sha256,
+            size_bytes=1,
+            metadata_json={},
+        )
+    )
+    db.commit()
+
+    with pytest.raises(MirrorAuthorizationError) as caught:
+        load_existing_publication(
+            lambda: nullcontext(db),
+            context,
+            version.id,
+        )
+
+    assert caught.value.code == "mirror_authorization_missing"
 
 
 def _wms_document() -> dict:
@@ -767,6 +842,11 @@ def test_operation_smoke_evidence_is_finalized_with_the_promoted_run(
     )
     monkeypatch.setattr(
         mirror_orchestrator,
+        "revalidate_run_authorization",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
         "persist_run_acquisition",
         lambda factory, lease, acquired: (),
     )
@@ -853,6 +933,11 @@ def test_operation_smoke_failure_prevents_promotion_and_preserves_active(
         mirror_orchestrator,
         "load_run_context",
         lambda factory, lease: context,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "revalidate_run_authorization",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         mirror_orchestrator,
@@ -1129,6 +1214,11 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
         current_source.definition_sha256 = changed.definition_sha256
         current_source.next_check_at = NOW
         db.commit()
+        ensure_authorized_mirror_source(
+            db,
+            current_source,
+            reviewed_at=NOW + timedelta(minutes=1),
+        )
         enqueue_due_sources(db, now=NOW + timedelta(minutes=2))
         changed_lease = claim_next_sync_run(
             db,

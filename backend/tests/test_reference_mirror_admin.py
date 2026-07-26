@@ -28,7 +28,7 @@ from test_reference_mirror_lifecycle import (
 )
 
 
-def test_operational_status_reports_history_metrics_and_authorization_gap(
+def test_operational_status_uses_explicit_local_mirror_authorization(
     db,
 ) -> None:
     (
@@ -52,10 +52,10 @@ def test_operational_status_reports_history_metrics_and_authorization_gap(
     assert report["catalog_snapshot_id"] == snapshot_v2.id
     assert report["summary"]["layer_count"] == 1
     assert report["summary"]["service_count"] == 1
-    assert report["summary"]["mirror_authorization_missing_count"] == 1
+    assert report["summary"]["mirror_authorization_missing_count"] == 0
     assert (
         report["summary"]["mirror_authorization_missing_service_count"]
-        == 1
+        == 0
     )
     assert report["summary"]["license_review_service_count"] == 0
     assert report["summary"]["delivery_attestation_service_count"] == 0
@@ -82,16 +82,13 @@ def test_operational_status_reports_history_metrics_and_authorization_gap(
         "requires_explicit_actor_reason_and_dry_run": True,
     }
     authorization = row["mirror_authorization"]
-    assert authorization["mirror_authorized"] is False
+    assert authorization["mirror_authorized"] is True
     assert authorization["catalog_license_status"] == "pending"
-    assert "catalog_license_pending" in authorization["blocking_reasons"]
-    assert "license_review_missing" in authorization["blocking_reasons"]
-    assert "delivery_attestation_missing" in authorization[
-        "blocking_reasons"
-    ]
-    assert "explicit_mirror_permission_not_recorded" in authorization[
-        "blocking_reasons"
-    ]
+    assert authorization["authorization_status"] == "authorized"
+    assert authorization["blocking_reasons"] == []
+    assert authorization["mirror_review_count"] == 1
+    assert authorization["reviewed_source_count"] == 1
+    assert authorization["enabled_source_count"] == 1
     assert report["retention"]["published_blob_gc_enabled"] is False
     assert report["retention"]["protected_delivery_version_count"] == 2
 

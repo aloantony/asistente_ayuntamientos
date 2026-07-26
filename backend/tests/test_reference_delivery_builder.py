@@ -41,6 +41,10 @@ from app.reference_layers.models import (
     ReferenceSyncRunArtifact,
 )
 from app.reference_layers.style_parity import persist_style_parity_plan
+from support_reference_mirror_authorization import (
+    authorize_mirror_source,
+    bind_run_authorization,
+)
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=timezone.utc)
 
@@ -109,6 +113,7 @@ def _lease_and_input(db):
         item.is_primary = item.id == source.id
         item.next_check_at = NOW - timedelta(seconds=1)
     db.commit()
+    authorize_mirror_source(db, source, reviewed_at=NOW)
     enqueue_due_sources(db, now=NOW)
     lease = claim_next_sync_run(
         db,
@@ -116,6 +121,7 @@ def _lease_and_input(db):
         lease_seconds=300,
         token_factory=lambda: "7" * 64,
     )
+    bind_run_authorization(db, source, lease.run_id)
     artifact = ReferenceSourceArtifact(
         source_id=source.id,
         artifact_kind="dataset",
@@ -640,6 +646,7 @@ def test_builder_rejects_massive_feature_collapse_before_version_creation(
     assert second_lease is not None
     assert second_lease.run_id == queued_run_ids[0]
     assert second_lease.source_id == source.id
+    bind_run_authorization(db, source, second_lease.run_id)
     second_artifact = ReferenceSourceArtifact(
         source_id=source.id,
         artifact_kind="dataset",

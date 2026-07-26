@@ -5,15 +5,18 @@ import hashlib
 import json
 from threading import Barrier
 import time
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.reference_layers import delivery_builder as reference_delivery_builder
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
     apply_catalog_definition,
 )
@@ -45,8 +48,20 @@ from app.reference_layers.models import (
     ReferenceLayerMirrorStrategy,
     ReferenceLayerMirrorStrategyDependency,
     ReferenceLayerSource,
+    ReferenceLayerStyle,
     ReferenceService,
+    ReferenceSourceArtifact,
+    ReferenceStyleParityPlan,
+    ReferenceStyleParityPlanItem,
     ReferenceSyncRun,
+    ReferenceSyncRunArtifact,
+)
+from app.reference_layers.source_probes import SourceProbe
+from app.reference_layers.style_parity import persist_style_parity_plan
+from support_reference_mirror_authorization import (
+    bind_run_authorization,
+    ensure_authorized_mirror_source,
+    supersede_mirror_authorization,
 )
 
 NOW = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
@@ -85,6 +100,11 @@ def committed_reference_providers(engine):
         cleanup.execute(
             delete(ReferenceLayerSource).where(
                 ReferenceLayerSource.provider_key.in_(provider_keys)
+            )
+        )
+        cleanup.execute(
+            delete(ReferenceLayerStyle).where(
+                ReferenceLayerStyle.provider_key.in_(provider_keys)
             )
         )
         cleanup.execute(
@@ -144,6 +164,15 @@ def _definition(
                 },
                 min_zoom=6,
                 max_zoom=18,
+                style_name="style:default",
+                styles=(
+                    ReferenceLayerStyleDefinition(
+                        source_key="style:default",
+                        title="Default",
+                        remote_name="planning:default",
+                        is_default=True,
+                    ),
+                ),
             ),
         ),
         retrieved_at=NOW,
@@ -202,10 +231,151 @@ def _canonical_sha256(value) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _create_style_parity_plan(
+    db,
+    *,
+    source,
+    snapshot,
+    lease,
+    sequence_number: int,
+):
+    style = db.scalar(
+        select(ReferenceLayerStyle).where(
+            ReferenceLayerStyle.provider_key == source.provider_key,
+            ReferenceLayerStyle.layer_id == source.layer_id,
+            ReferenceLayerStyle.source_key == "style:default",
+            ReferenceLayerStyle.last_seen_snapshot_id == snapshot.id,
+            ReferenceLayerStyle.status.in_(("active", "degraded")),
+        )
+    )
+    assert style is not None
+
+    artifacts = ()
+    style_artifact = None
+    probe = None
+    if source.target_kind in {"vector", "raster"}:
+        digest = hashlib.sha256(
+            (
+                f"lifecycle-style-{source.id}-{lease.run_id}-"
+                f"{sequence_number}"
+            ).encode()
+        ).hexdigest()
+        style_artifact = ReferenceSourceArtifact(
+            source_id=source.id,
+            artifact_kind="style",
+            source_version=f"2026-07-{20 + sequence_number}",
+            media_type="application/vnd.ogc.sld+xml",
+            storage_backend="filesystem",
+            storage_key=f"blobs/sha256/{digest[:2]}/{digest}",
+            size_bytes=256,
+            sha256=digest,
+            metadata_json={
+                "catalog_style_source_key": style.source_key,
+                "remote_name": style.remote_name,
+                "parity_kind": "exact",
+                "resource_bindings": [],
+                "unresolved_resources": [],
+            },
+            retrieved_at=NOW + timedelta(seconds=sequence_number),
+        )
+        db.add(style_artifact)
+        db.flush()
+        db.add(
+            ReferenceSyncRunArtifact(
+                source_id=source.id,
+                run_id=lease.run_id,
+                artifact_id=style_artifact.id,
+                role="style",
+            )
+        )
+        db.flush()
+        artifacts = (
+            SimpleNamespace(
+                artifact_id=style_artifact.id,
+                artifact_kind=style_artifact.artifact_kind,
+                roles=frozenset({"style"}),
+                media_type=style_artifact.media_type,
+                storage_backend=style_artifact.storage_backend,
+                storage_key=style_artifact.storage_key,
+                size_bytes=style_artifact.size_bytes,
+                sha256=style_artifact.sha256,
+                metadata_json=style_artifact.metadata_json,
+            ),
+        )
+    else:
+        advertised_styles = (
+            [{"name": style.remote_name}]
+            if source.protocol == "wmts"
+            else [style.remote_name]
+        )
+        probe = SourceProbe(
+            available=True,
+            protocol=source.protocol,
+            requested_name=source.remote_name or "",
+            canonical_name=source.remote_name,
+            service_version="1.0.0",
+            fingerprint_sha256=hashlib.sha256(
+                (
+                    f"lifecycle-probe-{source.id}-{lease.run_id}-"
+                    f"{sequence_number}"
+                ).encode()
+            ).hexdigest(),
+            fingerprint_quality="strong",
+            metadata={"styles": advertised_styles},
+        )
+
+    result = persist_style_parity_plan(
+        db,
+        provider_key=source.provider_key,
+        layer_id=source.layer_id,
+        catalog_snapshot_id=snapshot.id,
+        source_id=source.id,
+        sync_run_id=lease.run_id,
+        delivery_kind=source.target_kind,
+        styles=(style,),
+        artifacts=artifacts,
+        probe=probe,
+        now=NOW + timedelta(seconds=sequence_number),
+    )
+    assert result.complete is True
+    plan = db.get(ReferenceStyleParityPlan, result.plan_id)
+    items = tuple(
+        db.scalars(
+            select(ReferenceStyleParityPlanItem)
+            .where(ReferenceStyleParityPlanItem.plan_id == plan.id)
+            .order_by(ReferenceStyleParityPlanItem.id)
+        )
+    )
+    assert len(items) == 1
+    return style, style_artifact, plan, items
+
+
 def _create_version(db, *, source, snapshot, lease, sequence_number: int):
+    review = ensure_authorized_mirror_source(
+        db,
+        source,
+        reviewed_at=NOW + timedelta(seconds=sequence_number),
+    )
+    bind_run_authorization(db, source, lease.run_id)
+    style, style_artifact, plan, plan_items = _create_style_parity_plan(
+        db,
+        source=source,
+        snapshot=snapshot,
+        lease=lease,
+        sequence_number=sequence_number,
+    )
     validation = {
         "passed": True,
         "checks": ["bounds", "schema", "primary_asset"],
+        "style_parity_gate": {
+            "schema_version": "reference-delivery-style-parity-gate/v1",
+            "passed": True,
+            "plan_id": plan.id,
+            "plan_evidence_sha256": plan.evidence_sha256,
+            "required_style_count": len(plan_items),
+            "verified_style_count": len(plan_items),
+            "missing_style_count": 0,
+        },
     }
     version = ReferenceDeliveryVersion(
         provider_key=source.provider_key,
@@ -214,6 +384,8 @@ def _create_version(db, *, source, snapshot, lease, sequence_number: int):
         sync_run_id=lease.run_id,
         catalog_snapshot_id=snapshot.id,
         catalog_definition_sha256=snapshot.definition_sha256,
+        mirror_authorization_review_id=review.id,
+        mirror_authorization_review_sha256=review.review_sha256,
         sequence_number=sequence_number,
         delivery_kind=source.target_kind,
         source_version=f"2026-07-{20 + sequence_number}",
@@ -240,19 +412,53 @@ def _create_version(db, *, source, snapshot, lease, sequence_number: int):
         "tiles": "tile_archive",
     }[source.target_kind]
     storage_backend = "postgres" if source.target_kind == "vector" else "filesystem"
-    db.add(
-        ReferenceDeliveryAsset(
-            version_id=version.id,
-            asset_key="primary",
-            asset_kind=asset_kind,
-            is_primary=True,
-            storage_backend=storage_backend,
-            storage_key=f"mirror/{source.id}/v{sequence_number}",
-            media_type="application/octet-stream",
-            sha256=version.content_sha256,
-            size_bytes=None if storage_backend == "postgres" else 1024,
-            metadata_json={},
+    primary = ReferenceDeliveryAsset(
+        version_id=version.id,
+        asset_key="primary",
+        asset_kind=asset_kind,
+        is_primary=True,
+        storage_backend=storage_backend,
+        storage_key=f"mirror/{source.id}/v{sequence_number}",
+        media_type="application/octet-stream",
+        sha256=version.content_sha256,
+        size_bytes=None if storage_backend == "postgres" else 1024,
+        metadata_json=(
+            {"catalog_style_source_key": style.source_key}
+            if source.target_kind == "tiles"
+            else {}
+        ),
+    )
+    delivery_assets = [primary]
+    if style_artifact is not None:
+        delivery_assets.append(
+            ReferenceDeliveryAsset(
+                version_id=version.id,
+                asset_key="style-default",
+                asset_kind="style_sld",
+                is_primary=False,
+                storage_backend=style_artifact.storage_backend,
+                storage_key=style_artifact.storage_key,
+                media_type=style_artifact.media_type,
+                sha256=style_artifact.sha256,
+                size_bytes=style_artifact.size_bytes,
+                metadata_json={
+                    "catalog_style_id": style.id,
+                    "catalog_style_source_key": style.source_key,
+                    "style_name": "siur_style_default_v1",
+                    "parity_kind": "exact",
+                    "effective": True,
+                },
+            )
         )
+    db.add_all(delivery_assets)
+    db.flush()
+    reference_delivery_builder._append_delivery_style_parity(
+        db,
+        version=version,
+        plan=plan,
+        items=plan_items,
+        assets=delivery_assets,
+        now=NOW + timedelta(minutes=sequence_number),
     )
     db.commit()
     return version
@@ -1225,6 +1431,65 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         == events[index - 1].event_sha256
         for index in range(1, len(events))
     )
+
+
+def test_rollback_is_blocked_after_current_mirror_authorization_revocation(
+    db,
+) -> None:
+    _, layer, snapshot, sources, _ = _seed_bootstrap(
+        db,
+        provider_key="mirror-authorization-rollback-test",
+    )
+    source = next(item for item in sources if item.target_kind == "vector")
+    _only_source_due(db, source)
+    versions = []
+    for sequence, token in ((1, "c" * 64), (2, "d" * 64)):
+        source.next_check_at = NOW + timedelta(seconds=sequence)
+        db.commit()
+        enqueue_due_sources(db, now=NOW + timedelta(seconds=sequence))
+        lease = claim_next_sync_run(
+            db,
+            now=NOW + timedelta(seconds=sequence),
+            token_factory=lambda token=token: token,
+        )
+        version = _create_version(
+            db,
+            source=source,
+            snapshot=snapshot,
+            lease=lease,
+            sequence_number=sequence,
+        )
+        promote_delivery_version(
+            db,
+            version_id=version.id,
+            lease=lease,
+            expected_generation=sequence - 1,
+            reason=f"authorized version {sequence}",
+            now=NOW + timedelta(seconds=sequence, milliseconds=100),
+        )
+        versions.append(version)
+
+    current_review = ensure_authorized_mirror_source(db, source)
+    supersede_mirror_authorization(
+        db,
+        source,
+        current_review,
+        decision="restricted",
+    )
+
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="mirror_authorization_restricted",
+    ):
+        rollback_delivery_version(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=versions[0].id,
+            expected_generation=2,
+            reason="revoked evidence must block rollback",
+            now=NOW + timedelta(seconds=4),
+        )
 
 
 def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(

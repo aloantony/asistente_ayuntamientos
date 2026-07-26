@@ -34,10 +34,9 @@ from app.reference_layers.delivery_builder import (
     DeliveryBuildError,
     canonical_json_sha256,
 )
-from app.reference_layers.delivery_evidence import (
-    attestation_chain_link_is_valid,
-    stored_capabilities_hash_is_valid,
-    stored_license_review_hash_is_valid,
+from app.reference_layers.mirror_authorization import (
+    MirrorAuthorizationError,
+    require_current_source_authorization,
 )
 from app.reference_layers.mirror_lifecycle import (
     DeliveryTransitionPreview,
@@ -54,17 +53,14 @@ from app.reference_layers.mirror_status import catalog_mirror_statuses
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
-    ReferenceDeliveryAttestation,
     ReferenceDeliveryPromotion,
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerSource,
-    ReferenceLicenseReview,
     ReferenceSourceArtifact,
     ReferenceSyncRun,
     ReferenceService,
-    ReferenceWMSCapabilitiesSnapshot,
 )
 from app.users.models import User
 
@@ -369,139 +365,75 @@ def _service_authorization(
     service_ids = list(services)
     if not service_ids:
         return {}
-    reviews = {
-        service_id: review
-        for service_id, review in db.execute(
-            select(
-                ReferenceLicenseReview.service_id,
-                ReferenceLicenseReview,
-            )
-            .where(
-                ReferenceLicenseReview.provider_key
-                == snapshot.provider_key,
-                ReferenceLicenseReview.service_id.in_(service_ids),
-            )
-            .distinct(ReferenceLicenseReview.service_id)
-            .order_by(
-                ReferenceLicenseReview.service_id,
-                ReferenceLicenseReview.id.desc(),
-            )
+    sources_by_service: dict[int, list[ReferenceLayerSource]] = defaultdict(
+        list
+    )
+    for source, service_id in db.execute(
+        select(ReferenceLayerSource, ReferenceLayer.service_id)
+        .join(
+            ReferenceLayer,
+            (ReferenceLayer.id == ReferenceLayerSource.layer_id)
+            & (
+                ReferenceLayer.provider_key
+                == ReferenceLayerSource.provider_key
+            ),
         )
-    }
-    attestations = {
-        service_id: attestation
-        for service_id, attestation in db.execute(
-            select(
-                ReferenceDeliveryAttestation.service_id,
-                ReferenceDeliveryAttestation,
-            )
-            .where(
-                ReferenceDeliveryAttestation.provider_key
-                == snapshot.provider_key,
-                ReferenceDeliveryAttestation.service_id.in_(service_ids),
-            )
-            .distinct(ReferenceDeliveryAttestation.service_id)
-            .order_by(
-                ReferenceDeliveryAttestation.service_id,
-                ReferenceDeliveryAttestation.sequence_number.desc(),
-            )
+        .where(
+            ReferenceLayer.provider_key == snapshot.provider_key,
+            ReferenceLayer.last_seen_snapshot_id == snapshot.id,
+            ReferenceLayer.service_id.in_(service_ids),
+            ReferenceLayer.node_type == "layer",
+            ReferenceLayerSource.enabled.is_(True),
         )
-    }
+        .order_by(
+            ReferenceLayer.service_id,
+            ReferenceLayerSource.layer_id,
+            ReferenceLayerSource.is_primary.desc(),
+            ReferenceLayerSource.priority,
+            ReferenceLayerSource.id,
+        )
+    ):
+        sources_by_service[service_id].append(source)
     result: dict[int, dict[str, Any]] = {}
     for service_id, service in services.items():
-        review = reviews.get(service_id)
-        attestation = attestations.get(service_id)
+        service_sources = sources_by_service.get(service_id, [])
         blockers: list[str] = []
-        if service.license_status != "approved":
-            blockers.append(f"catalog_license_{service.license_status}")
-
-        review_valid = bool(
-            review is not None
-            and stored_license_review_hash_is_valid(
-                review,
-                service_source_key=service.source_key,
-            )
-        )
-        if review is None:
-            blockers.append("license_review_missing")
-        elif not review_valid:
-            blockers.append("license_review_invalid")
-        else:
-            if review.decision != "approved":
-                blockers.append(f"license_review_{review.decision}")
-            if not review.allow_cache:
-                blockers.append("cache_permission_missing")
-
-        attestation_valid = False
-        if attestation is None:
-            blockers.append("delivery_attestation_missing")
-        else:
-            capabilities = db.get(
-                ReferenceWMSCapabilitiesSnapshot,
-                attestation.capabilities_snapshot_id,
-            )
-            attested_review = db.get(
-                ReferenceLicenseReview,
-                attestation.license_review_id,
-            )
-            attestation_valid = bool(
-                capabilities is not None
-                and attested_review is not None
-                and stored_capabilities_hash_is_valid(capabilities)
-                and stored_license_review_hash_is_valid(
-                    attested_review,
-                    service_source_key=service.source_key,
-                )
-                and attestation_chain_link_is_valid(
+        review_ids: list[int] = []
+        if not service_sources:
+            blockers.append("mirror_authorization_missing")
+        for source in service_sources:
+            try:
+                review = require_current_source_authorization(
                     db,
-                    attestation,
-                    capabilities,
-                    attested_review,
+                    source=source,
+                    require_acquisition=True,
                 )
-                and attestation.attestation_kind == "delivery"
-                and attestation.catalog_snapshot_id == snapshot.id
-                and attestation.catalog_definition_sha256
-                == snapshot.definition_sha256
-                and review is not None
-                and attestation.license_review_id == review.id
-            )
-            if not attestation_valid:
-                blockers.append("delivery_attestation_invalid_or_stale")
-
-        explicit_mirror_permission = (
-            getattr(review, "allow_mirror", None)
-            if review_valid and review is not None
-            else None
-        )
-        if explicit_mirror_permission is None:
-            blockers.append("explicit_mirror_permission_not_recorded")
-        elif explicit_mirror_permission is not True:
-            blockers.append("mirror_permission_denied")
+            except MirrorAuthorizationError as error:
+                blockers.append(error.code)
+            else:
+                review_ids.append(review.id)
         blockers = list(dict.fromkeys(blockers))
         result[service_id] = {
             "mirror_authorized": not blockers,
             "authorization_status": (
-                "authorized" if not blockers else "missing"
+                "authorized" if not blockers else "blocked"
             ),
             "blocking_reasons": blockers,
             "service_id": service.id,
             "service_source_key": service.source_key,
             "catalog_license_status": service.license_status,
-            "license_review_id": review.id if review is not None else None,
-            "license_review_valid": review_valid,
-            "review_decision": (
-                review.decision if review_valid and review is not None else None
-            ),
-            "allow_cache": (
-                review.allow_cache
-                if review_valid and review is not None
-                else False
-            ),
-            "explicit_allow_mirror": explicit_mirror_permission,
-            "attestation_id": (
-                attestation.id if attestation is not None else None
-            ),
-            "attestation_valid": attestation_valid,
+            "mirror_review_count": len(review_ids),
+            "reviewed_source_count": len(review_ids),
+            "enabled_source_count": len(service_sources),
+            # Legacy WMS evidence remains intentionally separate and does not
+            # authorize local retention or service.
+            "license_review_id": None,
+            "license_review_valid": False,
+            "review_decision": None,
+            "allow_cache": False,
+            "explicit_allow_mirror": not blockers,
+            "attestation_id": None,
+            "attestation_valid": False,
         }
     return result
 
@@ -514,6 +446,9 @@ def _missing_service_authorization() -> dict[str, Any]:
         "service_id": None,
         "service_source_key": None,
         "catalog_license_status": None,
+        "mirror_review_count": 0,
+        "reviewed_source_count": 0,
+        "enabled_source_count": 0,
         "license_review_id": None,
         "license_review_valid": False,
         "review_decision": None,

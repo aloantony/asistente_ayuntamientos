@@ -23,6 +23,9 @@ from app.reference_layers.models import (
 from app.reference_layers.local_delivery import (
     catalog_local_delivery_availability,
 )
+from app.reference_layers.mirror_authorization import (
+    effective_service_attributions,
+)
 from app.reference_layers.mirror_status import catalog_mirror_statuses
 from app.reference_layers.schemas import (
     ReferenceCatalogRead,
@@ -148,6 +151,10 @@ def get_reference_catalog(
         styles=styles,
         local_availability=local_delivery_availability,
     )
+    service_attributions = effective_service_attributions(
+        db,
+        services=services,
+    )
 
     layer_reads: list[ReferenceLayerRead] = []
     for layer in layers:
@@ -200,7 +207,12 @@ def get_reference_catalog(
     return ReferenceCatalogRead(
         snapshot=ReferenceCatalogSnapshotRead.model_validate(snapshot),
         organization_id=organization_id,
-        services=[ReferenceServiceRead.model_validate(item) for item in services],
+        services=[
+            ReferenceServiceRead.model_validate(item).model_copy(
+                update={"attribution": service_attributions[item.id]}
+            )
+            for item in services
+        ],
         layers=layer_reads,
         styles=[
             ReferenceLayerStyleRead.model_validate(item).model_copy(

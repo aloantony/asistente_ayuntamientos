@@ -671,6 +671,9 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert "license_status" not in serialized
     assert "cache_policy" not in serialized
     assert "reviewer" not in serialized
+    assert "review_sha256" not in serialized
+    assert "document_sha256" not in serialized
+    assert "license_terms" not in serialized
     assert "attestation_sha256" not in serialized
     assert "idecyl.jcyl.es" not in serialized
 

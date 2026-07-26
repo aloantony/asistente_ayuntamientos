@@ -55,6 +55,14 @@ const BLOCKER_LABELS: Record<string, string> = {
   missing: "La capa ya no está presente en la fuente.",
   migration_backfill_required:
     "Esta capa requiere recalcular su estrategia después de la migración.",
+  mirror_authorization_invalid:
+    "La revisión del espejo local no supera la comprobación de integridad.",
+  mirror_authorization_missing:
+    "Falta una revisión humana que autorice conservar y servir esta copia local.",
+  mirror_authorization_restricted:
+    "La revisión vigente no permite conservar o servir localmente esta capa.",
+  mirror_authorization_source_changed:
+    "La fuente u origen revisados han cambiado y requieren una nueva autorización.",
   not_deliverable: "Este tipo de entrega aún no tiene renderizador.",
   remote_proxy_disabled:
     "No hay copia local activa y el proxy remoto está desactivado.",
