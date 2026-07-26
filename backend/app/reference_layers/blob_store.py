@@ -80,6 +80,13 @@ class StagingCleanupResult:
     skipped_count: int
 
 
+@dataclass(frozen=True)
+class StagingCleanupPlan:
+    eligible_count: int
+    eligible_bytes: int
+    skipped_count: int
+
+
 class ReferenceBlobStore:
     """A content-addressed blob store rooted in one local filesystem."""
 
@@ -381,11 +388,43 @@ class ReferenceBlobStore:
         older_than_seconds: float,
         now: float | None = None,
     ) -> StagingCleanupResult:
+        plan = self._process_staging(
+            older_than_seconds=older_than_seconds,
+            now=now,
+            delete=True,
+        )
+        return StagingCleanupResult(
+            deleted_count=plan.eligible_count,
+            deleted_bytes=plan.eligible_bytes,
+            skipped_count=plan.skipped_count,
+        )
+
+    def inspect_staging(
+        self,
+        *,
+        older_than_seconds: float,
+        now: float | None = None,
+    ) -> StagingCleanupPlan:
+        """Plan stale partial cleanup while leaving every file untouched."""
+
+        return self._process_staging(
+            older_than_seconds=older_than_seconds,
+            now=now,
+            delete=False,
+        )
+
+    def _process_staging(
+        self,
+        *,
+        older_than_seconds: float,
+        now: float | None,
+        delete: bool,
+    ) -> StagingCleanupPlan:
         age = _non_negative_finite(older_than_seconds, "older_than_seconds")
         current_time = time.time() if now is None else _finite_number(now, "now")
         cutoff = current_time - age
-        deleted_count = 0
-        deleted_bytes = 0
+        eligible_count = 0
+        eligible_bytes = 0
         skipped_count = 0
 
         directory_flags = os.O_RDONLY
@@ -400,7 +439,9 @@ class ReferenceBlobStore:
             try:
                 directory_fd = os.open(self._staging_dir, directory_flags)
             except OSError as error:
-                raise ReferenceBlobStoreError("could not open staging directory") from error
+                raise ReferenceBlobStoreError(
+                    "could not open staging directory"
+                ) from error
             try:
                 for name in os.listdir(directory_fd):
                     if STAGING_NAME_RE.fullmatch(name) is None:
@@ -432,7 +473,10 @@ class ReferenceBlobStore:
                             skipped_count += 1
                             continue
                         candidate = os.fstat(candidate_fd)
-                        if not stat.S_ISREG(candidate.st_mode) or candidate.st_mtime > cutoff:
+                        if (
+                            not stat.S_ISREG(candidate.st_mode)
+                            or candidate.st_mtime > cutoff
+                        ):
                             skipped_count += 1
                             continue
                         current = os.stat(
@@ -447,9 +491,10 @@ class ReferenceBlobStore:
                         ):
                             skipped_count += 1
                             continue
-                        os.unlink(name, dir_fd=directory_fd)
-                        deleted_count += 1
-                        deleted_bytes += candidate.st_size
+                        if delete:
+                            os.unlink(name, dir_fd=directory_fd)
+                        eligible_count += 1
+                        eligible_bytes += candidate.st_size
                     except FileNotFoundError:
                         skipped_count += 1
                     except OSError as error:
@@ -458,14 +503,14 @@ class ReferenceBlobStore:
                         ) from error
                     finally:
                         os.close(candidate_fd)
-                if deleted_count:
+                if delete and eligible_count:
                     os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
 
-        return StagingCleanupResult(
-            deleted_count=deleted_count,
-            deleted_bytes=deleted_bytes,
+        return StagingCleanupPlan(
+            eligible_count=eligible_count,
+            eligible_bytes=eligible_bytes,
             skipped_count=skipped_count,
         )
 
