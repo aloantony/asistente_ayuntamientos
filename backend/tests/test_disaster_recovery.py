@@ -4,7 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import socket
 import tarfile
+import tempfile
 from typing import Mapping, Sequence
 
 import pytest
@@ -61,6 +64,32 @@ SOURCE_EXTENSIONS = [
 TARGET_EXTENSIONS = [
     {**item, "owner": "drill_admin"} for item in SOURCE_EXTENSIONS
 ]
+EXTENSION_MEMBER_INVENTORIES = [
+    {
+        "name": "plpgsql",
+        "version": "1.0",
+        "member_count": 4,
+        "inventory_sha256": (
+            "995d6dd1dcea93e19ecfd163283c4ee2150ee6e6b4fb07828e389bca30b9f3be"
+        ),
+    },
+    {
+        "name": "postgis",
+        "version": "3.6.4",
+        "member_count": 909,
+        "inventory_sha256": (
+            "d5aafa675b5917f596cae61f26525333b173ce51854e3274915cff88830cc8dd"
+        ),
+    },
+    {
+        "name": "vector",
+        "version": "0.8.2",
+        "member_count": 237,
+        "inventory_sha256": (
+            "f75948c2610ad89be5f64d5da86ffbad33ffca79ea4b4a21d808680e6a6761f6"
+        ),
+    },
+]
 
 
 class FakePostgresRunner:
@@ -79,6 +108,8 @@ class FakePostgresRunner:
         source_identity_changes_after_dump: bool = False,
         target_contract_flags: tuple[int, ...] | None = None,
         target_extension_available: bool = True,
+        source_extension_member_mismatch: str | None = None,
+        target_extension_member_mismatch: str | None = None,
     ) -> None:
         self.fail_command = fail_command
         self.mutate_during_dump = mutate_during_dump
@@ -106,6 +137,12 @@ class FakePostgresRunner:
             raise ValueError("target_contract_flags must have six values")
         self.dump_created = False
         self.target_extension_available = target_extension_available
+        self.source_extension_member_mismatch = (
+            source_extension_member_mismatch
+        )
+        self.target_extension_member_mismatch = (
+            target_extension_member_mismatch
+        )
         self.calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
 
     def __call__(
@@ -189,6 +226,35 @@ class FakePostgresRunner:
                         f"{item['version']}|{item['owner']}|"
                         f"{int(available)}\n"
                         for item in extensions
+                    ),
+                )
+            if "siur-extension-members-v1" in sql:
+                mismatch = (
+                    self.target_extension_member_mismatch
+                    if database_name.startswith("app_drill_")
+                    else self.source_extension_member_mismatch
+                )
+                values = [
+                    {
+                        **item,
+                        **(
+                            {
+                                "member_count": int(item["member_count"]) + 1,
+                                "inventory_sha256": "0" * 64,
+                            }
+                            if item["name"] == mismatch
+                            else {}
+                        ),
+                    }
+                    for item in EXTENSION_MEMBER_INVENTORIES
+                ]
+                return CommandResult(
+                    0,
+                    stdout="".join(
+                        f"{item['name']}|{item['version']}|"
+                        f"{item['member_count']}|"
+                        f"{item['inventory_sha256']}\n"
+                        for item in values
                     ),
                 )
             if "pg_stat_activity" not in sql:
@@ -441,6 +507,17 @@ def downgrade_backup_to_schema_v2(backup: Path) -> None:
     rewrite_manifest(backup, mutate)
 
 
+def downgrade_backup_to_schema_v3(backup: Path) -> None:
+    def mutate(manifest: dict[str, object]) -> None:
+        manifest["schema_version"] = 3
+        database = manifest["database"]  # type: ignore[assignment]
+        database.pop("extension_members")
+        extensions = manifest["restore_contract"]["extensions"]  # type: ignore[index]
+        extensions.pop("exact_canonical_members_required")
+
+    rewrite_manifest(backup, mutate)
+
+
 def create_request(
     tmp_path: Path,
     *,
@@ -482,6 +559,13 @@ def completed_backup(
     runner = FakePostgresRunner()
     create_backup(request, apply=True, runner=runner, now=NOW)
     return request.destination, runner, reference, geoserver
+
+
+def replace_verified_backup_path(backup: Path) -> Path:
+    original = backup.with_name(f"{BACKUP_PREFIX}detached-original")
+    backup.rename(original)
+    shutil.copytree(original, backup, copy_function=shutil.copy2)
+    return original
 
 
 def test_create_defaults_to_read_only_dry_run_and_inventories_exclusions(
@@ -555,7 +639,7 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         ".reference-blob-store.lock",
         "staging",
     ]
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     assert manifest["consistency"]["postgres_system_identifier"] == (
         SOURCE_SYSTEM_IDENTIFIER
     )
@@ -569,6 +653,10 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         {key: item[key] for key in ("name", "schema", "version")}
         for item in SOURCE_EXTENSIONS
     ]
+    assert manifest["database"]["extension_members"] == {
+        "canonicalization": "pg-identify-object-json-v1",
+        "inventories": EXTENSION_MEMBER_INVENTORIES,
+    }
     assert manifest["database"]["pg_dump_contract"] == [
         "--format=custom",
         "--serializable-deferrable",
@@ -581,6 +669,7 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
     assert manifest["restore_contract"]["extensions"] == {
         "preinstalled_by_administrator": True,
         "exact_versions_required": True,
+        "exact_canonical_members_required": True,
         "owners_must_differ_from_restore_role": True,
         "restore_comments": False,
     }
@@ -607,7 +696,7 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
             and environment.get("PGDATABASE") == "app"
             for command, environment in runner.calls
         )
-        == 6
+        == 9
     )
     dump_command = next(
         command for command, _environment in runner.calls
@@ -623,6 +712,9 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
 
     assert report["verified"] is True
     assert report["database_name"] == "app"
+    assert report["extension_member_inventories"] == (
+        EXTENSION_MEMBER_INVENTORIES
+    )
     assert any(call[0][:2] == ("pg_restore", "--list") for call in runner.calls)
     assert all(
         SOURCE_SECRET not in " ".join(command)
@@ -697,6 +789,22 @@ def test_verify_remains_compatible_with_schema_v2_backup(
     assert report["required_extensions"] is None
 
 
+def test_verify_remains_compatible_with_schema_v3_backup(
+    tmp_path: Path,
+) -> None:
+    backup, runner, _reference, _geoserver = completed_backup(tmp_path)
+    downgrade_backup_to_schema_v3(backup)
+
+    report = verify_backup(backup, runner=runner)
+
+    assert report["verified"] is True
+    assert report["required_extensions"] == [
+        {key: item[key] for key in ("name", "schema", "version")}
+        for item in SOURCE_EXTENSIONS
+    ]
+    assert report["extension_member_inventories"] is None
+
+
 def test_restore_rejects_legacy_backup_without_extension_baseline(
     tmp_path: Path,
 ) -> None:
@@ -722,7 +830,7 @@ def test_restore_rejects_legacy_backup_without_extension_baseline(
     "field",
     ["entry_ctime", "entry_links", "root_ctime", "root_links"],
 )
-def test_schema_v3_requires_complete_filesystem_identity(
+def test_schema_v4_requires_complete_filesystem_identity(
     tmp_path: Path,
     field: str,
 ) -> None:
@@ -745,7 +853,7 @@ def test_schema_v3_requires_complete_filesystem_identity(
         verify_backup(backup, runner=runner)
 
 
-def test_schema_v3_database_identity_must_match_dump_declaration(
+def test_schema_v4_database_identity_must_match_dump_declaration(
     tmp_path: Path,
 ) -> None:
     backup, runner, _reference, _geoserver = completed_backup(tmp_path)
@@ -761,7 +869,7 @@ def test_schema_v3_database_identity_must_match_dump_declaration(
         verify_backup(backup, runner=runner)
 
 
-def test_schema_v3_extension_baseline_must_match_source_identity(
+def test_schema_v4_extension_baseline_must_match_source_identity(
     tmp_path: Path,
 ) -> None:
     backup, runner, _reference, _geoserver = completed_backup(tmp_path)
@@ -779,7 +887,7 @@ def test_schema_v3_extension_baseline_must_match_source_identity(
         verify_backup(backup, runner=runner)
 
 
-def test_schema_v3_requires_extension_exclusions_in_dump_contract(
+def test_schema_v4_requires_extension_exclusions_in_dump_contract(
     tmp_path: Path,
 ) -> None:
     backup, runner, _reference, _geoserver = completed_backup(tmp_path)
@@ -793,6 +901,53 @@ def test_schema_v3_requires_extension_exclusions_in_dump_contract(
     with pytest.raises(
         DisasterRecoveryVerificationError,
         match="PostgreSQL contract is invalid",
+    ):
+        verify_backup(backup, runner=runner)
+
+
+@pytest.mark.parametrize("extension_name", ["plpgsql", "postgis", "vector"])
+def test_create_rejects_unexpected_application_member_in_extension_before_dump(
+    tmp_path: Path,
+    extension_name: str,
+) -> None:
+    reference, geoserver = make_sources(tmp_path)
+    request = create_request(
+        tmp_path,
+        reference=reference,
+        geoserver=geoserver,
+        with_evidence=True,
+    )
+    runner = FakePostgresRunner(
+        source_extension_member_mismatch=extension_name,
+    )
+
+    with pytest.raises(
+        DisasterRecoverySafetyError,
+        match="unexpected or missing extension member",
+    ):
+        create_backup(request, apply=True, runner=runner, now=NOW)
+
+    assert not request.destination.exists()
+    assert all(command[0] != "pg_dump" for command, _env in runner.calls)
+
+
+def test_verify_rejects_noncanonical_extension_member_manifest(
+    tmp_path: Path,
+) -> None:
+    backup, runner, _reference, _geoserver = completed_backup(tmp_path)
+
+    def mutate(manifest: dict[str, object]) -> None:
+        inventories = manifest["database"]["extension_members"][  # type: ignore[index]
+            "inventories"
+        ]
+        inventories[-1]["member_count"] += 1
+        inventories[-1]["inventory_sha256"] = "0" * 64
+
+    rewrite_manifest(backup, mutate)
+
+    with pytest.raises(
+        DisasterRecoveryVerificationError,
+        match="unexpected or missing extension member",
     ):
         verify_backup(backup, runner=runner)
 
@@ -819,6 +974,44 @@ def test_verify_rejects_unmanifested_backup_entries(
 ) -> None:
     backup, runner, _reference, _geoserver = completed_backup(tmp_path)
     (backup / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+
+    with pytest.raises(DisasterRecoveryVerificationError):
+        verify_backup(backup, runner=runner)
+
+
+@pytest.mark.parametrize("special_kind", ["fifo", "socket"])
+def test_verify_rejects_special_payload_without_blocking_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    special_kind: str,
+) -> None:
+    backup, runner, _reference, _geoserver = completed_backup(tmp_path)
+    payload = backup / "geoserver_data.tar"
+    payload.unlink()
+    if special_kind == "fifo":
+        os.mkfifo(payload)
+    else:
+        special_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with tempfile.TemporaryDirectory(prefix="dr-", dir="/tmp") as socket_dir:
+            short_socket_path = Path(socket_dir) / "s"
+            try:
+                special_socket.bind(str(short_socket_path))
+            finally:
+                special_socket.close()
+            short_socket_path.replace(payload)
+    real_open = recovery_module.os.open
+
+    def require_nonblocking_open(
+        path: object,
+        flags: int,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        if path == "geoserver_data.tar" and not flags & os.O_NONBLOCK:
+            raise AssertionError("special backup payload open could block")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(recovery_module.os, "open", require_nonblocking_open)
 
     with pytest.raises(DisasterRecoveryVerificationError):
         verify_backup(backup, runner=runner)
@@ -1351,6 +1544,257 @@ def test_restore_apply_rejects_unavailable_exact_extension_version(
     assert not request.destination.exists()
 
 
+@pytest.mark.parametrize("extension_name", ["plpgsql", "postgis", "vector"])
+def test_restore_rejects_unexpected_target_extension_member_before_mutation(
+    tmp_path: Path,
+    extension_name: str,
+) -> None:
+    backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
+    request = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name=f"app_drill_extra_{extension_name}",
+        destination_name=f"{RESTORE_PREFIX}extra-{extension_name}",
+    )
+    runner = FakePostgresRunner(
+        target_extension_member_mismatch=extension_name,
+    )
+
+    with pytest.raises(
+        DisasterRecoverySafetyError,
+        match="unexpected or missing extension member",
+    ):
+        restore_backup(
+            request,
+            apply=True,
+            runner=runner,
+            now=NOW,
+        )
+
+    assert not request.destination.exists()
+    assert not list(
+        tmp_path.glob(f".{request.destination.name}.partial-*")
+    )
+    assert not any(
+        command[0] == "pg_restore" and "--list" not in command
+        for command, _environment in runner.calls
+    )
+
+
+def test_restore_aborts_if_backup_path_is_swapped_after_verification(
+    tmp_path: Path,
+) -> None:
+    backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
+    request = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name="app_drill_swap_after_verify",
+        destination_name=f"{RESTORE_PREFIX}swap-after-verify",
+    )
+
+    class SwapAfterVerificationRunner(FakePostgresRunner):
+        swapped = False
+
+        def __call__(
+            self,
+            argv: Sequence[str],
+            environment: Mapping[str, str],
+        ) -> CommandResult:
+            result = super().__call__(argv, environment)
+            if argv[0] == "pg_restore" and "--list" in argv and not self.swapped:
+                replace_verified_backup_path(backup)
+                self.swapped = True
+            return result
+
+    runner = SwapAfterVerificationRunner()
+
+    with pytest.raises(DisasterRecoveryVerificationError):
+        restore_backup(request, apply=True, runner=runner, now=NOW)
+
+    assert not request.destination.exists()
+    assert not list(
+        tmp_path.glob(f".{request.destination.name}.partial-*")
+    )
+    assert not any(command[0] == "psql" for command, _env in runner.calls)
+    assert not any(
+        command[0] == "pg_restore" and "--list" not in command
+        for command, _environment in runner.calls
+    )
+
+
+def test_restore_aborts_if_backup_path_is_swapped_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
+    request = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name="app_drill_swap_before_extract",
+        destination_name=f"{RESTORE_PREFIX}swap-before-extract",
+    )
+    runner = FakePostgresRunner()
+    original_preflight = recovery_module._assert_empty_drill_database
+    swapped = False
+
+    def swap_after_preflight(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        original_preflight(*args, **kwargs)
+        if not swapped:
+            replace_verified_backup_path(backup)
+            swapped = True
+
+    monkeypatch.setattr(
+        recovery_module,
+        "_assert_empty_drill_database",
+        swap_after_preflight,
+    )
+
+    with pytest.raises(DisasterRecoveryVerificationError):
+        restore_backup(request, apply=True, runner=runner, now=NOW)
+
+    assert not request.destination.exists()
+    assert not list(
+        tmp_path.glob(f".{request.destination.name}.partial-*")
+    )
+    assert not any(
+        command[0] == "pg_restore" and "--list" not in command
+        for command, _environment in runner.calls
+    )
+
+
+def test_restore_aborts_if_backup_path_is_swapped_before_pg_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
+    request = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name="app_drill_swap_before_pg_restore",
+        destination_name=f"{RESTORE_PREFIX}swap-before-pg-restore",
+    )
+    runner = FakePostgresRunner()
+    original_extract = recovery_module._safe_extract_tar
+    extracted = 0
+
+    def swap_after_extraction(*args: object, **kwargs: object) -> None:
+        nonlocal extracted
+        original_extract(*args, **kwargs)
+        extracted += 1
+        if extracted == 2:
+            replace_verified_backup_path(backup)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "_safe_extract_tar",
+        swap_after_extraction,
+    )
+
+    with pytest.raises(DisasterRecoveryVerificationError):
+        restore_backup(request, apply=True, runner=runner, now=NOW)
+
+    assert not request.destination.exists()
+    assert len(
+        list(tmp_path.glob(f".{request.destination.name}.partial-*"))
+    ) == 1
+    assert not any(
+        command[0] == "pg_restore" and "--list" not in command
+        for command, _environment in runner.calls
+    )
+
+
+def test_restore_compensates_if_backup_path_is_swapped_during_pg_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
+    request = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name="app_drill_swap_during_pg_restore",
+        destination_name=f"{RESTORE_PREFIX}swap-during-pg-restore",
+    )
+    runner = FakePostgresRunner()
+    original_restore = recovery_module._run_pg_restore
+
+    def swap_then_restore(*args: object, **kwargs: object) -> None:
+        replace_verified_backup_path(backup)
+        original_restore(*args, **kwargs)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "_run_pg_restore",
+        swap_then_restore,
+    )
+
+    with pytest.raises(DisasterRecoveryVerificationError):
+        restore_backup(request, apply=True, runner=runner, now=NOW)
+
+    commands = [command for command, _environment in runner.calls]
+    restore_index = next(
+        index
+        for index, command in enumerate(commands)
+        if command[0] == "pg_restore" and "--list" not in command
+    )
+    compensation_index = next(
+        index
+        for index, command in enumerate(commands)
+        if any(
+            "DROP OWNED BY CURRENT_USER CASCADE" in argument
+            for argument in command
+        )
+    )
+    assert compensation_index > restore_index
+    assert not request.destination.exists()
+    assert len(
+        list(tmp_path.glob(f".{request.destination.name}.partial-*"))
+    ) == 1
+    assert runner.target_preflight_counts == [0] * 12
+
+
+def test_restore_compensates_if_backup_path_is_swapped_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
+    request = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name="app_drill_swap_before_publish",
+        destination_name=f"{RESTORE_PREFIX}swap-before-publish",
+    )
+    runner = FakePostgresRunner()
+    original_inventory = recovery_module._read_extension_member_inventories
+
+    def swap_after_post_restore_inventory(
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        result = original_inventory(*args, **kwargs)
+        if kwargs.get("label") == "restored target":
+            replace_verified_backup_path(backup)
+        return result
+
+    monkeypatch.setattr(
+        recovery_module,
+        "_read_extension_member_inventories",
+        swap_after_post_restore_inventory,
+    )
+
+    with pytest.raises(DisasterRecoveryVerificationError):
+        restore_backup(request, apply=True, runner=runner, now=NOW)
+
+    commands = [command for command, _environment in runner.calls]
+    assert any(
+        "DROP OWNED BY CURRENT_USER CASCADE" in argument
+        for command in commands
+        for argument in command
+    )
+    assert not request.destination.exists()
+    assert runner.target_preflight_counts == [0] * 12
+
+
 def test_restore_apply_extracts_only_to_new_drill_path_and_empty_database(
     tmp_path: Path,
 ) -> None:
@@ -1419,6 +1863,7 @@ def test_restore_apply_extracts_only_to_new_drill_path_and_empty_database(
     assert "--single-transaction" in restore_commands[0]
     assert "--no-comments" in restore_commands[0]
     assert "--dbname=app_drill_20260726" in restore_commands[0]
+    assert restore_commands[0][-1].startswith("/proc/self/fd/")
     assert not any(
         option in restore_commands[0]
         for option in ("--clean", "--create", "--if-exists")
@@ -1429,6 +1874,11 @@ def test_restore_apply_extracts_only_to_new_drill_path_and_empty_database(
     assert any(
         environment.get("PGPASSWORD") == TARGET_SECRET
         for _command, environment in runner.calls
+    )
+    assert any(
+        recovery_module.PASSTHROUGH_FD_ENVIRONMENT_KEY in environment
+        for command, environment in runner.calls
+        if command[0] == "pg_restore"
     )
     preflight_sql = next(
         argument
@@ -1442,6 +1892,41 @@ def test_restore_apply_extracts_only_to_new_drill_path_and_empty_database(
     )
     assert "WITH RECURSIVE extension_objects" in preflight_sql
     assert "d.deptype IN ('a', 'i')" in preflight_sql
+
+
+def test_subprocess_runner_passes_verified_descriptor_without_leaking_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = tmp_path / "payload.dump"
+    payload.write_bytes(b"verified")
+    captured: dict[str, object] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "listed\n"
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> Completed:
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(recovery_module.subprocess, "run", fake_run)
+    with payload.open("rb") as stream:
+        descriptor = stream.fileno()
+        marker = recovery_module.PASSTHROUGH_FD_ENVIRONMENT_KEY
+        result = recovery_module.subprocess_command_runner(
+            ("pg_restore", "--list", f"/proc/self/fd/{descriptor}"),
+            {
+                "PATH": "/usr/bin",
+                marker: str(descriptor),
+            },
+        )
+
+    assert result.returncode == 0
+    assert captured["pass_fds"] == (descriptor,)
+    assert marker not in captured["env"]  # type: ignore[operator]
 
 
 def test_restore_uses_manifest_ownership_not_canonical_tar_fields(

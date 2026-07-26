@@ -36,9 +36,16 @@ from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+DATABASE_IDENTITY_SCHEMA_VERSION = 3
 LEGACY_SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
+SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {
+        LEGACY_SCHEMA_VERSION,
+        DATABASE_IDENTITY_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    }
+)
 QUIESCENCE_EVIDENCE_SCHEMA_VERSION = 2
 LEGACY_QUIESCENCE_EVIDENCE_SCHEMA_VERSION = 1
 DRILL_IDENTITY_SCHEMA_VERSION = 2
@@ -86,6 +93,30 @@ EXTENSION_VERSION_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$",
     re.ASCII,
 )
+EXTENSION_MEMBER_CANONICALIZATION = "pg-identify-object-json-v1"
+CANONICAL_EXTENSION_MEMBER_INVENTORIES = {
+    ("plpgsql", "1.0"): (
+        4,
+        "995d6dd1dcea93e19ecfd163283c4ee2150ee6e6b4fb07828e389bca30b9f3be",
+    ),
+    ("postgis", "3.6.4"): (
+        909,
+        "d5aafa675b5917f596cae61f26525333b173ce51854e3274915cff88830cc8dd",
+    ),
+    ("vector", "0.8.2"): (
+        237,
+        "f75948c2610ad89be5f64d5da86ffbad33ffca79ea4b4a21d808680e6a6761f6",
+    ),
+}
+BACKUP_PAYLOAD_NAMES = (
+    "geoserver_data.tar",
+    "manifest.json",
+    "manifest.sha256",
+    "postgres.dump",
+    QUIESCENCE_EVIDENCE_NAME,
+    "reference_artifacts.tar",
+)
+PASSTHROUGH_FD_ENVIRONMENT_KEY = "SIUR_RECOVERY_PASSTHROUGH_FD"
 
 
 class DisasterRecoveryError(RuntimeError):
@@ -165,6 +196,22 @@ class _DatabaseExtension:
 
 
 @dataclass(frozen=True)
+class _ExtensionMemberInventory:
+    name: str
+    version: str
+    member_count: int
+    inventory_sha256: str
+
+    def manifest_value(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "version": self.version,
+            "member_count": self.member_count,
+            "inventory_sha256": self.inventory_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class _DatabaseIdentity:
     database_name: str
     database_user: str
@@ -172,6 +219,25 @@ class _DatabaseIdentity:
     database_oid: int
     extensions: tuple[_DatabaseExtension, ...]
     drill_token: str | None = None
+
+
+@dataclass
+class _VerifiedBackup:
+    backup_path: Path
+    directory_metadata: os.stat_result
+    payload_metadata: dict[str, os.stat_result]
+    descriptors: dict[str, int]
+    manifest: dict[str, Any]
+    manifest_sha256: str
+    result: dict[str, object]
+
+    def close(self) -> None:
+        for descriptor in self.descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        self.descriptors.clear()
 
 
 @dataclass(frozen=True)
@@ -297,6 +363,9 @@ def create_backup(
         )
     command_runner = runner or subprocess_command_runner
     source_identity: _DatabaseIdentity | None = None
+    source_extension_members: tuple[_ExtensionMemberInventory, ...] | None = (
+        None
+    )
     if apply:
         if evidence is None:
             raise DisasterRecoverySafetyError(
@@ -308,6 +377,12 @@ def create_backup(
             require_drill_marker=False,
         )
         _assert_evidence_database_identity(evidence, source_identity)
+        source_extension_members = _read_extension_member_inventories(
+            command_runner,
+            database,
+            extensions=source_identity.extensions,
+            label="source",
+        )
 
     reference_inventory = _inventory_tree(
         reference_source,
@@ -378,6 +453,17 @@ def create_backup(
                 "source PostgreSQL identity changed while the dump was "
                 "being created"
             )
+        source_extension_members_after = _read_extension_member_inventories(
+            command_runner,
+            database,
+            extensions=source_identity_after.extensions,
+            label="source",
+        )
+        if source_extension_members_after != source_extension_members:
+            raise DisasterRecoverySafetyError(
+                "source PostgreSQL extension members changed while the dump "
+                "was being created"
+            )
 
         reference_archive = partial / "reference_artifacts.tar"
         geoserver_archive = partial / "geoserver_data.tar"
@@ -420,6 +506,21 @@ def create_backup(
                 "source PostgreSQL identity changed before backup "
                 "publication"
             )
+        source_extension_members_final = _read_extension_member_inventories(
+            command_runner,
+            database,
+            extensions=source_identity_final.extensions,
+            label="source",
+        )
+        if source_extension_members_final != source_extension_members:
+            raise DisasterRecoverySafetyError(
+                "source PostgreSQL extension members changed before backup "
+                "publication"
+            )
+        if source_extension_members is None:
+            raise DisasterRecoverySafetyError(
+                "source PostgreSQL extension member inventory is unavailable"
+            )
 
         manifest = _build_manifest(
             created_at=timestamp,
@@ -431,6 +532,7 @@ def create_backup(
             reference_archive=reference_archive,
             geoserver_inventory=geoserver_inventory,
             geoserver_archive=geoserver_archive,
+            extension_member_inventories=source_extension_members,
         )
         manifest_bytes = _canonical_json_bytes(manifest)
         if len(manifest_bytes) > MAX_JSON_BYTES:
@@ -468,105 +570,462 @@ def verify_backup(
 ) -> dict[str, object]:
     """Verify manifest, payload hashes, tar members and pg_dump readability."""
 
+    verified = _open_verified_backup(
+        backup,
+        runner=runner or subprocess_command_runner,
+    )
+    try:
+        return dict(verified.result)
+    finally:
+        verified.close()
+
+
+def _open_verified_backup(
+    backup: Path,
+    *,
+    runner: CommandRunner,
+    expected_manifest_sha256: str | None = None,
+) -> _VerifiedBackup:
     backup_path = _existing_named_directory(
         backup,
         prefix=BACKUP_PREFIX,
         label="backup",
     )
-    _assert_backup_directory_contents(backup_path)
-    manifest, actual_manifest_hash = _read_checked_manifest(backup_path)
-    manifest_schema_version = int(manifest["schema_version"])
-    database = _manifest_mapping(manifest, "database")
-    database_name = _database_name_from_manifest(database)
-    trees = _manifest_mapping(manifest, "trees")
-    reference = _mapping_member(trees, "reference_artifacts")
-    geoserver = _mapping_member(trees, "geoserver_data")
-    consistency = _manifest_mapping(manifest, "consistency")
-    evidence_description = _mapping_member(
-        consistency,
-        "quiescence_evidence",
-    )
-    evidence_path = _fixed_payload_path(
-        backup_path,
-        evidence_description,
-        expected_name=QUIESCENCE_EVIDENCE_NAME,
-    )
-    _verify_payload_hash(evidence_path, evidence_description)
-    _verify_stored_quiescence_evidence(
-        evidence_path,
-        consistency=consistency,
-        manifest_schema_version=int(manifest["schema_version"]),
-    )
-    dump_description = _mapping_member(database, "dump")
-    dump_path = _fixed_payload_path(
-        backup_path,
-        dump_description,
-        expected_name="postgres.dump",
-    )
-    _verify_payload_hash(dump_path, dump_description)
+    directory_descriptor = _open_absolute_directory_descriptor(backup_path)
+    descriptors: dict[str, int] = {}
+    try:
+        directory_metadata = os.fstat(directory_descriptor)
+        names = os.listdir(directory_descriptor)
+        if sorted(names) != sorted(BACKUP_PAYLOAD_NAMES):
+            raise DisasterRecoveryVerificationError(
+                "backup directory contains missing, unexpected or unsafe "
+                "entries"
+            )
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        for name in BACKUP_PAYLOAD_NAMES:
+            descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+            descriptors[name] = descriptor
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise DisasterRecoveryVerificationError(
+                    "backup directory contains missing, unexpected or unsafe "
+                    "entries"
+                )
+    except OSError as error:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        raise DisasterRecoveryVerificationError(
+            "backup directory contains missing, unexpected or unsafe entries"
+        ) from error
+    except BaseException:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(directory_descriptor)
 
-    verified_trees: dict[str, dict[str, int]] = {}
-    for name, description, expected_archive, expected_exclusions in (
-        (
-            "reference_artifacts",
-            reference,
-            "reference_artifacts.tar",
-            [".reference-blob-store.lock", "staging"],
-        ),
-        ("geoserver_data", geoserver, "geoserver_data.tar", ["gwc-cache"]),
-    ):
-        archive_description = _mapping_member(description, "archive")
-        archive_path = _fixed_payload_path(
-            backup_path,
-            archive_description,
-            expected_name=expected_archive,
+    try:
+        manifest_bytes = _read_descriptor_bytes(
+            descriptors["manifest.json"],
+            limit=MAX_JSON_BYTES,
+            label="backup manifest",
         )
-        _verify_payload_hash(archive_path, archive_description)
-        entries = _parse_manifest_entries(
-            description.get("entries"),
+        checksum_bytes = _read_descriptor_bytes(
+            descriptors["manifest.sha256"],
+            limit=1024,
+            label="backup manifest checksum",
+        )
+        expected_hash = _parse_manifest_checksum(checksum_bytes)
+        actual_manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+        if (
+            actual_manifest_hash != expected_hash
+            or (
+                expected_manifest_sha256 is not None
+                and actual_manifest_hash != expected_manifest_sha256
+            )
+        ):
+            raise DisasterRecoveryVerificationError(
+                "backup manifest checksum does not match"
+            )
+        manifest = _decode_json_object(
+            manifest_bytes,
+            label="backup manifest",
+        )
+        _validate_manifest_header(manifest)
+        manifest_schema_version = int(manifest["schema_version"])
+        database = _manifest_mapping(manifest, "database")
+        database_name = _database_name_from_manifest(database)
+        trees = _manifest_mapping(manifest, "trees")
+        reference = _mapping_member(trees, "reference_artifacts")
+        geoserver = _mapping_member(trees, "geoserver_data")
+        consistency = _manifest_mapping(manifest, "consistency")
+        evidence_description = _mapping_member(
+            consistency,
+            "quiescence_evidence",
+        )
+        _assert_payload_description_name(
+            evidence_description,
+            expected_name=QUIESCENCE_EVIDENCE_NAME,
+        )
+        _verify_payload_descriptor(
+            descriptors[QUIESCENCE_EVIDENCE_NAME],
+            evidence_description,
+        )
+        _verify_stored_quiescence_evidence_bytes(
+            _read_descriptor_bytes(
+                descriptors[QUIESCENCE_EVIDENCE_NAME],
+                limit=64 * 1024,
+                label="stored quiescence evidence",
+            ),
+            consistency=consistency,
             manifest_schema_version=manifest_schema_version,
         )
-        _validate_tree_statistics(
-            description,
-            entries,
-            expected_exclusions=expected_exclusions,
-            manifest_schema_version=manifest_schema_version,
+        dump_description = _mapping_member(database, "dump")
+        _assert_payload_description_name(
+            dump_description,
+            expected_name="postgres.dump",
         )
-        _verify_tar_archive(archive_path, entries)
-        verified_trees[name] = {
-            "files": sum(item.kind == "file" for item in entries),
-            "directories": sum(
-                item.kind == "directory" for item in entries
+        _verify_payload_descriptor(
+            descriptors["postgres.dump"],
+            dump_description,
+        )
+
+        verified_trees: dict[str, dict[str, int]] = {}
+        for name, description, expected_archive, expected_exclusions in (
+            (
+                "reference_artifacts",
+                reference,
+                "reference_artifacts.tar",
+                [".reference-blob-store.lock", "staging"],
             ),
-            "bytes": sum(
-                item.size_bytes for item in entries if item.kind == "file"
+            (
+                "geoserver_data",
+                geoserver,
+                "geoserver_data.tar",
+                ["gwc-cache"],
             ),
+        ):
+            archive_description = _mapping_member(description, "archive")
+            _assert_payload_description_name(
+                archive_description,
+                expected_name=expected_archive,
+            )
+            _verify_payload_descriptor(
+                descriptors[expected_archive],
+                archive_description,
+            )
+            entries = _parse_manifest_entries(
+                description.get("entries"),
+                manifest_schema_version=manifest_schema_version,
+            )
+            _validate_tree_statistics(
+                description,
+                entries,
+                expected_exclusions=expected_exclusions,
+                manifest_schema_version=manifest_schema_version,
+            )
+            _verify_tar_archive(descriptors[expected_archive], entries)
+            verified_trees[name] = {
+                "files": sum(item.kind == "file" for item in entries),
+                "directories": sum(
+                    item.kind == "directory" for item in entries
+                ),
+                "bytes": sum(
+                    item.size_bytes
+                    for item in entries
+                    if item.kind == "file"
+                ),
+            }
+
+        _run_pg_restore_list(runner, descriptors["postgres.dump"])
+        backup_id = manifest.get("backup_id")
+        if not isinstance(backup_id, str):
+            raise DisasterRecoveryVerificationError("backup id is invalid")
+        required_extensions = (
+            _parse_required_extension_manifest(
+                database.get("required_extensions")
+            )
+            if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION
+            else None
+        )
+        extension_member_inventories = (
+            _parse_manifest_extension_member_inventories(
+                database.get("extension_members"),
+                extensions=_parse_database_extensions(
+                    consistency.get("postgres_extensions"),
+                    label="backup PostgreSQL extensions",
+                    error_type=DisasterRecoveryVerificationError,
+                ),
+            )
+            if manifest_schema_version == SCHEMA_VERSION
+            else None
+        )
+        result: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "manifest_schema_version": manifest_schema_version,
+            "mode": "verify",
+            "backup": str(backup_path),
+            "backup_id": backup_id,
+            "manifest_sha256": actual_manifest_hash,
+            "database_name": database_name,
+            "quiescence_evidence_sha256": evidence_description["sha256"],
+            "required_extensions": required_extensions,
+            "extension_member_inventories": extension_member_inventories,
+            "trees": verified_trees,
+            "verified": True,
         }
-
-    _run_pg_restore_list(runner or subprocess_command_runner, dump_path)
-    backup_id = manifest.get("backup_id")
-    if not isinstance(backup_id, str):
-        raise DisasterRecoveryVerificationError("backup id is invalid")
-    required_extensions = (
-        _parse_required_extension_manifest(
-            database.get("required_extensions")
+        return _VerifiedBackup(
+            backup_path=backup_path,
+            directory_metadata=directory_metadata,
+            payload_metadata={
+                name: os.fstat(descriptor)
+                for name, descriptor in descriptors.items()
+            },
+            descriptors=descriptors,
+            manifest=manifest,
+            manifest_sha256=actual_manifest_hash,
+            result=result,
         )
-        if manifest_schema_version == SCHEMA_VERSION
-        else None
+    except BaseException:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        raise
+
+
+def _assert_verified_backup_path_unchanged(
+    verified: _VerifiedBackup,
+) -> None:
+    directory_descriptor = _open_absolute_directory_descriptor(
+        verified.backup_path
     )
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "manifest_schema_version": manifest_schema_version,
-        "mode": "verify",
-        "backup": str(backup_path),
-        "backup_id": backup_id,
-        "manifest_sha256": actual_manifest_hash,
-        "database_name": database_name,
-        "quiescence_evidence_sha256": evidence_description["sha256"],
-        "required_extensions": required_extensions,
-        "trees": verified_trees,
-        "verified": True,
+    opened: list[int] = []
+    try:
+        current_directory = os.fstat(directory_descriptor)
+        _assert_same_verified_node(
+            verified.directory_metadata,
+            current_directory,
+            kind="directory",
+        )
+        if sorted(os.listdir(directory_descriptor)) != sorted(
+            BACKUP_PAYLOAD_NAMES
+        ):
+            raise DisasterRecoveryVerificationError(
+                "verified backup path changed before restore consumption"
+            )
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        for name in BACKUP_PAYLOAD_NAMES:
+            descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+            opened.append(descriptor)
+            _assert_same_verified_node(
+                verified.payload_metadata[name],
+                os.fstat(descriptor),
+                kind="file",
+            )
+    except (OSError, DisasterRecoverySafetyError) as error:
+        raise DisasterRecoveryVerificationError(
+            "verified backup path changed before restore consumption"
+        ) from error
+    finally:
+        for descriptor in opened:
+            os.close(descriptor)
+        os.close(directory_descriptor)
+
+
+def _assert_same_verified_node(
+    expected: os.stat_result,
+    actual: os.stat_result,
+    *,
+    kind: Literal["directory", "file"],
+) -> None:
+    correct_kind = (
+        stat.S_ISDIR(actual.st_mode)
+        if kind == "directory"
+        else stat.S_ISREG(actual.st_mode)
+    )
+    fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+        "st_uid",
+        "st_gid",
+        "st_nlink",
+    )
+    if not correct_kind or any(
+        getattr(expected, field) != getattr(actual, field) for field in fields
+    ):
+        raise DisasterRecoveryVerificationError(
+            "verified backup node identity changed"
+        )
+
+
+def _snapshot_verified_payloads(
+    verified: _VerifiedBackup,
+    *,
+    directory: Path,
+    runner: CommandRunner,
+) -> dict[str, int]:
+    if not hasattr(os, "O_TMPFILE"):
+        raise DisasterRecoverySafetyError(
+            "anonymous verified payload staging is unavailable"
+        )
+    descriptions = _backup_consumed_payload_descriptions(verified.manifest)
+    directory_descriptor = _open_absolute_directory_descriptor(directory)
+    snapshots: dict[str, int] = {}
+    try:
+        for name in (
+            "reference_artifacts.tar",
+            "geoserver_data.tar",
+            "postgres.dump",
+        ):
+            snapshots[name] = _copy_descriptor_to_anonymous_file(
+                verified.descriptors[name],
+                directory_descriptor=directory_descriptor,
+                description=descriptions[name],
+            )
+        for archive_name, tree_name in (
+            ("reference_artifacts.tar", "reference_artifacts"),
+            ("geoserver_data.tar", "geoserver_data"),
+        ):
+            tree = _mapping_member(
+                _manifest_mapping(verified.manifest, "trees"),
+                tree_name,
+            )
+            entries = _parse_manifest_entries(
+                tree.get("entries"),
+                manifest_schema_version=int(
+                    verified.manifest["schema_version"]
+                ),
+            )
+            _verify_tar_archive(snapshots[archive_name], entries)
+        _run_pg_restore_list(runner, snapshots["postgres.dump"])
+        return snapshots
+    except BaseException:
+        for descriptor in snapshots.values():
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(directory_descriptor)
+
+
+def _backup_consumed_payload_descriptions(
+    manifest: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]]:
+    database = _manifest_mapping(manifest, "database")
+    trees = _manifest_mapping(manifest, "trees")
+    result = {
+        "postgres.dump": _mapping_member(database, "dump"),
+        "reference_artifacts.tar": _mapping_member(
+            _mapping_member(trees, "reference_artifacts"),
+            "archive",
+        ),
+        "geoserver_data.tar": _mapping_member(
+            _mapping_member(trees, "geoserver_data"),
+            "archive",
+        ),
     }
+    for name, description in result.items():
+        _assert_payload_description_name(
+            description,
+            expected_name=name,
+        )
+    return result
+
+
+def _copy_descriptor_to_anonymous_file(
+    source_descriptor: int,
+    *,
+    directory_descriptor: int,
+    description: Mapping[str, Any],
+) -> int:
+    expected_size, expected_sha256 = _payload_description_values(description)
+    flags = os.O_RDWR | os.O_TMPFILE
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        writable = os.open(
+            ".",
+            flags,
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+    except OSError as error:
+        raise DisasterRecoverySafetyError(
+            "anonymous verified payload staging is unavailable"
+        ) from error
+    readonly: int | None = None
+    try:
+        source_before = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(source_before.st_mode)
+            or source_before.st_nlink != 1
+        ):
+            raise DisasterRecoveryVerificationError(
+                "verified backup payload identity is invalid"
+            )
+        os.lseek(source_descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        size = 0
+        while True:
+            chunk = os.read(source_descriptor, COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(writable, view)
+                view = view[written:]
+        source_after = os.fstat(source_descriptor)
+        _assert_same_verified_node(
+            source_before,
+            source_after,
+            kind="file",
+        )
+        os.lseek(source_descriptor, 0, os.SEEK_SET)
+        if size != expected_size or digest.hexdigest() != expected_sha256:
+            raise DisasterRecoveryVerificationError(
+                "backup payload changed before anonymous staging"
+            )
+        os.fsync(writable)
+        os.fchmod(writable, 0o400)
+        readonly_flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            readonly_flags |= os.O_CLOEXEC
+        readonly = os.open(
+            f"/proc/self/fd/{writable}",
+            readonly_flags,
+        )
+        writable_metadata = os.fstat(writable)
+        readonly_metadata = os.fstat(readonly)
+        if (
+            writable_metadata.st_dev != readonly_metadata.st_dev
+            or writable_metadata.st_ino != readonly_metadata.st_ino
+        ):
+            raise DisasterRecoveryVerificationError(
+                "anonymous verified payload could not be reopened safely"
+            )
+        os.close(writable)
+        writable = -1
+        _verify_payload_descriptor(readonly, description)
+        return readonly
+    except BaseException:
+        if readonly is not None:
+            os.close(readonly)
+        raise
+    finally:
+        if writable >= 0:
+            os.close(writable)
 
 
 def restore_backup(
@@ -579,8 +1038,32 @@ def restore_backup(
     """Plan or restore into a new directory and an empty drill-only database."""
 
     command_runner = runner or subprocess_command_runner
-    verification = verify_backup(request.backup, runner=command_runner)
-    backup_path = Path(str(verification["backup"]))
+    verified = _open_verified_backup(
+        request.backup,
+        runner=command_runner,
+    )
+    try:
+        return _restore_verified_backup(
+            request,
+            verified=verified,
+            apply=apply,
+            command_runner=command_runner,
+            now=now,
+        )
+    finally:
+        verified.close()
+
+
+def _restore_verified_backup(
+    request: RestoreBackupRequest,
+    *,
+    verified: _VerifiedBackup,
+    apply: bool,
+    command_runner: CommandRunner,
+    now: datetime | None,
+) -> dict[str, object]:
+    verification = verified.result
+    backup_path = verified.backup_path
     destination = _new_named_destination(
         request.destination,
         prefix=RESTORE_PREFIX,
@@ -656,30 +1139,88 @@ def restore_backup(
     if not apply:
         return report
 
+    _assert_verified_backup_path_unchanged(verified)
+    snapshot_descriptors = _snapshot_verified_payloads(
+        verified,
+        directory=destination.parent,
+        runner=command_runner,
+    )
+    try:
+        return _apply_verified_restore(
+            verified=verified,
+            snapshot_descriptors=snapshot_descriptors,
+            destination=destination,
+            target=target,
+            expected_target_identity=expected_target_identity,
+            report=report,
+            command_runner=command_runner,
+            now=now,
+        )
+    finally:
+        for descriptor in snapshot_descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _apply_verified_restore(
+    *,
+    verified: _VerifiedBackup,
+    snapshot_descriptors: Mapping[str, int],
+    destination: Path,
+    target: _DatabaseLocation,
+    expected_target_identity: _DatabaseIdentity,
+    report: Mapping[str, object],
+    command_runner: CommandRunner,
+    now: datetime | None,
+) -> dict[str, object]:
+    manifest = verified.manifest
+    manifest_schema_version = int(manifest["schema_version"])
+    database_description = _manifest_mapping(manifest, "database")
+    expected_member_inventories = (
+        _parse_manifest_extension_member_inventories(
+            database_description.get("extension_members"),
+            extensions=expected_target_identity.extensions,
+        )
+    )
+    target_member_inventories = _read_extension_member_inventories(
+        command_runner,
+        target,
+        extensions=expected_target_identity.extensions,
+        label="target",
+    )
+    if [
+        item.manifest_value() for item in target_member_inventories
+    ] != expected_member_inventories:
+        raise DisasterRecoverySafetyError(
+            "target extension member inventory does not match the verified "
+            "backup baseline"
+        )
     _assert_empty_drill_database(
         command_runner,
         target,
         expected_target_identity,
     )
+    _assert_verified_backup_path_unchanged(verified)
     partial = destination.parent / (
         f".{destination.name}.partial-{uuid4().hex}"
     )
     _assert_new_path(partial, label="partial restore destination")
     _mkdir_new_directory(partial, 0o700)
-    manifest, _manifest_hash = _read_checked_manifest(backup_path)
-    manifest_schema_version = int(manifest["schema_version"])
     trees = _manifest_mapping(manifest, "trees")
     for tree_name, archive_name in (
         ("reference_artifacts", "reference_artifacts.tar"),
         ("geoserver_data", "geoserver_data.tar"),
     ):
+        _assert_verified_backup_path_unchanged(verified)
         tree = _mapping_member(trees, tree_name)
         entries = _parse_manifest_entries(
             tree.get("entries"),
             manifest_schema_version=manifest_schema_version,
         )
         _safe_extract_tar(
-            backup_path / archive_name,
+            snapshot_descriptors[archive_name],
             partial / tree_name,
             entries,
             root_mode=_manifest_mode(tree, "root_mode"),
@@ -690,10 +1231,8 @@ def restore_backup(
             root_uid=_manifest_owner_id(tree, "root_uid"),
             root_gid=_manifest_owner_id(tree, "root_gid"),
         )
-    database_description = _manifest_mapping(manifest, "database")
     dump_description = _mapping_member(database_description, "dump")
-    dump_path = _fixed_payload_path(
-        backup_path,
+    _assert_payload_description_name(
         dump_description,
         expected_name="postgres.dump",
     )
@@ -719,7 +1258,23 @@ def restore_backup(
     )
     os.chmod(partial, 0o750)
     _fsync_directory(partial)
-    _verify_payload_hash(dump_path, dump_description)
+    _verify_payload_descriptor(
+        snapshot_descriptors["postgres.dump"],
+        dump_description,
+    )
+    _assert_verified_backup_path_unchanged(verified)
+    target_member_inventories = _read_extension_member_inventories(
+        command_runner,
+        target,
+        extensions=expected_target_identity.extensions,
+        label="target",
+    )
+    if [
+        item.manifest_value() for item in target_member_inventories
+    ] != expected_member_inventories:
+        raise DisasterRecoverySafetyError(
+            "target extension member inventory changed before restore"
+        )
     _assert_empty_drill_database(
         command_runner,
         target,
@@ -728,13 +1283,32 @@ def restore_backup(
 
     restore_attempted = False
     try:
+        _assert_verified_backup_path_unchanged(verified)
         restore_attempted = True
-        _run_pg_restore(command_runner, target, dump_path)
+        _run_pg_restore(
+            command_runner,
+            target,
+            snapshot_descriptors["postgres.dump"],
+        )
+        _assert_verified_backup_path_unchanged(verified)
         _assert_database_identity(
             command_runner,
             target,
             expected_target_identity,
         )
+        restored_member_inventories = _read_extension_member_inventories(
+            command_runner,
+            target,
+            extensions=expected_target_identity.extensions,
+            label="restored target",
+        )
+        if [
+            item.manifest_value() for item in restored_member_inventories
+        ] != expected_member_inventories:
+            raise DisasterRecoverySafetyError(
+                "restored extension member inventory changed unexpectedly"
+            )
+        _assert_verified_backup_path_unchanged(verified)
         durability_verified = _publish_directory_noreplace(
             partial,
             destination,
@@ -771,15 +1345,37 @@ def subprocess_command_runner(
 ) -> CommandResult:
     """Run a fixed argv without a shell and without echoing command output."""
 
+    command_environment = dict(environment)
+    raw_passthrough_descriptor = command_environment.pop(
+        PASSTHROUGH_FD_ENVIRONMENT_KEY,
+        None,
+    )
+    pass_fds: tuple[int, ...] = ()
+    if raw_passthrough_descriptor is not None:
+        try:
+            passthrough_descriptor = int(raw_passthrough_descriptor)
+        except ValueError as error:
+            raise DisasterRecoveryCommandError(
+                "verified payload descriptor handoff is invalid"
+            ) from error
+        if (
+            passthrough_descriptor < 0
+            or f"/proc/self/fd/{passthrough_descriptor}" not in argv
+        ):
+            raise DisasterRecoveryCommandError(
+                "verified payload descriptor handoff is invalid"
+            )
+        pass_fds = (passthrough_descriptor,)
     try:
         completed = subprocess.run(
             list(argv),
-            env=dict(environment),
+            env=command_environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            pass_fds=pass_fds,
         )
     except (OSError, ValueError) as error:
         raise DisasterRecoveryCommandError(
@@ -909,6 +1505,9 @@ def _build_manifest(
     reference_archive: Path,
     geoserver_inventory: _TreeInventory,
     geoserver_archive: Path,
+    extension_member_inventories: tuple[
+        _ExtensionMemberInventory, ...
+    ],
 ) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -968,6 +1567,13 @@ def _build_manifest(
                 for item in evidence.get("postgres_extensions", [])
                 if isinstance(item, Mapping)
             ],
+            "extension_members": {
+                "canonicalization": EXTENSION_MEMBER_CANONICALIZATION,
+                "inventories": [
+                    item.manifest_value()
+                    for item in extension_member_inventories
+                ],
+            },
         },
         "trees": {
             "reference_artifacts": _tree_manifest(
@@ -1027,6 +1633,7 @@ def _build_manifest(
             "extensions": {
                 "preinstalled_by_administrator": True,
                 "exact_versions_required": True,
+                "exact_canonical_members_required": True,
                 "owners_must_differ_from_restore_role": True,
                 "restore_comments": False,
             },
@@ -1617,10 +2224,14 @@ def _run_pg_dump(
         raise DisasterRecoveryCommandError("PostgreSQL backup command failed")
 
 
-def _run_pg_restore_list(runner: CommandRunner, dump: Path) -> None:
+def _run_pg_restore_list(
+    runner: CommandRunner,
+    dump: Path | int,
+) -> None:
+    dump_argument, environment = _payload_command_input(dump)
     result = runner(
-        ("pg_restore", "--list", str(dump)),
-        _client_environment(),
+        ("pg_restore", "--list", dump_argument),
+        environment,
     )
     if result.returncode != 0:
         raise DisasterRecoveryVerificationError(
@@ -1922,8 +2533,11 @@ def _compensate_restored_drill_database(
 def _run_pg_restore(
     runner: CommandRunner,
     database: _DatabaseLocation,
-    dump: Path,
+    dump: Path | int,
 ) -> None:
+    dump_argument, descriptor_environment = _payload_command_input(dump)
+    environment = _postgres_environment(database)
+    environment.update(descriptor_environment)
     result = runner(
         (
             "pg_restore",
@@ -1933,14 +2547,29 @@ def _run_pg_restore(
             "--no-privileges",
             "--no-comments",
             f"--dbname={database.database_name}",
-            str(dump),
+            dump_argument,
         ),
-        _postgres_environment(database),
+        environment,
     )
     if result.returncode != 0:
         raise DisasterRecoveryCommandError(
             "PostgreSQL drill restore command failed"
         )
+
+
+def _payload_command_input(
+    payload: Path | int,
+) -> tuple[str, dict[str, str]]:
+    environment = _client_environment()
+    if isinstance(payload, int):
+        metadata = os.fstat(payload)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise DisasterRecoveryVerificationError(
+                "verified PostgreSQL payload descriptor is invalid"
+            )
+        environment[PASSTHROUGH_FD_ENVIRONMENT_KEY] = str(payload)
+        return f"/proc/self/fd/{payload}", environment
+    return str(payload), environment
 
 
 def _client_environment() -> dict[str, str]:
@@ -2161,6 +2790,195 @@ def _read_database_extensions(
         label="live database extensions",
         error_type=DisasterRecoverySafetyError,
     )
+
+
+def _read_extension_member_inventories(
+    runner: CommandRunner,
+    database: _DatabaseLocation,
+    *,
+    extensions: tuple[_DatabaseExtension, ...],
+    label: str,
+) -> tuple[_ExtensionMemberInventory, ...]:
+    # The descriptor deliberately contains no OID. pg_identify_object yields
+    # stable, schema-qualified identities, while the catalog and sub-object ID
+    # keep otherwise similar object classes distinct. Any ALTER EXTENSION ADD
+    # changes both the member count and this ordered SHA-256.
+    query = (
+        "/* siur-extension-members-v1 */ "
+        "WITH members AS ("
+        "SELECT e.extname, e.extversion, "
+        "jsonb_build_object("
+        "'catalog', d.classid::regclass::text, "
+        "'object_subid', d.objsubid, "
+        "'type', identified.type, "
+        "'schema', COALESCE(identified.schema, ''), "
+        "'name', COALESCE(identified.name, ''), "
+        "'identity', identified.identity)::text AS descriptor "
+        "FROM pg_extension e "
+        "JOIN pg_depend d ON d.refclassid = 'pg_extension'::regclass "
+        "AND d.refobjid = e.oid AND d.deptype = 'e' "
+        "CROSS JOIN LATERAL pg_identify_object("
+        "d.classid, d.objid, d.objsubid) AS identified "
+        "WHERE e.extname IN ('plpgsql','postgis','vector')) "
+        "SELECT extname, extversion, count(*)::text, "
+        "encode(sha256(convert_to(string_agg("
+        "descriptor, E'\\n' ORDER BY descriptor), 'UTF8')), 'hex') "
+        "FROM members GROUP BY extname, extversion ORDER BY extname"
+    )
+    result = runner(
+        (
+            "psql",
+            "-X",
+            "--no-align",
+            "--tuples-only",
+            "--field-separator=|",
+            "--set=ON_ERROR_STOP=1",
+            f"--command={query}",
+        ),
+        _postgres_environment(database),
+    )
+    if result.returncode != 0:
+        raise DisasterRecoveryCommandError(
+            f"{label} extension member inventory command failed"
+        )
+    inventories = _parse_extension_member_inventories(
+        [
+            {
+                "name": parts[0],
+                "version": parts[1],
+                "member_count": parts[2],
+                "inventory_sha256": parts[3],
+            }
+            for line in _command_output_lines(result)
+            if len(parts := line.split("|")) == 4
+        ],
+        extensions=extensions,
+        error_type=DisasterRecoverySafetyError,
+        label=f"{label} extension member inventory",
+    )
+    if len(_command_output_lines(result)) != len(inventories):
+        raise DisasterRecoverySafetyError(
+            f"{label} extension member inventory output is invalid"
+        )
+    _assert_canonical_extension_member_inventories(
+        inventories,
+        error_type=DisasterRecoverySafetyError,
+        label=label,
+    )
+    return inventories
+
+
+def _parse_extension_member_inventories(
+    value: object,
+    *,
+    extensions: Sequence[_DatabaseExtension] | None,
+    error_type: type[DisasterRecoveryError],
+    label: str,
+) -> tuple[_ExtensionMemberInventory, ...]:
+    if not isinstance(value, list):
+        raise error_type(f"{label} is invalid")
+    result: list[_ExtensionMemberInventory] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {
+            "name",
+            "version",
+            "member_count",
+            "inventory_sha256",
+        }:
+            raise error_type(f"{label} is invalid")
+        name = item.get("name")
+        version = item.get("version")
+        raw_member_count = item.get("member_count")
+        inventory_sha256 = item.get("inventory_sha256")
+        if (
+            isinstance(raw_member_count, int)
+            and not isinstance(raw_member_count, bool)
+        ):
+            member_count = raw_member_count
+        elif isinstance(raw_member_count, str) and re.fullmatch(
+            r"[1-9][0-9]*",
+            raw_member_count,
+        ):
+            member_count = int(raw_member_count)
+        else:
+            member_count = -1
+        if (
+            not isinstance(name, str)
+            or name not in REQUIRED_EXTENSION_SCHEMAS
+            or not isinstance(version, str)
+            or EXTENSION_VERSION_RE.fullmatch(version) is None
+            or member_count < 1
+            or member_count > 1_000_000
+            or not isinstance(inventory_sha256, str)
+            or SHA256_RE.fullmatch(inventory_sha256) is None
+        ):
+            raise error_type(f"{label} is invalid")
+        result.append(
+            _ExtensionMemberInventory(
+                name=name,
+                version=version,
+                member_count=member_count,
+                inventory_sha256=inventory_sha256,
+            )
+        )
+    expected_names = sorted(REQUIRED_EXTENSION_SCHEMAS)
+    if [item.name for item in result] != expected_names:
+        raise error_type(f"{label} must contain the exact reviewed baseline")
+    if extensions is not None and [
+        (item.name, item.version) for item in result
+    ] != [(item.name, item.version) for item in extensions]:
+        raise error_type(f"{label} does not match the extension identity")
+    return tuple(result)
+
+
+def _assert_canonical_extension_member_inventories(
+    inventories: Sequence[_ExtensionMemberInventory],
+    *,
+    error_type: type[DisasterRecoveryError],
+    label: str,
+) -> None:
+    for inventory in inventories:
+        expected = CANONICAL_EXTENSION_MEMBER_INVENTORIES.get(
+            (inventory.name, inventory.version)
+        )
+        if expected is None or expected != (
+            inventory.member_count,
+            inventory.inventory_sha256,
+        ):
+            raise error_type(
+                f"{label} extension member inventory is not canonical; "
+                "an unexpected or missing extension member was detected"
+            )
+
+
+def _parse_manifest_extension_member_inventories(
+    value: object,
+    *,
+    extensions: Sequence[_DatabaseExtension],
+) -> list[dict[str, object]]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "canonicalization",
+        "inventories",
+    }:
+        raise DisasterRecoveryVerificationError(
+            "backup extension member inventory is invalid"
+        )
+    if value.get("canonicalization") != EXTENSION_MEMBER_CANONICALIZATION:
+        raise DisasterRecoveryVerificationError(
+            "backup extension member canonicalization is invalid"
+        )
+    inventories = _parse_extension_member_inventories(
+        value.get("inventories"),
+        extensions=extensions,
+        error_type=DisasterRecoveryVerificationError,
+        label="backup extension member inventory",
+    )
+    _assert_canonical_extension_member_inventories(
+        inventories,
+        error_type=DisasterRecoveryVerificationError,
+        label="backup",
+    )
+    return [item.manifest_value() for item in inventories]
 
 
 def _parse_database_extensions(
@@ -2443,6 +3261,19 @@ def _verify_stored_quiescence_evidence(
         limit=64 * 1024,
         label="stored quiescence evidence",
     )
+    _verify_stored_quiescence_evidence_bytes(
+        raw,
+        consistency=consistency,
+        manifest_schema_version=manifest_schema_version,
+    )
+
+
+def _verify_stored_quiescence_evidence_bytes(
+    raw: bytes,
+    *,
+    consistency: Mapping[str, Any],
+    manifest_schema_version: int,
+) -> None:
     evidence = _decode_json_object(
         raw,
         label="stored quiescence evidence",
@@ -2450,7 +3281,7 @@ def _verify_stored_quiescence_evidence(
     stopped = evidence.get("stopped_services")
     expected_evidence_schema = (
         QUIESCENCE_EVIDENCE_SCHEMA_VERSION
-        if manifest_schema_version == SCHEMA_VERSION
+        if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION
         else LEGACY_QUIESCENCE_EVIDENCE_SCHEMA_VERSION
     )
     if (
@@ -2473,7 +3304,7 @@ def _verify_stored_quiescence_evidence(
         raise DisasterRecoveryVerificationError(
             "stored quiescence evidence does not match its manifest"
         )
-    if manifest_schema_version == SCHEMA_VERSION and any(
+    if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION and any(
         evidence.get(key) != consistency.get(key)
         for key in (
             "postgres_database_name",
@@ -2488,7 +3319,7 @@ def _verify_stored_quiescence_evidence(
         raise DisasterRecoveryVerificationError(
             "stored PostgreSQL quiescence identity does not match its manifest"
         )
-    if manifest_schema_version == SCHEMA_VERSION:
+    if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION:
         _parse_database_extensions(
             evidence.get("postgres_extensions"),
             label="stored PostgreSQL extensions",
@@ -2667,6 +3498,42 @@ def _read_regular_file(
     return b"".join(chunks)
 
 
+def _read_descriptor_bytes(
+    descriptor: int,
+    *,
+    limit: int,
+    label: str,
+) -> bytes:
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            raise DisasterRecoveryVerificationError(f"{label} is invalid")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(COPY_CHUNK_BYTES, limit + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise DisasterRecoveryVerificationError(
+                    f"{label} is too large"
+                )
+        after = os.fstat(descriptor)
+        _assert_same_verified_node(before, after, kind="file")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return b"".join(chunks)
+    except OSError as error:
+        raise DisasterRecoveryVerificationError(
+            f"{label} cannot be read safely"
+        ) from error
+
+
 def _decode_json_object(raw: bytes, *, label: str) -> dict[str, Any]:
     try:
         value = json.loads(
@@ -2759,14 +3626,68 @@ def _verify_payload_hash(
         )
 
 
+def _payload_description_values(
+    description: Mapping[str, Any],
+) -> tuple[int, str]:
+    expected_size = description.get("size_bytes")
+    expected_hash = description.get("sha256")
+    if (
+        isinstance(expected_size, bool)
+        or not isinstance(expected_size, int)
+        or expected_size < 0
+        or not isinstance(expected_hash, str)
+        or SHA256_RE.fullmatch(expected_hash) is None
+    ):
+        raise DisasterRecoveryVerificationError(
+            "backup payload description is invalid"
+        )
+    return expected_size, expected_hash
+
+
+def _verify_payload_descriptor(
+    descriptor: int,
+    description: Mapping[str, Any],
+) -> None:
+    expected_size, expected_hash = _payload_description_values(description)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size != expected_size
+            or _hash_descriptor(descriptor, expected=metadata)
+            != expected_hash
+        ):
+            raise DisasterRecoveryVerificationError(
+                "backup payload checksum does not match"
+            )
+    except OSError as error:
+        raise DisasterRecoveryVerificationError(
+            "backup payload cannot be verified safely"
+        ) from error
+
+
+def _open_tar_from_source(
+    source: Path | int,
+) -> tarfile.TarFile:
+    if isinstance(source, int):
+        os.lseek(source, 0, os.SEEK_SET)
+        stream = os.fdopen(os.dup(source), "rb", closefd=True)
+        try:
+            return tarfile.open(fileobj=stream, mode="r:")
+        except BaseException:
+            stream.close()
+            raise
+    return tarfile.open(source, mode="r:")
+
+
 def _verify_tar_archive(
-    archive_path: Path,
+    archive_path: Path | int,
     entries: tuple[_InventoryEntry, ...],
 ) -> None:
     expected = {entry.path: entry for entry in entries}
     seen: set[str] = set()
     try:
-        with tarfile.open(archive_path, mode="r:") as archive:
+        with _open_tar_from_source(archive_path) as archive:
             for member in archive:
                 name = _validate_relative_path(member.name)
                 if name in seen or name not in expected:
@@ -2824,7 +3745,7 @@ def _verify_tar_archive(
 
 
 def _safe_extract_tar(
-    archive_path: Path,
+    archive_path: Path | int,
     destination: Path,
     entries: tuple[_InventoryEntry, ...],
     *,
@@ -2840,7 +3761,7 @@ def _safe_extract_tar(
     seen: set[str] = set()
     directories: list[_InventoryEntry] = []
     try:
-        with tarfile.open(archive_path, mode="r:") as archive:
+        with _open_tar_from_source(archive_path) as archive:
             for member in archive:
                 name = _validate_relative_path(member.name)
                 if name in seen or name not in expected:
@@ -3027,7 +3948,7 @@ def _parse_manifest_entries(
         sha256 = item.get("sha256")
         if (
             (
-                manifest_schema_version == SCHEMA_VERSION
+                manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION
                 and ("ctime_ns" not in item or "links" not in item)
             )
             or not isinstance(path, str)
@@ -3094,7 +4015,7 @@ def _validate_tree_statistics(
 ) -> None:
     _manifest_mode(description, "root_mode")
     _manifest_nonnegative_integer(description, "root_mtime_ns")
-    if manifest_schema_version == SCHEMA_VERSION and (
+    if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION and (
         "root_ctime_ns" not in description
         or "root_links" not in description
     ):
@@ -3207,7 +4128,7 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         raise DisasterRecoveryVerificationError(
             "backup consistency evidence declaration is invalid"
         )
-    if manifest_schema_version == SCHEMA_VERSION:
+    if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION:
         system_identifier = consistency.get("postgres_system_identifier")
         database_oid = consistency.get("postgres_database_oid")
         if (
@@ -3241,13 +4162,13 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
     database = _manifest_mapping(manifest, "database")
     database_name = _database_name_from_manifest(database)
     if (
-        manifest_schema_version == SCHEMA_VERSION
+        manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION
         and consistency.get("postgres_database_name") != database_name
     ):
         raise DisasterRecoveryVerificationError(
             "backup PostgreSQL identity does not match its dump declaration"
         )
-    if manifest_schema_version == SCHEMA_VERSION:
+    if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION:
         required_extensions = _parse_required_extension_manifest(
             database.get("required_extensions")
         )
@@ -3257,6 +4178,11 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         ]:
             raise DisasterRecoveryVerificationError(
                 "backup extension baseline does not match its source identity"
+            )
+        if manifest_schema_version == SCHEMA_VERSION:
+            _parse_manifest_extension_member_inventories(
+                database.get("extension_members"),
+                extensions=source_extensions,
             )
     legacy_pg_dump_contract = [
         "--format=custom",
@@ -3273,7 +4199,7 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
     ]
     expected_pg_dump_contract = (
         current_pg_dump_contract
-        if manifest_schema_version == SCHEMA_VERSION
+        if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION
         else legacy_pg_dump_contract
     )
     if (
@@ -3311,13 +4237,18 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         "extensions": {
             "preinstalled_by_administrator": True,
             "exact_versions_required": True,
+            **(
+                {"exact_canonical_members_required": True}
+                if manifest_schema_version == SCHEMA_VERSION
+                else {}
+            ),
             "owners_must_differ_from_restore_role": True,
             "restore_comments": False,
         },
     }
     expected_restore_contract = (
         current_restore_contract
-        if manifest_schema_version == SCHEMA_VERSION
+        if manifest_schema_version >= DATABASE_IDENTITY_SCHEMA_VERSION
         else legacy_restore_contract
     )
     if restore_contract != expected_restore_contract:
@@ -3391,11 +4322,22 @@ def _fixed_payload_path(
     *,
     expected_name: str,
 ) -> Path:
+    _assert_payload_description_name(
+        description,
+        expected_name=expected_name,
+    )
+    return backup / expected_name
+
+
+def _assert_payload_description_name(
+    description: Mapping[str, Any],
+    *,
+    expected_name: str,
+) -> None:
     if description.get("path") != expected_name:
         raise DisasterRecoveryVerificationError(
             "backup payload path is invalid"
         )
-    return backup / expected_name
 
 
 def _parse_manifest_checksum(raw: bytes) -> str:

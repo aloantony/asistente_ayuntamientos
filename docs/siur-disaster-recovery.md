@@ -40,7 +40,8 @@ acepta:
 - un propietario dedicado no-superusuario, miembro de `pg_monitor`, con límite
   de una conexión tanto en el rol como en la base; `plpgsql`, `postgis` y
   `vector` deben estar preinstaladas por el administrador, pertenecerle y
-  coincidir exactamente en schema y versión con el backup;
+  coincidir exactamente en schema, versión y conjunto canónico de miembros con
+  el backup;
 - PostgreSQL en `127.0.0.1`, en un puerto distinto del `5432` del runtime de
   desarrollo;
 - `pg_restore --single-transaction --exit-on-error`, sin `--clean`, `--create`,
@@ -48,11 +49,23 @@ acepta:
 
 El dump excluye formalmente `plpgsql`, `postgis` y `vector`: no intenta
 recrearlas ni copiar datos internos como `spatial_ref_sys`. El manifest
-conserva la identidad completa observada y las versiones requeridas. Si una
-versión exacta no está instalada y disponible en el servidor drill, la
-restauración falla antes de `pg_restore`; no actualiza ni degrada extensiones
-automáticamente. Al usar `--no-comments`, los objetos de aplicación se
-restauran sin metadatos `COMMENT`.
+conserva la identidad completa observada, las versiones requeridas y el conteo
+y SHA-256 del inventario estable de miembros de cada extensión. La herramienta
+compara ese inventario con el baseline fijado para `plpgsql 1.0`,
+`postgis 3.6.4` y `vector 0.8.2` antes y después del dump y antes y después del
+restore. Así, un objeto de aplicación añadido accidentalmente con
+`ALTER EXTENSION ... ADD` provoca un aborto en vez de desaparecer por
+`--exclude-extension`. Si una versión exacta no está instalada y disponible en
+el servidor drill, la restauración falla antes de `pg_restore`; no actualiza ni
+degrada extensiones automáticamente. Al usar `--no-comments`, los objetos de
+aplicación se restauran sin metadatos `COMMENT`.
+
+Durante un restore, los seis ficheros del backup se abren una sola vez respecto
+del descriptor del directorio, se verifican sobre esos descriptores y los tres
+payloads consumidos se copian a ficheros anónimos privados (`O_TMPFILE`). Tar y
+`pg_restore` leen exclusivamente esos snapshots sin nombre. La identidad de la
+ruta original se vuelve a comprobar antes de extraer y antes de mutar
+PostgreSQL; cualquier sustitución hace abortar sin publicar el destino.
 
 Todos los pasos de filesystem y el `restore-report.json` se preparan antes de
 `pg_restore`. Si después del commit falla la publicación atómica, la herramienta
@@ -276,12 +289,12 @@ docker compose --profile operations run --rm -T --no-deps \
 
 El proceso:
 
-1. contrasta la identidad PostgreSQL viva con la evidencia e inventaría y
-   hashea todos los ficheros mediante descriptores abiertos, sin seguir
-   componentes sustituidos;
+1. contrasta la identidad PostgreSQL viva con la evidencia, valida el inventario
+   canónico de miembros de las tres extensiones e inventaría y hashea todos los
+   ficheros mediante descriptores abiertos, sin seguir componentes sustituidos;
 2. ejecuta `pg_dump` custom, serializable, sin owner ni privilegios, excluyendo
-   las tres extensiones preinstaladas, y vuelve a comprobar toda la identidad
-   PostgreSQL al terminar;
+   las tres extensiones preinstaladas, y vuelve a comprobar toda la identidad y
+   los miembros canónicos de PostgreSQL al terminar;
 3. crea dos tar sin symlinks, devices ni rutas absolutas; UID/GID, permisos y
    tiempos se guardan en el manifest y no se confían a los campos del tar;
 4. vuelve a inventariar y aborta si cambió un byte o metadata;
@@ -300,11 +313,11 @@ docker compose --profile operations run --rm -T --no-deps \
   --backup /backups/siur-backup-20260726T120000Z
 ```
 
-El verificador conserva compatibilidad de lectura con backups schema 2 ya
-publicados, pero no los restaura automáticamente porque carecen del baseline de
-extensiones. Los backups nuevos son schema 3 y añaden identidad PostgreSQL,
-versiones requeridas de extensiones, `ctime` y número de enlaces al contrato
-verificable.
+El verificador conserva compatibilidad de lectura con backups schema 2 y 3 ya
+publicados, pero no los restaura automáticamente porque carecen del baseline
+canónico de miembros de extensiones. Los backups nuevos son schema 4: conservan
+la identidad PostgreSQL, versiones requeridas de extensiones, `ctime`, número
+de enlaces y el inventario canónico hashado de miembros.
 
 Solo tras obtener `"verified": true`:
 
