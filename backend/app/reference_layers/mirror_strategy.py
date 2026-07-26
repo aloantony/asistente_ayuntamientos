@@ -363,11 +363,20 @@ def _derive_assignment(
             _layer_definition(layer),
         )
     except SourceDiscoveryError as error:
+        code = getattr(error, "code", "source_discovery_error")
+        evidence = getattr(error, "evidence", {})
+        if not isinstance(code, str) or not code:
+            code = "source_discovery_error"
+        if not isinstance(evidence, dict):
+            evidence = {}
         return _blocked(
             layer,
-            "source_discovery_error",
+            code,
             str(error),
-            {"error_type": type(error).__name__},
+            {
+                "error_type": type(error).__name__,
+                **evidence,
+            },
         )
     if not candidates:
         return _blocked(

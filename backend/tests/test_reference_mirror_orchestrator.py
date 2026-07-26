@@ -321,6 +321,159 @@ class FakeSupervisor:
         self.pulses += 1
 
 
+def test_raster_materialization_routes_geotiff_zip_to_safe_zip_driver(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "raster-zip-store"),
+        max_blob_bytes=1024 * 1024,
+    )
+    blob = store.put_stream(io.BytesIO(b"PK\x03\x04archive"))
+    artifact = PersistedRunArtifact(
+        artifact_id=1,
+        artifact_kind="dataset",
+        roles=frozenset({"input"}),
+        media_type="application/zip",
+        storage_backend="filesystem",
+        storage_key=blob.storage_key,
+        size_bytes=blob.size_bytes,
+        sha256=blob.sha256,
+        metadata_json={"data_format": "geotiff-zip"},
+    )
+    captured = {}
+    raster_result = object()
+
+    def ingest(_store, **kwargs):
+        captured.update(kwargs)
+        return raster_result
+
+    monkeypatch.setattr(
+        mirror_orchestrator.geo_ingest,
+        "ingest_raster_artifact",
+        ingest,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "_geoserver_materialization",
+        lambda *_args, **kwargs: kwargs["raster"],
+    )
+    supervisor = FakeSupervisor()
+    try:
+        result = mirror_orchestrator.materialize_raster_delivery(
+            store,
+            SimpleNamespace(
+                styles=(),
+                source=SimpleNamespace(
+                    config_json={"max_pixels": 1_600_000_000}
+                ),
+            ),
+            SimpleNamespace(),
+            (artifact,),
+            supervisor,
+            max_source_bytes=1024 * 1024,
+            max_output_bytes=1024 * 1024,
+            timeout_seconds=30,
+        )
+    finally:
+        store.close()
+
+    assert result is raster_result
+    assert captured["input_driver"] == "GTiffZIP"
+    assert captured["input_sha256"] == blob.sha256
+    assert captured["max_pixels"] == 1_600_000_000
+    assert supervisor.pulses == 1
+
+
+def test_vector_materialization_routes_ordered_cadastral_zip_parts(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "gml-zip-store"),
+        max_blob_bytes=1024 * 1024,
+    )
+    blobs = [
+        store.put_stream(io.BytesIO(b"PK\x03\x04second")),
+        store.put_stream(io.BytesIO(b"PK\x03\x04first")),
+    ]
+    artifacts = tuple(
+        PersistedRunArtifact(
+            artifact_id=index + 1,
+            artifact_kind="dataset",
+            roles=frozenset({"input"}),
+            media_type="application/zip",
+            storage_backend="filesystem",
+            storage_key=blob.storage_key,
+            size_bytes=blob.size_bytes,
+            sha256=blob.sha256,
+            metadata_json={
+                "data_format": "inspire-cadastral-parcel-gml-zip",
+                "input_layer": "CadastralParcel",
+                "page_index": page_index,
+            },
+        )
+        for index, (blob, page_index) in enumerate(
+            ((blobs[0], 1), (blobs[1], 0))
+        )
+    )
+    captured = {}
+    vector_result = object()
+
+    def ingest(_db, **kwargs):
+        captured.update(kwargs)
+        return vector_result
+
+    monkeypatch.setattr(
+        mirror_orchestrator.geo_ingest,
+        "ingest_vector_artifacts",
+        ingest,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "_geoserver_materialization",
+        lambda *_args, **kwargs: kwargs["vector"],
+    )
+    context = SimpleNamespace(
+        styles=(),
+        source=SimpleNamespace(
+            provider_key="siur",
+            layer_id=20,
+            config_json={},
+        ),
+        run=SimpleNamespace(id=30),
+    )
+    supervisor = FakeSupervisor()
+    try:
+        result = mirror_orchestrator.materialize_vector_delivery(
+            lambda: nullcontext(object()),
+            store,
+            context,
+            SimpleNamespace(),
+            artifacts,
+            supervisor,
+            database_url=(
+                "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+            ),
+            max_source_bytes=1024 * 1024,
+            timeout_seconds=30,
+        )
+    finally:
+        store.close()
+
+    assert result is vector_result
+    assert captured["input_driver"] == "GMLZIP"
+    assert [item[1] for item in captured["artifacts"]] == [
+        blobs[1].sha256,
+        blobs[0].sha256,
+    ]
+    assert all(
+        item[2] == "CadastralParcel"
+        for item in captured["artifacts"]
+    )
+    assert supervisor.pulses == 2
+
+
 def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
     tmp_path,
 ) -> None:

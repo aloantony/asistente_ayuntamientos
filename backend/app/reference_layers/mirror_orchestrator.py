@@ -733,7 +733,6 @@ class MirrorRunProcessor:
                 max_source_bytes=self.config.reference_geo_max_source_bytes,
                 max_output_bytes=min(
                     self.config.reference_blob_max_bytes,
-                    self.config.reference_geo_max_source_bytes,
                     geo_ingest.DEFAULT_MAX_RASTER_OUTPUT_BYTES,
                 ),
                 timeout_seconds=self.config.reference_geo_timeout_seconds,
@@ -1372,6 +1371,7 @@ def materialize_vector_delivery(
         "geojson": "GeoJSON",
         "json": "GeoJSON",
         "flatgeobuf": "FlatGeobuf",
+        "inspire-cadastral-parcel-gml-zip": "GMLZIP",
     }.get(data_format)
     if len(datasets) > 1 and input_driver is None:
         raise MirrorOrchestrationError(
@@ -1464,12 +1464,18 @@ def materialize_raster_delivery(
     input_driver = {
         "geotiff": "GTiff",
         "tiff": "GTiff",
+        "geotiff-zip": "GTiffZIP",
     }.get(data_format.strip().casefold() if isinstance(data_format, str) else "")
     if input_driver is None:
         raise MirrorOrchestrationError(
             "raster artifact has no allowlisted local input driver",
             code="raster_format_unsupported",
         )
+    source_config = context.source.config_json
+    max_pixels = source_config.get(
+        "max_pixels",
+        geo_ingest.DEFAULT_MAX_RASTER_PIXELS,
+    )
     style_assets = _resolve_local_sld_artifacts(context, artifacts)
     result = geo_ingest.ingest_raster_artifact(
         store,
@@ -1485,6 +1491,7 @@ def materialize_raster_delivery(
                 max_source_bytes,
             ),
         ),
+        max_pixels=max_pixels,
         max_output_bytes=max_output_bytes,
     )
     supervisor.pulse(force=True)

@@ -5,6 +5,7 @@ import sqlite3
 import struct
 import sys
 import zlib
+import zipfile
 
 import pytest
 from sqlalchemy import text
@@ -372,6 +373,129 @@ def test_vector_ingest_appends_ordered_pages_with_regenerated_fids(db, tmp_path)
     assert checks["source_fids_regenerated"] is True
 
 
+def test_cadastral_gml_zip_ingest_appends_in_order_with_unique_fids(
+    db,
+    tmp_path,
+) -> None:
+    archives = [
+        Path(tmp_path, "05001.zip"),
+        Path(tmp_path, "09001.zip"),
+    ]
+    members = [
+        "A.ES.SDGC.CP.05001.cadastralparcel.gml",
+        "A.ES.SDGC.CP.09001.cadastralparcel.gml",
+    ]
+    for archive_path, member in zip(archives, members, strict=True):
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr(
+                member,
+                b"""<wfs:FeatureCollection
+ xmlns:wfs="http://www.opengis.net/wfs/2.0"
+ xmlns:cp="http://inspire.ec.europa.eu/schemas/cp/4.0">
+ <wfs:member><cp:CadastralParcel /></wfs:member>
+</wfs:FeatureCollection>""",
+            )
+    digests = [
+        hashlib.sha256(path.read_bytes()).hexdigest() for path in archives
+    ]
+    imported_members: list[str] = []
+
+    def runner(argv, environment, timeout):
+        del environment, timeout
+        assert argv[1:3] == ["-if", "GML"]
+        assert "-unsetFid" in argv
+        source_argument = next(
+            item for item in argv if item.startswith("/vsizip/")
+        )
+        imported_members.append(source_argument.rsplit("/", 1)[-1])
+        storage_key = argv[argv.index("-nln") + 1]
+        table_name = storage_key.split(".", 1)[1]
+        if "-append" not in argv:
+            db.execute(
+                text(
+                    f"""
+                    CREATE TABLE reference_data.{table_name} (
+                        source_fid bigserial PRIMARY KEY,
+                        geom geometry(MultiPolygon, 3857) NOT NULL
+                    )
+                    """
+                )
+            )
+        else:
+            assert "-update" in argv
+            assert "-lco" not in argv
+        db.execute(
+            text(
+                f"""
+                INSERT INTO reference_data.{table_name} (geom)
+                VALUES (ST_Multi(ST_GeomFromText(
+                    'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
+                    3857
+                )))
+                """
+            )
+        )
+        return GeoCommandResult(b"", b"")
+
+    result = ingest_vector_artifacts(
+        db,
+        database=GeoDatabaseTarget.from_url(
+            "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+        ),
+        artifacts=[
+            (archives[0], digests[0], "CadastralParcel"),
+            (archives[1], digests[1], "CadastralParcel"),
+        ],
+        provider_key="siur",
+        layer_id=511,
+        run_id=512,
+        input_driver="GMLZIP",
+        runner=runner,
+    )
+
+    assert imported_members == members
+    assert result.feature_count == 2
+    checks = result.validation_json["checks"]
+    assert checks["artifact_feature_counts"] == [1, 1]
+    assert checks["source_fids_regenerated"] is True
+    assert {
+        item["input_driver"] for item in checks["input_manifest"]
+    } == {"GMLZIP"}
+
+
+def test_cadastral_gml_zip_is_revalidated_before_gdal(db, tmp_path) -> None:
+    archive_path = Path(tmp_path, "unsafe.zip")
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "A.ES.SDGC.CP.05001.cadastralparcel.gml",
+            b"<!DOCTYPE unsafe><FeatureCollection><CadastralParcel/>",
+        )
+    digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    calls = 0
+
+    def runner(*_args):
+        nonlocal calls
+        calls += 1
+        return GeoCommandResult(b"", b"")
+
+    with pytest.raises(GeoIngestError, match="member is invalid"):
+        ingest_vector_artifact(
+            db,
+            database=GeoDatabaseTarget.from_url(
+                "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+            ),
+            source_path=archive_path,
+            input_sha256=digest,
+            provider_key="siur",
+            layer_id=521,
+            run_id=522,
+            input_layer="CadastralParcel",
+            input_driver="GMLZIP",
+            runner=runner,
+        )
+    assert calls == 0
+
+
 def test_vector_multipage_failure_drops_the_whole_unpublished_table(db, tmp_path) -> None:
     pages = [Path(tmp_path, "page-a.geojson"), Path(tmp_path, "page-b.geojson")]
     for index, path in enumerate(pages):
@@ -589,6 +713,86 @@ def test_raster_ingest_creates_content_addressed_cog(tmp_path) -> None:
     assert result.validation_json["checks"]["nodata_preserved"] is True
     assert result.validation_json["checks"]["resolution_preserved"] is True
     assert result.validation_json["checks"]["overviews_validated"] is True
+    store.close()
+
+
+def test_geotiff_zip_ingest_uses_only_the_unique_archived_raster(
+    tmp_path,
+) -> None:
+    source = Path(tmp_path, "erosion.zip")
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr(
+            "EroPotNiveles_41.tiff",
+            b"II+\x00" + b"\x00" * 124,
+        )
+        archive.writestr(
+            "EroPotNiveles_41.tiff.aux.xml",
+            b"<PAMDataset/>",
+        )
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=1024 * 1024,
+    )
+    inspected_sources: list[str] = []
+
+    def runner(argv, environment, timeout):
+        del timeout
+        if argv[0] == "/usr/bin/gdal_translate":
+            assert argv[-2].startswith("/vsizip/")
+            assert argv[-2].endswith("/EroPotNiveles_41.tiff")
+            assert environment["GDAL_DISABLE_READDIR_ON_OPEN"] == "EMPTY_DIR"
+            Path(argv[-1]).write_bytes(b"normalized-cog")
+            return GeoCommandResult(b"", b"")
+        inspected_sources.append(argv[-1])
+        return GeoCommandResult(
+            _raster_info(
+                cog=Path(argv[-1]).name == "normalized.tif",
+            ),
+            b"",
+        )
+
+    result = ingest_raster_artifact(
+        store,
+        source_path=source,
+        input_sha256=source_sha256,
+        input_driver="GTiffZIP",
+        max_output_bytes=1024 * 1024,
+        runner=runner,
+    )
+
+    assert inspected_sources[0].startswith("/vsizip/")
+    assert inspected_sources[0].endswith("/EroPotNiveles_41.tiff")
+    assert result.validation_json["checks"]["input_driver"] == "GTiffZIP"
+    assert result.validation_json["checks"]["input_sha256"] == source_sha256
+    store.close()
+
+
+def test_geotiff_zip_rejects_ambiguous_rasters_before_gdal(tmp_path) -> None:
+    source = Path(tmp_path, "ambiguous.zip")
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("one.tif", b"II*\x00" + b"\x00" * 124)
+        archive.writestr("two.tiff", b"MM\x00*" + b"\x00" * 124)
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=1024 * 1024,
+    )
+    calls = 0
+
+    def runner(*_args):
+        nonlocal calls
+        calls += 1
+        return GeoCommandResult(b"", b"")
+
+    with pytest.raises(GeoIngestError, match="no unique raster member"):
+        ingest_raster_artifact(
+            store,
+            source_path=source,
+            input_driver="GTiffZIP",
+            max_output_bytes=1024 * 1024,
+            runner=runner,
+        )
+    assert calls == 0
     store.close()
 
 
@@ -895,6 +1099,47 @@ def test_raster_preflight_rejects_pixel_bombs_before_translation(tmp_path) -> No
             runner=runner,
         )
     assert calls == ["/usr/bin/gdalinfo"]
+    store.close()
+
+
+def test_reviewed_ines_pixel_limit_accepts_real_raster_dimensions(
+    tmp_path,
+) -> None:
+    source = Path(tmp_path, "source.tif")
+    source.write_bytes(b"II*\x00source-raster")
+    store = ReferenceBlobStore(
+        Path(tmp_path, "store"),
+        max_blob_bytes=10 * 1024 * 1024 * 1024,
+    )
+
+    def runner(argv, environment, timeout):
+        del argv, environment, timeout
+        return GeoCommandResult(
+            _raster_info(
+                cog=False,
+                size=(45_644, 34_891),
+                band_types=("Int32",),
+                nodata_values=(2_147_483_647,),
+                pixel_size=(25.0, 25.0),
+            ),
+            b"",
+        )
+
+    with pytest.raises(GeoIngestError, match="dimensions, bands or driver"):
+        ingest_raster_artifact(
+            store,
+            source_path=source,
+            max_output_bytes=1024 * 1024 * 1024,
+            runner=runner,
+        )
+    with pytest.raises(GeoIngestError, match="worst-case normalized size"):
+        ingest_raster_artifact(
+            store,
+            source_path=source,
+            max_pixels=1_600_000_000,
+            max_output_bytes=1024 * 1024 * 1024,
+            runner=runner,
+        )
     store.close()
 
 

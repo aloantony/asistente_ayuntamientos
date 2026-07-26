@@ -24,6 +24,44 @@ def test_invalid_composition_is_durable_blocked_assignment() -> None:
     assert assignment.reason_code == "composition_dependency_invalid"
 
 
+def test_source_discovery_blocker_evidence_is_preserved(
+    monkeypatch,
+) -> None:
+    def blocked(*_args):
+        raise mirror_strategy.SourceDiscoveryError(
+            "official download is unavailable",
+            code="official_download_unavailable",
+            evidence={
+                "wms_tiles_eligible": False,
+                "wms_guard": "bulk_wms_prohibited",
+            },
+        )
+
+    monkeypatch.setattr(mirror_strategy, "acquisition_candidates", blocked)
+    monkeypatch.setattr(
+        mirror_strategy,
+        "_service_definition",
+        lambda _service: object(),
+    )
+    monkeypatch.setattr(
+        mirror_strategy,
+        "_layer_definition",
+        lambda _record: object(),
+    )
+    catalog_layer = _layer("layer:flood")
+
+    assignment = mirror_strategy._derive_assignment(
+        catalog_layer,
+        object(),
+        {catalog_layer.source_key: catalog_layer},
+    )
+
+    assert assignment.strategy == "blocked"
+    assert assignment.reason_code == "official_download_unavailable"
+    assert assignment.evidence["wms_tiles_eligible"] is False
+    assert assignment.evidence["wms_guard"] == "bulk_wms_prohibited"
+
+
 def test_composition_cycle_is_blocked_without_aborting_other_layers() -> None:
     a = _layer(
         "layer:a",
