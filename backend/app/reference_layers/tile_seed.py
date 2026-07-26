@@ -122,6 +122,15 @@ class TileSeedPreflight:
 
 
 @dataclass(frozen=True)
+class TileContentSample:
+    """Deterministic upstream pixels used by conditional mirror checks."""
+
+    coordinates: tuple[TileCoordinate, ...]
+    bodies: tuple[bytes, ...]
+    content_sha256: str
+
+
+@dataclass(frozen=True)
 class _TileWindow:
     zoom: int
     min_x: int
@@ -382,6 +391,60 @@ def preflight_tile_archive(
     return result
 
 
+def sample_tile_source(
+    *,
+    source_document: object,
+    fetcher: TileFetcher | None = None,
+    sample_limit: int = 16,
+    concurrency: int = 4,
+) -> TileContentSample:
+    """Fetch a bounded, stable pixel sample from a reviewed tile source.
+
+    WMS samples use the same reviewed supertile request and deterministic crop
+    path as a full seed. XYZ/WMTS samples preserve the exact upstream bytes.
+    The resulting digest can therefore be compared to the same coordinates in
+    an immutable local archive without trusting a stable capabilities document.
+    """
+
+    descriptor = parse_tile_source_document(source_document)
+    workers = _integer(concurrency, "tile concurrency", 1, 16)
+    samples = _integer(sample_limit, "tile content sample limit", 1, 256)
+    coordinates = _sample_coordinates(descriptor, samples)
+    bodies = _fetch_sample_bodies(
+        descriptor,
+        coordinates,
+        fetcher or _https_fetcher(descriptor),
+        concurrency=workers,
+    )
+    return TileContentSample(
+        coordinates=coordinates,
+        bodies=bodies,
+        content_sha256=tile_content_sample_sha256(coordinates, bodies),
+    )
+
+
+def tile_content_sample_sha256(
+    coordinates: tuple[TileCoordinate, ...],
+    bodies: tuple[bytes, ...],
+) -> str:
+    """Hash coordinates and validated bytes with unambiguous framing."""
+
+    if not coordinates or len(coordinates) != len(bodies):
+        raise TileSeedError("tile content sample is incomplete")
+    digest = hashlib.sha256()
+    digest.update(b"reference-tile-content-sample/v1\0")
+    for coordinate, body in zip(coordinates, bodies, strict=True):
+        if not isinstance(body, bytes) or not 0 < len(body) <= MAX_TILE_BYTES:
+            raise TileSeedError("tile content sample contains invalid bytes")
+        identity = (
+            f"{coordinate.z}/{coordinate.x}/{coordinate.y}/"
+            f"{coordinate.matrix_identifier or ''}/{len(body)}\n"
+        ).encode("utf-8")
+        digest.update(identity)
+        digest.update(body)
+    return digest.hexdigest()
+
+
 def seed_tile_archive(
     store: ReferenceBlobStore,
     *,
@@ -492,26 +555,13 @@ def _run_preflight(
     concurrency: int,
 ) -> tuple[TileSeedPreflight, dict[TileCoordinate, bytes]]:
     coordinates = _sample_coordinates(descriptor, sample_limit)
-    if descriptor.protocol == "wms_tiles" and descriptor.wms_supertile_size > 1:
-        prefetched = _fetch_wms_preflight_samples(
-            descriptor,
-            coordinates,
-            fetcher,
-            concurrency=concurrency,
-        )
-        bodies = [prefetched[coordinate] for coordinate in coordinates]
-    else:
-        with ThreadPoolExecutor(
-            max_workers=concurrency,
-            thread_name_prefix="reference-tile-preflight",
-        ) as executor:
-            bodies = list(
-                executor.map(
-                    lambda item: _fetch_validated_tile(descriptor, item, fetcher),
-                    coordinates,
-                )
-            )
-        prefetched = dict(zip(coordinates, bodies, strict=True))
+    bodies = _fetch_sample_bodies(
+        descriptor,
+        coordinates,
+        fetcher,
+        concurrency=concurrency,
+    )
+    prefetched = dict(zip(coordinates, bodies, strict=True))
     if not bodies:
         raise TileSeedError("tile preflight did not select any coverage")
     sizes = [len(body) for body in bodies]
@@ -631,6 +681,37 @@ def _upper_sample_mean(sizes: list[int]) -> int:
         float(percentile),
     )
     return min(MAX_TILE_BYTES, math.ceil(upper))
+
+
+def _fetch_sample_bodies(
+    descriptor: TileSourceDescriptor,
+    coordinates: tuple[TileCoordinate, ...],
+    fetcher: TileFetcher,
+    *,
+    concurrency: int,
+) -> tuple[bytes, ...]:
+    if descriptor.protocol == "wms_tiles" and descriptor.wms_supertile_size > 1:
+        prefetched = _fetch_wms_preflight_samples(
+            descriptor,
+            coordinates,
+            fetcher,
+            concurrency=concurrency,
+        )
+        bodies = tuple(prefetched[coordinate] for coordinate in coordinates)
+    else:
+        with ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="reference-tile-preflight",
+        ) as executor:
+            bodies = tuple(
+                executor.map(
+                    lambda item: _fetch_validated_tile(descriptor, item, fetcher),
+                    coordinates,
+                )
+            )
+    if len(bodies) != len(coordinates):
+        raise TileSeedError("tile content sample coverage is incomplete")
+    return bodies
 
 
 def _fetch_wms_preflight_samples(
