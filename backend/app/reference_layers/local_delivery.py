@@ -15,6 +15,7 @@ from app.reference_layers.mirror_lifecycle import (
     catalog_snapshot_contains_active_layer,
     delivery_state_matches_promotion_head,
     stored_catalog_snapshot_is_valid,
+    stored_source_definition_is_valid,
     sync_run_source_definition_is_valid,
 )
 from app.reference_layers.mirror_authorization import (
@@ -33,9 +34,14 @@ from app.reference_layers.models import (
     ReferenceLayerMirrorStrategy,
     ReferenceLayerSource,
     ReferenceLayerStyle,
+    ReferenceService,
     ReferenceStyleParityPlan,
     ReferenceStyleParityPlanItem,
     ReferenceSyncRun,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    ReviewedOrthoEvidenceError,
+    require_reviewed_ign_ortho_delivery_allowed,
 )
 from app.reference_layers.wms_delivery import LayerDeliveryAvailability
 
@@ -227,6 +233,7 @@ def resolve_local_delivery(
         )
     )
     return _build_selection(
+        db,
         _ActiveRecord(
             current_layer,
             current_snapshot,
@@ -519,6 +526,7 @@ def catalog_local_delivery_availability(
             for style in layer_styles:
                 try:
                     selection = _build_selection(
+                        db,
                         record,
                         assets,
                         style=style,
@@ -538,6 +546,7 @@ def catalog_local_delivery_availability(
         else:
             try:
                 default_selection = _build_selection(
+                    db,
                     record,
                     assets,
                     style=None,
@@ -774,13 +783,14 @@ def _current_layer_blocker(
 
 
 def _build_selection(
+    db: Session,
     record: _ActiveRecord,
     assets: list[ReferenceDeliveryAsset],
     *,
     style: ReferenceLayerStyle | None,
     operation: Operation,
 ) -> LocalDeliverySelection:
-    primary_asset = _validate_active_record(record, assets)
+    primary_asset = _validate_active_record(db, record, assets)
     if record.version.delivery_kind in {"vector", "raster"}:
         return _geoserver_selection(
             record,
@@ -800,6 +810,7 @@ def _build_selection(
 
 
 def _validate_active_record(
+    db: Session,
     record: _ActiveRecord,
     assets: list[ReferenceDeliveryAsset],
 ) -> ReferenceDeliveryAsset:
@@ -807,6 +818,9 @@ def _validate_active_record(
         raise LocalDeliveryError("local_version_invalid")
     if (
         not sync_run_source_definition_is_valid(record.run)
+        or not stored_source_definition_is_valid(record.source)
+        or record.source.definition_sha256
+        != record.run.source_definition_sha256
         or record.run.status != "succeeded"
     ):
         raise LocalDeliveryError("local_source_changed")
@@ -825,6 +839,34 @@ def _validate_active_record(
         != record.version.delivery_kind
     ):
         raise LocalDeliveryError("local_version_invalid")
+    if record.layer.service_id is not None:
+        service = db.scalar(
+            select(ReferenceService).where(
+                ReferenceService.provider_key
+                == record.layer.provider_key,
+                ReferenceService.id == record.layer.service_id,
+            )
+        )
+        if service is None:
+            raise LocalDeliveryError("local_version_invalid")
+        catalog_layer = (
+            record.layer.remote_name or record.layer.source_key
+        )
+        try:
+            require_reviewed_ign_ortho_delivery_allowed(
+                catalog_endpoint_url=service.base_url,
+                catalog_layer=catalog_layer,
+                source_definition=record.run.source_definition_json,
+                validation_json=record.version.validation_json,
+                content_sha256=record.version.content_sha256,
+            )
+        except ReviewedOrthoEvidenceError:
+            blocker = (
+                "reviewed_ortho_2021_blocked"
+                if catalog_layer == "Ortofoto_2021"
+                else "reviewed_ortho_legacy_fenced"
+            )
+            raise LocalDeliveryError(blocker) from None
     try:
         catalog_hash_is_valid = (
             record.snapshot.id == record.version.catalog_snapshot_id

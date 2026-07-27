@@ -63,6 +63,10 @@ from app.reference_layers.source_discovery import (
 from app.reference_layers.style_update_watcher import (
     require_official_style_promotion_allowed,
 )
+from app.reference_layers.reviewed_ortho_evidence import (
+    ReviewedOrthoEvidenceError,
+    require_reviewed_ign_ortho_delivery_allowed,
+)
 
 AUTO_SOURCE_PREFIX = "auto:"
 BOOTSTRAP_PLAN_SCHEMA = "siur-mirror-source-bootstrap-v3"
@@ -1193,6 +1197,11 @@ def promote_delivery_version(
         )
         _validate_current_version_catalog(db, version)
         metadata_asset = _validate_version_ready(db, version)
+        _validate_reviewed_ortho_version(
+            db,
+            version=version,
+            run=run,
+        )
         from_version_id = (
             state.active_version_id
             if state is not None and state.status == "active"
@@ -2167,6 +2176,13 @@ def _validate_stored_version_servability(
             "delivery sync-run source-definition hash is invalid"
         )
     if (
+        not stored_source_definition_is_valid(source)
+        or source.definition_sha256 != run.source_definition_sha256
+    ):
+        raise MirrorPromotionConflict(
+            "current delivery source differs from the stored version"
+        )
+    if (
         run.provider_key != version.provider_key
         or run.layer_id != version.layer_id
         or not isinstance(run.source_definition_json, dict)
@@ -2213,7 +2229,53 @@ def _validate_stored_version_servability(
         run=run,
     )
     metadata_asset = _validate_version_ready(db, version)
+    _validate_reviewed_ortho_version(
+        db,
+        version=version,
+        run=run,
+        layer=layer,
+    )
     return source, metadata_asset
+
+
+def _validate_reviewed_ortho_version(
+    db: Session,
+    *,
+    version: ReferenceDeliveryVersion,
+    run: ReferenceSyncRun,
+    layer: ReferenceLayer | None = None,
+) -> None:
+    current_layer = layer or db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == version.provider_key,
+            ReferenceLayer.id == version.layer_id,
+        )
+    )
+    if current_layer is None or current_layer.service_id is None:
+        return
+    service = db.scalar(
+        select(ReferenceService).where(
+            ReferenceService.provider_key == current_layer.provider_key,
+            ReferenceService.id == current_layer.service_id,
+        )
+    )
+    if service is None:
+        raise MirrorPromotionConflict(
+            "delivery catalog service identity is missing"
+        )
+    catalog_layer = current_layer.remote_name or current_layer.source_key
+    try:
+        require_reviewed_ign_ortho_delivery_allowed(
+            catalog_endpoint_url=service.base_url,
+            catalog_layer=catalog_layer,
+            source_definition=run.source_definition_json,
+            validation_json=version.validation_json,
+            content_sha256=version.content_sha256,
+        )
+    except ReviewedOrthoEvidenceError as error:
+        raise MirrorPromotionConflict(
+            "reviewed ortho delivery evidence rejected the transition"
+        ) from error
 
 
 def _validate_version_mirror_authorization(

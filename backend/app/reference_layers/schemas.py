@@ -64,6 +64,9 @@ class ReferenceLayerRead(BaseModel):
     source_substitution_notice: str | None = None
     source_substitution_selected_layer: str | None = None
     source_substitution_profile: str | None = None
+    source_substitution_scope: str | None = None
+    source_substitution_attribution: str | None = None
+    source_substitution_content_sha256: str | None = None
     mirror_status: str = "legacy"
     active_version_id: int | None = None
     active_generation: int | None = None

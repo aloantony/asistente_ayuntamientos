@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from conftest import headers_for, unique_suffix
@@ -29,6 +30,13 @@ from app.reference_layers.models import (
     ReferenceLayerStyle,
     ReferenceService,
 )
+from app.reference_layers.delivery_builder import canonical_json_sha256
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
+)
+from app.reference_layers.routes import _active_reviewed_ortho_projection
 
 
 def make_definition(
@@ -743,6 +751,15 @@ def test_catalog_exposes_reviewed_ortho_assessment_without_source_urls(
     assert "2023" in by_title["Ortofoto_2023"][
         "source_substitution_profile"
     ]
+    assert by_title["Ortofoto_2023"][
+        "source_substitution_scope"
+    ] == "candidate"
+    assert by_title["Ortofoto_2023"][
+        "source_substitution_attribution"
+    ] == "Obra derivada de PNOA 2023 CC-BY 4.0 scne.es"
+    assert by_title["Ortofoto_2023"][
+        "source_substitution_content_sha256"
+    ] is None
     assert by_title["Ortofoto_2010"]["source_substitution_status"] == "exact"
     assert by_title["Ortofoto_2010"][
         "source_substitution_selected_layer"
@@ -799,6 +816,58 @@ def test_catalog_exposes_reviewed_ortho_assessment_without_source_urls(
     assert "fuente primaria" in invalid_2023["source_substitution_notice"]
     assert invalid_2023["source_substitution_selected_layer"] is None
     assert "www.ign.es" not in invalid_response.text
+
+
+def test_active_ortho_api_projection_describes_frozen_bytes_not_candidate() -> None:
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2023",
+    )
+    assert reviewed is not None
+    frozen = reviewed_ign_ortho_expected_source_definition(reviewed)
+    validation = {"passed": True}
+
+    projection = _active_reviewed_ortho_projection(
+        service=SimpleNamespace(base_url=CATALOG_ENDPOINT_URL),
+        layer=SimpleNamespace(
+            remote_name="Ortofoto_2023",
+            source_key="ortho-2023",
+        ),
+        version=SimpleNamespace(
+            validation_json=validation,
+            validation_sha256=canonical_json_sha256(validation),
+            content_sha256="d" * 64,
+        ),
+        run=SimpleNamespace(
+            source_definition_json=frozen,
+            source_definition_sha256=canonical_json_sha256(frozen),
+        ),
+    )
+
+    assert projection["scope"] == "active_delivery"
+    assert projection["equivalence_status"] == "invalid"
+    assert projection["selected_layer"] == "PNOA2023"
+    assert projection["delivery_content_sha256"] == "d" * 64
+
+    catalog_identity_changed = _active_reviewed_ortho_projection(
+        service=SimpleNamespace(base_url="https://changed.example.test/wms"),
+        layer=SimpleNamespace(
+            remote_name="Ortofoto_2023",
+            source_key="ortho-2023",
+        ),
+        version=SimpleNamespace(
+            validation_json=validation,
+            validation_sha256=canonical_json_sha256(validation),
+            content_sha256="d" * 64,
+        ),
+        run=SimpleNamespace(
+            source_definition_json=frozen,
+            source_definition_sha256=canonical_json_sha256(frozen),
+        ),
+    )
+    assert catalog_identity_changed["scope"] == "active_delivery"
+    assert catalog_identity_changed["equivalence_status"] == "invalid"
+    assert catalog_identity_changed["delivery_content_sha256"] == "d" * 64
 
 
 def test_catalog_excludes_historical_rows_missing_from_current_snapshot(

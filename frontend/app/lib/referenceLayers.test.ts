@@ -56,6 +56,9 @@ function makeLayer(overrides: Partial<ReferenceLayer>): ReferenceLayer {
     source_substitution_notice: null,
     source_substitution_selected_layer: null,
     source_substitution_profile: null,
+    source_substitution_scope: null,
+    source_substitution_attribution: null,
+    source_substitution_content_sha256: null,
     mirror_status: "active",
     active_version_id: 21,
     active_generation: 1,
@@ -455,6 +458,11 @@ describe("approved SIUR delivery descriptors", () => {
       available_style_ids: [12],
       effective_visible: true,
       effective_opacity: 0.65,
+      source_substitution_attribution:
+        "Obra derivada de PNOA 2020 CC-BY 4.0 scne.es",
+      source_substitution_status: "exact",
+      source_substitution_scope: "active_delivery",
+      source_substitution_content_sha256: "a".repeat(64),
     });
     const catalog = makeCatalog(
       [layer],
@@ -473,8 +481,9 @@ describe("approved SIUR delivery descriptors", () => {
     expect(descriptors[0].tileUrl).toBe(
       "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12",
     );
-    expect(descriptors[0].attribution).toContain("&lt;script&gt;");
-    expect(descriptors[0].attribution).not.toContain("<script>");
+    expect(descriptors[0].attribution).toBe(
+      "Obra derivada de PNOA 2020 CC-BY 4.0 scne.es",
+    );
     expect(() => buildReferenceTileUrl(7, 2, -1)).toThrow(TypeError);
     expect(buildReferenceMetadataUrl(7, 2)).toBe(
       "/api/organizations/7/reference-layers/2/metadata.json",

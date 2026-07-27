@@ -14,12 +14,14 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import logging
 import threading
 import time
 from typing import Any, Literal, Protocol, TypeAlias, cast
 
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
@@ -117,6 +119,12 @@ from app.reference_layers.style_parity import (
 from app.reference_layers.style_update_watcher import (
     OfficialStyleReviewRequiredError,
     require_official_style_promotion_allowed,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+    ReviewedOrthoEvidenceError,
+    build_reviewed_ign_ortho_parity_gate,
+    reviewed_ign_ortho_source_projection,
 )
 from app.reference_layers.tile_seed import (
     TileContentSample,
@@ -530,6 +538,10 @@ class MirrorRunProcessor:
                         self.session_factory,
                         context,
                     )
+                    _revalidate_reviewed_ortho_pre_promotion(
+                        self.acquisition,
+                        context,
+                    )
                     promote_existing_delivery(
                         self.session_factory,
                         self.store,
@@ -725,6 +737,10 @@ class MirrorRunProcessor:
                     context,
                     acquired=acquired,
                 )
+                _revalidate_reviewed_ortho_pre_promotion(
+                    self.acquisition,
+                    context,
+                )
                 promote_existing_delivery(
                     self.session_factory,
                     self.store,
@@ -854,6 +870,11 @@ class MirrorRunProcessor:
                 max_tiles=self.config.reference_tile_max_count,
                 concurrency=self.config.reference_tile_concurrency,
                 batch_size=self.config.reference_tile_batch_size,
+                prepromotion_capabilities_check=lambda: (
+                    self.acquisition.revalidate_reviewed_ortho_capabilities(
+                        context.source
+                    )
+                ),
             )
         raise MirrorOrchestrationError(
             "reference source target kind is unsupported",
@@ -1191,6 +1212,56 @@ def revalidate_style_promotion_gate(
             db,
             source=source,
             store=store,
+        )
+
+
+def _revalidate_reviewed_ortho_pre_promotion(
+    acquisition: Any,
+    context: RunContext,
+) -> None:
+    try:
+        projection = reviewed_ign_ortho_source_projection(
+            context.run.source_definition_json
+        )
+    except ReviewedOrthoEvidenceError as error:
+        raise MirrorOrchestrationError(
+            "reviewed ortho source changed before promotion",
+            code="reviewed_ortho_source_changed",
+        ) from error
+    if projection is None:
+        return
+    checker = getattr(
+        acquisition,
+        "revalidate_reviewed_ortho_capabilities",
+        None,
+    )
+    if not callable(checker):
+        raise MirrorOrchestrationError(
+            "reviewed ortho promotion has no live capabilities check",
+            code="reviewed_ortho_capabilities_missing",
+        )
+    try:
+        gate = checker(context.source)
+    except (ReferenceAcquisitionError, ReviewedOrthoEvidenceError) as error:
+        raise MirrorOrchestrationError(
+            "reviewed ortho capabilities changed before promotion",
+            code="reviewed_ortho_capabilities_changed",
+        ) from error
+    if (
+        not isinstance(gate, dict)
+        or gate.get("passed") is not True
+        or gate.get("schema_version")
+        != "siur-reviewed-ortho-prepromotion-capabilities/v1"
+        or gate.get("profile") != projection["profile"]
+        or not isinstance(gate.get("selected_capabilities"), dict)
+        or gate["selected_capabilities"].get("phase") != "pre_promotion"
+        or not isinstance(gate.get("catalog_capabilities"), dict)
+        or gate["catalog_capabilities"].get("phase")
+        != "parity_catalog"
+    ):
+        raise MirrorOrchestrationError(
+            "reviewed ortho promotion capabilities evidence is invalid",
+            code="reviewed_ortho_capabilities_missing",
         )
 
 
@@ -1929,6 +2000,350 @@ def _geoserver_materialization(
     return MaterializedDelivery(prepared, publication)
 
 
+def _reviewed_ortho_parity_gate(
+    store: ReferenceBlobStore,
+    *,
+    context: RunContext,
+    artifacts: tuple[PersistedRunArtifact, ...],
+    source_document: dict[str, Any],
+    publication_asset: TilePublicationAsset,
+    content_sha256: str,
+    concurrency: int,
+    sample: Callable[..., TileContentSample],
+    prepromotion_capabilities_check: (
+        Callable[[], dict[str, Any] | None] | None
+    ),
+) -> dict[str, Any] | None:
+    source_definition = context.run.source_definition_json
+    try:
+        projection = reviewed_ign_ortho_source_projection(
+            source_definition
+        )
+    except ReviewedOrthoEvidenceError as error:
+        raise MirrorOrchestrationError(
+            str(error),
+            code="reviewed_ortho_source_changed",
+        ) from error
+    if projection is None:
+        return None
+    if prepromotion_capabilities_check is None:
+        raise MirrorOrchestrationError(
+            "reviewed ortho promotion has no live capabilities check",
+            code="reviewed_ortho_capabilities_missing",
+        )
+    try:
+        prepromotion_capabilities = prepromotion_capabilities_check()
+    except (ReferenceAcquisitionError, ReviewedOrthoEvidenceError) as error:
+        raise MirrorOrchestrationError(
+            "reviewed ortho pre-promotion capabilities changed",
+            code="reviewed_ortho_capabilities_changed",
+        ) from error
+    if (
+        not isinstance(prepromotion_capabilities, dict)
+        or prepromotion_capabilities.get("schema_version")
+        != "siur-reviewed-ortho-prepromotion-capabilities/v1"
+        or prepromotion_capabilities.get("passed") is not True
+        or prepromotion_capabilities.get("profile")
+        != projection["profile"]
+        or not isinstance(
+            prepromotion_capabilities.get("selected_capabilities"),
+            dict,
+        )
+        or not isinstance(
+            prepromotion_capabilities.get("catalog_capabilities"),
+            dict,
+        )
+    ):
+        raise MirrorOrchestrationError(
+            "reviewed ortho promotion capabilities evidence is missing",
+            code="reviewed_ortho_capabilities_missing",
+        )
+    catalog_gates = [
+        gate
+        for artifact in artifacts
+        for gate in [
+            artifact.metadata_json.get(
+                "reviewed_ortho_capabilities_gate"
+            )
+        ]
+        if isinstance(gate, dict)
+        and gate.get("phase") == "parity_catalog"
+        and gate.get("selected_layer") == projection["catalog_layer"]
+    ]
+    if len(catalog_gates) != 1:
+        raise MirrorOrchestrationError(
+            "reviewed ortho catalog capabilities evidence is missing",
+            code="reviewed_ortho_capabilities_missing",
+        )
+
+    catalog_document = _reviewed_ortho_catalog_sample_document(
+        source_document,
+        projection=projection,
+    )
+
+    try:
+        selected_sample = sample(
+            source_document=source_document,
+            sample_limit=16,
+            concurrency=min(4, concurrency),
+        )
+        catalog_sample = sample(
+            source_document=catalog_document,
+            sample_limit=16,
+            concurrency=min(4, concurrency),
+        )
+        if selected_sample.coordinates != catalog_sample.coordinates:
+            raise TileSeedError(
+                "catalog and selected samples use different coordinates"
+            )
+        renderer = LocalTileArchiveRenderer(store.root)
+        local_bodies = tuple(
+            renderer.render_tile(
+                storage_key=publication_asset.storage_key,
+                archive_sha256=publication_asset.sha256,
+                z=coordinate.z,
+                x=coordinate.x,
+                y=coordinate.y,
+            ).body
+            for coordinate in selected_sample.coordinates
+        )
+        selected_sha256 = tile_content_sample_sha256(
+            selected_sample.coordinates,
+            selected_sample.bodies,
+        )
+        local_sha256 = tile_content_sample_sha256(
+            selected_sample.coordinates,
+            local_bodies,
+        )
+        catalog_sha256 = tile_content_sample_sha256(
+            catalog_sample.coordinates,
+            catalog_sample.bodies,
+        )
+        coverage, pixel_comparison = _ortho_pixel_measurements(
+            selected_sample.bodies,
+            catalog_sample.bodies,
+        )
+        coordinate_sha256 = hashlib.sha256(
+            json.dumps(
+                [
+                    [
+                        item.z,
+                        item.x,
+                        item.y,
+                        item.matrix_identifier,
+                    ]
+                    for item in selected_sample.coordinates
+                ],
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        measurements = {
+            "schema_version": (
+                "siur-reviewed-ortho-parity-measurements/v1"
+            ),
+            "sample_count": len(selected_sample.coordinates),
+            "coordinate_sha256": coordinate_sha256,
+            "selected_sample_sha256": selected_sha256,
+            "local_sample_sha256": local_sha256,
+            "catalog_sample_sha256": catalog_sha256,
+            "coverage_mask": coverage,
+            "resolution_scale": {
+                "tile_width": 256,
+                "tile_height": 256,
+                "crs": "EPSG:3857",
+                "sampled_zooms": sorted(
+                    {item.z for item in selected_sample.coordinates}
+                ),
+                "maximum_resolution_delta_metres_per_pixel": 0.0,
+                "maximum_scale_denominator_delta": 0.0,
+            },
+            "pixel_samples": pixel_comparison,
+        }
+        gate = build_reviewed_ign_ortho_parity_gate(
+            source_definition=source_definition,
+            content_sha256=content_sha256,
+            selected_capabilities=prepromotion_capabilities[
+                "selected_capabilities"
+            ],
+            catalog_capabilities=prepromotion_capabilities[
+                "catalog_capabilities"
+            ],
+            measurements=measurements,
+        )
+    except (
+        ReviewedOrthoEvidenceError,
+        TileSeedError,
+        LocalTileArchiveError,
+        OSError,
+        ValueError,
+    ) as error:
+        raise MirrorOrchestrationError(
+            "reviewed ortho pixel parity did not pass",
+            code="reviewed_ortho_parity_failed",
+        ) from error
+    if gate is None:
+        raise MirrorOrchestrationError(
+            "reviewed ortho parity gate was not produced",
+            code="reviewed_ortho_parity_failed",
+        )
+    return gate
+
+
+def _reviewed_ortho_catalog_sample_document(
+    source_document: dict[str, Any],
+    *,
+    projection: dict[str, Any],
+) -> dict[str, Any]:
+    """Retarget the reviewed descriptor without leaving stale KVP identity."""
+
+    catalog_document = deepcopy(source_document)
+    descriptor = catalog_document.get("descriptor")
+    if not isinstance(descriptor, dict):
+        raise MirrorOrchestrationError(
+            "reviewed ortho source descriptor is invalid",
+            code="reviewed_ortho_parity_failed",
+        )
+    kvp = descriptor.get("kvp")
+    if not isinstance(kvp, dict):
+        raise MirrorOrchestrationError(
+            "reviewed ortho WMS descriptor is invalid",
+            code="reviewed_ortho_parity_failed",
+        )
+    descriptor["layer"] = projection["catalog_layer"]
+    kvp["endpoint_url"] = CATALOG_ENDPOINT_URL
+    kvp["layers"] = projection["catalog_layer"]
+    catalog_document["definition_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                "schema": "siur-reviewed-ortho-catalog-sample/v1",
+                "profile": projection["profile"],
+                "catalog_layer": projection["catalog_layer"],
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return catalog_document
+
+
+def _ortho_pixel_measurements(
+    selected_bodies: tuple[bytes, ...],
+    catalog_bodies: tuple[bytes, ...],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if (
+        not selected_bodies
+        or len(selected_bodies) != len(catalog_bodies)
+    ):
+        raise ValueError("ortho pixel samples are incomplete")
+    selected_nonempty = 0
+    catalog_nonempty = 0
+    minimum_iou = 1.0
+    absolute_error = 0
+    compared_values = 0
+    for selected_body, catalog_body in zip(
+        selected_bodies,
+        catalog_bodies,
+        strict=True,
+    ):
+        selected_pixels, selected_mask, selected_active = (
+            _ortho_pixel_grid(selected_body)
+        )
+        catalog_pixels, catalog_mask, catalog_active = _ortho_pixel_grid(
+            catalog_body
+        )
+        selected_nonempty += int(selected_active)
+        catalog_nonempty += int(catalog_active)
+        intersection = sum(
+            left and right
+            for left, right in zip(
+                selected_mask,
+                catalog_mask,
+                strict=True,
+            )
+        )
+        union = sum(
+            left or right
+            for left, right in zip(
+                selected_mask,
+                catalog_mask,
+                strict=True,
+            )
+        )
+        minimum_iou = min(
+            minimum_iou,
+            1.0 if union == 0 else intersection / union,
+        )
+        absolute_error += sum(
+            abs(left - right)
+            for left, right in zip(
+                selected_pixels,
+                catalog_pixels,
+                strict=True,
+            )
+        )
+        compared_values += len(selected_pixels)
+    normalized_mae = (
+        absolute_error / (compared_values * 255)
+        if compared_values
+        else 1.0
+    )
+    return (
+        {
+            "selected_nonempty_samples": selected_nonempty,
+            "catalog_nonempty_samples": catalog_nonempty,
+            "minimum_mask_iou": round(minimum_iou, 8),
+        },
+        {
+            "normalized_mean_absolute_error": round(
+                normalized_mae,
+                8,
+            ),
+        },
+    )
+
+
+def _ortho_pixel_grid(
+    body: bytes,
+) -> tuple[tuple[int, ...], tuple[bool, ...], bool]:
+    try:
+        with Image.open(BytesIO(body)) as image:
+            image.load()
+            if image.size != (256, 256):
+                raise ValueError("ortho sample dimensions are invalid")
+            reduced = image.convert("RGB").resize((32, 32))
+            pixels = tuple(
+                channel
+                for pixel in reduced.getdata()
+                for channel in pixel
+            )
+    except (UnidentifiedImageError, Image.DecompressionBombError) as error:
+        raise ValueError("ortho sample image is invalid") from error
+    luminance = tuple(
+        (
+            pixels[index] * 299
+            + pixels[index + 1] * 587
+            + pixels[index + 2] * 114
+        )
+        // 1000
+        for index in range(0, len(pixels), 3)
+    )
+    dynamic_range = max(luminance) - min(luminance)
+    active = dynamic_range >= 4
+    mask: list[bool] = []
+    for block_y in range(8):
+        for block_x in range(8):
+            block = [
+                luminance[(block_y * 4 + dy) * 32 + block_x * 4 + dx]
+                for dy in range(4)
+                for dx in range(4)
+            ]
+            mask.append(max(block) - min(block) >= 3)
+    return pixels, tuple(mask), active
+
+
 def materialize_tile_delivery(
     store: ReferenceBlobStore,
     context: RunContext,
@@ -1942,6 +2357,10 @@ def materialize_tile_delivery(
     batch_size: int,
     seed: Callable[..., TileSeedResult] = seed_tile_archive,
     inspect: Callable[..., TileArchiveInspection] = geo_ingest.inspect_tile_archive,
+    sample: Callable[..., TileContentSample] = sample_tile_source,
+    prepromotion_capabilities_check: (
+        Callable[[], dict[str, Any] | None] | None
+    ) = None,
 ) -> MaterializedDelivery:
     descriptor_artifacts = [
         item
@@ -2080,6 +2499,19 @@ def materialize_tile_delivery(
             code="tile_style_coverage_incomplete",
         )
     primary = prepared_assets[primary_index]
+    reviewed_ortho_gate = _reviewed_ortho_parity_gate(
+        store,
+        context=context,
+        artifacts=artifacts,
+        source_document=documents[primary_index][1],
+        publication_asset=publication_assets[primary_index],
+        content_sha256=primary.sha256,
+        concurrency=concurrency,
+        sample=sample,
+        prepromotion_capabilities_check=(
+            prepromotion_capabilities_check
+        ),
+    )
     validation = {
         "schema_version": "reference-delivery-validation/v1",
         "passed": True,
@@ -2099,6 +2531,8 @@ def materialize_tile_delivery(
             },
         },
     }
+    if reviewed_ortho_gate is not None:
+        validation["reviewed_ortho_parity_gate"] = reviewed_ortho_gate
     prepared = PreparedDelivery(
         delivery_kind="tiles",
         source_version=acquired.observed_version,

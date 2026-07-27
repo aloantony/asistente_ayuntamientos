@@ -12,9 +12,13 @@ from app.reference_layers.reviewed_ortho_evidence import (
     PROFILE_RESOURCE,
     PROFILE_SHA256,
     ReviewedOrthoEvidenceError,
+    build_reviewed_ign_ortho_parity_gate,
+    require_reviewed_ign_ortho_delivery_allowed,
     require_reviewed_ign_ortho_acquisition_allowed,
+    reviewed_ign_ortho_catalog_capabilities_gate,
     reviewed_ign_ortho_equivalence,
     reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_live_capabilities_gate,
     reviewed_ign_ortho_source_projection,
     reviewed_ign_ortho_substitution,
 )
@@ -339,3 +343,205 @@ def test_both_capabilities_drive_quadrant_classification() -> None:
     assert "Cuadrante NE" in ambiguous.catalog_abstract
     assert "Norte de Castilla y León" in ambiguous.selected_abstract
     assert ambiguous.equivalence_status == "substitute_degraded"
+
+
+def test_live_capabilities_are_compared_semantically_not_only_by_hash() -> None:
+    package = files("app.reference_layers")
+    body = package.joinpath(CAPABILITIES_RESOURCE).read_bytes()
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2020",
+    )
+    assert reviewed is not None
+    definition = reviewed_ign_ortho_expected_source_definition(reviewed)
+
+    gate = reviewed_ign_ortho_live_capabilities_gate(
+        definition,
+        body,
+        phase="pre_download",
+    )
+
+    assert gate is not None
+    assert gate["passed"] is True
+    assert gate["live_sha256"] == CAPABILITIES_SHA256
+    changed = body.replace(
+        b"Ortoimagen PNOA correspondiente al a\xc3\xb1o 2020.",
+        b"Ortoimagen PNOA correspondiente al a\xc3\xb1o 2020 cambiada.",
+        1,
+    )
+    with pytest.raises(
+        ReviewedOrthoEvidenceError,
+        match="semantics changed",
+    ):
+        reviewed_ign_ortho_live_capabilities_gate(
+            definition,
+            changed,
+            phase="pre_download",
+        )
+
+
+def test_exact_parity_gate_is_structured_hash_bound_and_executable() -> None:
+    package = files("app.reference_layers")
+    selected_body = package.joinpath(CAPABILITIES_RESOURCE).read_bytes()
+    catalog_body = package.joinpath(
+        CATALOG_CAPABILITIES_RESOURCE
+    ).read_bytes()
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2020",
+    )
+    assert reviewed is not None
+    definition = reviewed_ign_ortho_expected_source_definition(reviewed)
+    selected_gate = reviewed_ign_ortho_live_capabilities_gate(
+        definition,
+        selected_body,
+        phase="pre_promotion",
+    )
+    catalog_gate = reviewed_ign_ortho_catalog_capabilities_gate(
+        definition,
+        catalog_body,
+    )
+    content_sha256 = "a" * 64
+    measurements = {
+        "schema_version": "siur-reviewed-ortho-parity-measurements/v1",
+        "sample_count": 12,
+        "coordinate_sha256": "1" * 64,
+        "selected_sample_sha256": "2" * 64,
+        "local_sample_sha256": "2" * 64,
+        "catalog_sample_sha256": "3" * 64,
+        "coverage_mask": {
+            "selected_nonempty_samples": 12,
+            "catalog_nonempty_samples": 12,
+            "minimum_mask_iou": 0.98,
+        },
+        "resolution_scale": {
+            "tile_width": 256,
+            "tile_height": 256,
+            "crs": "EPSG:3857",
+            "sampled_zooms": [12, 14, 15],
+            "maximum_resolution_delta_metres_per_pixel": 0.0,
+            "maximum_scale_denominator_delta": 0.0,
+        },
+        "pixel_samples": {
+            "normalized_mean_absolute_error": 0.02,
+        },
+    }
+
+    gate = build_reviewed_ign_ortho_parity_gate(
+        source_definition=definition,
+        content_sha256=content_sha256,
+        selected_capabilities=selected_gate,
+        catalog_capabilities=catalog_gate,
+        measurements=measurements,
+    )
+    stale_selected_gate = reviewed_ign_ortho_live_capabilities_gate(
+        definition,
+        selected_body,
+        phase="pre_download",
+    )
+    with pytest.raises(ReviewedOrthoEvidenceError):
+        build_reviewed_ign_ortho_parity_gate(
+            source_definition=definition,
+            content_sha256=content_sha256,
+            selected_capabilities=stale_selected_gate,
+            catalog_capabilities=catalog_gate,
+            measurements=measurements,
+        )
+
+    assert gate is not None
+    projection = require_reviewed_ign_ortho_delivery_allowed(
+        catalog_endpoint_url=CATALOG_ENDPOINT_URL,
+        catalog_layer="Ortofoto_2020",
+        source_definition=definition,
+        validation_json={"reviewed_ortho_parity_gate": gate},
+        content_sha256=content_sha256,
+    )
+    assert projection is not None
+    assert projection["equivalence_status"] == "exact"
+    assert projection["required_attribution"] == (
+        "Obra derivada de PNOA 2020 CC-BY 4.0 scne.es"
+    )
+    with pytest.raises(
+        ReviewedOrthoEvidenceError,
+        match="catalog identity",
+    ):
+        require_reviewed_ign_ortho_delivery_allowed(
+            catalog_endpoint_url="https://changed.example.test/wms",
+            catalog_layer="Ortofoto_2020",
+            source_definition=definition,
+            validation_json={"reviewed_ortho_parity_gate": gate},
+            content_sha256=content_sha256,
+        )
+    forged = {**gate, "classification": "substitute_degraded"}
+    with pytest.raises(ReviewedOrthoEvidenceError):
+        require_reviewed_ign_ortho_delivery_allowed(
+            catalog_endpoint_url=CATALOG_ENDPOINT_URL,
+            catalog_layer="Ortofoto_2020",
+            source_definition=definition,
+            validation_json={"reviewed_ortho_parity_gate": forged},
+            content_sha256=content_sha256,
+        )
+    with pytest.raises(ReviewedOrthoEvidenceError):
+        require_reviewed_ign_ortho_delivery_allowed(
+            catalog_endpoint_url=CATALOG_ENDPOINT_URL,
+            catalog_layer="Ortofoto_2020",
+            source_definition=definition,
+            validation_json={},
+            content_sha256=content_sha256,
+        )
+
+
+def test_2021_delivery_is_blocked_even_with_historical_validation() -> None:
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2021",
+    )
+    assert reviewed is not None
+    definition = reviewed_ign_ortho_expected_source_definition(reviewed)
+
+    with pytest.raises(
+        ReviewedOrthoEvidenceError,
+        match="permanently blocked",
+    ):
+        require_reviewed_ign_ortho_delivery_allowed(
+            catalog_endpoint_url=CATALOG_ENDPOINT_URL,
+            catalog_layer="Ortofoto_2021",
+            source_definition=definition,
+            validation_json={"passed": True},
+            content_sha256="a" * 64,
+        )
+
+
+def test_attribution_and_parity_policy_are_product_specific() -> None:
+    expectations = {
+        "Ortofoto_2023": (
+            "Obra derivada de PNOA 2023 CC-BY 4.0 scne.es"
+        ),
+        "Ortofoto_2002": (
+            "Obra derivada de Orto-SIGPAC 1997-2003 "
+            "CC-BY 4.0 scne.es"
+        ),
+        "Ortofoto_1973-83": (
+            "Obra derivada de Orto-Interministerial 1976-1986 "
+            "CC-BY 4.0 scne.es"
+        ),
+        "Ortofoto_1956": (
+            "Obra derivada de Orto-AMS 1956-1957 "
+            "CC-BY 4.0 ejercito.defensa.gob.es"
+        ),
+    }
+    for catalog_layer, attribution in expectations.items():
+        reviewed = reviewed_ign_ortho_substitution(
+            CATALOG_ENDPOINT_URL,
+            catalog_layer,
+        )
+        assert reviewed is not None
+        projection = reviewed_ign_ortho_source_projection(
+            reviewed_ign_ortho_expected_source_definition(reviewed)
+        )
+        assert projection is not None
+        assert projection["required_attribution"] == attribution
+        assert projection["parity_policy"]["schema_version"] == (
+            "siur-reviewed-ortho-parity-policy/v1"
+        )
+        assert "parity_requirements" not in projection

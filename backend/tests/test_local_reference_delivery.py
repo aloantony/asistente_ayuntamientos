@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import select
 
+import app.reference_layers.local_delivery as local_delivery
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
@@ -35,6 +36,11 @@ from app.reference_layers.models import (
     ReferenceSyncRun,
 )
 from support_reference_mirror_authorization import authorize_mirror_source
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
+)
 
 
 def _catalog_definition(
@@ -91,6 +97,102 @@ def _catalog_definition(
             tzinfo=timezone.utc,
         ),
     )
+
+
+def test_local_serving_fences_any_historical_2021_delivery(
+    monkeypatch,
+) -> None:
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2021",
+    )
+    assert reviewed is not None
+    source_definition = reviewed_ign_ortho_expected_source_definition(
+        reviewed
+    )
+    monkeypatch.setattr(
+        local_delivery,
+        "delivery_state_matches_promotion_head",
+        lambda _state, _head: True,
+    )
+    monkeypatch.setattr(
+        local_delivery,
+        "sync_run_source_definition_is_valid",
+        lambda _run: True,
+    )
+    monkeypatch.setattr(
+        local_delivery,
+        "stored_source_definition_is_valid",
+        lambda _source: True,
+    )
+    record = local_delivery._ActiveRecord(
+        layer=type(
+            "Layer",
+            (),
+            {
+                "id": 3,
+                "provider_key": "siur",
+                "service_id": 4,
+                "remote_name": "Ortofoto_2021",
+                "source_key": "ortho-2021",
+            },
+        )(),
+        current_snapshot=object(),
+        state=object(),
+        version=type(
+            "Version",
+            (),
+            {
+                "layer_id": 3,
+                "provider_key": "siur",
+                "source_id": 5,
+                "sync_run_id": 6,
+                "delivery_kind": "tiles",
+                "validation_json": {"passed": True},
+                "content_sha256": "a" * 64,
+            },
+        )(),
+        source=type(
+            "Source",
+            (),
+            {
+                "provider_key": "siur",
+                "layer_id": 3,
+                "id": 5,
+                "definition_sha256": "b" * 64,
+            },
+        )(),
+        run=type(
+            "Run",
+            (),
+            {
+                "id": 6,
+                "source_id": 5,
+                "provider_key": "siur",
+                "layer_id": 3,
+                "source_definition_sha256": "b" * 64,
+                "source_definition_json": source_definition,
+                "status": "succeeded",
+            },
+        )(),
+        snapshot=object(),
+        head=object(),
+    )
+    db = type(
+        "DB",
+        (),
+        {
+            "scalar": lambda _self, _query: type(
+                "Service",
+                (),
+                {"base_url": CATALOG_ENDPOINT_URL},
+            )()
+        },
+    )()
+
+    with pytest.raises(LocalDeliveryError) as error:
+        local_delivery._validate_active_record(db, record, [])
+    assert error.value.blocker == "reviewed_ortho_2021_blocked"
 
 
 def seed_local_delivery(

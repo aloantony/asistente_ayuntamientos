@@ -66,6 +66,9 @@ export type ReferenceLayer = {
   source_substitution_notice: string | null;
   source_substitution_selected_layer: string | null;
   source_substitution_profile: string | null;
+  source_substitution_scope: "candidate" | "active_delivery" | null;
+  source_substitution_attribution: string | null;
+  source_substitution_content_sha256: string | null;
   mirror_status:
     | "not_applicable"
     | "legacy"
@@ -278,6 +281,25 @@ export function validateReferenceCatalog(
 
   for (const layer of catalog.layers) {
     const availableStyleIds = new Set<number>();
+    const hasSubstitution = layer.source_substitution_status !== null;
+    if (
+      hasSubstitution !== (layer.source_substitution_scope !== null) ||
+      (layer.source_substitution_scope === "candidate" &&
+        layer.source_substitution_content_sha256 !== null) ||
+      (layer.source_substitution_scope === "active_delivery" &&
+        (layer.active_version_id === null ||
+          layer.source_substitution_content_sha256 === null ||
+          !/^[0-9a-f]{64}$/.test(
+            layer.source_substitution_content_sha256,
+          ))) ||
+      ((layer.source_substitution_status === "exact" ||
+        layer.source_substitution_status === "substitute_degraded") &&
+        !layer.source_substitution_attribution)
+    ) {
+      throw new ReferenceCatalogIntegrityError(
+        "La clasificación de la sustitución no corresponde a los bytes anunciados.",
+      );
+    }
     if (
       (layer.node_type === "group" && layer.mirror_status !== "not_applicable") ||
       (layer.node_type === "layer" && layer.mirror_status === "not_applicable")
@@ -719,9 +741,12 @@ export function buildSiurMapLayers(
       return;
     }
     const attribution =
-      layer.service_id === null
+      (layer.source_substitution_scope === "active_delivery"
+        ? layer.source_substitution_attribution
+        : null) ??
+      (layer.service_id === null
         ? null
-        : (servicesById.get(layer.service_id)?.attribution ?? null);
+        : (servicesById.get(layer.service_id)?.attribution ?? null));
     result.push({
       organizationId,
       layerId: layer.id,

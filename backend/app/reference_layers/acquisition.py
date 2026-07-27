@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 import hashlib
@@ -65,6 +65,13 @@ from app.reference_layers.source_probes import (
     SourceProbe,
     SourceProbeError,
     probe_candidate_document,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_CAPABILITIES_URL,
+    ReviewedOrthoEvidenceError,
+    reviewed_ign_ortho_catalog_capabilities_gate,
+    reviewed_ign_ortho_live_capabilities_gate,
+    reviewed_ign_ortho_source_projection,
 )
 
 
@@ -631,6 +638,8 @@ class ReferenceAcquisitionPipeline:
     def _probe(
         self,
         candidate: SourceCandidate,
+        *,
+        reviewed_ortho_phase: str = "pre_download",
     ) -> tuple[SourceProbe, AcquiredArtifact, bytes]:
         url, accept, media_types = _probe_request(candidate)
 
@@ -646,6 +655,21 @@ class ReferenceAcquisitionPipeline:
                 raise AcquisitionValidationError(
                     probe.reason or "requested collection is unavailable",
                     code="collection_unavailable",
+                )
+            try:
+                live_gate = reviewed_ign_ortho_live_capabilities_gate(
+                    candidate_definition(candidate),
+                    document,
+                    phase=reviewed_ortho_phase,
+                )
+            except ReviewedOrthoEvidenceError as exc:
+                raise AcquisitionValidationError(
+                    "live reviewed WMS capabilities changed",
+                    code="reviewed_ortho_capabilities_changed",
+                ) from exc
+            if live_gate is not None:
+                probe.metadata["reviewed_ortho_capabilities_gate"] = (
+                    live_gate
                 )
             return probe, document
 
@@ -673,6 +697,77 @@ class ReferenceAcquisitionPipeline:
             },
         )
         return probe, artifact, document
+
+    def revalidate_reviewed_ortho_capabilities(
+        self,
+        source: SourceCandidate | ReferenceLayerSource,
+    ) -> dict[str, Any] | None:
+        """Repeat the semantic capabilities check immediately pre-promotion."""
+
+        candidate = candidate_from_source_model(source) if isinstance(
+            source, ReferenceLayerSource
+        ) else source
+        projection = reviewed_ign_ortho_source_projection(
+            candidate_definition(candidate)
+        )
+        if projection is None:
+            return None
+        probe, _artifact, _document = self._probe(
+            candidate,
+            reviewed_ortho_phase="pre_promotion",
+        )
+        gate = probe.metadata.get("reviewed_ortho_capabilities_gate")
+        if not isinstance(gate, dict):
+            raise AcquisitionValidationError(
+                "pre-promotion capabilities gate is missing",
+                code="reviewed_ortho_capabilities_changed",
+            )
+        catalog_candidate = replace(
+            candidate,
+            endpoint_url=CATALOG_CAPABILITIES_URL.split("?", 1)[0],
+            remote_name=projection["catalog_layer"],
+        )
+
+        def validate_catalog(document: bytes) -> dict[str, Any]:
+            try:
+                catalog_gate = (
+                    reviewed_ign_ortho_catalog_capabilities_gate(
+                        candidate_definition(candidate),
+                        document,
+                    )
+                )
+            except ReviewedOrthoEvidenceError as exc:
+                raise AcquisitionValidationError(
+                    "live catalog WMS capabilities changed",
+                    code="reviewed_ortho_capabilities_changed",
+                ) from exc
+            if catalog_gate is None:
+                raise AcquisitionValidationError(
+                    "pre-promotion catalog capabilities gate is missing",
+                    code="reviewed_ortho_capabilities_changed",
+                )
+            return catalog_gate
+
+        catalog_download = self._download(
+            catalog_candidate,
+            CATALOG_CAPABILITIES_URL,
+            max_bytes=self.limits.max_probe_bytes,
+            accept="application/xml, text/xml;q=0.9",
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=validate_catalog,
+        )
+        return {
+            "schema_version": (
+                "siur-reviewed-ortho-prepromotion-capabilities/v1"
+            ),
+            "passed": True,
+            "profile": projection["profile"],
+            "selected_capabilities": gate,
+            "catalog_capabilities": cast(
+                dict[str, Any],
+                catalog_download.parsed,
+            ),
+        }
 
     def _acquire_styles(
         self,
@@ -2186,6 +2281,62 @@ class ReferenceAcquisitionPipeline:
         else:
             probe, capabilities, _document = self._probe(candidate)
             artifacts.append(capabilities)
+            reviewed_projection = reviewed_ign_ortho_source_projection(
+                candidate_definition(candidate)
+            )
+            if reviewed_projection is not None:
+                catalog_candidate = replace(
+                    candidate,
+                    endpoint_url=CATALOG_CAPABILITIES_URL.split("?", 1)[0],
+                    remote_name=reviewed_projection["catalog_layer"],
+                )
+
+                def validate_catalog(document: bytes) -> dict[str, Any]:
+                    try:
+                        gate = reviewed_ign_ortho_catalog_capabilities_gate(
+                            candidate_definition(candidate),
+                            document,
+                        )
+                    except ReviewedOrthoEvidenceError as exc:
+                        raise AcquisitionValidationError(
+                            "live catalog WMS capabilities changed",
+                            code="reviewed_ortho_capabilities_changed",
+                        ) from exc
+                    if gate is None:
+                        raise AcquisitionValidationError(
+                            "reviewed catalog capabilities gate is missing",
+                            code="reviewed_ortho_capabilities_changed",
+                        )
+                    return gate
+
+                catalog_download = self._download(
+                    catalog_candidate,
+                    CATALOG_CAPABILITIES_URL,
+                    max_bytes=self.limits.max_probe_bytes,
+                    accept="application/xml, text/xml;q=0.9",
+                    allowed_media_types=_XML_MEDIA_TYPES,
+                    validator=validate_catalog,
+                )
+                catalog_gate = cast(
+                    dict[str, Any],
+                    catalog_download.parsed,
+                )
+                artifacts.append(
+                    self._remote_artifact(
+                        catalog_download,
+                        kind="capabilities",
+                        role="observation",
+                        metadata={
+                            "protocol": "wms_tiles",
+                            "requested_name": (
+                                reviewed_projection["catalog_layer"]
+                            ),
+                            "reviewed_ortho_capabilities_gate": (
+                                catalog_gate
+                            ),
+                        },
+                    )
+                )
             if candidate.protocol == "wmts":
                 descriptor = _wmts_tile_descriptor(candidate, probe)
             else:
