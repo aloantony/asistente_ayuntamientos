@@ -128,6 +128,7 @@ class ReviewedLocalStyleRecipe:
     profile: str
     style_kind: Literal[
         "catastro_parcels",
+        "eurostat_grid",
         "flood_polygons",
         "ines_raster",
     ]
@@ -226,69 +227,90 @@ _EUROSTAT_GRID_PARITY = {
     "100": (
         19,
         "3b275f7d129ece404f5d30945cfaa01106ac4bf4ae342bc4410a754fc53724e8",
-        "d3cb61a8a2cdff30a7cb756e90ed34165a86d398a1fe7a56bc14e052336ecca8",
     ),
     "50": (
         59,
         "31dc8e9032f005208e73fe9c0953a8705baa939f073daf173d407fb90245ed29",
-        "08616c3298860350c7493d206841c1c89a51db21d4e259f956b8cf705896985e",
     ),
     "20": (
         295,
         "2fec8c573394fb627dca042d857e3add71d49c09914c4769270950b2e80a0e87",
-        "88cc3325e6714c99ea8a4d278ec4d06660f54e71b19579bc6a1fba544b6ce563",
     ),
     "5": (
         4_046,
         "3a1d8be941eca72ebc415920cfcd023a7e40ed6468b42510a68ba40627e996bf",
-        "ad798dbc48fc6f9d8e33c756225a796b556e068f7042bdc8eb8dac7e698e96ea",
     ),
     "2": (
         24_323,
         "834260837e2ad9b0bcd186175e23ba143faa7e41718afca9017f331ef3435a5f",
-        "6d7006192433e64ba98a108c3e2d84da4fa6f850dd5ddf7d5063a50952907dff",
     ),
     "1": (
         95_818,
         "5f7ec0b6a6fc773ead27954380eb54aa63a6ba874ce8e71c7a349333acd7266c",
-        "aa5bc932ff75bfa82a2d07766461b7f7c7bc98bae4334c312344a59b7c5c5031",
     ),
 }
-_EUROSTAT_GRID_STYLES = [
+_EUROSTAT_GRID_LOCAL_STYLES = [
     {
         "catalog_style_source_key": "rejilla_eurostat_cyl_blanco",
         "remote_name": "rejilla_eurostat_cyl_blanco",
+        "is_default": False,
+        "outline_color": "#ffffff",
     },
     {
         "catalog_style_source_key": "rejilla_eurostat_cyl_fucsia",
         "remote_name": "rejilla_eurostat_cyl_fucsia",
+        "is_default": False,
+        "outline_color": "#e6007e",
     },
     {
         "catalog_style_source_key": "rejilla_eurostat_cyl_morado",
         "remote_name": "rejilla_eurostat_cyl_morado",
+        "is_default": True,
+        "outline_color": "#6d28d9",
     },
 ]
+_EUROSTAT_GRID_STYLE_SET_SCHEMA = (
+    "siur-reviewed-local-grid-style-set/v1"
+)
 
 
 def _eurostat_grid_style_evidence(
+    profile: str,
     catalog_remote_name: str,
 ) -> dict[str, Any]:
+    identity = {
+        "schema": _EUROSTAT_GRID_STYLE_SET_SCHEMA,
+        "profile": profile,
+        "catalog_endpoint_url": _IDECYL_GRID_WMS,
+        "catalog_layer_name": catalog_remote_name,
+        "styles": [
+            {
+                "catalog_style_source_key": item[
+                    "catalog_style_source_key"
+                ],
+                "remote_name": item["remote_name"],
+                "is_default": item["is_default"],
+                "outline_color": item["outline_color"],
+            }
+            for item in _EUROSTAT_GRID_LOCAL_STYLES
+        ],
+    }
     return {
-        "style_parity_status": "exact_original_sld_required",
-        "original_wms_endpoint_url": _IDECYL_GRID_WMS,
-        "original_wms_layer_name": catalog_remote_name,
+        "schema": _EUROSTAT_GRID_STYLE_SET_SCHEMA,
+        "style_parity_status": "local_style_adaptation_required",
+        "local_style_set_identity_sha256": hashlib.sha256(
+            json.dumps(
+                identity,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
         "catalog_default_style_source_key": (
             "rejilla_eurostat_cyl_morado"
         ),
-        "original_wms_style_name": "rejilla_eurostat_cyl_morado",
-        "catalog_styles": [
-            {
-                **item,
-                "is_default": item["catalog_style_source_key"]
-                == "rejilla_eurostat_cyl_morado",
-            }
-            for item in _EUROSTAT_GRID_STYLES
-        ],
+        "catalog_style_count": 3,
     }
 
 
@@ -297,17 +319,17 @@ def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
     for resolution, (
         feature_count,
         identifier_sha256,
-        style_bundle_sha256,
     ) in _EUROSTAT_GRID_PARITY.items():
         catalog_remote_name = (
             f"rejilla_eurostat_cyl_{resolution}x{resolution}"
         )
         source_layer = f"grid_{resolution}km_surf"
+        profile = (
+            f"eurostat-gisco-grid-{resolution}km-cyl-local-styles-v1"
+        )
         sources.append(
             _ReviewedDatasetSource(
-                profile=(
-                    f"eurostat-gisco-grid-{resolution}km-cyl-exact-v1"
-                ),
+                profile=profile,
                 catalog_endpoint_url=_IDECYL_GRID_WMS,
                 catalog_remote_name=catalog_remote_name,
                 protocol="download",
@@ -322,10 +344,6 @@ def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
                     "data_format": "geopackage",
                     "media_type": "application/geopackage+sqlite3",
                     "source_retention": "discard_after_derivation",
-                    "style_endpoint_url": _IDECYL_GRID_WMS,
-                    "style_layer_name": catalog_remote_name,
-                    "style_bundle_sha256": style_bundle_sha256,
-                    "styles": deepcopy(_EUROSTAT_GRID_STYLES),
                     "vector_transform": {
                         "schema": "reference-masked-geopackage/v1",
                         "mask_url": _IGN_CASTILLA_Y_LEON_MASK_URL,
@@ -369,11 +387,9 @@ def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
                     "whole_source_features_preserved": True,
                     "expected_feature_count": feature_count,
                     "expected_identifier_sha256": identifier_sha256,
-                    "expected_style_bundle_sha256": (
-                        style_bundle_sha256
-                    ),
                     "expected_style_evidence": (
                         _eurostat_grid_style_evidence(
+                            profile,
                             catalog_remote_name
                         )
                     ),
@@ -732,6 +748,59 @@ _REVIEWED_LOCAL_STYLE_IDENTITIES = {
         ),
         "remote_style_name": "Biodiversidad_INES_ErosionLaminar",
     },
+}
+
+
+def _eurostat_grid_local_style_identities(
+    profile: str,
+    reviewed: _ReviewedDatasetSource,
+) -> tuple[dict[str, Any], ...]:
+    transform = reviewed.config["vector_transform"]
+    selected_layer_name = transform["output_layer"]
+    result: list[dict[str, Any]] = []
+    for item in _EUROSTAT_GRID_LOCAL_STYLES:
+        semantic = {
+            "schema": "siur-owned-eurostat-grid-style/v1",
+            "profile": profile,
+            "catalog_layer_name": reviewed.catalog_remote_name,
+            "selected_layer_name": selected_layer_name,
+            "catalog_style_source_key": item[
+                "catalog_style_source_key"
+            ],
+            "remote_style_name": item["remote_name"],
+            "is_default": item["is_default"],
+            "fill_opacity": 0,
+            "outline_color": item["outline_color"],
+            "outline_width": 1,
+            "max_scale_denominator": 4_000_000,
+        }
+        result.append(
+            {
+                "style_kind": "eurostat_grid",
+                "catalog_style_source_key": item[
+                    "catalog_style_source_key"
+                ],
+                "remote_style_name": item["remote_name"],
+                "selected_layer_name": selected_layer_name,
+                "outline_color": item["outline_color"],
+                "style_identity_sha256": hashlib.sha256(
+                    json.dumps(
+                        semantic,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    return tuple(result)
+
+
+_REVIEWED_LOCAL_STYLE_IDENTITY_SETS = {
+    profile: _eurostat_grid_local_style_identities(profile, reviewed)
+    for profile, reviewed in _REVIEWED_DATASET_SOURCES_BY_PROFILE.items()
+    if profile.startswith("eurostat-gisco-grid-")
 }
 
 _BULK_WMS_GUARDS = {
@@ -1306,19 +1375,75 @@ def _reviewed_dataset_source_config(
     reviewed: _ReviewedDatasetSource,
 ) -> dict[str, Any]:
     config = deepcopy(reviewed.config)
-    style_evidence = _reviewed_style_evidence(
-        catalog_endpoint,
-        layer,
-    )
     expected_style_evidence = reviewed.equivalence.get(
         "expected_style_evidence"
     )
-    if expected_style_evidence is not None:
-        if not isinstance(expected_style_evidence, dict):
+    if (
+        expected_style_evidence is not None
+        and not isinstance(expected_style_evidence, dict)
+    ):
+        raise SourceDiscoveryError(
+            "reviewed dataset style evidence is invalid",
+            code="reviewed_dataset_style_changed",
+        )
+    if (
+        isinstance(expected_style_evidence, dict)
+        and expected_style_evidence.get("schema")
+        == _EUROSTAT_GRID_STYLE_SET_SCHEMA
+    ):
+        catalog_styles = sorted(
+            (
+                {
+                    "catalog_style_source_key": style.source_key,
+                    "remote_name": style.remote_name,
+                    "is_default": style.is_default,
+                }
+                for style in layer.styles
+                if style.status in {"active", "degraded"}
+            ),
+            key=lambda item: item["catalog_style_source_key"],
+        )
+        expected_catalog_styles = [
+            {
+                "catalog_style_source_key": item[
+                    "catalog_style_source_key"
+                ],
+                "remote_name": item["remote_name"],
+                "is_default": item["is_default"],
+            }
+            for item in _EUROSTAT_GRID_LOCAL_STYLES
+        ]
+        expected_catalog_styles.sort(
+            key=lambda item: item["catalog_style_source_key"]
+        )
+        if (
+            catalog_endpoint != reviewed.catalog_endpoint_url
+            or layer.remote_name != reviewed.catalog_remote_name
+            or catalog_styles != expected_catalog_styles
+        ):
             raise SourceDiscoveryError(
-                "reviewed dataset style evidence is invalid",
+                "reviewed grid style identities no longer match the catalog",
                 code="reviewed_dataset_style_changed",
             )
+        style_evidence = _eurostat_grid_style_evidence(
+            reviewed.profile,
+            reviewed.catalog_remote_name,
+        )
+        if style_evidence != expected_style_evidence:
+            raise SourceDiscoveryError(
+                "reviewed grid style identity is invalid",
+                code="reviewed_dataset_style_changed",
+            )
+    else:
+        style_evidence = _reviewed_style_evidence(
+            catalog_endpoint,
+            layer,
+        )
+    if (
+        isinstance(expected_style_evidence, dict)
+        and expected_style_evidence.get("schema")
+        != _EUROSTAT_GRID_STYLE_SET_SCHEMA
+    ):
         observed_expected = deepcopy(expected_style_evidence)
         observed_expected["style_parity_status"] = style_evidence[
             "style_parity_status"
@@ -1329,20 +1454,37 @@ def _reviewed_dataset_source_config(
                 code="reviewed_dataset_style_changed",
             )
         style_evidence = deepcopy(expected_style_evidence)
-    config["reviewed_equivalence"] = {
+    config["reviewed_equivalence"] = _reviewed_dataset_equivalence(
+        reviewed,
+        style_evidence,
+        catalog_endpoint_url=catalog_endpoint,
+    )
+    return config
+
+
+def _reviewed_dataset_equivalence(
+    reviewed: _ReviewedDatasetSource,
+    style_evidence: dict[str, Any],
+    *,
+    catalog_endpoint_url: str,
+) -> dict[str, Any]:
+    details = deepcopy(reviewed.equivalence)
+    details.pop("expected_style_evidence", None)
+    equivalence = {
         "schema": _REVIEWED_DATASET_SOURCE_SCHEMA,
         "profile": reviewed.profile,
         "catalog_protocol": "wms",
-        "catalog_endpoint_url": catalog_endpoint,
-        "catalog_remote_name": layer.remote_name,
+        "catalog_remote_name": reviewed.catalog_remote_name,
         "selected_protocol": reviewed.protocol,
         "selected_endpoint_url": reviewed.endpoint_url,
         "selected_remote_name": reviewed.remote_name,
         "target_kind": reviewed.target_kind,
-        **deepcopy(reviewed.equivalence),
+        **details,
         "style_evidence": style_evidence,
     }
-    return config
+    if not reviewed.profile.startswith("eurostat-gisco-grid-"):
+        equivalence["catalog_endpoint_url"] = catalog_endpoint_url
+    return equivalence
 
 
 def reviewed_cross_origin_style_source(
@@ -1350,6 +1492,8 @@ def reviewed_cross_origin_style_source(
 ) -> bool:
     """Prove a cross-origin style request against the immutable allowlist."""
 
+    if "style_endpoint_url" not in candidate.config:
+        return False
     raw_equivalence = candidate.config.get("reviewed_equivalence")
     if not isinstance(raw_equivalence, dict):
         return False
@@ -1364,19 +1508,11 @@ def reviewed_cross_origin_style_source(
     )
     if not isinstance(expected_style_evidence, dict):
         return False
-    expected_equivalence = {
-        "schema": _REVIEWED_DATASET_SOURCE_SCHEMA,
-        "profile": reviewed.profile,
-        "catalog_protocol": "wms",
-        "catalog_endpoint_url": reviewed.catalog_endpoint_url,
-        "catalog_remote_name": reviewed.catalog_remote_name,
-        "selected_protocol": reviewed.protocol,
-        "selected_endpoint_url": reviewed.endpoint_url,
-        "selected_remote_name": reviewed.remote_name,
-        "target_kind": reviewed.target_kind,
-        **deepcopy(reviewed.equivalence),
-        "style_evidence": deepcopy(expected_style_evidence),
-    }
+    expected_equivalence = _reviewed_dataset_equivalence(
+        reviewed,
+        deepcopy(expected_style_evidence),
+        catalog_endpoint_url=reviewed.catalog_endpoint_url,
+    )
     expected_candidate = _candidate(
         protocol=reviewed.protocol,
         target_kind=reviewed.target_kind,
@@ -1551,39 +1687,36 @@ def candidate_definition(candidate: SourceCandidate) -> dict[str, Any]:
 
 def _reviewed_local_style_expected_equivalence(
     reviewed: _ReviewedDatasetSource,
-    identity: dict[str, Any],
+    identities: tuple[dict[str, Any], ...],
 ) -> dict[str, Any]:
-    expected_style_evidence = {
-        "style_parity_status": "local_style_adaptation_required",
-        "original_wms_endpoint_url": reviewed.catalog_endpoint_url,
-        "original_wms_layer_name": reviewed.catalog_remote_name,
-        "catalog_default_style_source_key": (
-            identity["catalog_style_source_key"]
-        ),
-        "original_wms_style_name": identity["remote_style_name"],
-        "catalog_styles": [
-            {
-                "catalog_style_source_key": (
-                    identity["catalog_style_source_key"]
-                ),
-                "remote_name": identity["remote_style_name"],
-                "is_default": True,
-            }
-        ],
-    }
-    return {
-        "schema": _REVIEWED_DATASET_SOURCE_SCHEMA,
-        "profile": reviewed.profile,
-        "catalog_protocol": "wms",
-        "catalog_endpoint_url": reviewed.catalog_endpoint_url,
-        "catalog_remote_name": reviewed.catalog_remote_name,
-        "selected_protocol": reviewed.protocol,
-        "selected_endpoint_url": reviewed.endpoint_url,
-        "selected_remote_name": reviewed.remote_name,
-        "target_kind": reviewed.target_kind,
-        **deepcopy(reviewed.equivalence),
-        "style_evidence": expected_style_evidence,
-    }
+    configured = reviewed.equivalence.get("expected_style_evidence")
+    if isinstance(configured, dict):
+        expected_style_evidence = deepcopy(configured)
+    else:
+        identity = identities[0]
+        expected_style_evidence = {
+            "style_parity_status": "local_style_adaptation_required",
+            "original_wms_endpoint_url": reviewed.catalog_endpoint_url,
+            "original_wms_layer_name": reviewed.catalog_remote_name,
+            "catalog_default_style_source_key": (
+                identity["catalog_style_source_key"]
+            ),
+            "original_wms_style_name": identity["remote_style_name"],
+            "catalog_styles": [
+                {
+                    "catalog_style_source_key": (
+                        identity["catalog_style_source_key"]
+                    ),
+                    "remote_name": identity["remote_style_name"],
+                    "is_default": True,
+                }
+            ],
+        }
+    return _reviewed_dataset_equivalence(
+        reviewed,
+        expected_style_evidence,
+        catalog_endpoint_url=reviewed.catalog_endpoint_url,
+    )
 
 
 def _reviewed_local_style_reference(
@@ -1611,6 +1744,19 @@ def _reviewed_local_style_reference(
             "official_mvt_style_adapted_to_sld_not_exact"
         )
         return style_reference
+    if identity["style_kind"] == "eurostat_grid":
+        return {
+            "source_kind": "siur-owned-deterministic-style",
+            "style_identity_sha256": identity[
+                "style_identity_sha256"
+            ],
+            "adaptation_status": "adaptation_required",
+            "parity_claim": "siur_local_adaptation_not_exact",
+            "fill_opacity": 0,
+            "outline_color": identity["outline_color"],
+            "outline_width": 1,
+            "max_scale_denominator": 4_000_000,
+        }
     return {
         "official_style_reference": deepcopy(
             reviewed.equivalence["official_style_reference"]
@@ -1621,18 +1767,46 @@ def _reviewed_local_style_reference(
     }
 
 
+def _reviewed_local_style_identities(
+    profile: str,
+) -> tuple[dict[str, Any], ...]:
+    identities = _REVIEWED_LOCAL_STYLE_IDENTITY_SETS.get(profile)
+    if identities is not None:
+        return identities
+    identity = _REVIEWED_LOCAL_STYLE_IDENTITIES.get(profile)
+    return (identity,) if identity is not None else ()
+
+
 def reviewed_local_style_profile_identity(
     profile: str,
+    catalog_style_source_key: str | None = None,
 ) -> tuple[str, str, str, str, str, str] | None:
     """Return the immutable style identity for an allowlisted recipe."""
 
-    identity = _REVIEWED_LOCAL_STYLE_IDENTITIES.get(profile)
+    identities = _reviewed_local_style_identities(profile)
     reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
-    if identity is None or reviewed is None:
+    if reviewed is None or not identities:
         return None
+    if catalog_style_source_key is None:
+        if len(identities) != 1:
+            return None
+        identity = identities[0]
+    else:
+        matching = [
+            item
+            for item in identities
+            if item["catalog_style_source_key"]
+            == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        identity = matching[0]
     equivalence_sha256 = hashlib.sha256(
         json.dumps(
-            _reviewed_local_style_expected_equivalence(reviewed, identity),
+            _reviewed_local_style_expected_equivalence(
+                reviewed,
+                identities,
+            ),
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
@@ -1644,27 +1818,42 @@ def reviewed_local_style_profile_identity(
         identity["catalog_style_source_key"],
         identity["remote_style_name"],
         reviewed.catalog_remote_name,
-        reviewed.remote_name,
+        identity.get("selected_layer_name", reviewed.remote_name),
         equivalence_sha256,
     )
 
 
 def reviewed_local_style_profile_reference(
     profile: str,
+    catalog_style_source_key: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the exact official reference accepted for persisted evidence."""
 
-    identity = _REVIEWED_LOCAL_STYLE_IDENTITIES.get(profile)
+    identities = _reviewed_local_style_identities(profile)
     reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
-    if identity is None or reviewed is None:
+    if reviewed is None or not identities:
         return None
+    if catalog_style_source_key is None:
+        if len(identities) != 1:
+            return None
+        identity = identities[0]
+    else:
+        matching = [
+            item
+            for item in identities
+            if item["catalog_style_source_key"]
+            == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        identity = matching[0]
     return _reviewed_local_style_reference(reviewed, identity)
 
 
-def reviewed_local_style_recipe(
+def reviewed_local_style_recipes(
     candidate: SourceCandidate,
-) -> ReviewedLocalStyleRecipe | None:
-    """Validate and expose a local recipe only for an exact reviewed source.
+) -> tuple[ReviewedLocalStyleRecipe, ...]:
+    """Validate and expose local recipes only for an exact reviewed source.
 
     The persisted candidate is untrusted input at this boundary.  A matching
     schema or profile string is insufficient: protocol, endpoints, collection,
@@ -1674,12 +1863,12 @@ def reviewed_local_style_recipe(
 
     raw_equivalence = candidate.config.get("reviewed_equivalence")
     if raw_equivalence is None:
-        return None
+        return ()
     if (
         not isinstance(raw_equivalence, dict)
         or raw_equivalence.get("schema") != _REVIEWED_DATASET_SOURCE_SCHEMA
     ):
-        return None
+        return ()
     profile = raw_equivalence.get("profile")
     if not isinstance(profile, str):
         raise SourceDiscoveryError(
@@ -1687,15 +1876,15 @@ def reviewed_local_style_recipe(
             code="reviewed_local_style_invalid",
         )
     reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
-    identity = _REVIEWED_LOCAL_STYLE_IDENTITIES.get(profile)
-    if reviewed is None or identity is None:
+    identities = _reviewed_local_style_identities(profile)
+    if reviewed is None or not identities:
         raise SourceDiscoveryError(
             "reviewed local style profile is not allowlisted",
             code="reviewed_local_style_invalid",
         )
     expected_equivalence = _reviewed_local_style_expected_equivalence(
         reviewed,
-        identity,
+        identities,
     )
     expected_config = {
         **deepcopy(reviewed.config),
@@ -1727,7 +1916,6 @@ def reviewed_local_style_recipe(
             code="reviewed_local_style_invalid",
         )
 
-    style_reference = _reviewed_local_style_reference(reviewed, identity)
     equivalence_sha256 = hashlib.sha256(
         json.dumps(
             expected_equivalence,
@@ -1737,18 +1925,45 @@ def reviewed_local_style_recipe(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    return ReviewedLocalStyleRecipe(
-        schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
-        profile=profile,
-        style_kind=identity["style_kind"],
-        catalog_style_source_key=identity["catalog_style_source_key"],
-        remote_style_name=identity["remote_style_name"],
-        catalog_layer_name=reviewed.catalog_remote_name,
-        selected_layer_name=reviewed.remote_name,
-        reviewed_equivalence=deepcopy(expected_equivalence),
-        reviewed_equivalence_sha256=equivalence_sha256,
-        style_reference=style_reference,
+    return tuple(
+        ReviewedLocalStyleRecipe(
+            schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
+            profile=profile,
+            style_kind=identity["style_kind"],
+            catalog_style_source_key=identity[
+                "catalog_style_source_key"
+            ],
+            remote_style_name=identity["remote_style_name"],
+            catalog_layer_name=reviewed.catalog_remote_name,
+            selected_layer_name=identity.get(
+                "selected_layer_name",
+                reviewed.remote_name,
+            ),
+            reviewed_equivalence=deepcopy(expected_equivalence),
+            reviewed_equivalence_sha256=equivalence_sha256,
+            style_reference=_reviewed_local_style_reference(
+                reviewed,
+                identity,
+            ),
+        )
+        for identity in identities
     )
+
+
+def reviewed_local_style_recipe(
+    candidate: SourceCandidate,
+) -> ReviewedLocalStyleRecipe | None:
+    """Compatibility wrapper for the existing one-style reviewed profiles."""
+
+    recipes = reviewed_local_style_recipes(candidate)
+    if not recipes:
+        return None
+    if len(recipes) != 1:
+        raise SourceDiscoveryError(
+            "reviewed local style profile defines multiple styles",
+            code="reviewed_local_style_ambiguous",
+        )
+    return recipes[0]
 
 
 def _tile_config(
