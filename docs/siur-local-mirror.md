@@ -3,9 +3,11 @@
 ## Objetivo y criterio de completitud
 
 La integración se considera completa cuando cada capa hoja del catálogo SIUR
-vigente tiene una estrategia de adquisición explícita, una copia persistente en
-nuestros servidores y una entrega que no necesita contactar con el proveedor
-durante una petición del visor.
+vigente tiene una estrategia de adquisición explícita, un producto local
+persistente y versionado en nuestros servidores y una entrega que no necesita
+contactar con el proveedor durante una petición del visor. El producto
+persistente puede ser el original o una derivación revisada y reproducible
+cuando conservar el bruto no sea necesario ni esté autorizado.
 
 El catálogo se comprueba al menos una vez al día. Una comprobación sin cambios
 no vuelve a descargar ni publicar el dataset. Una actualización se descarga a
@@ -17,7 +19,8 @@ No se acepta como estado final ninguna capa que caiga silenciosamente al proxy
 WMS remoto. La matriz de cobertura debe clasificar las 227 capas actuales y
 cualquier alta futura en una de estas estrategias:
 
-1. `vector`: original local e importación a una tabla PostGIS versionada.
+1. `vector`: original local o derivado revisado e importación a una tabla
+   PostGIS versionada.
 2. `raster`: original local y GeoTIFF local optimizado con pirámides.
 3. `tiles`: pirámide finita local cuando no existe un dataset descargable.
 4. `composition`: composición local de datasets o capas ya versionados.
@@ -32,12 +35,21 @@ versión local ha sido validada y promocionada.
 
 Se conservan localmente:
 
-- los bytes originales obtenidos del proveedor, con hash y procedencia;
+- los bytes originales obtenidos del proveedor, con hash y procedencia, salvo
+  una transformación revisada que exija descartarlos tras la derivación;
 - la salida normalizada que consume el renderizador;
 - estilos SLD, símbolos, metadatos y manifiestos;
 - la versión activa y al menos una versión anterior recuperable;
 - una pirámide de teselas cuando las imágenes son el único producto disponible;
 - la caché persistente generada bajo demanda por GeoWebCache.
+
+Una excepción de este tipo debe estar declarada por la fuente y por su revisión
+de autorización. Se conserva como evidencia la URL exacta, hash, tamaño,
+validadores HTTP, campos seleccionados, máscara, algoritmo y hash del resultado.
+El bruto solo puede existir en almacenamiento transitorio privado y debe
+eliminarse al cerrar la derivación. Las cuadrículas Eurostat usan esta excepción
+para conservar únicamente geometría e identificadores de las celdas de Castilla
+y León, sin retener los atributos de población del GeoPackage de entrada.
 
 No se generan por adelantado todas las combinaciones de capa, estilo, zoom y
 tesela cuando existe el dataset vectorial o ráster. GeoServer las renderiza
@@ -107,11 +119,13 @@ mantienen correctamente esos metadatos.
 
 ## Almacenamiento y ciclo de vida
 
-Los originales y derivados de fichero usan claves content-addressed basadas en
-SHA-256. Una descarga se escribe primero en una ruta temporal privada, con
-límites de tiempo y tamaño; después se verifica el hash y se mueve atómicamente
-a su clave definitiva. PostgreSQL solo guarda el inventario y las relaciones,
-no los cuerpos cartográficos grandes.
+Los originales retenidos y los derivados de fichero usan claves
+content-addressed basadas en SHA-256. Una descarga se escribe primero en una
+ruta temporal privada, con límites de tiempo y tamaño; después se verifica el
+hash y, según la política revisada de la fuente, se mueve atómicamente a su clave
+definitiva o se transforma y descarta tras registrar su observación exacta.
+PostgreSQL solo guarda el inventario y las relaciones, no los cuerpos
+cartográficos grandes.
 
 Las tablas vectoriales y nombres de capa internos incorporan el identificador
 de versión. Nunca se trunca ni sobrescribe la tabla activa. Los GeoTIFF y
@@ -121,7 +135,7 @@ recuperable.
 
 La caché Redis continúa siendo efímera y pequeña. GeoWebCache tiene su propio
 volumen y cuota persistentes. Perder cualquiera de esas cachés puede degradar el
-rendimiento, pero no la disponibilidad ni los datos originales.
+rendimiento, pero no la disponibilidad ni los datos locales publicados.
 
 ## Validación antes de promoción
 
