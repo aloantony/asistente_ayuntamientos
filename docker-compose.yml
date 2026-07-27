@@ -25,6 +25,7 @@ services:
       GEOSERVER_ADMIN_USER: ""
       GEOSERVER_ADMIN_PASSWORD: ""
       LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
       # Local reference delivery is the production default. Remote WMS
       # fallback requires an explicit operator opt-in.
       REFERENCE_REMOTE_PROXY_ENABLED: ${REFERENCE_REMOTE_PROXY_ENABLED:-false}
@@ -55,6 +56,7 @@ services:
       GEOSERVER_ADMIN_USER: ""
       GEOSERVER_ADMIN_PASSWORD: ""
       LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
     network_mode: host
     command:
       ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
@@ -75,8 +77,13 @@ services:
       context: ./backend
     env_file:
       - .env
+    environment:
+      # Publication still traverses the fail-closed gateway; only the private
+      # one-shot bootstrap may address Tomcat on port 8080.
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
     user: "0:${REFERENCE_STORAGE_GID:-2000}"
     network_mode: host
+    restart: unless-stopped
     command:
       ["python", "-m", "app.reference_layers.mirror_runtime", "worker"]
     volumes:
@@ -101,7 +108,9 @@ services:
       GEOSERVER_ADMIN_USER: ""
       GEOSERVER_ADMIN_PASSWORD: ""
       LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
     network_mode: host
+    restart: unless-stopped
     command:
       ["python", "-m", "app.reference_layers.mirror_runtime", "scheduler"]
     volumes:
@@ -321,6 +330,9 @@ services:
     depends_on:
       geoserver-network:
         condition: service_started
+        restart: true
+      gwc-bootstrap:
+        condition: service_completed_successfully
         restart: true
 
   gwc-ops:

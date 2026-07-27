@@ -8,7 +8,9 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
       - "127.0.0.1:8000:8000"
-      - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
+      # Only the fail-closed gateway is published. Tomcat remains private on
+      # loopback port 8080 inside this shared namespace.
+      - "127.0.0.1:${GEOSERVER_PORT:-8081}:8081"
       - "127.0.0.1:5432:5432"
       - "127.0.0.1:6379:6379"
     networks:
@@ -27,9 +29,16 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
       REDIS_URL: redis://127.0.0.1:6379/0
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
       REFERENCE_REMOTE_PROXY_ENABLED: "false"
-    depends_on:
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      gwc-gateway:
+        condition: service_healthy
+        restart: true
       siur-offline-netns:
         condition: service_started
 
@@ -37,8 +46,16 @@ services:
     network_mode: "service:siur-offline-netns"
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
       REDIS_URL: redis://127.0.0.1:6379/0
-    depends_on:
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      gwc-gateway:
+        condition: service_healthy
+        restart: true
       siur-offline-netns:
         condition: service_started
 
@@ -46,8 +63,13 @@ services:
     network_mode: "service:siur-offline-netns"
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
-    depends_on:
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      gwc-gateway:
+        condition: service_healthy
+        restart: true
       siur-offline-netns:
         condition: service_started
 
@@ -55,7 +77,13 @@ services:
     network_mode: "service:siur-offline-netns"
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
-    depends_on:
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      gwc-gateway:
+        condition: service_healthy
+        restart: true
       siur-offline-netns:
         condition: service_started
 
@@ -64,28 +92,74 @@ services:
     environment:
       API_PROXY_TARGET: http://127.0.0.1:8000
       HOSTNAME: 0.0.0.0
-    depends_on:
+    depends_on: !override
+      backend:
+        condition: service_started
+        restart: true
       siur-offline-netns:
         condition: service_started
 
   postgres:
     network_mode: "service:siur-offline-netns"
     ports: !reset []
-    depends_on:
+    depends_on: !override
       siur-offline-netns:
         condition: service_started
 
   geoserver:
     network_mode: "service:siur-offline-netns"
     ports: !reset []
-    depends_on:
+    depends_on: !override
+      gwc-config-init:
+        condition: service_completed_successfully
+        restart: true
+      postgres:
+        condition: service_healthy
       siur-offline-netns:
         condition: service_started
 
   redis:
     network_mode: "service:siur-offline-netns"
     ports: !reset []
-    depends_on:
+    depends_on: !override
+      siur-offline-netns:
+        condition: service_started
+
+  # Disable the online namespace owner in this topology. Leaving it active
+  # would retain a default bridge (and a second host port) with Internet
+  # egress even though no offline service should use it.
+  geoserver-network:
+    profiles: ["siur-online-topology-disabled"]
+    network_mode: none
+    ports: !reset []
+
+  # Bootstrap is the sole private administrative path to Tomcat. It must share
+  # GeoServer's offline namespace and complete before the gateway can start.
+  gwc-bootstrap:
+    network_mode: "service:siur-offline-netns"
+    depends_on: !override
+      geoserver:
+        condition: service_started
+        restart: true
+      siur-offline-netns:
+        condition: service_started
+
+  gwc-gateway:
+    network_mode: "service:siur-offline-netns"
+    depends_on: !override
+      gwc-bootstrap:
+        condition: service_completed_successfully
+        restart: true
+      siur-offline-netns:
+        condition: service_started
+
+  # Keep the optional quota inspection command usable under the same network
+  # cut when the operations profile is explicitly selected.
+  gwc-ops:
+    network_mode: "service:siur-offline-netns"
+    depends_on: !override
+      geoserver:
+        condition: service_started
       siur-offline-netns:
         condition: service_started
 

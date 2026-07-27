@@ -209,7 +209,12 @@ en `127.0.0.1`, de modo que el navegador y el operador conservan acceso local,
 pero backend, GeoServer, workers, PostgreSQL y Redis no tienen salida a
 Internet. Los nombres históricos `postgres`, `redis` y `geoserver` resuelven al
 mismo espacio de red para que la configuración persistida de GeoServer siga
-siendo válida.
+siendo válida. GeoServer, el bootstrap, el gateway y los consumidores comparten
+ese namespace, pero el único puerto cartográfico publicado y configurado en
+backend/workers es `8081`, el del gateway. El Tomcat de GeoServer permanece en
+`127.0.0.1:8080` dentro del namespace y solo lo usan el bootstrap y el propio
+gateway. El arranque exige, en este orden, inicialización de configuración,
+GeoServer, bootstrap satisfactorio, gateway sano y consumidores.
 
 La topología se activa únicamente después de terminar y comprobar todas las
 sincronizaciones:
@@ -224,8 +229,9 @@ docker compose \
 El cambio recrea Redis sin datos persistentes y por tanto cubre también el
 reinicio con caché vacía. Antes de aceptar el resultado se debe demostrar desde
 el contenedor backend que una conexión TCP pública falla y que PostgreSQL,
-Redis y GeoServer siguen accesibles por loopback; después se recorren mapa,
-estilos, leyenda e identify en el navegador.
+Redis y GeoServer siguen accesibles por loopback a través del gateway; después
+se recorren mapa, estilos, leyenda e identify en el navegador. Una respuesta
+directa en `127.0.0.1:8080` no constituye evidencia válida de entrega.
 
 Para recuperar la operación periódica normal se recrea el proyecto solo con el
 archivo principal (sin borrar volúmenes):
