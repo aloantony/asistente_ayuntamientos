@@ -30,6 +30,7 @@ from app.reference_layers.models import (
     OrganizationReferenceLayerSetting,
     ReferenceCatalogSnapshot,
     ReferenceLayer,
+    ReferenceLayerSource,
     ReferenceLayerStyle,
     ReferenceService,
 )
@@ -45,6 +46,11 @@ from app.reference_layers.mirror_authorization import (
     effective_service_attributions,
 )
 from app.reference_layers.mirror_status import catalog_mirror_statuses
+from app.reference_layers.reviewed_ortho_evidence import (
+    ReviewedOrthoEvidenceError,
+    reviewed_ign_ortho_catalog_projection,
+    reviewed_ign_ortho_source_projection,
+)
 from app.reference_layers.schemas import (
     ReferenceCatalogRead,
     ReferenceCatalogSnapshotRead,
@@ -129,6 +135,68 @@ def get_reference_catalog(
             )
         )
     )
+    services_by_id = {service.id: service for service in services}
+    substitutions: dict[int, dict[str, object]] = {}
+    for layer in layers:
+        service = services_by_id.get(layer.service_id or -1)
+        if service is None or layer.remote_name is None:
+            continue
+        try:
+            projection = reviewed_ign_ortho_catalog_projection(
+                service.base_url,
+                layer.remote_name,
+            )
+        except ReviewedOrthoEvidenceError:
+            projection = {
+                "equivalence_status": "invalid",
+                "public_notice": (
+                    "La evidencia versionada de la sustitución no supera "
+                    "su comprobación de integridad."
+                ),
+                "selected_layer": None,
+                "profile": None,
+            }
+        if projection is not None:
+            substitutions[layer.id] = projection
+
+    primary_sources = list(
+        db.scalars(
+            select(ReferenceLayerSource).where(
+                ReferenceLayerSource.provider_key == snapshot.provider_key,
+                ReferenceLayerSource.layer_id.in_(
+                    [layer.id for layer in layers]
+                ),
+                ReferenceLayerSource.enabled.is_(True),
+                ReferenceLayerSource.is_primary.is_(True),
+            )
+        )
+    )
+    for source in primary_sources:
+        try:
+            projection = reviewed_ign_ortho_source_projection(
+                {
+                    "protocol": source.protocol,
+                    "target_kind": source.target_kind,
+                    "endpoint_url": source.endpoint_url,
+                    "remote_name": source.remote_name,
+                    "sync_strategy": source.sync_strategy,
+                    "priority": source.priority,
+                    "config": source.config_json,
+                }
+            )
+        except ReviewedOrthoEvidenceError:
+            substitutions[source.layer_id] = {
+                "equivalence_status": "invalid",
+                "public_notice": (
+                    "La evidencia versionada de la sustitución no coincide "
+                    "con la fuente primaria y debe revisarse."
+                ),
+                "selected_layer": None,
+                "profile": None,
+            }
+        else:
+            if projection is not None:
+                substitutions[source.layer_id] = projection
     settings: dict[int, OrganizationReferenceLayerSetting] = {}
     if organization_id is not None:
         settings = {
@@ -213,6 +281,7 @@ def get_reference_catalog(
                 effective_opacity = Decimal(setting.opacity)
         availability = delivery_availability[layer.id]
         mirror_status = mirror_statuses[layer.id]
+        substitution = substitutions.get(layer.id)
         layer_reads.append(
             ReferenceLayerRead.model_validate(layer).model_copy(
                 update={
@@ -233,6 +302,26 @@ def get_reference_catalog(
                     ),
                     "metadata_available": (
                         local_metadata_availability[layer.id]
+                    ),
+                    "source_substitution_status": (
+                        substitution.get("equivalence_status")
+                        if substitution is not None
+                        else None
+                    ),
+                    "source_substitution_notice": (
+                        substitution.get("public_notice")
+                        if substitution is not None
+                        else None
+                    ),
+                    "source_substitution_selected_layer": (
+                        substitution.get("selected_layer")
+                        if substitution is not None
+                        else None
+                    ),
+                    "source_substitution_profile": (
+                        substitution.get("profile")
+                        if substitution is not None
+                        else None
                     ),
                     "mirror_status": mirror_status.status,
                     "active_version_id": mirror_status.active_version_id,

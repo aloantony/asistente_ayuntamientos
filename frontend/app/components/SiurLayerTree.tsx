@@ -67,6 +67,8 @@ const BLOCKER_LABELS: Record<string, string> = {
   not_deliverable: "Este tipo de entrega aún no tiene renderizador.",
   remote_proxy_disabled:
     "No hay copia local activa y el proxy remoto está desactivado.",
+  reviewed_ortho_substitution_blocked:
+    "La capa IGN revisada no demuestra equivalencia territorial y temporal suficiente.",
   service_mismatch: "El servicio no coincide con la evidencia verificada.",
   source_candidate_missing:
     "No se ha encontrado una fuente segura para replicar esta capa.",
@@ -114,6 +116,21 @@ function blockerLabel(blocker: string | null) {
   return BLOCKER_LABELS[blocker] ?? `Entrega no disponible (${blocker}).`;
 }
 
+function sourceSubstitutionLabel(layer: ReferenceLayer) {
+  switch (layer.source_substitution_status) {
+    case "exact":
+      return "Fuente oficial IGN elegible del mismo producto y año";
+    case "substitute_degraded":
+      return "Entrega local sustitutiva degradada";
+    case "blocked":
+      return "Sustitución IGN bloqueada";
+    case "invalid":
+      return "Evidencia de sustitución no válida";
+    case null:
+      return null;
+  }
+}
+
 function collectLeafLayers(node: ReferenceLayerTreeNode): ReferenceLayer[] {
   if (node.layer.node_type === "layer") {
     return [node.layer];
@@ -158,6 +175,7 @@ export function SiurLayerTree({
         const blocker = catalog ? referenceLayerBlocker(catalog, layer) : null;
         const blockerText = blockerLabel(blocker);
         const mirrorText = mirrorStatusLabel(layer);
+        const substitutionLabel = sourceSubstitutionLabel(layer);
         const stackIndex = preferences?.stackOrder.indexOf(layer.id) ?? -1;
         const selectedStyle = styles.find(
           (style) => style.id === control?.styleId,
@@ -229,6 +247,23 @@ export function SiurLayerTree({
             {mirrorText ? (
               <p className="siur-layer-mirror-status" role="status">
                 {mirrorText}
+              </p>
+            ) : null}
+            {substitutionLabel && layer.source_substitution_notice ? (
+              <p
+                className={
+                  "siur-layer-substitution " +
+                  `siur-layer-substitution-${layer.source_substitution_status}`
+                }
+                role="status"
+              >
+                <strong>{substitutionLabel}</strong>
+                <span>{layer.source_substitution_notice}</span>
+                {layer.source_substitution_selected_layer ? (
+                  <small>
+                    Capa IGN: <code>{layer.source_substitution_selected_layer}</code>
+                  </small>
+                ) : null}
               </p>
             ) : null}
             {blockerText ? (

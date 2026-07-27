@@ -80,6 +80,11 @@ from app.reference_layers.models import (
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
 )
+from app.reference_layers.reviewed_ortho_evidence import (
+    PUBLIC_SUBSTITUTION_SCHEMA,
+    ReviewedOrthoEvidenceError,
+    require_reviewed_ign_ortho_acquisition_allowed,
+)
 from app.reference_layers.wms_delivery import LayerDeliveryAvailability
 
 MAX_LOCAL_METADATA_BYTES = 4 * 1024 * 1024
@@ -873,13 +878,6 @@ def _assemble_document(
         raise LocalMetadataError(
             "sync-run source definition is unavailable"
         )
-    run_config = run_definition.get("config")
-    frozen_source_format = (
-        run_config.get("format")
-        if isinstance(run_config, dict)
-        and isinstance(run_config.get("format"), str)
-        else None
-    )
     prepared_validation_sha256 = canonical_json_sha256(
         prepared.validation_json
     )
@@ -995,39 +993,16 @@ def _assemble_document(
         raise LocalMetadataError(
             "prepared delivery has no canonical data schema"
         )
+    source_document = _source_metadata_projection(
+        source=source,
+        run_definition=run_definition,
+        source_definition_sha256=run.source_definition_sha256,
+    )
     document = {
         "schema_version": LOCAL_METADATA_DOCUMENT_SCHEMA,
         "binding": binding,
         "catalog": catalog,
-        "source": {
-            "id": source.id,
-            "source_key": _required_text(
-                source.source_key,
-                "source key",
-                255,
-            ),
-            "protocol": _required_text(
-                run_definition.get("protocol"),
-                "source protocol",
-                30,
-            ),
-            "target_kind": _required_text(
-                run_definition.get("target_kind"),
-                "source target kind",
-                16,
-            ),
-            "source_format": _optional_text(
-                frozen_source_format,
-                "source format",
-                255,
-            ),
-            "sync_strategy": _required_text(
-                run_definition.get("sync_strategy"),
-                "source sync strategy",
-                30,
-            ),
-            "definition_sha256": run.source_definition_sha256,
-        },
+        "source": source_document,
         "styles": {
             "plan_id": plan.id,
             "plan_evidence_sha256": plan.evidence_sha256,
@@ -1071,6 +1046,61 @@ def _assemble_document(
     }
     _validate_document_shape(document)
     return document
+
+
+def _source_metadata_projection(
+    *,
+    source: ReferenceLayerSource,
+    run_definition: dict[str, Any],
+    source_definition_sha256: str,
+) -> dict[str, Any]:
+    run_config = run_definition.get("config")
+    frozen_source_format = (
+        run_config.get("format")
+        if isinstance(run_config, dict)
+        and isinstance(run_config.get("format"), str)
+        else None
+    )
+    try:
+        ortho_substitution = require_reviewed_ign_ortho_acquisition_allowed(
+            run_definition
+        )
+    except ReviewedOrthoEvidenceError as error:
+        raise LocalMetadataError(
+            "reviewed ortho substitution metadata is invalid"
+        ) from error
+    result = {
+        "id": source.id,
+        "source_key": _required_text(
+            source.source_key,
+            "source key",
+            255,
+        ),
+        "protocol": _required_text(
+            run_definition.get("protocol"),
+            "source protocol",
+            30,
+        ),
+        "target_kind": _required_text(
+            run_definition.get("target_kind"),
+            "source target kind",
+            16,
+        ),
+        "source_format": _optional_text(
+            frozen_source_format,
+            "source format",
+            255,
+        ),
+        "sync_strategy": _required_text(
+            run_definition.get("sync_strategy"),
+            "source sync strategy",
+            30,
+        ),
+        "definition_sha256": source_definition_sha256,
+    }
+    if ortho_substitution is not None:
+        result["ortho_substitution"] = ortho_substitution
+    return result
 
 
 def _safe_catalog_projection(
@@ -1949,19 +1979,139 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
         },
         "catalog.layer",
     )
-    _exact_keys(
-        document.get("source"),
-        {
-            "id",
-            "source_key",
-            "protocol",
-            "target_kind",
-            "source_format",
-            "sync_strategy",
-            "definition_sha256",
-        },
-        "source",
-    )
+    source_value = document.get("source")
+    source_keys = {
+        "id",
+        "source_key",
+        "protocol",
+        "target_kind",
+        "source_format",
+        "sync_strategy",
+        "definition_sha256",
+    }
+    if isinstance(source_value, dict) and "ortho_substitution" in source_value:
+        source_keys.add("ortho_substitution")
+    source = _exact_keys(source_value, source_keys, "source")
+    substitution = source.get("ortho_substitution")
+    if substitution is not None:
+        value = _exact_keys(
+            substitution,
+            {
+                "schema",
+                "profile",
+                "evidence_profile_sha256",
+                "capabilities_sha256",
+                "catalog_capabilities_sha256",
+                "catalog_layer",
+                "catalog_title",
+                "catalog_abstract_sha256",
+                "selected_layer",
+                "selected_title",
+                "metadata_record_id",
+                "equivalence_status",
+                "comparison_basis",
+                "declared_coverage",
+                "catalog_declared_resolutions_metres",
+                "declared_resolutions_metres",
+                "promotion_eligible",
+                "public_notice",
+                "parity_requirements",
+            },
+            "source.ortho_substitution",
+        )
+        if value.get("schema") != PUBLIC_SUBSTITUTION_SCHEMA:
+            raise LocalMetadataError(
+                "local metadata ortho substitution schema is invalid"
+            )
+        for key in (
+            "evidence_profile_sha256",
+            "capabilities_sha256",
+            "catalog_capabilities_sha256",
+            "catalog_abstract_sha256",
+        ):
+            digest = value.get(key)
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise LocalMetadataError(
+                    "local metadata ortho substitution digest is invalid"
+                )
+        if value.get("equivalence_status") not in {
+            "exact",
+            "substitute_degraded",
+            "blocked",
+        }:
+            raise LocalMetadataError(
+                "local metadata ortho equivalence status is invalid"
+            )
+        if value.get("declared_coverage") not in {
+            "full",
+            "partial",
+            "none",
+            "unknown",
+        }:
+            raise LocalMetadataError(
+                "local metadata ortho declared coverage is invalid"
+            )
+        for key in (
+            "catalog_declared_resolutions_metres",
+            "declared_resolutions_metres",
+        ):
+            resolutions = value.get(key)
+            if (
+                not isinstance(resolutions, list)
+                or len(resolutions) > 16
+                or any(
+                    isinstance(item, bool)
+                    or not isinstance(item, (int, float))
+                    or not 0 < float(item) <= 100
+                    for item in resolutions
+                )
+                or resolutions != sorted(set(resolutions))
+            ):
+                raise LocalMetadataError(
+                    "local metadata ortho declared resolutions are invalid"
+                )
+        if value.get("promotion_eligible") is not True:
+            raise LocalMetadataError(
+                "local metadata ortho source is not promotion eligible"
+            )
+        for key, maximum in (
+            ("profile", 200),
+            ("catalog_layer", 100),
+            ("catalog_title", 500),
+            ("selected_layer", 100),
+            ("selected_title", 500),
+            ("metadata_record_id", 255),
+            ("public_notice", 2_000),
+        ):
+            _required_text(
+                value.get(key),
+                f"source.ortho_substitution.{key}",
+                maximum,
+            )
+        expected_basis = {
+            "exact": "catalog_and_selected_capabilities_match",
+            "substitute_degraded": (
+                "catalog_and_selected_capabilities_require_degraded_delivery"
+            ),
+            "blocked": "selected_source_has_no_declared_regional_coverage",
+        }[value["equivalence_status"]]
+        if value.get("comparison_basis") != expected_basis:
+            raise LocalMetadataError(
+                "local metadata ortho comparison basis is invalid"
+            )
+        requirements = _safe_string_list(
+            value.get("parity_requirements"),
+            "source.ortho_substitution.parity_requirements",
+            maximum=16,
+        )
+        if not requirements or len(set(requirements)) != len(requirements):
+            raise LocalMetadataError(
+                "local metadata ortho parity requirements are invalid"
+            )
     styles = _exact_keys(
         document.get("styles"),
         {"plan_id", "plan_evidence_sha256", "items"},

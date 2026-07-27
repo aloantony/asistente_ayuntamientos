@@ -1524,6 +1524,7 @@ button:disabled {
 .siur-layer-blocker,
 .siur-layer-error,
 .siur-layer-mirror-status,
+.siur-layer-substitution,
 .siur-layer-warning,
 .siur-layer-note {
   border-radius: 8px;
@@ -1535,6 +1536,31 @@ button:disabled {
 .siur-layer-mirror-status {
   color: var(--text-secondary) !important;
   background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.siur-layer-substitution {
+  display: grid;
+  gap: 4px;
+  color: var(--text-secondary) !important;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.siur-layer-substitution-substitute_degraded {
+  background: color-mix(in srgb, #d9a520 14%, var(--surface));
+}
+
+.siur-layer-substitution-blocked {
+  border-color: color-mix(in srgb, var(--danger) 48%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.siur-layer-substitution-invalid {
+  color: var(--danger, #9f2d20) !important;
+  background: color-mix(in srgb, #c0603a 10%, var(--surface));
+}
+
+.siur-layer-substitution small {
+  color: var(--text-muted);
 }
 
 .siur-layer-blocker,

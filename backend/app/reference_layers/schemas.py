@@ -60,6 +60,10 @@ class ReferenceLayerRead(BaseModel):
     available_style_ids: list[int] = Field(default_factory=list)
     legend_available: bool = False
     metadata_available: bool = False
+    source_substitution_status: str | None = None
+    source_substitution_notice: str | None = None
+    source_substitution_selected_layer: str | None = None
+    source_substitution_profile: str | None = None
     mirror_status: str = "legacy"
     active_version_id: int | None = None
     active_generation: int | None = None

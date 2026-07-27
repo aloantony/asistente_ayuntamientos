@@ -20,6 +20,10 @@ from app.reference_layers.models import (
     ReferenceLayerSource,
     ReferenceService,
 )
+from app.reference_layers.reviewed_ortho_evidence import (
+    reviewed_ign_ortho_catalog_projection,
+    reviewed_ign_ortho_public_projection,
+)
 from app.reference_layers.source_audit import (
     _layer_definition,
     _service_definition,
@@ -358,9 +362,11 @@ def _derive_assignment(
             {},
         )
     try:
+        service_definition = _service_definition(service)
+        layer_definition = _layer_definition(layer)
         candidates = acquisition_candidates(
-            _service_definition(service),
-            _layer_definition(layer),
+            service_definition,
+            layer_definition,
         )
     except SourceDiscoveryError as error:
         code = getattr(error, "code", "source_discovery_error")
@@ -379,6 +385,21 @@ def _derive_assignment(
             },
         )
     if not candidates:
+        substitution = reviewed_ign_ortho_catalog_projection(
+            service_definition.base_url,
+            layer_definition.remote_name or "",
+        )
+        if (
+            substitution is not None
+            and substitution["promotion_eligible"] is False
+        ):
+            return _blocked(
+                layer,
+                "reviewed_ortho_substitution_blocked",
+                "reviewed IGN ortho mapping is partial or semantically "
+                "different and cannot become a local source",
+                {"ortho_substitution": substitution},
+            )
         return _blocked(
             layer,
             "source_candidate_missing",
@@ -394,20 +415,38 @@ def _derive_assignment(
             f"source target kind is unsupported: {selected.target_kind}",
             {"source_key": selected.source_key, "target_kind": selected.target_kind},
         )
+    substitution = reviewed_ign_ortho_public_projection(selected.config)
+    reason_code = "candidate_selected"
+    reason = "highest-priority safe local acquisition candidate selected"
+    evidence = {
+        "source_key": selected.source_key,
+        "protocol": selected.protocol,
+        "target_kind": selected.target_kind,
+        "priority": selected.priority,
+    }
+    if substitution is not None:
+        evidence["ortho_substitution"] = substitution
+        if substitution["equivalence_status"] == "substitute_degraded":
+            reason_code = "candidate_substitute_degraded"
+            reason = (
+                "reviewed official ortho substitute selected as an "
+                "explicitly degraded local delivery"
+            )
+        else:
+            reason_code = "candidate_exact_official_substitution"
+            reason = (
+                "reviewed official PNOA substitution selected after both "
+                "capabilities declarations matched"
+            )
     return StrategyAssignment(
         layer_id=layer.id,
         layer_source_key=layer.source_key,
         strategy=strategy,
         source_key=selected.source_key,
         dependency_source_keys=(),
-        reason_code="candidate_selected",
-        reason="highest-priority safe local acquisition candidate selected",
-        evidence={
-            "source_key": selected.source_key,
-            "protocol": selected.protocol,
-            "target_kind": selected.target_kind,
-            "priority": selected.priority,
-        },
+        reason_code=reason_code,
+        reason=reason,
+        evidence=evidence,
     )
 
 

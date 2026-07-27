@@ -37,6 +37,10 @@ const LAYER_BASE: ReferenceLayer = {
   available_style_ids: [],
   legend_available: false,
   metadata_available: false,
+  source_substitution_status: null,
+  source_substitution_notice: null,
+  source_substitution_selected_layer: null,
+  source_substitution_profile: null,
   mirror_status: "not_applicable",
   active_version_id: null,
   active_generation: null,
@@ -223,6 +227,57 @@ describe("SiurLayerTree", () => {
 
     expect(screen.getByText(/se mantiene la versión local anterior/i)).toBeTruthy();
     expect(screen.getByText(/copia local todavía no está lista/i)).toBeTruthy();
+  });
+
+  it("shows the explicit coverage degradation for a reviewed ortho substitute", () => {
+    const catalog = catalogFixture();
+    catalog.layers[1] = {
+      ...catalog.layers[1],
+      source_substitution_status: "substitute_degraded",
+      source_substitution_notice:
+        "SIGPAC agrupa vuelos 1997-2003 y no equivale a un mosaico anual completo.",
+      source_substitution_selected_layer: "SIGPAC",
+      source_substitution_profile: "ign-pnoa-historico-ortofoto-2002-v1",
+    };
+    catalog.layers[2] = {
+      ...catalog.layers[2],
+      title: "Ortofoto 2021",
+      delivery_blocker: "reviewed_ortho_substitution_blocked",
+      source_substitution_status: "blocked",
+      source_substitution_notice:
+        "PNOA2021 no declara cobertura en Castilla y León y no se configura.",
+      source_substitution_selected_layer: "PNOA2021",
+      source_substitution_profile: "ign-pnoa-historico-ortofoto-2021-v1",
+    };
+    const tree = buildReferenceLayerTree(catalog.layers);
+
+    render(
+      <SiurLayerTree
+        catalog={catalog}
+        error=""
+        isLoading={false}
+        onControlChange={vi.fn()}
+        onMove={vi.fn()}
+        preferences={{
+          layers: {
+            "2": { visible: true, opacity: 1, styleId: 12 },
+            "3": { visible: false, opacity: 1, styleId: null },
+          },
+          stackOrder: [2, 3],
+        }}
+        structuralWarnings={[]}
+        tree={tree.roots}
+      />,
+    );
+
+    expect(
+      screen.getByText("Entrega local sustitutiva degradada"),
+    ).toBeTruthy();
+    expect(screen.getByText(/no equivale a un mosaico anual completo/i)).toBeTruthy();
+    expect(screen.getByText("SIGPAC", { selector: "code" })).toBeTruthy();
+    expect(screen.getByText("Sustitución IGN bloqueada")).toBeTruthy();
+    expect(screen.getByText(/no declara cobertura en Castilla y León/i)).toBeTruthy();
+    expect(screen.getByText("PNOA2021", { selector: "code" })).toBeTruthy();
   });
 
   it("keeps incomplete style delivery disabled and exposes its technical reason", () => {

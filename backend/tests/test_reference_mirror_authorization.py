@@ -49,6 +49,11 @@ from app.reference_layers.models import (
     ReferenceService,
     ReferenceSyncRun,
 )
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
+)
 from support_reference_mirror_authorization import (
     authorize_mirror_source,
     mirror_authorization_document,
@@ -215,6 +220,41 @@ def test_parser_rejects_invalid_permission_shapes(
     mutation(value)
     with pytest.raises(MirrorAuthorizationDocumentError, match=message):
         parse_mirror_authorization(json.dumps(value).encode())
+
+
+def test_authorization_cannot_override_reviewed_ortho_equivalence_block(db) -> None:
+    _, _, _, source = _seed_source(
+        db,
+        provider_key="auth-blocked-ortho",
+        target_kind="tiles",
+    )
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2021",
+    )
+    assert reviewed is not None
+    definition = reviewed_ign_ortho_expected_source_definition(reviewed)
+    source.protocol = definition["protocol"]
+    source.target_kind = definition["target_kind"]
+    source.endpoint_url = definition["endpoint_url"]
+    source.remote_name = definition["remote_name"]
+    source.sync_strategy = definition["sync_strategy"]
+    source.priority = definition["priority"]
+    source.config_json = definition["config"]
+    source.source_format = definition["config"]["format"]
+    source.definition_sha256 = canonical_json_sha256(definition)
+    db.commit()
+    document = mirror_authorization_document(
+        db,
+        source,
+        allowed_origins=["https://www.ign.es"],
+    )
+
+    with pytest.raises(
+        MirrorAuthorizationDocumentError,
+        match="not eligible for local acquisition",
+    ):
+        plan_mirror_authorization_review(db, document)
 
 
 def test_plan_apply_requires_exact_hash_and_linear_chain(db) -> None:

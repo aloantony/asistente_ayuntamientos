@@ -13,8 +13,11 @@ from app.reference_layers.catalog import (
     ReferenceServiceDefinition,
     apply_catalog_definition,
 )
-from app.reference_layers.models import ReferenceLayer
-from app.reference_layers.mirror_lifecycle import build_mirror_bootstrap_plan
+from app.reference_layers.models import ReferenceLayer, ReferenceLayerSource
+from app.reference_layers.mirror_lifecycle import (
+    apply_mirror_bootstrap_plan,
+    build_mirror_bootstrap_plan,
+)
 from app.reference_layers.source_audit import (
     _layer_definition,
     audit_current_catalog_sources,
@@ -814,6 +817,113 @@ def test_mirror_bootstrap_makes_reviewed_wms_primary_and_keeps_wmts_fallback(
     assert fallback.is_primary is False
 
 
+def test_ortho_bootstrap_keeps_visible_degraded_source_and_blocks_2021(
+    db,
+) -> None:
+    catalog_service = replace(
+        service("wms", "https://orto.wms.itacyl.es/WMS"),
+        source_key="ortho-itacyl",
+        default_format=None,
+    )
+    degraded_layer = replace(
+        layer("Ortofoto_2023"),
+        source_key="layer:siur:" + "3" * 64,
+        service_key=catalog_service.source_key,
+        bounds=None,
+        min_zoom=None,
+        max_zoom=None,
+        image_format=None,
+        style_name=None,
+    )
+    blocked_layer = replace(
+        degraded_layer,
+        source_key="layer:siur:" + "1" * 64,
+        remote_name="Ortofoto_2021",
+        title="Ortofoto 2021",
+    )
+    definition = ReferenceCatalogDefinition(
+        provider_key="siur",
+        source_url="https://example.es/siur-settings.json",
+        raw_catalog={"version": 1},
+        services=(catalog_service,),
+        layers=(degraded_layer, blocked_layer),
+        retrieved_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+    )
+    apply_catalog_definition(db, definition)
+    stored_layers = {
+        item.remote_name: item
+        for item in db.scalars(
+            select(ReferenceLayer).where(
+                ReferenceLayer.provider_key == "siur",
+                ReferenceLayer.node_type == "layer",
+            )
+        )
+    }
+    for index, catalog_name in enumerate(("Ortofoto_2023", "Ortofoto_2021")):
+        db.add(
+            ReferenceLayerSource(
+                provider_key="siur",
+                layer_id=stored_layers[catalog_name].id,
+                source_key=f"auto:wms_tiles:{index:032x}",
+                protocol="wms_tiles",
+                target_kind="tiles",
+                endpoint_url="https://orto.wms.itacyl.es/WMS",
+                remote_name=catalog_name,
+                source_format="image/jpeg",
+                sync_strategy="tile_seed",
+                config_json={"legacy": True},
+                definition_sha256=str(index + 1) * 64,
+                enabled=True,
+                is_primary=True,
+                priority=50,
+            )
+        )
+    db.commit()
+
+    plan = build_mirror_bootstrap_plan(db, provider_key="siur")
+
+    assert len(plan.sources) == 1
+    assert plan.sources[0].layer_id == stored_layers["Ortofoto_2023"].id
+    assert plan.sources[0].endpoint_url == (
+        "https://www.ign.es/wms/pnoa-historico"
+    )
+    assert plan.sources[0].remote_name == "PNOA2023"
+    assert plan.sources[0].config_json["reviewed_equivalence"][
+        "equivalence_status"
+    ] == "substitute_degraded"
+    assert len(plan.deactivated_source_keys) == 2
+
+    applied = apply_mirror_bootstrap_plan(db, plan)
+    sources = list(
+        db.scalars(
+            select(ReferenceLayerSource).where(
+                ReferenceLayerSource.provider_key == "siur"
+            )
+        )
+    )
+    degraded_sources = [
+        item
+        for item in sources
+        if item.layer_id == stored_layers["Ortofoto_2023"].id
+        and item.enabled
+    ]
+    blocked_sources = [
+        item
+        for item in sources
+        if item.layer_id == stored_layers["Ortofoto_2021"].id
+        and item.enabled
+    ]
+
+    assert applied.created_count == 1
+    assert applied.deactivated_count == 2
+    assert len(degraded_sources) == 1
+    assert degraded_sources[0].is_primary is True
+    assert degraded_sources[0].endpoint_url == (
+        "https://www.ign.es/wms/pnoa-historico"
+    )
+    assert blocked_sources == []
+
+
 def test_siur_tile_fallback_uses_the_reviewed_finite_coverage() -> None:
     candidate = acquisition_candidates(
         service(),
@@ -881,26 +991,87 @@ def test_xyz_jpeg_template_uses_matching_archive_format() -> None:
     assert "wms_supertile_size" not in candidate.config
 
 
-def test_siur_ortho_fallback_uses_reviewed_jpeg_and_z15_profile() -> None:
+@pytest.mark.parametrize(
+    ("catalog_layer", "selected_layer", "equivalence_status", "eligible"),
+    [
+        ("Ortofoto_2023", "PNOA2023", "substitute_degraded", True),
+        ("Ortofoto_2021", "PNOA2021", "blocked", False),
+        ("Ortofoto_2020", "PNOA2020", "exact", True),
+        ("Ortofoto_2017", "PNOA2017", "exact", True),
+        ("Ortofoto_2014", "PNOA2014", "exact", True),
+        ("Ortofoto_2011", "PNOA2011", "substitute_degraded", True),
+        ("Ortofoto_2010", "PNOA2010", "exact", True),
+        ("Ortofoto_2009", "PNOA2009", "substitute_degraded", True),
+        ("Ortofoto_2008", "PNOA2008", "substitute_degraded", True),
+        ("Ortofoto_2007", "PNOA2007", "substitute_degraded", True),
+        ("Ortofoto_2006", "PNOA2006", "exact", True),
+        ("Ortofoto_2005", "PNOA2005", "exact", True),
+        ("Ortofoto_2004", "PNOA2004", "substitute_degraded", True),
+        ("Ortofoto_2002", "SIGPAC", "substitute_degraded", True),
+        ("Ortofoto_2001", "SIGPAC", "substitute_degraded", True),
+        ("Ortofoto_2000", "SIGPAC", "substitute_degraded", True),
+        ("Ortofoto_1999", "SIGPAC", "substitute_degraded", True),
+        ("Ortofoto_1997", "SIGPAC", "substitute_degraded", True),
+        (
+            "Ortofoto_1973-83",
+            "Interministerial_1973-1986",
+            "substitute_degraded",
+            True,
+        ),
+        (
+            "Ortofoto_1956",
+            "AMS_1956-1957",
+            "substitute_degraded",
+            True,
+        ),
+    ],
+)
+def test_itacyl_ortho_builds_exact_or_visible_degraded_source_but_blocks_2021(
+    catalog_layer: str,
+    selected_layer: str,
+    equivalence_status: str,
+    eligible: bool,
+) -> None:
     candidate = acquisition_candidates(
         replace(
             service("wms", "https://orto.wms.itacyl.es/WMS"),
             default_format=None,
         ),
         replace(
-            layer("Ortofoto_2002"),
+            layer(catalog_layer),
             source_key="layer:siur:" + "c" * 64,
             bounds=None,
             min_zoom=None,
             max_zoom=None,
             image_format=None,
         ),
-    )[0]
+    )
 
+    if not eligible:
+        assert candidate == ()
+        return
+
+    assert len(candidate) == 1
+    candidate = candidate[0]
     assert candidate.protocol == "wms_tiles"
+    assert candidate.endpoint_url == "https://www.ign.es/wms/pnoa-historico"
+    assert candidate.remote_name == selected_layer
     assert candidate.config["format"] == "image/jpeg"
+    assert candidate.config["bounds"] == SIUR_TILE_BOUNDS
+    assert candidate.config["min_zoom"] == 0
     assert candidate.config["max_zoom"] == 15
+    assert candidate.config["wms_supertile_size"] == 8
     assert candidate.config["coverage_profile"].endswith("ortho-native-z15-v1")
+    assert candidate.config["reviewed_equivalence"][
+        "equivalence_status"
+    ] == equivalence_status
+    assert candidate.config["reviewed_equivalence"][
+        "selected_layer"
+    ] == selected_layer
+    assert candidate.config["reviewed_equivalence"][
+        "promotion_eligible"
+    ] is True
+    assert "orto.wms.itacyl.es" not in str(candidate_definition(candidate))
 
 
 def test_source_identity_changes_with_effective_definition_only() -> None:
