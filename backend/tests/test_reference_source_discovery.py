@@ -152,8 +152,10 @@ def test_geoserver_data_candidates_freeze_serviceable_catalog_style_identities()
     }
     assert candidates[0].config == {
         "discovery": "wfs_capabilities",
+        "wfs_snapshot": {"mode": "single_response"},
         **expected,
     }
+    assert candidates[0].sync_strategy == "full_snapshot"
     assert candidates[1].config == {
         "discovery": "wcs_capabilities",
         **expected,
@@ -197,7 +199,25 @@ def test_inspire_wms_derives_wfs_but_still_requires_a_probe() -> None:
     assert candidates[0].endpoint_url == (
         "https://servicios.idee.es/wfs-inspire/transportes"
     )
-    assert candidates[0].config["discovery"] == "wfs_capabilities"
+    assert candidates[0].sync_strategy == "full_snapshot"
+    assert candidates[0].config == {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {"mode": "single_response"},
+    }
+
+
+def test_native_wfs_uses_a_complete_convergent_snapshot() -> None:
+    candidate = acquisition_candidates(
+        service("wfs", "https://example.es/geoserver/roads/wfs"),
+        layer("roads"),
+    )[0]
+
+    assert candidate.protocol == "wfs"
+    assert candidate.sync_strategy == "full_snapshot"
+    assert candidate.config == {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {"mode": "single_response"},
+    }
 
 
 @pytest.mark.parametrize(

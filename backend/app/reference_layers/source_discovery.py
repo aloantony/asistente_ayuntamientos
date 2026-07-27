@@ -1071,10 +1071,13 @@ def acquisition_candidates(
                         target_kind="vector",
                         endpoint_url=_with_path(parts, f"{prefix}/wfs"),
                         remote_name=layer.remote_name,
-                        sync_strategy="paged_snapshot",
+                        sync_strategy="full_snapshot",
                         priority=20,
                         config={
                             "discovery": "wfs_capabilities",
+                            "wfs_snapshot": {
+                                "mode": "single_response",
+                            },
                             **style_config,
                         },
                     ),
@@ -1104,9 +1107,14 @@ def acquisition_candidates(
                         "/wfs-inspire" + inspire.group("suffix"),
                     ),
                     remote_name=layer.remote_name,
-                    sync_strategy="paged_snapshot",
+                    sync_strategy="full_snapshot",
                     priority=25,
-                    config={"discovery": "wfs_capabilities"},
+                    config={
+                        "discovery": "wfs_capabilities",
+                        "wfs_snapshot": {
+                            "mode": "single_response",
+                        },
+                    },
                 )
             )
 
@@ -1183,9 +1191,14 @@ def acquisition_candidates(
                 target_kind="vector",
                 endpoint_url=endpoint,
                 remote_name=layer.remote_name,
-                sync_strategy="paged_snapshot",
+                sync_strategy="full_snapshot",
                 priority=10,
-                config={"discovery": "wfs_capabilities"},
+                config={
+                    "discovery": "wfs_capabilities",
+                    "wfs_snapshot": {
+                        "mode": "single_response",
+                    },
+                },
             )
         )
     elif protocol == "arcgis_rest":
