@@ -21,6 +21,11 @@ from app.reference_layers.catalog import (
     ReferenceLayerDefinition,
     ReferenceServiceDefinition,
 )
+from app.reference_layers.idecyl_exact_evidence import (
+    IDECyLExactEvidenceError,
+    is_idecyl_geoserver_catalog_endpoint,
+    reviewed_idecyl_exact_source,
+)
 from app.reference_layers.mirror_coverage import (
     SIUR_LAYER_PREFIX,
     SIUR_TILE_BOUNDS,
@@ -831,6 +836,46 @@ def acquisition_candidates(
     endpoint = _canonical_endpoint(service.base_url)
     protocol = service.upstream_protocol.lower()
     candidates: list[SourceCandidate] = []
+
+    if protocol == "wms" and is_idecyl_geoserver_catalog_endpoint(endpoint):
+        try:
+            reviewed_idecyl = reviewed_idecyl_exact_source(
+                catalog_layer_source_key=layer.source_key,
+                catalog_endpoint_url=endpoint,
+                catalog_remote_name=layer.remote_name,
+            )
+        except IDECyLExactEvidenceError as error:
+            raise SourceDiscoveryError(
+                "reviewed IDECyL evidence is invalid",
+                code="reviewed_idecyl_evidence_invalid",
+            ) from error
+        if reviewed_idecyl is not None:
+            if (
+                layer.role != "overlay"
+                or layer.renderer != "raster_tile"
+                or not layer.source_key.startswith(SIUR_LAYER_PREFIX)
+            ):
+                raise SourceDiscoveryError(
+                    "reviewed IDECyL layer identity is invalid",
+                    code="reviewed_idecyl_identity_invalid",
+                )
+            return (
+                _candidate(
+                    protocol="wfs",
+                    target_kind="vector",
+                    endpoint_url=reviewed_idecyl.endpoint_url,
+                    remote_name=reviewed_idecyl.remote_name,
+                    sync_strategy="paged_snapshot",
+                    priority=_REVIEWED_DATASET_SOURCE_PRIORITY,
+                    config={
+                        "discovery": "wfs_capabilities",
+                        **_geoserver_style_config(endpoint, layer),
+                        "reviewed_equivalence": deepcopy(
+                            reviewed_idecyl.evidence
+                        ),
+                    },
+                ),
+            )
 
     reviewed_dataset = _reviewed_dataset_source(endpoint, layer)
     if reviewed_dataset is not None:
