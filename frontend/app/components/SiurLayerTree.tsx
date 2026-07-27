@@ -69,6 +69,10 @@ const BLOCKER_LABELS: Record<string, string> = {
     "No hay copia local activa y el proxy remoto está desactivado.",
   reviewed_ortho_substitution_blocked:
     "La capa IGN revisada no demuestra equivalencia territorial y temporal suficiente.",
+  reviewed_ortho_2021_blocked:
+    "La entrega histórica de 2021 está bloqueada y no puede reactivarse ni servirse.",
+  reviewed_ortho_legacy_fenced:
+    "Los bytes locales activos no tienen la evidencia de identidad y paridad exigida.",
   service_mismatch: "El servicio no coincide con la evidencia verificada.",
   source_candidate_missing:
     "No se ha encontrado una fuente segura para replicar esta capa.",
@@ -262,6 +266,19 @@ export function SiurLayerTree({
                 {layer.source_substitution_selected_layer ? (
                   <small>
                     Capa IGN: <code>{layer.source_substitution_selected_layer}</code>
+                  </small>
+                ) : null}
+                {layer.source_substitution_scope ? (
+                  <small>
+                    {layer.source_substitution_scope === "active_delivery"
+                      ? "Clasificación de los bytes locales activos."
+                      : "Clasificación de la fuente candidata; todavía no describe una entrega activa."}
+                  </small>
+                ) : null}
+                {layer.source_substitution_attribution ? (
+                  <small>
+                    Atribución obligatoria:{" "}
+                    {layer.source_substitution_attribution}
                   </small>
                 ) : null}
               </p>

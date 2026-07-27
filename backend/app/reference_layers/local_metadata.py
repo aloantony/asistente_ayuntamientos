@@ -998,6 +998,27 @@ def _assemble_document(
         run_definition=run_definition,
         source_definition_sha256=run.source_definition_sha256,
     )
+    substitution = source_document.get("ortho_substitution")
+    if isinstance(substitution, dict):
+        parity_gate = prepared.validation_json.get(
+            "reviewed_ortho_parity_gate"
+        )
+        if (
+            not isinstance(parity_gate, dict)
+            or not isinstance(parity_gate.get("evidence_sha256"), str)
+        ):
+            raise LocalMetadataError(
+                "reviewed ortho delivery has no parity evidence"
+            )
+        substitution.update(
+            {
+                "scope": "active_delivery",
+                "delivery_content_sha256": prepared.content_sha256,
+                "parity_evidence_sha256": (
+                    parity_gate["evidence_sha256"]
+                ),
+            }
+        )
     document = {
         "schema_version": LOCAL_METADATA_DOCUMENT_SCHEMA,
         "binding": binding,
@@ -2015,7 +2036,11 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
                 "declared_resolutions_metres",
                 "promotion_eligible",
                 "public_notice",
-                "parity_requirements",
+                "parity_policy",
+                "required_attribution",
+                "scope",
+                "delivery_content_sha256",
+                "parity_evidence_sha256",
             },
             "source.ortho_substitution",
         )
@@ -2028,6 +2053,8 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
             "capabilities_sha256",
             "catalog_capabilities_sha256",
             "catalog_abstract_sha256",
+            "delivery_content_sha256",
+            "parity_evidence_sha256",
         ):
             digest = value.get(key)
             if (
@@ -2045,6 +2072,10 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
         }:
             raise LocalMetadataError(
                 "local metadata ortho equivalence status is invalid"
+            )
+        if value.get("scope") != "active_delivery":
+            raise LocalMetadataError(
+                "local metadata ortho scope is invalid"
             )
         if value.get("declared_coverage") not in {
             "full",
@@ -2086,6 +2117,7 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
             ("selected_title", 500),
             ("metadata_record_id", 255),
             ("public_notice", 2_000),
+            ("required_attribution", 500),
         ):
             _required_text(
                 value.get(key),
@@ -2103,14 +2135,22 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
             raise LocalMetadataError(
                 "local metadata ortho comparison basis is invalid"
             )
-        requirements = _safe_string_list(
-            value.get("parity_requirements"),
-            "source.ortho_substitution.parity_requirements",
-            maximum=16,
-        )
-        if not requirements or len(set(requirements)) != len(requirements):
+        policy = value.get("parity_policy")
+        if (
+            not isinstance(policy, dict)
+            or policy.get("schema_version")
+            != "siur-reviewed-ortho-parity-policy/v1"
+            or policy.get("profile") != value.get("profile")
+            or policy.get("classification")
+            != value.get("equivalence_status")
+            or not isinstance(policy.get("sample_plan"), dict)
+            or not isinstance(policy.get("coverage_mask"), dict)
+            or not isinstance(policy.get("resolution_scale"), dict)
+            or not isinstance(policy.get("pixel_samples"), dict)
+            or not isinstance(policy.get("promotion"), dict)
+        ):
             raise LocalMetadataError(
-                "local metadata ortho parity requirements are invalid"
+                "local metadata ortho parity policy is invalid"
             )
     styles = _exact_keys(
         document.get("styles"),

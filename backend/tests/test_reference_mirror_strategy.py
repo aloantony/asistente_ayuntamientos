@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+from io import BytesIO
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
+from PIL import Image
+
+from app.reference_layers.mirror_orchestrator import (
+    _reviewed_ortho_catalog_sample_document,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+)
+from app.reference_layers.tile_seed import sample_tile_source
 from app.reference_layers import mirror_strategy
 from app.reference_layers.catalog import (
     ReferenceLayerDefinition,
@@ -208,6 +219,75 @@ def test_reviewed_ortho_strategy_preserves_exact_and_degraded_evidence(
             assert assignment.source_key is None
         if status == "substitute_degraded":
             assert "degradado" in substitution["public_notice"].casefold()
-            assert "explicit_public_degradation_notice" in substitution[
-                "parity_requirements"
-            ]
+            assert substitution["parity_policy"]["promotion"][
+                "immutable_degraded_classification"
+            ] is True
+
+
+def test_reviewed_ortho_catalog_descriptor_passes_the_real_sampler() -> None:
+    source_document = {
+        "schema": "reference-tile-source/v1",
+        "protocol": "wms_tiles",
+        "definition_sha256": "a" * 64,
+        "descriptor": {
+            "bounds": {
+                "west": -180.0,
+                "south": -85.0,
+                "east": 180.0,
+                "north": 85.0,
+            },
+            "min_zoom": 0,
+            "max_zoom": 0,
+            "format": "image/jpeg",
+            "coverage_required": True,
+            "estimated_tile_count": 1,
+            "max_tile_count": 1,
+            "layer": "PNOA2020",
+            "style": "",
+            "crs": "EPSG:3857",
+            "kvp": {
+                "endpoint_url": "https://www.ign.es/wms/pnoa-historico",
+                "service": "WMS",
+                "request": "GetMap",
+                "version": "1.3.0",
+                "layers": "PNOA2020",
+                "styles": "",
+                "format": "image/jpeg",
+                "transparent": "FALSE",
+                "CRS": "EPSG:3857",
+                "bbox_placeholder": "{bbox}",
+                "width_placeholder": "{width}",
+                "height_placeholder": "{height}",
+            },
+        },
+    }
+    catalog_document = _reviewed_ortho_catalog_sample_document(
+        source_document,
+        projection={
+            "profile": "ign-pnoa-historico-ortofoto-2020-v1",
+            "catalog_layer": "Ortofoto_2020",
+        },
+    )
+    image = Image.new("RGB", (256, 256), (30, 80, 120))
+    output = BytesIO()
+    image.save(output, format="JPEG")
+
+    def fetcher(url: str, _media_type: str) -> bytes:
+        parsed = urlsplit(url)
+        assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == (
+            CATALOG_ENDPOINT_URL
+        )
+        assert parse_qs(parsed.query)["LAYERS"] == ["Ortofoto_2020"]
+        return output.getvalue()
+
+    sample = sample_tile_source(
+        source_document=catalog_document,
+        fetcher=fetcher,
+        sample_limit=1,
+        concurrency=1,
+    )
+
+    assert len(sample.coordinates) == 1
+    assert catalog_document["descriptor"]["layer"] == "Ortofoto_2020"
+    assert catalog_document["descriptor"]["kvp"]["layers"] == "Ortofoto_2020"
+    assert source_document["descriptor"]["layer"] == "PNOA2020"

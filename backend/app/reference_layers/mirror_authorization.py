@@ -1216,13 +1216,27 @@ def _validate_evidence_for_source(
             "stored source definition hash is invalid"
         )
     try:
-        require_reviewed_ign_ortho_acquisition_allowed(
+        reviewed_ortho = require_reviewed_ign_ortho_acquisition_allowed(
             _stored_source_definition(source)
         )
     except ReviewedOrthoEvidenceError as error:
         raise MirrorAuthorizationDocumentError(
             "reviewed ortho source is not eligible for local acquisition"
         ) from error
+    if (
+        reviewed_ortho is not None
+        and (
+            evidence.attribution
+            != reviewed_ortho["required_attribution"]
+            or evidence.license_name
+            != source.config_json["reviewed_equivalence"]["license_name"]
+            or evidence.license_url
+            != source.config_json["reviewed_equivalence"]["license_url"]
+        )
+    ):
+        raise MirrorAuthorizationDocumentError(
+            "authorization license or attribution does not match the reviewed product"
+        )
     _validate_urls_within_origins(
         (
             source.endpoint_url,
@@ -1280,7 +1294,7 @@ def _require_permissions(
     acquisition: bool,
 ) -> None:
     try:
-        require_reviewed_ign_ortho_acquisition_allowed(
+        reviewed_ortho = require_reviewed_ign_ortho_acquisition_allowed(
             _stored_source_definition(source)
         )
     except ReviewedOrthoEvidenceError as error:
@@ -1288,6 +1302,21 @@ def _require_permissions(
             "reviewed ortho source is not eligible for local acquisition",
             code="reviewed_ortho_substitution_blocked",
         ) from error
+    if (
+        reviewed_ortho is not None
+        and (
+            review.attribution
+            != reviewed_ortho["required_attribution"]
+            or review.license_name
+            != source.config_json["reviewed_equivalence"]["license_name"]
+            or review.license_url
+            != source.config_json["reviewed_equivalence"]["license_url"]
+        )
+    ):
+        raise MirrorAuthorizationError(
+            "reviewed ortho license or attribution is not official",
+            code="reviewed_ortho_attribution_mismatch",
+        )
     if (
         review.decision != "approved"
         or not review.allow_local_storage

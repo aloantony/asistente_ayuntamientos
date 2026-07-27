@@ -28,7 +28,7 @@
   "license_evidence": {
     "name": "Creative Commons Attribution 4.0 International (CC BY 4.0)",
     "url": "https://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf",
-    "attribution": "Sistema Cartográfico Nacional · Instituto Geográfico Nacional de España"
+    "attribution_rule": "official_product_and_date_derived_work_formula"
   },
   "operational_profile": {
     "bounds": {
@@ -54,7 +54,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2023",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Entrega local degradada: IGN PNOA2023 declara Castilla y León a 25 cm, pero ITACyL incorpora bordes de máxima actualidad y Valladolid a 10 cm. Se conserva la diferencia y no se afirma paridad píxel a píxel.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "itacyl_border_and_valladolid_difference",
         "explicit_public_degradation_notice",
@@ -73,7 +73,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2021",
       "equivalence_status": "blocked",
       "public_notice": "Sustitución bloqueada: el resumen oficial de PNOA2021 no declara cobertura en Castilla y León. No se configura ni se promueve esta capa IGN como reemplazo de Ortofoto_2021.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "no_declared_castilla_y_leon_coverage",
         "explicit_public_degradation_notice",
@@ -91,7 +91,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2020",
       "equivalence_status": "exact",
       "public_notice": "Sustitución oficial IGN por PNOA2020, del mismo producto PNOA y año. La cobertura efectiva es la declarada por IGN y debe superar la paridad de teselas antes de promoverse.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_nonempty_coverage",
         "declared_coverage_mask_review",
@@ -109,7 +109,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2017",
       "equivalence_status": "exact",
       "public_notice": "Sustitución oficial IGN por PNOA2017, del mismo producto PNOA y año. La cobertura efectiva es la declarada por IGN y debe superar la paridad de teselas antes de promoverse.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_nonempty_coverage",
         "declared_coverage_mask_review",
@@ -127,7 +127,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2014",
       "equivalence_status": "exact",
       "public_notice": "Sustitución oficial IGN por PNOA2014, del mismo producto PNOA y año. La cobertura efectiva es la declarada por IGN y debe superar la paridad de teselas antes de promoverse.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_nonempty_coverage",
         "declared_coverage_mask_review",
@@ -145,7 +145,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2011",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Entrega local degradada: IGN PNOA2011 declara norte a 50 cm y sur a 25 cm; ITACyL enumera SW 25 cm y NW/NE 50 cm sin declarar el cuadrante SE. Hace falta una máscara de cobertura para demostrar paridad.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_mask_comparison",
         "explicit_public_degradation_notice",
@@ -164,7 +164,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2010",
       "equivalence_status": "exact",
       "public_notice": "Fuente IGN del mismo PNOA y año: ambos GetCapabilities declaran NW a 50 cm y SE a 25 cm en Castilla y León. La entrega conserva la evidencia de ambas declaraciones.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_product_year_match",
         "catalog_and_selected_coverage_signature_match",
@@ -183,7 +183,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2009",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Entrega local degradada: ITACyL declara NW a 50 cm y SE a 25 cm, mientras IGN declara SW a 50 cm y NE a 25 cm. Los cuadrantes no coinciden y no se afirma equivalencia.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_quadrant_mismatch",
         "explicit_public_degradation_notice",
@@ -202,7 +202,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2008",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Entrega local degradada: ITACyL declara NE a 25 cm y SW a 50 cm, mientras IGN declara NW a 25 cm y SE a 50 cm. Los cuadrantes no coinciden y no se afirma equivalencia.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_quadrant_mismatch",
         "explicit_public_degradation_notice",
@@ -221,7 +221,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2007",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Entrega local degradada: ITACyL declara SW a 25 cm y NE a 50 cm; IGN declara SW a 25 cm y el norte a 50 cm. La posible diferencia NW/NE requiere comparar máscaras antes de afirmar equivalencia.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_mask_comparison",
         "explicit_public_degradation_notice",
@@ -240,7 +240,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2006",
       "equivalence_status": "exact",
       "public_notice": "Fuente IGN del mismo PNOA y año: ambos GetCapabilities declaran SE a 25 cm y NW a 50 cm en Castilla y León. La entrega conserva la evidencia de ambas declaraciones.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_product_year_match",
         "catalog_and_selected_coverage_signature_match",
@@ -259,7 +259,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2005",
       "equivalence_status": "exact",
       "public_notice": "Fuente IGN del mismo PNOA y año: ambos GetCapabilities declaran NE a 25 cm y SW a 50 cm en Castilla y León. La entrega conserva la evidencia de ambas declaraciones.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_product_year_match",
         "catalog_and_selected_coverage_signature_match",
@@ -278,7 +278,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2004",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Entrega local degradada: ITACyL declara NW a 25 cm y SE a 50 cm, mientras IGN PNOA2004 declara Castilla y León a 50 cm. La diferencia de cobertura/resolución se conserva explícitamente.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "catalog_and_selected_resolution_mismatch",
         "explicit_public_degradation_notice",
@@ -297,7 +297,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Sustituto degradado: Ortofoto_2002 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_sheet_date_inventory",
         "requested_year_coverage_report",
@@ -317,7 +317,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Sustituto degradado: Ortofoto_2001 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_sheet_date_inventory",
         "requested_year_coverage_report",
@@ -337,7 +337,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Sustituto degradado: Ortofoto_2000 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_sheet_date_inventory",
         "requested_year_coverage_report",
@@ -357,7 +357,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Sustituto degradado: Ortofoto_1999 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_sheet_date_inventory",
         "requested_year_coverage_report",
@@ -377,7 +377,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Sustituto degradado: Ortofoto_1997 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_sheet_date_inventory",
         "requested_year_coverage_report",
@@ -397,7 +397,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignOrtofotosInterministerial",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Sustituto degradado: la capa IGN Interministerial declara 1973-1986 y su resumen describe vuelos 1976-1986; no equivale exactamente al intervalo SIUR 1973-83 ni garantiza la misma cobertura.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_sheet_date_inventory",
         "1973_1983_overlap_coverage_report",
@@ -417,7 +417,7 @@
       "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignAMSserieB",
       "equivalence_status": "substitute_degraded",
       "public_notice": "Sustituto degradado: la capa IGN Americano Serie B cubre 1956-1957 y solo parte del territorio español; no equivale exactamente a una cobertura completa y exclusivamente de 1956.",
-      "parity_requirements": [
+      "review_notes": [
         "exact_remote_layer_identity",
         "castilla_y_leon_sheet_date_inventory",
         "1956_only_coverage_report",

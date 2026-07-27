@@ -41,6 +41,9 @@ const LAYER_BASE: ReferenceLayer = {
   source_substitution_notice: null,
   source_substitution_selected_layer: null,
   source_substitution_profile: null,
+  source_substitution_scope: null,
+  source_substitution_attribution: null,
+  source_substitution_content_sha256: null,
   mirror_status: "not_applicable",
   active_version_id: null,
   active_generation: null,
@@ -238,6 +241,10 @@ describe("SiurLayerTree", () => {
         "SIGPAC agrupa vuelos 1997-2003 y no equivale a un mosaico anual completo.",
       source_substitution_selected_layer: "SIGPAC",
       source_substitution_profile: "ign-pnoa-historico-ortofoto-2002-v1",
+      source_substitution_scope: "active_delivery",
+      source_substitution_attribution:
+        "Obra derivada de Orto-SIGPAC 1997-2003 CC-BY 4.0 scne.es",
+      source_substitution_content_sha256: "a".repeat(64),
     };
     catalog.layers[2] = {
       ...catalog.layers[2],
@@ -275,6 +282,12 @@ describe("SiurLayerTree", () => {
     ).toBeTruthy();
     expect(screen.getByText(/no equivale a un mosaico anual completo/i)).toBeTruthy();
     expect(screen.getByText("SIGPAC", { selector: "code" })).toBeTruthy();
+    expect(
+      screen.getByText(/clasificación de los bytes locales activos/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/obra derivada de Orto-SIGPAC 1997-2003/i),
+    ).toBeTruthy();
     expect(screen.getByText("Sustitución IGN bloqueada")).toBeTruthy();
     expect(screen.getByText(/no declara cobertura en Castilla y León/i)).toBeTruthy();
     expect(screen.getByText("PNOA2021", { selector: "code" })).toBeTruthy();

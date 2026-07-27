@@ -26,13 +26,20 @@ from app.reference_layers.blob_store import (
     ReferenceBlobStore,
     ReferenceBlobStoreError,
 )
+from app.reference_layers.delivery_builder import (
+    DeliveryBuildError,
+    canonical_json_sha256,
+)
 from app.reference_layers.models import (
     OrganizationReferenceLayerSetting,
     ReferenceCatalogSnapshot,
+    ReferenceDeliveryVersion,
     ReferenceLayer,
+    ReferenceLayerDeliveryState,
     ReferenceLayerSource,
     ReferenceLayerStyle,
     ReferenceService,
+    ReferenceSyncRun,
 )
 from app.reference_layers.local_delivery import (
     catalog_local_delivery_availability,
@@ -48,6 +55,7 @@ from app.reference_layers.mirror_authorization import (
 from app.reference_layers.mirror_status import catalog_mirror_statuses
 from app.reference_layers.reviewed_ortho_evidence import (
     ReviewedOrthoEvidenceError,
+    require_reviewed_ign_ortho_delivery_allowed,
     reviewed_ign_ortho_catalog_projection,
     reviewed_ign_ortho_source_projection,
 )
@@ -67,6 +75,70 @@ from app.users.models import User
 router = APIRouter(tags=["reference-layers"])
 router.include_router(wms_router)
 logger = logging.getLogger(__name__)
+
+
+def _active_reviewed_ortho_projection(
+    *,
+    service: ReferenceService | None,
+    layer: ReferenceLayer,
+    version: ReferenceDeliveryVersion,
+    run: ReferenceSyncRun,
+) -> dict[str, object]:
+    catalog_layer = layer.remote_name or layer.source_key
+    frozen = (
+        run.source_definition_json
+        if isinstance(run.source_definition_json, dict)
+        else {}
+    )
+    try:
+        if (
+            canonical_json_sha256(frozen)
+            != run.source_definition_sha256
+            or canonical_json_sha256(version.validation_json)
+            != version.validation_sha256
+        ):
+            raise ReviewedOrthoEvidenceError(
+                "active ortho hashes are invalid"
+            )
+        projection = require_reviewed_ign_ortho_delivery_allowed(
+            catalog_endpoint_url=service.base_url if service is not None else "",
+            catalog_layer=catalog_layer,
+            source_definition=frozen,
+            validation_json=version.validation_json,
+            content_sha256=version.content_sha256,
+        )
+        if projection is None:
+            raise ReviewedOrthoEvidenceError(
+                "active delivery no longer has its reviewed catalog identity"
+            )
+    except (ReviewedOrthoEvidenceError, DeliveryBuildError):
+        return {
+            "equivalence_status": (
+                "blocked"
+                if catalog_layer == "Ortofoto_2021"
+                else "invalid"
+            ),
+            "public_notice": (
+                "La entrega local activa está bloqueada: sus bytes "
+                "históricos no tienen la identidad y la paridad "
+                "versionadas exigidas."
+            ),
+            "selected_layer": frozen.get("remote_name"),
+            "profile": (
+                frozen.get("config", {})
+                .get("reviewed_equivalence", {})
+                .get("profile")
+                if isinstance(frozen.get("config"), dict)
+                else None
+            ),
+            "required_attribution": None,
+            "scope": "active_delivery",
+            "delivery_content_sha256": version.content_sha256,
+        }
+    return {
+        **projection,
+        "scope": "active_delivery",
+    }
 
 
 @router.get(
@@ -146,7 +218,7 @@ def get_reference_catalog(
                 service.base_url,
                 layer.remote_name,
             )
-        except ReviewedOrthoEvidenceError:
+        except (ReviewedOrthoEvidenceError, DeliveryBuildError):
             projection = {
                 "equivalence_status": "invalid",
                 "public_notice": (
@@ -155,9 +227,65 @@ def get_reference_catalog(
                 ),
                 "selected_layer": None,
                 "profile": None,
+                "scope": "candidate",
             }
         if projection is not None:
+            projection["scope"] = "candidate"
             substitutions[layer.id] = projection
+
+    active_rows = db.execute(
+        select(
+            ReferenceLayerDeliveryState,
+            ReferenceDeliveryVersion,
+            ReferenceSyncRun,
+        )
+        .join(
+            ReferenceDeliveryVersion,
+            ReferenceDeliveryVersion.id
+            == ReferenceLayerDeliveryState.active_version_id,
+        )
+        .join(
+            ReferenceSyncRun,
+            ReferenceSyncRun.id
+            == ReferenceDeliveryVersion.sync_run_id,
+        )
+        .where(
+            ReferenceLayerDeliveryState.provider_key
+            == snapshot.provider_key,
+            ReferenceLayerDeliveryState.layer_id.in_(
+                [layer.id for layer in layers]
+            ),
+            ReferenceLayerDeliveryState.status == "active",
+            ReferenceLayerDeliveryState.active_version_id.is_not(None),
+        )
+    ).all()
+    layers_by_id = {layer.id: layer for layer in layers}
+    active_substitution_layers: set[int] = set()
+    for state, version, run in active_rows:
+        layer = layers_by_id.get(state.layer_id)
+        if layer is None:
+            continue
+        service = services_by_id.get(layer.service_id or -1)
+        try:
+            frozen_projection = reviewed_ign_ortho_source_projection(
+                run.source_definition_json
+            )
+        except ReviewedOrthoEvidenceError:
+            frozen_is_reviewed = True
+        else:
+            frozen_is_reviewed = frozen_projection is not None
+        if (
+            layer.id not in substitutions
+            and not frozen_is_reviewed
+        ):
+            continue
+        active_substitution_layers.add(layer.id)
+        substitutions[layer.id] = _active_reviewed_ortho_projection(
+            service=service,
+            layer=layer,
+            version=version,
+            run=run,
+        )
 
     primary_sources = list(
         db.scalars(
@@ -172,6 +300,8 @@ def get_reference_catalog(
         )
     )
     for source in primary_sources:
+        if source.layer_id in active_substitution_layers:
+            continue
         try:
             projection = reviewed_ign_ortho_source_projection(
                 {
@@ -193,9 +323,11 @@ def get_reference_catalog(
                 ),
                 "selected_layer": None,
                 "profile": None,
+                "scope": "candidate",
             }
         else:
             if projection is not None:
+                projection["scope"] = "candidate"
                 substitutions[source.layer_id] = projection
     settings: dict[int, OrganizationReferenceLayerSetting] = {}
     if organization_id is not None:
@@ -320,6 +452,21 @@ def get_reference_catalog(
                     ),
                     "source_substitution_profile": (
                         substitution.get("profile")
+                        if substitution is not None
+                        else None
+                    ),
+                    "source_substitution_scope": (
+                        substitution.get("scope")
+                        if substitution is not None
+                        else None
+                    ),
+                    "source_substitution_attribution": (
+                        substitution.get("required_attribution")
+                        if substitution is not None
+                        else None
+                    ),
+                    "source_substitution_content_sha256": (
+                        substitution.get("delivery_content_sha256")
                         if substitution is not None
                         else None
                     ),

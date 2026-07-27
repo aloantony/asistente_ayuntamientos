@@ -24,6 +24,11 @@ from xml.etree import ElementTree
 PROFILE_SCHEMA = "siur-reviewed-ign-pnoa-historico-profile/v1"
 EQUIVALENCE_SCHEMA = "siur-reviewed-ign-pnoa-historico-equivalence/v1"
 PUBLIC_SUBSTITUTION_SCHEMA = "siur-public-ortho-substitution/v1"
+LIVE_CAPABILITIES_GATE_SCHEMA = (
+    "siur-reviewed-ortho-live-capabilities-gate/v1"
+)
+PARITY_POLICY_SCHEMA = "siur-reviewed-ortho-parity-policy/v1"
+PARITY_GATE_SCHEMA = "siur-reviewed-ortho-parity-gate/v1"
 PROFILE_RESOURCE = (
     "evidence/ign_pnoa_historico/equivalence-profile-v1.json"
 )
@@ -34,8 +39,8 @@ CATALOG_CAPABILITIES_RESOURCE = (
     "evidence/ign_pnoa_historico/itacyl-capabilities-20260727.xml"
 )
 PROFILE_SHA256 = (
-    "285037c16462406560a71c738fca14c2"
-    "402e76f0159d16e9a608974ee5e396dd"
+    "951082e32627c1744e7f04bb4592a315"
+    "857c08047c3240cf47187c5ebefd1187"
 )
 CAPABILITIES_SHA256 = (
     "1a0fede7e1d1bfd2746656b7b2e731df"
@@ -58,9 +63,8 @@ CAPABILITIES_URL = (
 LICENSE_URL = (
     "https://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf"
 )
-REQUIRED_ATTRIBUTION = (
-    "Sistema Cartográfico Nacional · "
-    "Instituto Geográfico Nacional de España"
+ATTRIBUTION_RULE = (
+    "official_product_and_date_derived_work_formula"
 )
 SOURCE_PRIORITY = 5
 MAX_PROFILE_BYTES = 128 * 1024
@@ -90,7 +94,7 @@ _MAPPING_KEYS = frozenset(
         "metadata_url",
         "equivalence_status",
         "public_notice",
-        "parity_requirements",
+        "review_notes",
     }
 )
 _EXPECTED_CATALOG_LAYERS = frozenset(
@@ -175,7 +179,8 @@ class ReviewedIgnOrthoSubstitution:
     declared_resolutions_metres: tuple[float, ...]
     promotion_eligible: bool
     public_notice: str
-    parity_requirements: tuple[str, ...]
+    review_notes: tuple[str, ...]
+    parity_policy: dict[str, Any]
     license_name: str
     license_url: str
     required_attribution: str
@@ -211,6 +216,7 @@ def reviewed_ign_ortho_equivalence(
         "catalog_capabilities_sha256": (
             reviewed.catalog_capabilities_sha256
         ),
+        "catalog_capabilities_url": CATALOG_CAPABILITIES_URL,
         "capabilities_url": reviewed.capabilities_url,
         "license_name": reviewed.license_name,
         "license_url": reviewed.license_url,
@@ -234,7 +240,7 @@ def reviewed_ign_ortho_equivalence(
         ),
         "promotion_eligible": reviewed.promotion_eligible,
         "public_notice": reviewed.public_notice,
-        "parity_requirements": list(reviewed.parity_requirements),
+        "parity_policy": reviewed.parity_policy,
     }
 
 
@@ -290,7 +296,8 @@ def reviewed_ign_ortho_public_projection(
         ),
         "promotion_eligible": reviewed.promotion_eligible,
         "public_notice": reviewed.public_notice,
-        "parity_requirements": list(reviewed.parity_requirements),
+        "parity_policy": reviewed.parity_policy,
+        "required_attribution": reviewed.required_attribution,
     }
 
 
@@ -394,6 +401,200 @@ def require_reviewed_ign_ortho_acquisition_allowed(
             "reviewed IGN ortho substitution is not eligible for acquisition"
         )
     return projection
+
+
+def reviewed_ign_ortho_live_capabilities_gate(
+    source_definition: Any,
+    document: bytes,
+    *,
+    phase: str,
+) -> dict[str, Any] | None:
+    """Compare live WMS semantics with the exact committed review snapshot.
+
+    A harmless byte-level change is allowed, but every field that affects the
+    identity, rendering, coverage, attribution or metadata of the selected
+    layer must remain identical.  The returned hashes are suitable for
+    persistence in the acquisition observation and delivery validation gate.
+    """
+
+    projection = require_reviewed_ign_ortho_acquisition_allowed(
+        source_definition
+    )
+    if projection is None:
+        return None
+    if phase not in {"pre_download", "pre_promotion"}:
+        raise ReviewedOrthoEvidenceError(
+            "reviewed ortho capabilities phase is invalid"
+        )
+    reviewed = _reviewed_substitutions_by_profile()[projection["profile"]]
+    expected_document = _resource_bytes(
+        CAPABILITIES_RESOURCE,
+        MAX_CAPABILITIES_BYTES,
+    )
+    expected = _wms_semantic_snapshot(
+        expected_document,
+        reviewed.selected_layer,
+    )
+    live = _wms_semantic_snapshot(document, reviewed.selected_layer)
+    if live != expected:
+        raise ReviewedOrthoEvidenceError(
+            "live IGN WMS semantics changed since the reviewed snapshot"
+        )
+    semantic_sha256 = _canonical_sha256(expected)
+    return {
+        "schema_version": LIVE_CAPABILITIES_GATE_SCHEMA,
+        "passed": True,
+        "phase": phase,
+        "profile": reviewed.profile,
+        "selected_layer": reviewed.selected_layer,
+        "snapshot_sha256": reviewed.capabilities_sha256,
+        "live_sha256": hashlib.sha256(document).hexdigest(),
+        "semantic_sha256": semantic_sha256,
+        "semantic_fields": [
+            "layer",
+            "title",
+            "abstract",
+            "crs",
+            "formats",
+            "styles",
+            "bounds",
+            "attribution",
+            "access_constraints",
+            "metadata",
+        ],
+    }
+
+
+def reviewed_ign_ortho_catalog_capabilities_gate(
+    source_definition: Any,
+    document: bytes,
+) -> dict[str, Any] | None:
+    """Bind the compared ITACyL layer to its reviewed live WMS semantics."""
+
+    projection = require_reviewed_ign_ortho_acquisition_allowed(
+        source_definition
+    )
+    if projection is None:
+        return None
+    reviewed = _reviewed_substitutions_by_profile()[projection["profile"]]
+    expected_document = _resource_bytes(
+        CATALOG_CAPABILITIES_RESOURCE,
+        MAX_CAPABILITIES_BYTES,
+    )
+    expected = _wms_semantic_snapshot(
+        expected_document,
+        reviewed.catalog_layer,
+    )
+    live = _wms_semantic_snapshot(document, reviewed.catalog_layer)
+    if live != expected:
+        raise ReviewedOrthoEvidenceError(
+            "live ITACyL WMS semantics changed since the reviewed snapshot"
+        )
+    return {
+        "schema_version": LIVE_CAPABILITIES_GATE_SCHEMA,
+        "passed": True,
+        "phase": "parity_catalog",
+        "profile": reviewed.profile,
+        "selected_layer": reviewed.catalog_layer,
+        "snapshot_sha256": reviewed.catalog_capabilities_sha256,
+        "live_sha256": hashlib.sha256(document).hexdigest(),
+        "semantic_sha256": _canonical_sha256(expected),
+        "semantic_fields": [
+            "layer",
+            "title",
+            "abstract",
+            "crs",
+            "formats",
+            "styles",
+            "bounds",
+            "attribution",
+            "access_constraints",
+            "metadata",
+        ],
+    }
+
+
+def require_reviewed_ign_ortho_delivery_allowed(
+    *,
+    catalog_endpoint_url: str,
+    catalog_layer: str,
+    source_definition: Any,
+    validation_json: Any,
+    content_sha256: str,
+) -> dict[str, Any] | None:
+    """Validate the executable, immutable gate for promotion and serving."""
+
+    projection = reviewed_ign_ortho_source_projection(source_definition)
+    reviewed = reviewed_ign_ortho_substitution(
+        catalog_endpoint_url,
+        catalog_layer,
+    )
+    if projection is None:
+        if reviewed is None:
+            return None
+        raise ReviewedOrthoEvidenceError(
+            "stored ortho bytes do not have a reviewed source identity"
+        )
+    if reviewed is None:
+        raise ReviewedOrthoEvidenceError(
+            "reviewed ortho bytes no longer have their catalog identity"
+        )
+    if catalog_layer == "Ortofoto_2021":
+        raise ReviewedOrthoEvidenceError(
+            "the 2021 ortho delivery is permanently blocked"
+        )
+    if (
+        projection["profile"] != reviewed.profile
+        or projection["equivalence_status"] != reviewed.equivalence_status
+    ):
+        raise ReviewedOrthoEvidenceError(
+            "stored ortho bytes do not have the reviewed source identity"
+        )
+    if not isinstance(validation_json, dict):
+        raise ReviewedOrthoEvidenceError(
+            "stored ortho delivery has no validation evidence"
+        )
+    gate = validation_json.get("reviewed_ortho_parity_gate")
+    if not isinstance(gate, dict):
+        raise ReviewedOrthoEvidenceError(
+            "stored ortho delivery has no executable parity gate"
+        )
+    evidence_sha256 = gate.get("evidence_sha256")
+    unsigned = {key: value for key, value in gate.items() if key != "evidence_sha256"}
+    expected = {
+        "schema_version": PARITY_GATE_SCHEMA,
+        "passed": True,
+        "profile": reviewed.profile,
+        "evidence_profile_sha256": reviewed.evidence_profile_sha256,
+        "classification": reviewed.equivalence_status,
+        "required_attribution": reviewed.required_attribution,
+        "policy_sha256": _canonical_sha256(reviewed.parity_policy),
+        "delivery_content_sha256": content_sha256,
+    }
+    if (
+        any(unsigned.get(key) != value for key, value in expected.items())
+        or evidence_sha256 != _canonical_sha256(unsigned)
+        or not _valid_live_gate(
+            unsigned.get("selected_capabilities"),
+            reviewed=reviewed,
+            layer=reviewed.selected_layer,
+        )
+        or not _valid_live_gate(
+            unsigned.get("catalog_capabilities"),
+            reviewed=reviewed,
+            layer=reviewed.catalog_layer,
+        )
+        or not _valid_parity_measurements(unsigned, reviewed)
+    ):
+        raise ReviewedOrthoEvidenceError(
+            "stored ortho delivery parity evidence is invalid"
+        )
+    return {
+        **projection,
+        "required_attribution": reviewed.required_attribution,
+        "delivery_content_sha256": content_sha256,
+        "parity_evidence_sha256": evidence_sha256,
+    }
 
 
 @lru_cache(maxsize=1)
@@ -538,8 +739,8 @@ def _reviewed_substitutions() -> dict[str, ReviewedIgnOrthoSubstitution]:
                 "reviewed IGN equivalence status is invalid"
             )
         requirements = _text_list(
-            raw.get("parity_requirements"),
-            "parity requirements",
+            raw.get("review_notes"),
+            "review notes",
             maximum=16,
         )
         notice = _text(raw.get("public_notice"), "public notice", 2_000)
@@ -591,10 +792,16 @@ def _reviewed_substitutions() -> dict[str, ReviewedIgnOrthoSubstitution]:
             declared_resolutions_metres=declared_resolutions,
             promotion_eligible=status != "blocked",
             public_notice=notice,
-            parity_requirements=requirements,
+            review_notes=requirements,
+            parity_policy=_parity_policy(
+                profile=profile_name,
+                classification=status,
+            ),
             license_name=license_value["name"],
             license_url=license_value["url"],
-            required_attribution=license_value["attribution"],
+            required_attribution=_required_product_attribution(
+                selected_layer
+            ),
             bounds=dict(operations["bounds"]),
             min_zoom=operations["min_zoom"],
             max_zoom=operations["max_zoom"],
@@ -614,6 +821,539 @@ def _reviewed_substitutions() -> dict[str, ReviewedIgnOrthoSubstitution]:
             "reviewed IGN ortho coverage is incomplete"
         )
     return result
+
+
+def _required_product_attribution(selected_layer: str) -> str:
+    if selected_layer.startswith("PNOA") and selected_layer[4:].isdigit():
+        return (
+            f"Obra derivada de PNOA {selected_layer[4:]} "
+            "CC-BY 4.0 scne.es"
+        )
+    if selected_layer == "SIGPAC":
+        return (
+            "Obra derivada de Orto-SIGPAC 1997-2003 "
+            "CC-BY 4.0 scne.es"
+        )
+    if selected_layer == "Interministerial_1973-1986":
+        return (
+            "Obra derivada de Orto-Interministerial 1976-1986 "
+            "CC-BY 4.0 scne.es"
+        )
+    if selected_layer == "AMS_1956-1957":
+        return (
+            "Obra derivada de Orto-AMS 1956-1957 "
+            "CC-BY 4.0 ejercito.defensa.gob.es"
+        )
+    raise ReviewedOrthoEvidenceError(
+        "reviewed ortho product has no official attribution formula"
+    )
+
+
+def _parity_policy(
+    *,
+    profile: str,
+    classification: str,
+) -> dict[str, Any]:
+    exact = classification == "exact"
+    return {
+        "schema_version": PARITY_POLICY_SCHEMA,
+        "profile": profile,
+        "classification": classification,
+        "sample_plan": {
+            "schema_version": "siur-ortho-sample-plan/v1",
+            "minimum_sample_count": 12,
+            "tile_width": 256,
+            "tile_height": 256,
+            "crs": "EPSG:3857",
+            "coordinate_selection": "zoom-stratified-stable-v1",
+        },
+        "coverage_mask": {
+            "minimum_nonempty_samples_per_source": 1,
+            "minimum_mask_iou": 0.90 if exact else None,
+        },
+        "resolution_scale": {
+            "require_identical_coordinates": True,
+            "maximum_resolution_delta_metres_per_pixel": 0.0,
+            "maximum_scale_denominator_delta": 0.0,
+        },
+        "pixel_samples": {
+            "require_local_selected_digest_match": True,
+            "maximum_normalized_mean_absolute_error": (
+                0.12 if exact else None
+            ),
+            "comparison_is_classification_evidence": True,
+        },
+        "promotion": {
+            "eligible": classification != "blocked",
+            "immutable_degraded_classification": (
+                classification == "substitute_degraded"
+            ),
+        },
+    }
+
+
+def build_reviewed_ign_ortho_parity_gate(
+    *,
+    source_definition: Any,
+    content_sha256: str,
+    selected_capabilities: Any,
+    catalog_capabilities: Any,
+    measurements: Any,
+) -> dict[str, Any] | None:
+    """Build and self-validate the delivery gate from measured evidence."""
+
+    projection = require_reviewed_ign_ortho_acquisition_allowed(
+        source_definition
+    )
+    if projection is None:
+        return None
+    reviewed = _reviewed_substitutions_by_profile()[projection["profile"]]
+    if not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+        raise ReviewedOrthoEvidenceError(
+            "reviewed ortho delivery content hash is invalid"
+        )
+    unsigned = {
+        "schema_version": PARITY_GATE_SCHEMA,
+        "passed": True,
+        "profile": reviewed.profile,
+        "evidence_profile_sha256": reviewed.evidence_profile_sha256,
+        "classification": reviewed.equivalence_status,
+        "required_attribution": reviewed.required_attribution,
+        "policy_sha256": _canonical_sha256(reviewed.parity_policy),
+        "delivery_content_sha256": content_sha256,
+        "selected_capabilities": selected_capabilities,
+        "catalog_capabilities": catalog_capabilities,
+        "measurements": measurements,
+    }
+    gate = {
+        **unsigned,
+        "evidence_sha256": _canonical_sha256(unsigned),
+    }
+    require_reviewed_ign_ortho_delivery_allowed(
+        catalog_endpoint_url=reviewed.catalog_endpoint_url,
+        catalog_layer=reviewed.catalog_layer,
+        source_definition=source_definition,
+        validation_json={"reviewed_ortho_parity_gate": gate},
+        content_sha256=content_sha256,
+    )
+    return gate
+
+
+def _valid_live_gate(
+    value: Any,
+    *,
+    reviewed: ReviewedIgnOrthoSubstitution,
+    layer: str,
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    snapshot_sha256 = (
+        reviewed.capabilities_sha256
+        if layer == reviewed.selected_layer
+        else reviewed.catalog_capabilities_sha256
+    )
+    resource = (
+        CAPABILITIES_RESOURCE
+        if layer == reviewed.selected_layer
+        else CATALOG_CAPABILITIES_RESOURCE
+    )
+    expected_semantic = _wms_semantic_snapshot(
+        _resource_bytes(resource, MAX_CAPABILITIES_BYTES),
+        layer,
+    )
+    return (
+        value.get("schema_version") == LIVE_CAPABILITIES_GATE_SCHEMA
+        and value.get("passed") is True
+        and value.get("profile") == reviewed.profile
+        and value.get("selected_layer") == layer
+        and value.get("snapshot_sha256") == snapshot_sha256
+        and isinstance(value.get("live_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", value["live_sha256"]) is not None
+        and value.get("semantic_sha256")
+        == _canonical_sha256(expected_semantic)
+        and value.get("phase")
+        == (
+            "pre_promotion"
+            if layer == reviewed.selected_layer
+            else "parity_catalog"
+        )
+    )
+
+
+def _valid_parity_measurements(
+    gate: dict[str, Any],
+    reviewed: ReviewedIgnOrthoSubstitution,
+) -> bool:
+    value = gate.get("measurements")
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "sample_count",
+        "coordinate_sha256",
+        "selected_sample_sha256",
+        "local_sample_sha256",
+        "catalog_sample_sha256",
+        "coverage_mask",
+        "resolution_scale",
+        "pixel_samples",
+    }:
+        return False
+    count = value.get("sample_count")
+    digests = (
+        value.get("coordinate_sha256"),
+        value.get("selected_sample_sha256"),
+        value.get("local_sample_sha256"),
+        value.get("catalog_sample_sha256"),
+    )
+    coverage = value.get("coverage_mask")
+    resolution = value.get("resolution_scale")
+    pixels = value.get("pixel_samples")
+    policy = reviewed.parity_policy
+    minimum = policy["sample_plan"]["minimum_sample_count"]
+    if (
+        value.get("schema_version")
+        != "siur-reviewed-ortho-parity-measurements/v1"
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or not minimum <= count <= 256
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"[0-9a-f]{64}", item) is None
+            for item in digests
+        )
+        or value["selected_sample_sha256"]
+        != value["local_sample_sha256"]
+        or not isinstance(coverage, dict)
+        or not isinstance(resolution, dict)
+        or not isinstance(pixels, dict)
+    ):
+        return False
+    selected_nonempty = coverage.get("selected_nonempty_samples")
+    catalog_nonempty = coverage.get("catalog_nonempty_samples")
+    mask_iou = coverage.get("minimum_mask_iou")
+    mae = pixels.get("normalized_mean_absolute_error")
+    sampled_zooms = resolution.get("sampled_zooms")
+    if (
+        isinstance(selected_nonempty, bool)
+        or not isinstance(selected_nonempty, int)
+        or isinstance(catalog_nonempty, bool)
+        or not isinstance(catalog_nonempty, int)
+        or not 1 <= selected_nonempty <= count
+        or not 1 <= catalog_nonempty <= count
+        or not isinstance(mask_iou, (int, float))
+        or isinstance(mask_iou, bool)
+        or not 0 <= float(mask_iou) <= 1
+        or resolution.get("tile_width") != 256
+        or resolution.get("tile_height") != 256
+        or resolution.get("crs") != "EPSG:3857"
+        or not isinstance(sampled_zooms, list)
+        or not sampled_zooms
+        or any(
+            isinstance(zoom, bool)
+            or not isinstance(zoom, int)
+            or not reviewed.min_zoom <= zoom <= reviewed.max_zoom
+            for zoom in sampled_zooms
+        )
+        or resolution.get("maximum_resolution_delta_metres_per_pixel")
+        != 0.0
+        or resolution.get("maximum_scale_denominator_delta") != 0.0
+        or not isinstance(mae, (int, float))
+        or isinstance(mae, bool)
+        or not 0 <= float(mae) <= 1
+    ):
+        return False
+    if reviewed.equivalence_status == "exact":
+        return (
+            float(mask_iou)
+            >= policy["coverage_mask"]["minimum_mask_iou"]
+            and float(mae)
+            <= policy["pixel_samples"][
+                "maximum_normalized_mean_absolute_error"
+            ]
+        )
+    return (
+        reviewed.equivalence_status == "substitute_degraded"
+        and policy["promotion"]["immutable_degraded_classification"] is True
+    )
+
+
+def _wms_semantic_snapshot(
+    body: bytes,
+    selected_layer: str,
+) -> dict[str, Any]:
+    if not isinstance(body, bytes) or not 1 <= len(body) <= MAX_CAPABILITIES_BYTES:
+        raise ReviewedOrthoEvidenceError(
+            "live WMS capabilities size is invalid"
+        )
+    upper = body.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise ReviewedOrthoEvidenceError(
+            "live WMS capabilities contain forbidden declarations"
+        )
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError as error:
+        raise ReviewedOrthoEvidenceError(
+            "live WMS capabilities XML is invalid"
+        ) from error
+    elements = 0
+    text_bytes = 0
+    stack: list[tuple[ElementTree.Element, int]] = [(root, 1)]
+    while stack:
+        element, depth = stack.pop()
+        elements += 1
+        if elements > 100_000 or depth > 64:
+            raise ReviewedOrthoEvidenceError(
+                "live WMS capabilities structure is too large"
+            )
+        text_bytes += len((element.text or "").encode("utf-8"))
+        text_bytes += len((element.tail or "").encode("utf-8"))
+        if text_bytes > 4 * 1024 * 1024:
+            raise ReviewedOrthoEvidenceError(
+                "live WMS capabilities text is too large"
+            )
+        stack.extend((child, depth + 1) for child in element)
+    if root.get("version") != "1.3.0":
+        raise ReviewedOrthoEvidenceError(
+            "live WMS capabilities version is invalid"
+        )
+    service = next(
+        (
+            item
+            for item in root
+            if _local_name(item.tag) == "Service"
+        ),
+        None,
+    )
+    service_constraints = _child_text(
+        service,
+        "AccessConstraints",
+    )
+    formats: list[str] = []
+    for element in root.iter():
+        if _local_name(element.tag) == "GetMap":
+            formats = sorted(
+                {
+                    text
+                    for child in element
+                    if _local_name(child.tag) == "Format"
+                    for text in [_element_text(child)]
+                    if text
+                }
+            )
+            break
+    selected: dict[str, Any] | None = None
+
+    def visit(
+        layer: ElementTree.Element,
+        *,
+        inherited_crs: tuple[str, ...],
+        inherited_bounds: tuple[dict[str, Any], ...],
+        inherited_styles: tuple[dict[str, Any], ...],
+        inherited_attribution: dict[str, str | None] | None,
+        inherited_constraints: str | None,
+    ) -> None:
+        nonlocal selected
+        direct_crs = tuple(
+            token
+            for child in layer
+            if _local_name(child.tag) in {"CRS", "SRS"}
+            for token in (_element_text(child) or "").split()
+        )
+        crs = tuple(sorted(set((*inherited_crs, *direct_crs))))
+        direct_bounds = tuple(
+            _semantic_bounds(child)
+            for child in layer
+            if _local_name(child.tag)
+            in {"EX_GeographicBoundingBox", "BoundingBox", "LatLonBoundingBox"}
+        )
+        bounds = direct_bounds or inherited_bounds
+        direct_styles = tuple(
+            _semantic_style(child)
+            for child in layer
+            if _local_name(child.tag) == "Style"
+        )
+        styles = tuple(
+            {
+                json.dumps(item, ensure_ascii=False, sort_keys=True): item
+                for item in (*inherited_styles, *direct_styles)
+            }.values()
+        )
+        direct_attribution = next(
+            (
+                _semantic_attribution(child)
+                for child in layer
+                if _local_name(child.tag) == "Attribution"
+            ),
+            None,
+        )
+        attribution = direct_attribution or inherited_attribution
+        constraints = (
+            _child_text(layer, "AccessConstraints")
+            or inherited_constraints
+        )
+        name = _child_text(layer, "Name")
+        if name == selected_layer:
+            sorted_styles = sorted(
+                styles,
+                key=lambda item: json.dumps(item, sort_keys=True),
+            )
+            metadata = sorted(
+                (
+                    _semantic_metadata(child)
+                    for child in layer
+                    if _local_name(child.tag) == "MetadataURL"
+                ),
+                key=lambda item: json.dumps(item, sort_keys=True),
+            )
+            selected = {
+                "layer": name,
+                "title": _child_text(layer, "Title"),
+                "abstract": _child_text(layer, "Abstract"),
+                "crs": list(crs),
+                "formats": formats,
+                "styles": sorted_styles,
+                "bounds": list(bounds),
+                "attribution": attribution,
+                "access_constraints": {
+                    "service": service_constraints,
+                    "layer": constraints,
+                },
+                "metadata": metadata,
+            }
+        for child in layer:
+            if _local_name(child.tag) == "Layer":
+                visit(
+                    child,
+                    inherited_crs=crs,
+                    inherited_bounds=bounds,
+                    inherited_styles=styles,
+                    inherited_attribution=attribution,
+                    inherited_constraints=constraints,
+                )
+
+    for capability in root.iter():
+        if _local_name(capability.tag) != "Capability":
+            continue
+        for child in capability:
+            if _local_name(child.tag) == "Layer":
+                visit(
+                    child,
+                    inherited_crs=(),
+                    inherited_bounds=(),
+                    inherited_styles=(),
+                    inherited_attribution=None,
+                    inherited_constraints=None,
+                )
+        break
+    if selected is None:
+        raise ReviewedOrthoEvidenceError(
+            "live WMS omits the reviewed layer"
+        )
+    return selected
+
+
+def _semantic_bounds(element: ElementTree.Element) -> dict[str, Any]:
+    kind = _local_name(element.tag)
+    if kind == "EX_GeographicBoundingBox":
+        return {
+            "kind": kind,
+            "west": _child_text(element, "westBoundLongitude"),
+            "south": _child_text(element, "southBoundLatitude"),
+            "east": _child_text(element, "eastBoundLongitude"),
+            "north": _child_text(element, "northBoundLatitude"),
+        }
+    return {
+        "kind": kind,
+        "crs": element.get("CRS") or element.get("SRS"),
+        "minx": element.get("minx"),
+        "miny": element.get("miny"),
+        "maxx": element.get("maxx"),
+        "maxy": element.get("maxy"),
+        "resx": element.get("resx"),
+        "resy": element.get("resy"),
+    }
+
+
+def _semantic_attribution(
+    element: ElementTree.Element,
+) -> dict[str, str | None]:
+    return {
+        "title": _child_text(element, "Title"),
+        "url": _first_online_resource(element),
+    }
+
+
+def _semantic_style(element: ElementTree.Element) -> dict[str, Any]:
+    legends: list[dict[str, str | None]] = []
+    for child in element:
+        if _local_name(child.tag) != "LegendURL":
+            continue
+        legends.append(
+            {
+                "width": child.get("width"),
+                "height": child.get("height"),
+                "format": _child_text(child, "Format"),
+                "url": _first_online_resource(child),
+            }
+        )
+    return {
+        "name": _child_text(element, "Name"),
+        "title": _child_text(element, "Title"),
+        "abstract": _child_text(element, "Abstract"),
+        "legends": legends,
+    }
+
+
+def _semantic_metadata(element: ElementTree.Element) -> dict[str, str | None]:
+    return {
+        "type": element.get("type"),
+        "format": _child_text(element, "Format"),
+        "url": _first_online_resource(element),
+    }
+
+
+def _first_online_resource(element: ElementTree.Element) -> str | None:
+    for child in element.iter():
+        if _local_name(child.tag) == "OnlineResource":
+            return child.get(_XLINK_HREF) or child.get("href")
+    return None
+
+
+def _child_text(
+    element: ElementTree.Element | None,
+    name: str,
+) -> str | None:
+    if element is None:
+        return None
+    for child in element:
+        if _local_name(child.tag) == name:
+            return _element_text(child)
+    return None
+
+
+def _element_text(element: ElementTree.Element) -> str | None:
+    value = "".join(element.itertext()).strip()
+    return value or None
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _canonical_sha256(value: Any) -> str:
+    try:
+        body = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ReviewedOrthoEvidenceError(
+            "reviewed ortho evidence is not canonical JSON"
+        ) from error
+    return hashlib.sha256(body).hexdigest()
 
 
 def _declared_castilla_y_leon_coverage(
@@ -775,7 +1515,7 @@ def _validate_profile_header(document: dict[str, Any]) -> None:
             "Creative Commons Attribution 4.0 International (CC BY 4.0)"
         ),
         "url": LICENSE_URL,
-        "attribution": REQUIRED_ATTRIBUTION,
+        "attribution_rule": ATTRIBUTION_RULE,
     }:
         raise ReviewedOrthoEvidenceError(
             "reviewed ortho license evidence is invalid"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+from importlib.resources import files
 import io
 import json
 from pathlib import Path
@@ -53,6 +54,13 @@ from app.reference_layers.safe_download import HTTPSDownloadResult
 from app.reference_layers.source_discovery import (
     SourceCandidate,
     acquisition_candidates,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    CAPABILITIES_RESOURCE as IGN_CAPABILITIES_RESOURCE,
+    CATALOG_CAPABILITIES_RESOURCE as ITACYL_CAPABILITIES_RESOURCE,
+    CATALOG_ENDPOINT_URL,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
 )
 
 
@@ -3107,6 +3115,83 @@ def test_wms_jpeg_recipe_disables_impossible_transparency(store, limits):
         metadata_kind="reference-tile-source/v1",
     )["descriptor"]
     assert descriptor["kvp"]["transparent"] == "FALSE"
+
+
+def test_reviewed_ortho_acquisition_requires_both_live_semantic_gates(
+    store,
+    limits,
+):
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2020",
+    )
+    assert reviewed is not None
+    definition = reviewed_ign_ortho_expected_source_definition(reviewed)
+    draft = SourceCandidate(
+        **definition,
+        source_key="source:reviewed-ortho",
+        definition_sha256="0" * 64,
+    )
+    source = replace(
+        draft,
+        definition_sha256=source_candidate_definition_sha256(draft),
+    )
+    package = files("app.reference_layers")
+    selected = package.joinpath(IGN_CAPABILITIES_RESOURCE).read_bytes()
+    catalog = package.joinpath(ITACYL_CAPABILITIES_RESOURCE).read_bytes()
+    roomy_limits = replace(
+        limits,
+        max_probe_bytes=512 * 1024,
+        max_page_bytes=512 * 1024,
+        max_total_bytes=4 * 1024 * 1024,
+    )
+
+    def handler(url, _etag, _modified):
+        return Response(
+            catalog if "orto.wms.itacyl.es" in url else selected,
+            "application/xml",
+        )
+
+    pipeline = ReferenceAcquisitionPipeline(
+        store,
+        limits=roomy_limits,
+        downloader_factory=FakeTransport(handler),
+    )
+    result = pipeline.acquire(source)
+    gates = [
+        (
+            item.metadata.get("reviewed_ortho_capabilities_gate")
+            or item.metadata["probe"]["reviewed_ortho_capabilities_gate"]
+        )
+        for item in result.artifacts
+        if item.artifact_kind == "capabilities"
+    ]
+    assert {gate["phase"] for gate in gates} == {
+        "pre_download",
+        "parity_catalog",
+    }
+    promotion_gate = pipeline.revalidate_reviewed_ortho_capabilities(source)
+    assert promotion_gate is not None
+    assert promotion_gate["selected_capabilities"]["phase"] == (
+        "pre_promotion"
+    )
+    assert promotion_gate["catalog_capabilities"]["phase"] == (
+        "parity_catalog"
+    )
+
+    changed = selected.replace(b"<Title>PNOA 2020</Title>", b"<Title>Otro</Title>")
+    with pytest.raises(AcquisitionValidationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=roomy_limits,
+            downloader_factory=FakeTransport(
+                lambda url, _etag, _modified: Response(
+                    catalog if "orto.wms.itacyl.es" in url else changed,
+                    "application/xml",
+                )
+            ),
+        ).acquire(source)
+    assert error.value.code == "reviewed_ortho_capabilities_changed"
 
 
 def test_wms_supertile_opt_in_requires_and_preserves_reviewed_siur_profile(

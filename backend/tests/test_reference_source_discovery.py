@@ -1204,7 +1204,13 @@ def test_itacyl_ortho_builds_exact_or_visible_degraded_source_but_blocks_2021(
     assert candidate.config["reviewed_equivalence"][
         "promotion_eligible"
     ] is True
-    assert "orto.wms.itacyl.es" not in str(candidate_definition(candidate))
+    assert candidate.config["reviewed_equivalence"][
+        "catalog_capabilities_url"
+    ] == (
+        "https://orto.wms.itacyl.es/WMS"
+        "?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0"
+    )
+    assert candidate.endpoint_url == "https://www.ign.es/wms/pnoa-historico"
 
 
 def test_source_identity_changes_with_effective_definition_only() -> None:

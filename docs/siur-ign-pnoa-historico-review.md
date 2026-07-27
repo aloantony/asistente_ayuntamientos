@@ -21,12 +21,16 @@ publicada.
 - Perfil revisado de las 20 identidades:
   `backend/app/reference_layers/evidence/ign_pnoa_historico/equivalence-profile-v1.json`,
   SHA-256
-  `285037c16462406560a71c738fca14c2402e76f0159d16e9a608974ee5e396dd`.
+  `951082e32627c1744e7f04bb4592a315857c08047c3240cf47187c5ebefd1187`.
 - Fuente seleccionada cuando la equivalencia es elegible:
   `https://www.ign.es/wms/pnoa-historico`, protocolo `wms_tiles`, JPEG y estilo
   vacío.
-- Atribución que debe conservar una revisión humana que permita servicio local:
-  `Sistema Cartográfico Nacional · Instituto Geográfico Nacional de España`.
+- La atribución no es genérica: se conserva por capa con la fórmula oficial de
+  obra derivada. Ejemplos: `Obra derivada de PNOA 2020 CC-BY 4.0 scne.es`,
+  `Obra derivada de Orto-SIGPAC 1997-2003 CC-BY 4.0 scne.es`,
+  `Obra derivada de Orto-Interministerial 1976-1986 CC-BY 4.0 scne.es` y
+  `Obra derivada de Orto-AMS 1956-1957 CC-BY 4.0
+  ejercito.defensa.gob.es`.
 
 Los tres documentos se verifican por hash en cada carga. Los títulos, resúmenes
 y registros de metadatos del perfil también deben coincidir con los dos
@@ -35,10 +39,12 @@ GetCapabilities versionados.
 ## Resultado por capa
 
 `exact` significa aquí «mismo producto PNOA y año, con declaraciones de
-cobertura y resolución compatibles en ambos GetCapabilities». No afirma
-igualdad píxel a píxel ni que la pirámide local a zoom 15 conserve la resolución
-nativa del vuelo. `substitute_degraded` sí se puede entregar localmente, pero su
-motivo permanece visible e inmutable y nunca se presenta como equivalente.
+cobertura y resolución compatibles en ambos GetCapabilities». La clasificación
+por sí sola no autoriza promoción: la entrega debe conservar además un gate
+ejecutable con comparación de máscaras de cobertura, tamaño, resolución,
+escala, píxeles representativos y coincidencia entre la muestra IGN y los bytes
+locales. `substitute_degraded` también necesita ese gate; su diferencia queda
+visible e inmutable y nunca se presenta como equivalente.
 
 | SIUR | IGN | Cobertura/resolución declarada para Castilla y León | Estado | Fuente automática |
 | --- | --- | --- | --- | --- |
@@ -90,12 +96,47 @@ clasificación incorporada a la definición hash-bound. La única estrategia
 2. Una autorización humana puede permitir descarga y servicio de una degradada,
    pero no puede cambiar su clasificación a `exact`; cualquier alteración rompe
    la definición y la evidencia esperadas.
-3. Los metadatos locales conservan la comparación degradada y rechazan 2021.
-4. El API y el árbol de capas muestran el estado y el aviso sin exponer URLs de
-   adquisición ni términos internos.
-5. Cada una de las 19 fuentes necesita su propia revisión
+3. Antes de descargar teselas y de promover se comparan las capacidades vivas
+   IGN e ITACyL con la semántica versionada: identidad, título, resumen, CRS,
+   formatos, estilos, extensión, atribución, restricciones y metadatos. Un
+   cambio semántico exige revisión y falla cerrado.
+4. La versión candidata puede prepararse, pero no promoverse sin el gate de
+   paridad persistido y ligado por hash al contenido local.
+5. Servir, reactivar o revertir vuelve a validar la fuente congelada, la
+   clasificación y el gate. Cualquier entrega histórica de `Ortofoto_2021` y
+   cualquier versión anterior sin la evidencia nueva quedan cercadas.
+6. Los metadatos locales conservan clasificación, atribución, hash de los bytes
+   activos y hash de paridad.
+7. El API y el árbol de capas distinguen una fuente `candidate` de una
+   `active_delivery`; si hay bytes activos nunca los describen con la candidata
+   actual.
+8. Cada una de las 19 fuentes necesita su propia revisión
    `siur-mirror-authorization-v1`, ligada a su `source_id` y
    `source_definition_sha256`, antes del primer acceso de red.
+
+## Qué debe revisar Antonio
+
+Para cada una de las 19 fuentes, Antonio debe recibir el documento exacto
+`siur-mirror-authorization-v1` y comprobar:
+
+1. que `source_id`, `source_definition_sha256`, capa IGN y capa SIUR son las que
+   figuran en esta matriz;
+2. que la fórmula de atribución corresponde al producto y fecha concretos y se
+   mostrará en mapa, metadatos y servicio;
+3. si las condiciones oficiales permiten, para el uso real del despliegue,
+   las tres decisiones separadas: descarga masiva de teselas, conservación
+   estable en nuestros servidores y re-servicio local a los usuarios;
+4. que los permisos `metadata_probe`, `dataset_download`, `bulk_tile_seed`,
+   `local_storage` y `local_service` reflejan literalmente su decisión, sin
+   ampliar un «sí» parcial;
+5. que las trece sustituciones degradadas siguen rotuladas como degradadas en
+   selector, panel y metadatos, y que `Ortofoto_2021` no se autoriza;
+6. que los hashes `review_sha256` y `document_sha256` del dry-run son los mismos
+   que se aplicarán.
+
+Las comprobaciones técnicas de capacidades y píxeles evitan datos erróneos,
+pero no deciden por Antonio los permisos jurídicos de descarga, conservación o
+re-servicio. El sistema no genera ni aprueba automáticamente esas revisiones.
 
 Este cambio no crea ni simula esas 19 revisiones humanas. La evidencia de
 licencia incluida en el perfil permite preparar la revisión; no concede por sí

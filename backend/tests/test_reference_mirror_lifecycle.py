@@ -71,6 +71,11 @@ from app.reference_layers.models import (
     ReferenceSyncRunArtifact,
 )
 from app.reference_layers.source_probes import SourceProbe
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
+)
 from app.reference_layers.style_parity import persist_style_parity_plan
 from app.users.models import User
 from support_reference_mirror_authorization import (
@@ -96,6 +101,80 @@ def _transition_verifier(store):
             version,
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("catalog_layer", "validation"),
+    [
+        ("Ortofoto_2021", {"passed": True}),
+        ("Ortofoto_2020", {"passed": True}),
+    ],
+)
+def test_lifecycle_fences_2021_and_legacy_ortho_versions(
+    db,
+    catalog_layer,
+    validation,
+) -> None:
+    provider_key = f"ortho-lifecycle-{catalog_layer.casefold()}"
+    apply_catalog_definition(
+        db,
+        ReferenceCatalogDefinition(
+            provider_key=provider_key,
+            source_url="https://example.test/ortho.json",
+            raw_catalog={"revision": 1},
+            services=(
+                ReferenceServiceDefinition(
+                    source_key="ortho",
+                    title="Ortofotos",
+                    upstream_protocol="wms",
+                    base_url=CATALOG_ENDPOINT_URL,
+                ),
+            ),
+            layers=(
+                ReferenceLayerDefinition(
+                    source_key="ortho-layer",
+                    node_type="layer",
+                    title=catalog_layer,
+                    service_key="ortho",
+                    remote_name=catalog_layer,
+                    role="overlay",
+                    renderer="raster_tile",
+                    delivery_mode="mirror",
+                ),
+            ),
+            retrieved_at=NOW,
+        ),
+    )
+    layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == provider_key,
+            ReferenceLayer.remote_name == catalog_layer,
+        )
+    )
+    assert layer is not None
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        catalog_layer,
+    )
+    assert reviewed is not None
+    source_definition = reviewed_ign_ortho_expected_source_definition(
+        reviewed
+    )
+
+    with pytest.raises(MirrorPromotionConflict):
+        reference_mirror_lifecycle._validate_reviewed_ortho_version(
+            db,
+            version=SimpleNamespace(
+                provider_key=provider_key,
+                layer_id=layer.id,
+                validation_json=validation,
+                content_sha256="a" * 64,
+            ),
+            run=SimpleNamespace(
+                source_definition_json=source_definition,
+            ),
+            layer=layer,
+        )
 
 
 @pytest.fixture

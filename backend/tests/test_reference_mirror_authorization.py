@@ -259,6 +259,64 @@ def test_authorization_cannot_override_reviewed_ortho_equivalence_block(db) -> N
         plan_mirror_authorization_review(db, document)
 
 
+def test_reviewed_ortho_requires_exact_official_product_attribution(db) -> None:
+    _, _, _, source = _seed_source(
+        db,
+        provider_key="auth-exact-ortho-attribution",
+        target_kind="tiles",
+    )
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2020",
+    )
+    assert reviewed is not None
+    definition = reviewed_ign_ortho_expected_source_definition(reviewed)
+    source.protocol = definition["protocol"]
+    source.target_kind = definition["target_kind"]
+    source.endpoint_url = definition["endpoint_url"]
+    source.remote_name = definition["remote_name"]
+    source.sync_strategy = definition["sync_strategy"]
+    source.priority = definition["priority"]
+    source.config_json = definition["config"]
+    source.source_format = definition["config"]["format"]
+    source.definition_sha256 = canonical_json_sha256(definition)
+    db.commit()
+    origins = [
+        "https://www.ign.es",
+        "https://orto.wms.itacyl.es",
+    ]
+
+    wrong = mirror_authorization_document(
+        db,
+        source,
+        allowed_origins=origins,
+        attribution="IGN",
+    )
+    with pytest.raises(
+        MirrorAuthorizationDocumentError,
+        match="license or attribution",
+    ):
+        plan_mirror_authorization_review(db, wrong)
+
+    correct_value = json.loads(
+        mirror_authorization_document(
+            db,
+            source,
+            allowed_origins=origins,
+            attribution=reviewed.required_attribution,
+        )
+    )
+    correct_value["license"]["name"] = definition["config"][
+        "reviewed_equivalence"
+    ]["license_name"]
+    correct_value["license"]["url"] = definition["config"][
+        "reviewed_equivalence"
+    ]["license_url"]
+    correct = json.dumps(correct_value).encode()
+    plan = plan_mirror_authorization_review(db, correct)
+    assert plan.evidence.attribution == reviewed.required_attribution
+
+
 def test_plan_apply_requires_exact_hash_and_linear_chain(db) -> None:
     _, _, _, source = _seed_source(db)
     document = _approved_document(db, source)
