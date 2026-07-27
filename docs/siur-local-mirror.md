@@ -117,6 +117,27 @@ calidad. La comprobación diaria usa, cuando sean fiables, `ETag`,
 periódicamente una comprobación completa para detectar servidores que no
 mantienen correctamente esos metadatos.
 
+Una fuente WFS que no anuncie `PagingIsTransactionSafe=true` no puede usar la
+paginación heredada. Su configuración revisada debe declarar uno de dos
+contratos. `wfs_snapshot.mode=single_response` descarga la colección completa
+sin `count`, `startIndex` ni `sortBy`, elimina identificadores y metadatos
+volátiles y ordena localmente el multiconjunto por contenido canónico; así se
+preservan incluso entidades idénticas sin inventar una clave remota.
+`wfs_snapshot.mode=paged` exige además `identity_properties`, construye con
+ellas un `sortBy` ascendente y comprueba identidad única y orden estrictamente
+creciente entre páginas.
+
+Ambos modos obtienen antes el total mediante un `GetFeature` independiente con
+`resultType=hits&count=1`, leen dos veces la colección completa y comparan el
+conteo, la secuencia o multiconjunto de identidades y el SHA-256 canónico de
+todo el contenido. El total y los bytes observados se acotan de forma acumulada
+incluyendo la segunda pasada. Los identificadores efímeros del servidor se
+sustituyen por identificadores locales deterministas. Una página duplicada, una
+mutación, una clave ausente, un total divergente o dos pasadas que no convergen
+aborta la adquisición sin crear un manifiesto promocionable. Este control
+técnico no concede derechos de descarga, conservación ni servicio: siguen
+siendo obligatorias las revisiones y autorizaciones persistidas.
+
 ## Almacenamiento y ciclo de vida
 
 Los originales retenidos y los derivados de fichero usan claves
