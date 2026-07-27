@@ -99,6 +99,30 @@ class ReferenceLocalContext:
     delivery: LocalDeliverySelection
 
 
+def _require_delivery_fence(
+    context: ReferenceWMSContext | ReferenceLocalContext,
+    *,
+    version_id: int | None,
+    generation: int | None,
+) -> None:
+    if (version_id is None) != (generation is None):
+        raise HTTPException(
+            status_code=422,
+            detail="Version and generation must be provided together",
+        )
+    if version_id is None or generation is None:
+        return
+    if (
+        not isinstance(context, ReferenceLocalContext)
+        or context.delivery.version_id != version_id
+        or context.delivery.generation != generation
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Reference delivery version changed",
+        )
+
+
 @router.get(
     "/organizations/{organization_id}/reference-layers/{layer_id}"
     "/tiles/{z}/{x}/{y}.png",
@@ -114,6 +138,8 @@ def get_reference_layer_tile(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     style_id: Annotated[int | None, Query(ge=1)] = None,
+    version_id: Annotated[int | None, Query(ge=1)] = None,
+    generation: Annotated[int | None, Query(ge=1)] = None,
 ) -> Response:
     context = _resolve_delivery_context(
         db,
@@ -122,6 +148,11 @@ def get_reference_layer_tile(
         layer_id=layer_id,
         style_id=style_id,
         operation="tile",
+    )
+    _require_delivery_fence(
+        context,
+        version_id=version_id,
+        generation=generation,
     )
     _require_rate_limit(_tile_rate_limiter, "tile", current_user.id)
     _require_tile_scope(context.layer, z=z, x=x, y=y)
@@ -166,6 +197,8 @@ def get_reference_layer_legend(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     style_id: Annotated[int | None, Query(ge=1)] = None,
+    version_id: Annotated[int | None, Query(ge=1)] = None,
+    generation: Annotated[int | None, Query(ge=1)] = None,
 ) -> Response:
     context = _resolve_delivery_context(
         db,
@@ -174,6 +207,11 @@ def get_reference_layer_legend(
         layer_id=layer_id,
         style_id=style_id,
         operation="legend",
+    )
+    _require_delivery_fence(
+        context,
+        version_id=version_id,
+        generation=generation,
     )
     _require_rate_limit(_legend_rate_limiter, "legend", current_user.id)
     if isinstance(context, ReferenceLocalContext):
@@ -215,6 +253,8 @@ def identify_reference_layer(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     style_id: Annotated[int | None, Query(ge=1)] = None,
+    version_id: Annotated[int | None, Query(ge=1)] = None,
+    generation: Annotated[int | None, Query(ge=1)] = None,
     feature_count: Annotated[int, Query(ge=1, le=10)] = 5,
 ) -> JSONResponse:
     context = _resolve_delivery_context(
@@ -225,6 +265,11 @@ def identify_reference_layer(
         style_id=style_id,
         require_queryable=True,
         operation="identify",
+    )
+    _require_delivery_fence(
+        context,
+        version_id=version_id,
+        generation=generation,
     )
     _require_rate_limit(_identify_rate_limiter, "identify", current_user.id)
     _require_tile_scope(context.layer, z=z, x=x, y=y)
@@ -479,6 +524,7 @@ def _render_local_tile(
         rendered=rendered,
         cache_status=cache_status,
         version_id=context.delivery.version_id,
+        generation=context.delivery.generation,
     )
 
 
@@ -508,6 +554,7 @@ def _render_local_legend(
         rendered=rendered,
         cache_status="GWC",
         version_id=context.delivery.version_id,
+        generation=context.delivery.generation,
     )
 
 
@@ -554,6 +601,7 @@ def _render_local_identify(
             "Vary": "Authorization, Cookie",
             "X-Content-Type-Options": "nosniff",
             "X-Reference-Version": str(context.delivery.version_id),
+            "X-Reference-Generation": str(context.delivery.generation),
         },
     )
 
@@ -564,6 +612,7 @@ def _local_binary_response(
     rendered: LocalGeoServerResponse | LocalTileArchiveResponse,
     cache_status: str,
     version_id: int,
+    generation: int,
 ) -> Response:
     headers = {
         "Cache-Control": "private, max-age=300",
@@ -572,6 +621,7 @@ def _local_binary_response(
         "X-Content-Type-Options": "nosniff",
         "X-Reference-Cache": cache_status,
         "X-Reference-Version": str(version_id),
+        "X-Reference-Generation": str(generation),
     }
     if _etag_matches(request.headers.get("if-none-match"), rendered.etag):
         return Response(status_code=304, headers=headers)

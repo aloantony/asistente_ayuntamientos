@@ -49,6 +49,8 @@ type MunicipalMapProps = {
   onAreaSelectionChange?: (bounds: MapBounds | null) => void;
   onLocationError?: (message: string) => void;
   onSiurIdentify?: (point: SiurIdentifyPoint) => void;
+  onSiurTileError?: (layerId: number, layerTitle: string) => void;
+  onSiurTileLoad?: (layerId: number) => void;
   onSelectItem: (item: GeoMapItem) => void;
   onMapContextMenu?: (payload: {
     latitude: number;
@@ -70,6 +72,7 @@ type SiurTileLayerRecord = {
   layer: TileLayer;
   signature: string;
   url: string;
+  errorNotified: boolean;
 };
 
 type AreaDragState = {
@@ -379,11 +382,19 @@ export function MunicipalMap({
   onMapContextMenu,
   onSelectItem,
   onSiurIdentify,
+  onSiurTileError,
+  onSiurTileLoad,
 }: MunicipalMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<LeafletModule | null>(null);
   const tileLayerRef = useRef<TileLayer | null>(null);
+  const baseTileLayerRecordRef = useRef<{
+    layerId: number;
+    signature: string;
+    url: string;
+    errorNotified: boolean;
+  } | null>(null);
   const siurTileLayersRef = useRef<Map<number, SiurTileLayerRecord>>(new Map());
   const markerRecordsRef = useRef<Map<string, MarkerRecord>>(new Map());
   const markerBoundsRef = useRef<LatLngBounds | null>(null);
@@ -414,6 +425,8 @@ export function MunicipalMap({
   const onMapContextMenuRef = useRef(onMapContextMenu);
   const onSelectItemRef = useRef(onSelectItem);
   const onSiurIdentifyRef = useRef(onSiurIdentify);
+  const onSiurTileErrorRef = useRef(onSiurTileError);
+  const onSiurTileLoadRef = useRef(onSiurTileLoad);
   const siurLayersRef = useRef(siurLayers);
 
   focusLocationRef.current = focusLocation;
@@ -427,6 +440,8 @@ export function MunicipalMap({
   onMapContextMenuRef.current = onMapContextMenu;
   onSelectItemRef.current = onSelectItem;
   onSiurIdentifyRef.current = onSiurIdentify;
+  onSiurTileErrorRef.current = onSiurTileError;
+  onSiurTileLoadRef.current = onSiurTileLoad;
   siurLayersRef.current = siurLayers;
 
   const focusLatitude = focusLocation?.latitude;
@@ -698,6 +713,7 @@ export function MunicipalMap({
       mapRef.current = null;
       leafletRef.current = null;
       tileLayerRef.current = null;
+      baseTileLayerRecordRef.current = null;
       siurTileLayers.clear();
       markerRecords.clear();
       markerBoundsRef.current = null;
@@ -715,24 +731,70 @@ export function MunicipalMap({
       return;
     }
 
-    tileLayerRef.current?.remove();
-    tileLayerRef.current = null;
     if (!selectedBaseMap) {
+      tileLayerRef.current?.remove();
+      tileLayerRef.current = null;
+      baseTileLayerRecordRef.current = null;
       return;
     }
+    const signature = JSON.stringify([
+      selectedBaseMap.layerId,
+      selectedBaseMap.attribution,
+      selectedBaseMap.minZoom,
+      selectedBaseMap.maxZoom,
+      selectedBaseMap.bounds,
+    ]);
+    const existing = baseTileLayerRecordRef.current;
+    if (
+      existing &&
+      tileLayerRef.current &&
+      existing.layerId === selectedBaseMap.layerId &&
+      existing.signature === signature
+    ) {
+      if (existing.url !== selectedBaseMap.tileUrl) {
+        tileLayerRef.current.setUrl(selectedBaseMap.tileUrl);
+        existing.url = selectedBaseMap.tileUrl;
+        existing.errorNotified = false;
+      }
+      return;
+    }
+    tileLayerRef.current?.remove();
+    tileLayerRef.current = null;
+    baseTileLayerRecordRef.current = null;
     const bounds = selectedBaseMap.bounds
       ? L.latLngBounds(
           [selectedBaseMap.bounds.south, selectedBaseMap.bounds.west],
           [selectedBaseMap.bounds.north, selectedBaseMap.bounds.east],
         )
       : undefined;
-    tileLayerRef.current = L.tileLayer(selectedBaseMap.tileUrl, {
+    const tileLayer = L.tileLayer(selectedBaseMap.tileUrl, {
       attribution: selectedBaseMap.attribution ?? undefined,
       bounds,
       maxZoom: selectedBaseMap.maxZoom ?? MAX_MAP_ZOOM,
       minZoom: selectedBaseMap.minZoom ?? 0,
-    }).addTo(map);
-    tileLayerRef.current.setZIndex(0);
+    });
+    const record = {
+      layerId: selectedBaseMap.layerId,
+      signature,
+      url: selectedBaseMap.tileUrl,
+      errorNotified: false,
+    };
+    tileLayer.on("tileerror", () => {
+      if (!record.errorNotified) {
+        record.errorNotified = true;
+        onSiurTileErrorRef.current?.(
+          selectedBaseMap.layerId,
+          selectedBaseMap.title,
+        );
+      }
+    });
+    tileLayer.on("tileload", () => {
+      record.errorNotified = false;
+      onSiurTileLoadRef.current?.(selectedBaseMap.layerId);
+    });
+    tileLayerRef.current = tileLayer.addTo(map);
+    baseTileLayerRecordRef.current = record;
+    tileLayer.setZIndex(0);
   }, [mapReady, selectedBaseMap]);
 
   useEffect(() => {
@@ -771,22 +833,39 @@ export function MunicipalMap({
               [descriptor.bounds.north, descriptor.bounds.east],
             )
           : undefined;
+        const tileLayer = L.tileLayer(descriptor.tileUrl, {
+          attribution: descriptor.attribution ?? undefined,
+          bounds,
+          maxZoom: descriptor.maxZoom ?? MAX_MAP_ZOOM,
+          minZoom: descriptor.minZoom ?? 0,
+          opacity: descriptor.opacity,
+          pane: "siurPane",
+        });
         record = {
-          layer: L.tileLayer(descriptor.tileUrl, {
-            attribution: descriptor.attribution ?? undefined,
-            bounds,
-            maxZoom: descriptor.maxZoom ?? MAX_MAP_ZOOM,
-            minZoom: descriptor.minZoom ?? 0,
-            opacity: descriptor.opacity,
-            pane: "siurPane",
-          }),
+          layer: tileLayer,
           signature,
           url: descriptor.tileUrl,
+          errorNotified: false,
         };
+        const tileRecord = record;
+        tileLayer.on("tileerror", () => {
+          if (!tileRecord.errorNotified) {
+            tileRecord.errorNotified = true;
+            onSiurTileErrorRef.current?.(
+              descriptor.layerId,
+              descriptor.title,
+            );
+          }
+        });
+        tileLayer.on("tileload", () => {
+          tileRecord.errorNotified = false;
+          onSiurTileLoadRef.current?.(descriptor.layerId);
+        });
         siurTileLayersRef.current.set(descriptor.layerId, record);
       } else if (record.url !== descriptor.tileUrl) {
         record.layer.setUrl(descriptor.tileUrl);
         record.url = descriptor.tileUrl;
+        record.errorNotified = false;
       }
 
       record.layer.setOpacity(descriptor.opacity);

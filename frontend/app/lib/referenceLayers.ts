@@ -144,6 +144,8 @@ export type SiurMapPreferences = {
 export type SiurMapLayer = {
   organizationId: number;
   layerId: number;
+  versionId: number;
+  generation: number;
   role: string | null;
   title: string;
   tileUrl: string;
@@ -207,11 +209,30 @@ function requireNonNegativeInteger(value: number, label: string) {
   return value;
 }
 
-function optionalStyleQuery(styleId: number | null | undefined) {
-  if (styleId == null) {
-    return "";
+function referenceDeliveryQuery(
+  styleId: number | null | undefined,
+  versionId?: number | null,
+  generation?: number | null,
+) {
+  if ((versionId == null) !== (generation == null)) {
+    throw new TypeError("versionId and generation must be provided together");
   }
-  return `?style_id=${requirePositiveInteger(styleId, "styleId")}`;
+  const query = new URLSearchParams();
+  if (styleId != null) {
+    query.set("style_id", String(requirePositiveInteger(styleId, "styleId")));
+  }
+  if (versionId != null && generation != null) {
+    query.set(
+      "version_id",
+      String(requirePositiveInteger(versionId, "versionId")),
+    );
+    query.set(
+      "generation",
+      String(requirePositiveInteger(generation, "generation")),
+    );
+  }
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : "";
 }
 
 function compareCatalogOrder(
@@ -382,11 +403,17 @@ export function buildReferenceTileUrl(
   organizationId: number,
   layerId: number,
   styleId?: number | null,
+  versionId?: number | null,
+  generation?: number | null,
 ) {
   return (
     `${API_BASE_URL}/organizations/${requirePositiveInteger(organizationId, "organizationId")}` +
     `/reference-layers/${requirePositiveInteger(layerId, "layerId")}` +
-    `/tiles/{z}/{x}/{y}.png${optionalStyleQuery(styleId)}`
+    `/tiles/{z}/{x}/{y}.png${referenceDeliveryQuery(
+      styleId,
+      versionId,
+      generation,
+    )}`
   );
 }
 
@@ -394,11 +421,13 @@ export function buildReferenceLegendUrl(
   organizationId: number,
   layerId: number,
   styleId?: number | null,
+  versionId?: number | null,
+  generation?: number | null,
 ) {
   return (
     `${API_BASE_URL}/organizations/${requirePositiveInteger(organizationId, "organizationId")}` +
     `/reference-layers/${requirePositiveInteger(layerId, "layerId")}` +
-    `/legend.png${optionalStyleQuery(styleId)}`
+    `/legend.png${referenceDeliveryQuery(styleId, versionId, generation)}`
   );
 }
 
@@ -432,6 +461,14 @@ export function buildReferenceIdentifyPath(point: SiurIdentifyPoint) {
       String(requirePositiveInteger(layer.styleId, "styleId")),
     );
   }
+  query.set(
+    "version_id",
+    String(requirePositiveInteger(layer.versionId, "versionId")),
+  );
+  query.set(
+    "generation",
+    String(requirePositiveInteger(layer.generation, "generation")),
+  );
   return (
     `/organizations/${requirePositiveInteger(layer.organizationId, "organizationId")}` +
     `/reference-layers/${requirePositiveInteger(layer.layerId, "layerId")}` +
@@ -750,12 +787,22 @@ export function buildSiurMapLayers(
     result.push({
       organizationId,
       layerId: layer.id,
+      versionId: requirePositiveInteger(
+        layer.active_version_id ?? 0,
+        "versionId",
+      ),
+      generation: requirePositiveInteger(
+        layer.active_generation ?? 0,
+        "generation",
+      ),
       role: layer.role,
       title: layer.title,
       tileUrl: buildReferenceTileUrl(
         organizationId,
         layer.id,
         validStyleId,
+        layer.active_version_id,
+        layer.active_generation,
       ),
       styleId: validStyleId,
       attribution: attribution ? escapeLeafletAttribution(attribution) : null,
@@ -779,6 +826,8 @@ function isLocalReferenceTileLayer(layer: SiurMapLayer) {
         layer.organizationId,
         layer.layerId,
         layer.styleId,
+        layer.versionId,
+        layer.generation,
       )
     );
   } catch {

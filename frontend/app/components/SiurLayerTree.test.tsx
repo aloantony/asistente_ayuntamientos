@@ -188,6 +188,14 @@ describe("SiurLayerTree", () => {
     expect(
       screen.getByRole("option", { name: "Color aprobado" }).getAttribute("value"),
     ).toBe("12");
+    fireEvent.click(screen.getByRole("button", { name: "Ver leyenda" }));
+    expect(
+      screen
+        .getByRole("img", { name: "Leyenda de Clasificación del suelo" })
+        .getAttribute("src"),
+    ).toBe(
+      "/api/organizations/7/reference-layers/2/legend.png?style_id=12&version_id=17&generation=2",
+    );
 
     fireEvent.click(
       screen.getByRole("button", {

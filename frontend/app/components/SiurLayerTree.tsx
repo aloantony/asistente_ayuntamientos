@@ -193,6 +193,8 @@ export function SiurLayerTree({
                 catalog.organization_id,
                 layer.id,
                 control?.styleId,
+                layer.active_version_id,
+                layer.active_generation,
               )
             : null;
         const metadataUrl =

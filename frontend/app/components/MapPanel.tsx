@@ -81,6 +81,7 @@ type LayeredGeoMapItem = GeoMapItem & {
 
 const MAP_PREFERENCES_KEY = "municipal-map-preferences-v1";
 const SIUR_PREFERENCES_PREFIX = "siur-map-preferences-v1";
+const SIUR_CATALOG_REFRESH_INTERVAL_MS = 15_000;
 const MUNICIPAL_CAPITAL_ZOOM = 14;
 const MAP_LAYER_COLORS: Record<GeoEntityType, string> = {
   requirement: "#c0603a",
@@ -459,6 +460,10 @@ export function MapPanel({ user }: MapPanelProps) {
   const [siurPreferences, setSiurPreferences] =
     useState<SiurMapPreferences | null>(null);
   const [siurCatalogError, setSiurCatalogError] = useState("");
+  const [siurRenderError, setSiurRenderError] = useState<{
+    layerId: number;
+    message: string;
+  } | null>(null);
   const [isLoadingSiurCatalog, setIsLoadingSiurCatalog] = useState(false);
   const [siurIdentify, setSiurIdentify] = useState<SiurIdentifyState | null>(
     null,
@@ -490,6 +495,7 @@ export function MapPanel({ user }: MapPanelProps) {
   const assetRequestSequenceRef = useRef(0);
   const mapAbortControllerRef = useRef<AbortController | null>(null);
   const siurCatalogAbortControllerRef = useRef<AbortController | null>(null);
+  const siurCatalogRefreshRef = useRef<(() => void) | null>(null);
   const siurIdentifyAbortControllerRef = useRef<AbortController | null>(null);
   const assetAbortControllerRef = useRef<AbortController | null>(null);
   const assetSearchRef = useRef<HTMLInputElement | null>(null);
@@ -674,68 +680,110 @@ export function MapPanel({ user }: MapPanelProps) {
       setSiurCatalog(null);
       setSiurPreferences(null);
       setSiurCatalogError("");
+      setSiurRenderError(null);
       setIsLoadingSiurCatalog(false);
       return;
     }
 
-    const controller = new AbortController();
-    siurCatalogAbortControllerRef.current = controller;
+    let disposed = false;
+    let hasLoadedCatalog = false;
+    let requestInFlight = false;
     setSiurCatalog(null);
     setSiurPreferences(null);
     setSiurCatalogError("");
+    setSiurRenderError(null);
     setIsLoadingSiurCatalog(true);
 
-    fetchReferenceCatalog(
-      siurOrganizationId,
-      getStoredToken(),
-      controller.signal,
-    )
-      .then((catalog) => {
-        if (controller.signal.aborted) {
+    const readStoredPreferences = () => {
+      let storedPreferences: Partial<SiurMapPreferences> | null = null;
+      try {
+        const serialized = window.localStorage.getItem(
+          siurPreferencesKey(siurOrganizationId),
+        );
+        storedPreferences = serialized
+          ? (JSON.parse(serialized) as Partial<SiurMapPreferences>)
+          : null;
+      } catch {
+        // A valid catalog must remain usable when browser storage is denied.
+        storedPreferences = null;
+      }
+      return storedPreferences;
+    };
+
+    const refreshCatalog = async () => {
+      if (disposed || requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
+      const controller = new AbortController();
+      siurCatalogAbortControllerRef.current?.abort();
+      siurCatalogAbortControllerRef.current = controller;
+      try {
+        const catalog = await fetchReferenceCatalog(
+          siurOrganizationId,
+          getStoredToken(),
+          controller.signal,
+        );
+        if (disposed || controller.signal.aborted) {
           return;
-        }
-        let storedPreferences: Partial<SiurMapPreferences> | null = null;
-        try {
-          const serialized = window.localStorage.getItem(
-            siurPreferencesKey(siurOrganizationId),
-          );
-          storedPreferences = serialized
-            ? (JSON.parse(serialized) as Partial<SiurMapPreferences>)
-            : null;
-        } catch {
-          // A valid catalog must remain usable when browser storage is denied.
-          storedPreferences = null;
         }
         setSiurCatalog(catalog);
-        setSiurPreferences(
-          reconcileSiurPreferences(catalog, storedPreferences),
+        setSiurPreferences((current) =>
+          reconcileSiurPreferences(
+            catalog,
+            current ?? readStoredPreferences(),
+          ),
         );
-      })
-      .catch((error) => {
-        if (controller.signal.aborted || isAbortError(error)) {
+        setSiurCatalogError("");
+        hasLoadedCatalog = true;
+      } catch (error) {
+        if (disposed || controller.signal.aborted || isAbortError(error)) {
           return;
         }
-        setSiurCatalog(null);
-        setSiurPreferences(null);
+        if (!hasLoadedCatalog) {
+          setSiurCatalog(null);
+          setSiurPreferences(null);
+        }
         handleRequestErrorRef.current(
           error,
           setSiurCatalogError,
-          "No se pudo cargar la cartografía SIUR.",
+          hasLoadedCatalog
+            ? "No se pudo actualizar la cartografía SIUR; se mantiene la versión cargada."
+            : "No se pudo cargar la cartografía SIUR.",
         );
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
+      } finally {
+        requestInFlight = false;
+        if (!disposed) {
           setIsLoadingSiurCatalog(false);
         }
-      });
+      }
+    };
+
+    const requestRefresh = () => {
+      void refreshCatalog();
+    };
+    siurCatalogRefreshRef.current = requestRefresh;
+    requestRefresh();
+    const refreshTimer = window.setInterval(
+      requestRefresh,
+      SIUR_CATALOG_REFRESH_INTERVAL_MS,
+    );
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        requestRefresh();
+      }
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
 
     return () => {
-      controller.abort();
+      disposed = true;
+      window.clearInterval(refreshTimer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      siurCatalogAbortControllerRef.current?.abort();
+      siurCatalogRefreshRef.current = null;
       siurIdentifyAbortControllerRef.current?.abort();
       siurIdentifyAbortControllerRef.current = null;
-      if (siurCatalogAbortControllerRef.current === controller) {
-        siurCatalogAbortControllerRef.current = null;
-      }
+      siurCatalogAbortControllerRef.current = null;
     };
   }, [canViewMap, getStoredToken, siurOrganizationId]);
 
@@ -1294,6 +1342,23 @@ export function MapPanel({ user }: MapPanelProps) {
     },
     [getStoredToken],
   );
+
+  const handleSiurTileError = useCallback(
+    (layerId: number, layerTitle: string) => {
+      setSiurRenderError({
+        layerId,
+        message: `No se pudo renderizar «${layerTitle}». Se está comprobando su versión local.`,
+      });
+      siurCatalogRefreshRef.current?.();
+    },
+    [],
+  );
+
+  const handleSiurTileLoad = useCallback((layerId: number) => {
+    setSiurRenderError((current) =>
+      current?.layerId === layerId ? null : current,
+    );
+  }, []);
 
   const handleSelectItem = useCallback((item: GeoMapItem) => {
     siurIdentifyAbortControllerRef.current?.abort();
@@ -2083,7 +2148,7 @@ export function MapPanel({ user }: MapPanelProps) {
               })}
               <SiurLayerTree
                 catalog={siurCatalog}
-                error={siurCatalogError}
+                error={siurRenderError?.message ?? siurCatalogError}
                 isLoading={isLoadingSiurCatalog}
                 onControlChange={handleSiurControlChange}
                 onMove={handleSiurMove}
@@ -2165,6 +2230,8 @@ export function MapPanel({ user }: MapPanelProps) {
             onMapContextMenu={handleMapContextMenu}
             onSelectItem={handleSelectItem}
             onSiurIdentify={handleSiurIdentify}
+            onSiurTileError={handleSiurTileError}
+            onSiurTileLoad={handleSiurTileLoad}
             selectedItemId={selectedItem ? getItemKey(selectedItem) : null}
             siurLayers={siurMapLayers}
           />

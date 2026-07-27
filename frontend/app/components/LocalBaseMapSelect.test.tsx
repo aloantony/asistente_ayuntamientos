@@ -24,9 +24,11 @@ function makeLayer(
   const layer: SiurMapLayer = {
     organizationId: 7,
     layerId,
+    versionId: 1,
+    generation: 1,
     role: "base",
     title,
-    tileUrl: buildReferenceTileUrl(7, layerId),
+    tileUrl: buildReferenceTileUrl(7, layerId, null, 1, 1),
     styleId: null,
     attribution: null,
     bounds: null,

@@ -1711,11 +1711,13 @@ def test_public_contract_has_no_arbitrary_wms_or_url_parameters(client) -> None:
     assert parameter_names <= {
         "access_token",
         "feature_count",
+        "generation",
         "layer_id",
         "organization_id",
         "pixel_x",
         "pixel_y",
         "style_id",
+        "version_id",
         "x",
         "y",
         "z",
@@ -2218,7 +2220,7 @@ def test_tile_route_prefers_active_local_delivery_without_wms_evidence(
 
     path = (
         f"/organizations/{organization.id}/reference-layers/{layer.id}"
-        "/tiles/0/0/0.png"
+        "/tiles/0/0/0.png?version_id=77&generation=3"
     )
     delivered = client.get(path, headers=headers_for(viewer))
     not_modified = client.get(
@@ -2229,8 +2231,20 @@ def test_tile_route_prefers_active_local_delivery_without_wms_evidence(
     assert delivered.status_code == 200
     assert delivered.headers["x-reference-cache"] == "GWC"
     assert delivered.headers["x-reference-version"] == "77"
+    assert delivered.headers["x-reference-generation"] == "3"
     assert delivered.headers["content-type"].startswith("image/png")
     assert not_modified.status_code == 304
+    stale = client.get(
+        path.replace("version_id=77", "version_id=76"),
+        headers=headers_for(viewer),
+    )
+    incomplete = client.get(
+        path.split("?")[0] + "?version_id=77",
+        headers=headers_for(viewer),
+    )
+    assert stale.status_code == 409
+    assert stale.json() == {"detail": "Reference delivery version changed"}
+    assert incomplete.status_code == 422
 
 
 def test_local_legend_and_identify_keep_authenticated_public_contract(
@@ -2270,7 +2284,11 @@ def test_local_legend_and_identify_keep_authenticated_public_contract(
     )
     prefix = f"/organizations/{organization.id}/reference-layers/{layer.id}"
 
-    legend = client.get(f"{prefix}/legend.png", headers=headers_for(viewer))
+    legend = client.get(
+        f"{prefix}/legend.png",
+        params={"version_id": 77, "generation": 3},
+        headers=headers_for(viewer),
+    )
     identify = client.get(
         f"{prefix}/identify",
         params={
@@ -2279,15 +2297,19 @@ def test_local_legend_and_identify_keep_authenticated_public_contract(
             "y": 0,
             "pixel_x": 128,
             "pixel_y": 128,
+            "version_id": 77,
+            "generation": 3,
         },
         headers=headers_for(viewer),
     )
 
     assert legend.status_code == 200
     assert legend.headers["x-reference-version"] == "77"
+    assert legend.headers["x-reference-generation"] == "3"
     assert identify.status_code == 200
     assert identify.json()["features"][0]["properties"] == {"name": "local"}
     assert identify.headers["x-reference-version"] == "77"
+    assert identify.headers["x-reference-generation"] == "3"
 
 
 def test_invalid_active_local_state_never_falls_back_to_remote_wms(

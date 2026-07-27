@@ -131,6 +131,8 @@ function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
   const layer = {
     organizationId: 7,
     layerId: 1,
+    versionId: 1,
+    generation: 1,
     role: "overlay",
     title: "Capa",
     tileUrl: "/api/organizations/7/reference-layers/1/tiles/{z}/{x}/{y}.png",
@@ -153,6 +155,8 @@ function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
         layer.organizationId,
         layer.layerId,
         layer.styleId,
+        layer.versionId,
+        layer.generation,
       ),
   };
 }
@@ -479,12 +483,18 @@ describe("approved SIUR delivery descriptors", () => {
 
     expect(descriptors).toHaveLength(1);
     expect(descriptors[0].tileUrl).toBe(
-      "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12",
+      "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12&version_id=21&generation=1",
     );
     expect(descriptors[0].attribution).toBe(
       "Obra derivada de PNOA 2020 CC-BY 4.0 scne.es",
     );
     expect(() => buildReferenceTileUrl(7, 2, -1)).toThrow(TypeError);
+    expect(buildReferenceTileUrl(7, 2, 12, 21, 4)).toBe(
+      "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12&version_id=21&generation=4",
+    );
+    expect(() => buildReferenceTileUrl(7, 2, 12, 21, null)).toThrow(
+      TypeError,
+    );
     expect(buildReferenceMetadataUrl(7, 2)).toBe(
       "/api/organizations/7/reference-layers/2/metadata.json",
     );
@@ -570,14 +580,18 @@ describe("approved SIUR delivery descriptors", () => {
     expect([...query.keys()].sort()).toEqual(
       [
         "feature_count",
+        "generation",
         "pixel_x",
         "pixel_y",
         "style_id",
+        "version_id",
         "x",
         "y",
         "z",
       ].sort(),
     );
+    expect(query.get("version_id")).toBe("1");
+    expect(query.get("generation")).toBe("1");
     for (const forbidden of [
       "bbox",
       "crs",
