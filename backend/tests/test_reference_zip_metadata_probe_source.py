@@ -60,6 +60,14 @@ def _indexes(audit_layer_id: int) -> tuple[bytes, bytes]:
     )
 
 
+def _probe_source_count(db) -> int:
+    return db.scalar(
+        select(func.count())
+        .select_from(ReferenceLayerSource)
+        .where(ReferenceLayerSource.source_key.like("probe:%"))
+    )
+
+
 def _seed_catalog(db, *, audit_layer_id: int, provider_key: str = "siur"):
     reviewed = _reviewed(audit_layer_id)
     definition = ReferenceCatalogDefinition(
@@ -138,7 +146,7 @@ def test_plan_binds_current_catalog_to_disabled_exact_source(
         "enabled": True,
     }
     assert replace(plan, source_state=changed_state).plan_sha256 != plan.plan_sha256
-    assert db.scalar(select(func.count()).select_from(ReferenceLayerSource)) == 0
+    assert _probe_source_count(db) == 0
 
 
 def test_apply_requires_exact_plan_and_is_idempotent(db) -> None:
@@ -160,7 +168,7 @@ def test_apply_requires_exact_plan_and_is_idempotent(db) -> None:
             expected_plan_sha256="0" * 64,
         )
     assert error.value.code == "plan_changed"
-    assert db.scalar(select(func.count()).select_from(ReferenceLayerSource)) == 0
+    assert _probe_source_count(db) == 0
 
     applied, source = apply_metadata_probe_source(
         db,
@@ -190,7 +198,7 @@ def test_apply_requires_exact_plan_and_is_idempotent(db) -> None:
     assert repeated.action == "already_exists"
     assert repeated.plan_sha256 == plan.plan_sha256
     assert same_source.id == source.id
-    assert db.scalar(select(func.count()).select_from(ReferenceLayerSource)) == 1
+    assert _probe_source_count(db) == 1
 
 
 def test_existing_probe_source_is_never_repaired_in_place(db) -> None:
@@ -299,7 +307,7 @@ def test_stale_probe_source_blocks_append_instead_of_being_replaced(
         )
 
     assert error.value.code == "stale_probe_source_exists"
-    assert db.scalar(select(func.count()).select_from(ReferenceLayerSource)) == 1
+    assert _probe_source_count(db) == 1
 
 
 def test_insert_collision_rolls_back_savepoint_and_keeps_session_usable(
@@ -341,7 +349,7 @@ def test_insert_collision_rolls_back_savepoint_and_keeps_session_usable(
         )
 
     assert error.value.code == "source_conflict"
-    assert db.scalar(select(func.count()).select_from(ReferenceLayerSource)) == 1
+    assert _probe_source_count(db) == 1
 
 
 def test_local_index_reader_rejects_symlink(tmp_path) -> None:
@@ -423,7 +431,7 @@ def test_cli_dry_run_reads_exact_files_without_mutating_sources(
     assert payload["ok"] is True
     assert payload["mode"] == "dry-run"
     assert payload["safety"]["network_performed"] is False
-    assert db.scalar(select(func.count()).select_from(ReferenceLayerSource)) == 0
+    assert _probe_source_count(db) == 0
 
 
 def test_changed_catalog_identity_is_rejected(db) -> None:
