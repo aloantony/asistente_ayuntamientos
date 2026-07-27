@@ -1538,27 +1538,88 @@ def _read_local_document(
             f"{label} input must be a local file"
         )
     path = Path(path_value)
-    try:
-        path_stat = path.lstat()
-    except OSError as error:
+    components = path.parts[1:] if path.is_absolute() else path.parts
+    if not components or any(component == ".." for component in components):
         raise MirrorAuthorizationDocumentError(
             f"{label} file is unavailable"
-        ) from error
-    if (
-        not stat_module.S_ISREG(path_stat.st_mode)
-        or not 1 <= path_stat.st_size <= maximum_bytes
-    ):
-        raise MirrorAuthorizationDocumentError(
-            f"{label} file size is invalid"
         )
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_fd: int | None = None
+    descriptor: int | None = None
     try:
-        descriptor = os.open(path, flags)
+        directory_fd = os.open(
+            path.anchor if path.is_absolute() else ".",
+            directory_flags,
+        )
+        for component in components[:-1]:
+            component_stat = os.stat(
+                component,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if not stat_module.S_ISDIR(component_stat.st_mode):
+                raise OSError(
+                    "authorization path component is not a directory"
+                )
+            next_directory_fd = os.open(
+                component,
+                directory_flags,
+                dir_fd=directory_fd,
+            )
+            try:
+                opened_component_stat = os.fstat(next_directory_fd)
+                if (
+                    not stat_module.S_ISDIR(opened_component_stat.st_mode)
+                    or (
+                        opened_component_stat.st_dev,
+                        opened_component_stat.st_ino,
+                    )
+                    != (component_stat.st_dev, component_stat.st_ino)
+                ):
+                    raise OSError(
+                        "authorization path component changed"
+                    )
+            except BaseException:
+                os.close(next_directory_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = next_directory_fd
+        path_stat = os.stat(
+            components[-1],
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat_module.S_ISREG(path_stat.st_mode)
+            or not 1 <= path_stat.st_size <= maximum_bytes
+        ):
+            raise MirrorAuthorizationDocumentError(
+                f"{label} file size is invalid"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(
+            components[-1],
+            flags,
+            dir_fd=directory_fd,
+        )
     except OSError as error:
         raise MirrorAuthorizationDocumentError(
             f"{label} file is unavailable"
         ) from error
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+    assert descriptor is not None
     try:
         with os.fdopen(descriptor, "rb", closefd=True) as stream:
             opened_stat = os.fstat(stream.fileno())

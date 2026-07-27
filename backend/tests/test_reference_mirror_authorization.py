@@ -610,6 +610,26 @@ def test_cli_rejects_symlink_authorization_document(
     )
 
 
+def test_cli_rejects_intermediate_symlink_authorization_path(
+    tmp_path,
+    capsys,
+) -> None:
+    actual_directory = tmp_path / "actual"
+    actual_directory.mkdir()
+    document = actual_directory / "authorization.json"
+    document.write_text("{}", encoding="utf-8")
+    linked_directory = tmp_path / "linked"
+    linked_directory.symlink_to(actual_directory, target_is_directory=True)
+
+    assert mirror_authorization.main(
+        ["--file", str(linked_directory / document.name)]
+    ) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["error_code"] == (
+        "mirror_authorization_document_rejected"
+    )
+
+
 def test_source_hash_and_unapproved_origin_changes_fail_closed(db) -> None:
     _, _, _, source = _seed_source(db)
     value = json.loads(_approved_document(db, source))
