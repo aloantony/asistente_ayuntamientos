@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260727_0046"
+HEAD_REVISION = "20260727_0047"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -2279,43 +2279,61 @@ def test_reference_strategy_generations_preserve_history_and_refuse_downgrade(
             fixture = seed_reference_mirror_strategy_placeholder(connection)
         run_alembic(migration_database_url, "upgrade", "20260726_0045")
         with engine.begin() as connection:
-            placeholder_id = connection.execute(
+            reviewed_layer_id, reviewed_strategy_id = (
+                add_reviewed_reference_mirror_strategy(
+                    connection,
+                    fixture,
+                )
+            )
+            reviewed_source_id = connection.execute(
                 text(
                     """
-                    SELECT id
+                    SELECT source_id
                     FROM reference_layer_mirror_strategies
-                    WHERE layer_id = :layer_id
-                      AND generation = 1
+                    WHERE id = :strategy_id
                     """
                 ),
-                fixture,
+                {"strategy_id": reviewed_strategy_id},
             ).scalar_one()
-            _, reviewed_strategy_id = add_reviewed_reference_mirror_strategy(
-                connection,
-                fixture,
-            )
-            historical_rows = connection.execute(
+
+        run_alembic(migration_database_url, "upgrade", "20260727_0046")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260727_0046"
+            assert connection.execute(
                 text(
                     """
-                    SELECT id, row_to_json(strategy_row)::text
-                    FROM reference_layer_mirror_strategies AS strategy_row
-                    ORDER BY id
+                    SELECT count(*)
+                    FROM reference_layer_mirror_strategies
+                    WHERE strategy_reason_code =
+                        'migration_backfill_required'
                     """
                 )
-            ).all()
+            ).scalar_one() == 0
+            reviewed_before = connection.execute(
+                text(
+                    """
+                    SELECT row_to_json(strategy_row)::text
+                    FROM reference_layer_mirror_strategies AS strategy_row
+                    WHERE id = :strategy_id
+                    """
+                ),
+                {"strategy_id": reviewed_strategy_id},
+            ).scalar_one()
 
         run_alembic(migration_database_url, "upgrade", "head")
         with engine.begin() as connection:
             assert connection.execute(
                 text(
                     """
-                    SELECT id, row_to_json(strategy_row)::text
+                    SELECT row_to_json(strategy_row)::text
                     FROM reference_layer_mirror_strategies AS strategy_row
-                    WHERE generation = 1
-                    ORDER BY id
+                    WHERE id = :strategy_id
                     """
-                )
-            ).all() == historical_rows
+                ),
+                {"strategy_id": reviewed_strategy_id},
+            ).scalar_one() == reviewed_before
             replacement_strategy_id = connection.execute(
                 text(
                     """
@@ -2329,13 +2347,17 @@ def test_reference_strategy_generations_preserve_history_and_refuse_downgrade(
                         'siur', :layer_id, :snapshot_id,
                         :definition_sha256, 'vector', :source_id,
                         'reviewed_vector_source',
-                        'reviewed successor to the synthetic blocker',
+                        'reviewed successor generation',
                         CAST('{"reviewed": true}' AS JSON),
                         repeat('f', 64), 2, now()
                     ) RETURNING id
                     """
                 ),
-                fixture,
+                {
+                    **fixture,
+                    "layer_id": reviewed_layer_id,
+                    "source_id": reviewed_source_id,
+                },
             ).scalar_one()
             assert connection.execute(
                 text(
@@ -2345,7 +2367,7 @@ def test_reference_strategy_generations_preserve_history_and_refuse_downgrade(
                     WHERE layer_id = :layer_id
                     """
                 ),
-                fixture,
+                {"layer_id": reviewed_layer_id},
             ).scalar_one() == [1, 2]
 
         with pytest.raises(DBAPIError) as immutable:
@@ -2365,7 +2387,7 @@ def test_reference_strategy_generations_preserve_history_and_refuse_downgrade(
         refused = run_alembic(
             migration_database_url,
             "downgrade",
-            "20260726_0045",
+            "20260727_0046",
             check=False,
         )
         assert refused.returncode != 0
@@ -2382,7 +2404,6 @@ def test_reference_strategy_generations_preserve_history_and_refuse_downgrade(
                     """
                 )
             ).scalar_one() == [
-                placeholder_id,
                 reviewed_strategy_id,
                 replacement_strategy_id,
             ]
@@ -2398,8 +2419,17 @@ def test_reference_strategy_generation_downgrade_allows_generation_one(
     try:
         with engine.begin() as connection:
             fixture = seed_reference_mirror_strategy_placeholder(connection)
+        run_alembic(migration_database_url, "upgrade", "20260726_0045")
+        with engine.begin() as connection:
+            reviewed_layer_id, reviewed_strategy_id = (
+                add_reviewed_reference_mirror_strategy(
+                    connection,
+                    fixture,
+                )
+            )
+        run_alembic(migration_database_url, "upgrade", "20260727_0046")
         run_alembic(migration_database_url, "upgrade", "head")
-        run_alembic(migration_database_url, "downgrade", "20260726_0045")
+        run_alembic(migration_database_url, "downgrade", "20260727_0046")
         with engine.connect() as connection:
             assert connection.execute(
                 text(
@@ -2409,8 +2439,28 @@ def test_reference_strategy_generation_downgrade_allows_generation_one(
                     WHERE layer_id = :layer_id
                     """
                 ),
-                fixture,
-            ).one() == ("migration_backfill_required", 1)
+                {"layer_id": reviewed_layer_id},
+            ).one() == ("reviewed_vector_source", 1)
+            assert connection.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM reference_layer_mirror_strategies
+                    WHERE strategy_reason_code =
+                        'migration_backfill_required'
+                    """
+                )
+            ).scalar_one() == 0
+            assert connection.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM reference_layer_mirror_strategies
+                    WHERE id = :strategy_id
+                    """
+                ),
+                {"strategy_id": reviewed_strategy_id},
+            ).scalar_one() == reviewed_strategy_id
             assert {
                 item["name"]
                 for item in inspect(connection).get_unique_constraints(
@@ -2452,6 +2502,7 @@ def test_reference_strategy_dependencies_require_the_same_generation(
                 ),
                 {"strategy_id": dependency_strategy_id},
             ).scalar_one()
+        run_alembic(migration_database_url, "upgrade", "20260727_0046")
         run_alembic(migration_database_url, "upgrade", "head")
 
         with engine.begin() as connection:
