@@ -44,6 +44,9 @@ PREVIOUS_MANIFEST_SHA256 = (
     "dfba2595e8417f92eec282d8f40a055a"
 )
 STYLE_CONFIG_SCHEMA = "siur-reviewed-idecyl-local-style/v1"
+STYLE_EXCLUSION_CONFIG_SCHEMA = (
+    "siur-reviewed-idecyl-local-style-exclusion/v1"
+)
 GENERATOR_VERSION = "siur-sld-1.0-idecyl-local-adaptation/v1"
 AUTHORIZATION_EFFECT = "none_without_persisted_human_mirror_review"
 SOURCE_PRIORITY = 5
@@ -671,6 +674,77 @@ def reviewed_idecyl_local_styles_for_source(
             "IDECyL local-style recipe set is internally inconsistent"
         )
     return items
+
+
+def reviewed_idecyl_local_style_exclusion_for_source(
+    source: ReviewedIDECyLExactSource,
+) -> dict[str, Any] | None:
+    """Resolve older and boundary exclusions against one exact source.
+
+    These exclusions deliberately do not provide partial SLD recipes.  The
+    projection is only technical evidence that vector style parity is
+    incomplete; it neither authorizes mirroring nor claims that a later WMS
+    tile archive has already been verified.
+    """
+
+    if not isinstance(source, ReviewedIDECyLExactSource):
+        raise TypeError("source must be a ReviewedIDECyLExactSource")
+    # Validate both committed manifests before exposing any exclusion.
+    _committed_package()
+    layer_id = source.audit_layer_id
+    if layer_id in {66, 232, 296}:
+        exclusion = next(
+            item
+            for item in _EXPECTED_EXCLUSIONS
+            if item["audit_layer_id"] == layer_id
+        )
+        reason_codes = [exclusion["reason_code"]]
+        catalog_style_source_keys: list[str] = []
+        unresolved_style_source_keys: list[str] = []
+        evidence_binding = {
+            "manifest_resource": PREVIOUS_MANIFEST_RESOURCE,
+            "manifest_sha256": PREVIOUS_MANIFEST_SHA256,
+        }
+    elif layer_id == 279:
+        exclusion = _EXPECTED_BOUNDARY_EXCLUSIONS[0]
+        reason_codes = [exclusion["reason_code"]]
+        catalog_style_source_keys = list(
+            exclusion["catalog_style_source_keys"]
+        )
+        unresolved_style_source_keys = list(
+            exclusion["unresolved_style_source_keys"]
+        )
+        evidence_binding = {
+            "manifest_resource": MANIFEST_RESOURCE,
+            "manifest_sha256": MANIFEST_SHA256,
+        }
+    else:
+        return None
+    exact = reviewed_idecyl_exact_source(
+        catalog_layer_source_key=source.catalog_layer_source_key,
+        catalog_endpoint_url=source.catalog_endpoint_url,
+        catalog_remote_name=source.catalog_remote_name,
+    )
+    if (
+        exact is None
+        or exact != source
+        or source.local_service_status != "candidate"
+        or source.candidate_config is None
+    ):
+        raise IDECyLLocalStyleEvidenceError(
+            "IDECyL local-style exclusion source identity changed"
+        )
+    return {
+        "schema": STYLE_EXCLUSION_CONFIG_SCHEMA,
+        "audit_layer_id": layer_id,
+        "profile": source.profile,
+        "authorization_effect": AUTHORIZATION_EFFECT,
+        "complete_vector_style_parity": False,
+        "reason_codes": reason_codes,
+        "catalog_style_source_keys": catalog_style_source_keys,
+        "unresolved_style_source_keys": unresolved_style_source_keys,
+        "evidence_binding": evidence_binding,
+    }
 
 
 def idecyl_local_style_config(

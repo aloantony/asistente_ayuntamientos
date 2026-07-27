@@ -34,10 +34,14 @@ from app.reference_layers.idecyl_exact_evidence import (
 )
 from app.reference_layers.idecyl_local_style_evidence import (
     idecyl_local_style_inventory,
+    reviewed_idecyl_local_style_exclusion_for_source,
 )
 from app.reference_layers.idecyl_population_nitrate_style_evidence import (
     idecyl_nitrate_style_inventory,
     idecyl_population_style_exclusion,
+)
+from app.reference_layers.idecyl_style_exclusion_evidence import (
+    idecyl_style_exclusion_inventory,
 )
 from app.reference_layers.reviewed_archive_integrity import (
     configured_reviewed_archive_integrity,
@@ -124,6 +128,12 @@ WFS_CANDIDATE_IDS = {
 }
 COMPLETE_ARCHIVE_STYLE_IDS = {98, 137, 151, 197, 213, 225, 230}
 MIXED_EXACT_ADAPTED_STYLE_IDS = {268}
+BAKED_WMS_FALLBACK_IDS = {65, 66, 105, 232, 237, 279, 296}
+BAKED_WMS_DEFAULT_STYLES = {
+    66: "eclipse_2026_zonas_no_recomendadas_rojo",
+    232: "vegetacion_cyl_rednatura2000_verde",
+    296: "gesfor_cyl_rodal_linea_oliva",
+}
 
 
 def _resource_body(resource_path: str) -> bytes:
@@ -228,8 +238,40 @@ def _layer_with_reviewed_archive_styles(
         ),
     )
     style_evidence = reviewed.evidence.get("archive_style_evidence")
-    if reviewed.audit_layer_id == 237:
+    if reviewed.audit_layer_id in {65, 105}:
+        exclusion = next(
+            item
+            for item in idecyl_style_exclusion_inventory()
+            if item.audit_layer_id == reviewed.audit_layer_id
+        )
+        catalog_styles = exclusion.required_catalog_styles
+    elif reviewed.audit_layer_id == 237:
         catalog_styles = idecyl_population_style_exclusion()["catalog_styles"]
+    elif reviewed.audit_layer_id == 279:
+        exclusion = reviewed_idecyl_local_style_exclusion_for_source(
+            reviewed
+        )
+        assert exclusion is not None
+        catalog_styles = tuple(
+            {
+                "catalog_style_source_key": source_key,
+                "remote_name": source_key,
+                "title": source_key,
+                "is_default": source_key
+                == "lineas_limite_municipales_azul",
+            }
+            for source_key in exclusion["catalog_style_source_keys"]
+        )
+    elif reviewed.audit_layer_id in BAKED_WMS_DEFAULT_STYLES:
+        source_key = BAKED_WMS_DEFAULT_STYLES[reviewed.audit_layer_id]
+        catalog_styles = (
+            {
+                "catalog_style_source_key": source_key,
+                "remote_name": source_key,
+                "title": source_key,
+                "is_default": True,
+            },
+        )
     elif isinstance(style_evidence, dict):
         catalog_styles = style_evidence["catalog_styles"]
     else:
@@ -417,19 +459,60 @@ def test_layer_39_keeps_its_exact_https_geopackage_candidate() -> None:
     )
 
 
-def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
+def test_all_18_reviewable_archives_choose_a_style_complete_candidate() -> None:
     inventory = {item.audit_layer_id: item for item in idecyl_exact_source_inventory()}
     definitions: set[str] = set()
 
     for layer_id in sorted(REVIEWABLE_ARCHIVE_IDS):
         reviewed = inventory[layer_id]
+        layer = _layer_with_reviewed_archive_styles(reviewed)
         candidates = acquisition_candidates(
             _service(reviewed.catalog_endpoint_url),
-            _layer_with_reviewed_archive_styles(reviewed),
+            layer,
         )
 
         assert len(candidates) == 1
         candidate = candidates[0]
+        if layer_id in BAKED_WMS_FALLBACK_IDS:
+            assert candidate.protocol == "wms_tiles"
+            assert candidate.target_kind == "tiles"
+            assert candidate.sync_strategy == "tile_seed"
+            assert candidate.priority == 5
+            assert candidate.endpoint_url == reviewed.catalog_endpoint_url
+            fallback = candidate.config["reviewed_baked_wms_fallback"]
+            assert fallback["audit_layer_id"] == layer_id
+            assert fallback["profile"] == reviewed.profile
+            assert fallback["complete_vector_style_parity"] is False
+            assert fallback["required_verification"] == (
+                "capabilities_and_baked_archive_per_catalog_style"
+            )
+            assert fallback["implicit_default_style"] is False
+            assert fallback["catalog_styles"] == sorted(
+                (
+                    {
+                        "catalog_style_source_key": style.source_key,
+                        "remote_name": style.remote_name,
+                        "is_default": style.is_default,
+                    }
+                    for style in layer.styles
+                ),
+                key=lambda item: item["catalog_style_source_key"],
+            )
+            assert (
+                candidate.config["style_name"]
+                == next(
+                    style.remote_name
+                    for style in layer.styles
+                    if style.is_default
+                )
+            )
+            assert "reviewed_equivalence" not in candidate.config
+            assert "archive_member" not in candidate.config
+            assert candidate.definition_sha256 == _canonical_sha256(
+                candidate_definition(candidate)
+            )
+            definitions.add(candidate.definition_sha256)
+            continue
         assert candidate.protocol == "download"
         assert candidate.target_kind == "vector"
         assert candidate.sync_strategy == "conditional_get"
@@ -478,12 +561,7 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         else:
             assert "reviewed_local_style" not in candidate.config
             assert "reviewed_local_styles" not in candidate.config
-        if layer_id == 237:
-            exclusion = candidate.config["reviewed_local_style_exclusion"]
-            assert exclusion["local_service_eligible"] is False
-            assert exclusion["catalog_style_count"] == 6
-        else:
-            assert "reviewed_local_style_exclusion" not in candidate.config
+        assert "reviewed_local_style_exclusion" not in candidate.config
         integrity = configured_reviewed_archive_integrity(candidate.config)
         assert integrity is not None
         semantic, spec_sha256 = integrity

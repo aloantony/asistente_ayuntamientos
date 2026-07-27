@@ -26,6 +26,7 @@ from app.reference_layers.idecyl_exact_evidence import (
 )
 from app.reference_layers.idecyl_exact_evidence import (
     IDECyLExactEvidenceError,
+    ReviewedIDECyLExactSource,
     is_idecyl_geoserver_catalog_endpoint,
     reviewed_idecyl_exact_source,
 )
@@ -34,10 +35,13 @@ from app.reference_layers.idecyl_local_style_evidence import (
     ReviewedIDECyLLocalStyle,
     idecyl_local_style_config,
     idecyl_local_style_expected_source_definition,
+    reviewed_idecyl_local_style_exclusion_for_source,
     reviewed_idecyl_local_style,
     reviewed_idecyl_local_styles_for_source,
 )
 from app.reference_layers.idecyl_population_nitrate_style_evidence import (
+    MANIFEST_RESOURCE as IDECYL_POPULATION_STYLE_MANIFEST_RESOURCE,
+    MANIFEST_SHA256 as IDECYL_POPULATION_STYLE_MANIFEST_SHA256,
     IDECyLPopulationNitrateStyleEvidenceError,
     ReviewedIDECyLNitrateStyle,
     idecyl_nitrate_expected_source_definition,
@@ -46,6 +50,12 @@ from app.reference_layers.idecyl_population_nitrate_style_evidence import (
     reviewed_idecyl_nitrate_styles_for_source,
     reviewed_idecyl_population_style_exclusion,
     reviewed_idecyl_population_style_exclusion_for_source,
+)
+from app.reference_layers.idecyl_style_exclusion_evidence import (
+    MANIFEST_RESOURCE as IDECYL_STYLE_EXCLUSION_MANIFEST_RESOURCE,
+    MANIFEST_SHA256 as IDECYL_STYLE_EXCLUSION_MANIFEST_SHA256,
+    IDECyLStyleExclusionEvidenceError,
+    reviewed_idecyl_style_exclusion,
 )
 from app.reference_layers.mirror_coverage import (
     SIUR_LAYER_PREFIX,
@@ -115,6 +125,9 @@ _REVIEWED_DATASET_SOURCE_PRIORITY = 5
 _REVIEWED_ORTHO_SUBSTITUTION_PRIORITY = REVIEWED_ORTHO_SOURCE_PRIORITY
 _BULK_WMS_GUARD_SCHEMA = "siur-bulk-wms-guard/v1"
 _REVIEWED_LOCAL_STYLE_SCHEMA = "siur-reviewed-local-style-recipe/v1"
+_REVIEWED_IDECYL_BAKED_WMS_SCHEMA = (
+    "siur-reviewed-idecyl-baked-wms-fallback/v1"
+)
 _LEGACY_IDECYL_ARCHIVE_STYLE_EVIDENCE_KEYS = frozenset(
     {"remote_name", "archive_member", "sha256"}
 )
@@ -1024,26 +1037,50 @@ def acquisition_candidates(
                 nitrate_styles = reviewed_idecyl_nitrate_styles_for_source(
                     reviewed_idecyl
                 )
-            except IDECyLPopulationNitrateStyleEvidenceError as error:
+                style_exclusion = reviewed_idecyl_style_exclusion(
+                    reviewed_idecyl.profile
+                )
+                local_style_exclusion = (
+                    reviewed_idecyl_local_style_exclusion_for_source(
+                        reviewed_idecyl
+                    )
+                )
+            except (
+                IDECyLLocalStyleEvidenceError,
+                IDECyLPopulationNitrateStyleEvidenceError,
+                IDECyLStyleExclusionEvidenceError,
+            ) as error:
                 raise SourceDiscoveryError(
-                    "reviewed IDECyL population/nitrate style evidence " "is invalid",
+                    "reviewed IDECyL local-style evidence is invalid",
                     code="reviewed_idecyl_local_style_evidence_invalid",
                 ) from error
             if population_exclusion is not None:
-                definition = _idecyl_population_exclusion_source_definition(
+                _idecyl_population_exclusion_source_definition(
                     layer,
                     population_exclusion,
                 )
-                return (
-                    _candidate(
-                        protocol=definition["protocol"],
-                        target_kind=definition["target_kind"],
-                        endpoint_url=definition["endpoint_url"],
-                        remote_name=definition["remote_name"],
-                        sync_strategy=definition["sync_strategy"],
-                        priority=definition["priority"],
-                        config=definition["config"],
+                return _idecyl_baked_wms_candidates(
+                    service,
+                    layer,
+                    reviewed_idecyl,
+                    reason_codes=tuple(
+                        population_exclusion["reason_codes"]
                     ),
+                    expected_catalog_styles=population_exclusion[
+                        "catalog_styles"
+                    ],
+                    exclusion_evidence={
+                        "kind": "population_style_exclusion",
+                        "manifest_resource": (
+                            IDECYL_POPULATION_STYLE_MANIFEST_RESOURCE
+                        ),
+                        "manifest_sha256": (
+                            IDECYL_POPULATION_STYLE_MANIFEST_SHA256
+                        ),
+                        "evidence_identity_sha256": population_exclusion[
+                            "exclusion_identity_sha256"
+                        ],
+                    },
                 )
             if nitrate_styles:
                 definition = _idecyl_nitrate_source_definition(
@@ -1060,6 +1097,48 @@ def acquisition_candidates(
                         priority=definition["priority"],
                         config=definition["config"],
                     ),
+                )
+            if style_exclusion is not None:
+                return _idecyl_baked_wms_candidates(
+                    service,
+                    layer,
+                    reviewed_idecyl,
+                    reason_codes=style_exclusion.reason_codes,
+                    expected_catalog_styles=(
+                        style_exclusion.required_catalog_styles
+                    ),
+                    exclusion_evidence={
+                        "kind": "style_exclusion",
+                        "manifest_resource": (
+                            IDECYL_STYLE_EXCLUSION_MANIFEST_RESOURCE
+                        ),
+                        "manifest_sha256": (
+                            IDECYL_STYLE_EXCLUSION_MANIFEST_SHA256
+                        ),
+                        "evidence_identity_sha256": (
+                            style_exclusion.evidence[
+                                "evidence_identity_sha256"
+                            ]
+                        ),
+                    },
+                )
+            if local_style_exclusion is not None:
+                return _idecyl_baked_wms_candidates(
+                    service,
+                    layer,
+                    reviewed_idecyl,
+                    reason_codes=tuple(
+                        local_style_exclusion["reason_codes"]
+                    ),
+                    expected_catalog_style_source_keys=tuple(
+                        local_style_exclusion[
+                            "catalog_style_source_keys"
+                        ]
+                    ),
+                    exclusion_evidence={
+                        "kind": "local_style_exclusion",
+                        **local_style_exclusion["evidence_binding"],
+                    },
                 )
             config = deepcopy(reviewed_idecyl.candidate_config)
             if "archive_styles" in config:
@@ -1317,6 +1396,149 @@ def acquisition_candidates(
         raise SourceDiscoveryError(f"unsupported catalog protocol: {protocol}")
 
     return tuple(sorted(_deduplicate(candidates), key=lambda item: item.priority))
+
+
+def _idecyl_baked_wms_candidates(
+    service: ReferenceServiceDefinition,
+    layer: ReferenceLayerDefinition,
+    reviewed: ReviewedIDECyLExactSource,
+    *,
+    reason_codes: tuple[str, ...],
+    exclusion_evidence: dict[str, Any],
+    expected_catalog_styles: Any = None,
+    expected_catalog_style_source_keys: tuple[str, ...] = (),
+) -> tuple[SourceCandidate, ...]:
+    """Select WMS tiles only when reviewed vector style parity is incomplete."""
+
+    if (
+        reviewed.catalog_layer_source_key != layer.source_key
+        or reviewed.catalog_endpoint_url
+        != _canonical_endpoint(service.base_url)
+        or reviewed.catalog_remote_name != layer.remote_name
+        or not reason_codes
+        or any(not isinstance(item, str) or not item for item in reason_codes)
+        or not isinstance(exclusion_evidence, dict)
+        or not exclusion_evidence
+    ):
+        raise SourceDiscoveryError(
+            "reviewed IDECyL baked fallback identity is invalid",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    active_styles = [
+        style
+        for style in layer.styles
+        if style.status in {"active", "degraded"}
+    ]
+    if (
+        len({style.source_key for style in active_styles})
+        != len(active_styles)
+        or len(
+            {
+                style.remote_name
+                for style in active_styles
+                if style.remote_name is not None
+            }
+        )
+        != len(active_styles)
+        or any(
+            not isinstance(style.remote_name, str)
+            or not style.remote_name
+            for style in active_styles
+        )
+        or (
+            active_styles
+            and sum(style.is_default for style in active_styles) != 1
+        )
+    ):
+        raise SourceDiscoveryError(
+            "catalog IDECyL styles are invalid for baked fallback",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    actual_style_identities = {
+        (
+            style.source_key,
+            style.remote_name,
+            style.title,
+            style.is_default,
+        )
+        for style in active_styles
+    }
+    if expected_catalog_styles is not None:
+        expected_style_identities = {
+            (
+                item.get("catalog_style_source_key"),
+                item.get("remote_name"),
+                item.get("title"),
+                item.get("is_default"),
+            )
+            for item in expected_catalog_styles
+            if isinstance(item, dict)
+        }
+        if (
+            len(expected_style_identities) != len(expected_catalog_styles)
+            or actual_style_identities != expected_style_identities
+        ):
+            raise SourceDiscoveryError(
+                "catalog IDECyL styles differ from their baked fallback evidence",
+                code="reviewed_idecyl_local_style_identity_invalid",
+            )
+    if expected_catalog_style_source_keys and {
+        style.source_key for style in active_styles
+    } != set(expected_catalog_style_source_keys):
+        raise SourceDiscoveryError(
+            "catalog IDECyL style coverage differs from its baked fallback evidence",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    catalog_styles = sorted(
+        (
+            {
+                "catalog_style_source_key": style.source_key,
+                "remote_name": style.remote_name,
+                "is_default": style.is_default,
+            }
+            for style in active_styles
+        ),
+        key=lambda item: item["catalog_style_source_key"],
+    )
+    tile_config = _tile_config(service, layer)
+    tile_config["style_name"] = (
+        next(
+            style.remote_name
+            for style in active_styles
+            if style.is_default
+        )
+        if active_styles
+        else ""
+    )
+    tile_config["reviewed_baked_wms_fallback"] = {
+        "schema": _REVIEWED_IDECYL_BAKED_WMS_SCHEMA,
+        "profile": reviewed.profile,
+        "audit_layer_id": reviewed.audit_layer_id,
+        "catalog_identity": {
+            "catalog_layer_source_key": reviewed.catalog_layer_source_key,
+            "catalog_endpoint_url": reviewed.catalog_endpoint_url,
+            "catalog_remote_name": reviewed.catalog_remote_name,
+        },
+        "complete_vector_style_parity": False,
+        "required_verification": (
+            "capabilities_and_baked_archive_per_catalog_style"
+        ),
+        "reason_codes": list(reason_codes),
+        "catalog_styles": catalog_styles,
+        "implicit_default_style": not bool(active_styles),
+        "exclusion_evidence": deepcopy(exclusion_evidence),
+    }
+    return (
+        _candidate(
+            protocol="wms_tiles",
+            target_kind="tiles",
+            endpoint_url=reviewed.catalog_endpoint_url,
+            remote_name=reviewed.catalog_remote_name,
+            sync_strategy="tile_seed",
+            priority=_REVIEWED_DATASET_SOURCE_PRIORITY,
+            config=tile_config,
+        ),
+    )
 
 
 def _idecyl_archive_style_config(
