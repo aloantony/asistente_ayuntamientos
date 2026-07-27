@@ -35,7 +35,10 @@ from app.reference_layers.models import (
 
 
 SCHEMA_VERSION = "siur-mirror-authorization-v1"
+BATCH_SCHEMA_VERSION = "siur-mirror-authorization-batch-v1"
 MAX_DOCUMENT_BYTES = 256 * 1024
+MAX_BATCH_DOCUMENTS = 2_048
+MAX_BATCH_MANIFEST_BYTES = 2 * 1024 * 1024
 _PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$", re.ASCII)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _TEMPLATE_TOKEN_RE = re.compile(r"\{[^{}]+\}")
@@ -84,6 +87,10 @@ _PERMISSION_KEYS = frozenset(
         "local_service",
         "bulk_tile_seed",
     }
+)
+_BATCH_MANIFEST_KEYS = frozenset({"schema_version", "documents"})
+_BATCH_DOCUMENT_KEYS = frozenset(
+    {"path", "review_sha256", "document_sha256"}
 )
 _SOURCE_PROTOCOLS = frozenset(
     {
@@ -206,6 +213,31 @@ class MirrorAuthorizationPlan:
             ),
             "already_applied": self.already_applied_id is not None,
             "review_id": self.already_applied_id,
+        }
+
+
+@dataclass(frozen=True)
+class MirrorAuthorizationBatchPlan:
+    """One deterministic, all-or-nothing set of exact source reviews."""
+
+    plans: tuple[MirrorAuthorizationPlan, ...]
+    batch_sha256: str
+
+    def public_summary(self, *, applied: bool = False) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "apply" if applied else "dry-run",
+            "applied": applied,
+            "schema_version": BATCH_SCHEMA_VERSION,
+            "batch_sha256": self.batch_sha256,
+            "review_count": len(self.plans),
+            "already_applied_count": sum(
+                plan.already_applied_id is not None for plan in self.plans
+            ),
+            "reviews": [
+                plan.public_summary(applied=applied)
+                for plan in self.plans
+            ],
         }
 
 
@@ -701,6 +733,42 @@ def plan_mirror_authorization_review(
     )
 
 
+def plan_mirror_authorization_batch(
+    db: Session,
+    documents: Sequence[bytes],
+    *,
+    lock: bool = False,
+) -> MirrorAuthorizationBatchPlan:
+    """Plan a deterministic set of distinct source reviews."""
+
+    if (
+        not isinstance(documents, Sequence)
+        or isinstance(documents, (str, bytes, bytearray))
+        or not 1 <= len(documents) <= MAX_BATCH_DOCUMENTS
+    ):
+        raise MirrorAuthorizationDocumentError(
+            "authorization batch size is invalid"
+        )
+    parsed = [parse_mirror_authorization(document) for document in documents]
+    source_ids = [evidence.source_id for evidence in parsed]
+    if len(set(source_ids)) != len(source_ids):
+        raise MirrorAuthorizationDocumentError(
+            "authorization batch contains duplicate source_id"
+        )
+    ordered_documents = [
+        evidence.raw_document
+        for evidence in sorted(parsed, key=lambda item: item.source_id)
+    ]
+    plans = tuple(
+        plan_mirror_authorization_review(db, document, lock=lock)
+        for document in ordered_documents
+    )
+    return MirrorAuthorizationBatchPlan(
+        plans=plans,
+        batch_sha256=_authorization_batch_sha256(plans),
+    )
+
+
 def apply_mirror_authorization_review(
     db: Session,
     document: bytes,
@@ -728,59 +796,118 @@ def apply_mirror_authorization_review(
             raise MirrorAuthorizationDocumentError(
                 "document hash changed after the dry-run"
             )
-        if plan.already_applied_id is not None:
-            existing = db.get(
-                ReferenceMirrorAuthorizationReview,
-                plan.already_applied_id,
-            )
-            if (
-                existing is None
-                or not stored_mirror_authorization_review_is_valid(existing)
-            ):
-                raise MirrorAuthorizationDocumentError(
-                    "stored authorization is invalid"
-                )
-            db.commit()
-            return existing
-        evidence = plan.evidence
-        review = ReferenceMirrorAuthorizationReview(
-            provider_key=evidence.provider_key,
-            service_id=evidence.service_id,
-            layer_id=evidence.layer_id,
-            source_id=evidence.source_id,
-            source_definition_sha256=(
-                evidence.source_definition_sha256
-            ),
-            protocol=evidence.protocol,
-            target_kind=evidence.target_kind,
-            canonical_origin=evidence.canonical_origin,
-            allowed_origins_json=list(evidence.allowed_origins),
-            reviewed_document=evidence.raw_document,
-            document_size_bytes=len(evidence.raw_document),
-            document_sha256=evidence.document_sha256,
-            review_sha256=evidence.review_sha256,
-            supersedes_review_id=plan.predecessor_id,
-            supersedes_review_sha256=plan.predecessor_sha256,
-            decision=evidence.decision,
-            reviewer=evidence.reviewer,
-            reviewed_at=evidence.reviewed_at,
-            license_name=evidence.license_name,
-            license_url=evidence.license_url,
-            license_terms=evidence.license_terms,
-            attribution=evidence.attribution,
-            allow_metadata_probe=evidence.allow_metadata_probe,
-            allow_dataset_download=evidence.allow_dataset_download,
-            allow_local_storage=evidence.allow_local_storage,
-            allow_local_service=evidence.allow_local_service,
-            allow_bulk_tile_seed=evidence.allow_bulk_tile_seed,
-        )
-        db.add(review)
+        review = _review_for_plan(db, plan)
         db.flush()
         db.commit()
         return review
     except Exception:
         db.rollback()
         raise
+
+
+def apply_mirror_authorization_batch(
+    db: Session,
+    documents: Sequence[bytes],
+    *,
+    expected_batch_sha256: str,
+) -> tuple[
+    MirrorAuthorizationBatchPlan,
+    tuple[ReferenceMirrorAuthorizationReview, ...],
+]:
+    """Atomically append the exact batch confirmed after its dry-run."""
+
+    expected_batch = _sha256(
+        expected_batch_sha256,
+        "expected_batch_sha256",
+    )
+    try:
+        plan = plan_mirror_authorization_batch(db, documents, lock=True)
+        if plan.batch_sha256 != expected_batch:
+            raise MirrorAuthorizationDocumentError(
+                "authorization batch hash changed after the dry-run"
+            )
+        reviews = tuple(_review_for_plan(db, item) for item in plan.plans)
+        db.flush()
+        db.commit()
+        return plan, reviews
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _review_for_plan(
+    db: Session,
+    plan: MirrorAuthorizationPlan,
+) -> ReferenceMirrorAuthorizationReview:
+    if plan.already_applied_id is not None:
+        existing = db.get(
+            ReferenceMirrorAuthorizationReview,
+            plan.already_applied_id,
+        )
+        if (
+            existing is None
+            or not stored_mirror_authorization_review_is_valid(existing)
+        ):
+            raise MirrorAuthorizationDocumentError(
+                "stored authorization is invalid"
+            )
+        return existing
+    evidence = plan.evidence
+    review = ReferenceMirrorAuthorizationReview(
+        provider_key=evidence.provider_key,
+        service_id=evidence.service_id,
+        layer_id=evidence.layer_id,
+        source_id=evidence.source_id,
+        source_definition_sha256=evidence.source_definition_sha256,
+        protocol=evidence.protocol,
+        target_kind=evidence.target_kind,
+        canonical_origin=evidence.canonical_origin,
+        allowed_origins_json=list(evidence.allowed_origins),
+        reviewed_document=evidence.raw_document,
+        document_size_bytes=len(evidence.raw_document),
+        document_sha256=evidence.document_sha256,
+        review_sha256=evidence.review_sha256,
+        supersedes_review_id=plan.predecessor_id,
+        supersedes_review_sha256=plan.predecessor_sha256,
+        decision=evidence.decision,
+        reviewer=evidence.reviewer,
+        reviewed_at=evidence.reviewed_at,
+        license_name=evidence.license_name,
+        license_url=evidence.license_url,
+        license_terms=evidence.license_terms,
+        attribution=evidence.attribution,
+        allow_metadata_probe=evidence.allow_metadata_probe,
+        allow_dataset_download=evidence.allow_dataset_download,
+        allow_local_storage=evidence.allow_local_storage,
+        allow_local_service=evidence.allow_local_service,
+        allow_bulk_tile_seed=evidence.allow_bulk_tile_seed,
+    )
+    db.add(review)
+    return review
+
+
+def _authorization_batch_sha256(
+    plans: Sequence[MirrorAuthorizationPlan],
+) -> str:
+    return _canonical_json_sha256(
+        {
+            "schema_version": BATCH_SCHEMA_VERSION,
+            "reviews": [
+                {
+                    "provider_key": plan.evidence.provider_key,
+                    "service_id": plan.evidence.service_id,
+                    "layer_id": plan.evidence.layer_id,
+                    "source_id": plan.evidence.source_id,
+                    "source_definition_sha256": (
+                        plan.evidence.source_definition_sha256
+                    ),
+                    "review_sha256": plan.evidence.review_sha256,
+                    "document_sha256": plan.evidence.document_sha256,
+                }
+                for plan in plans
+            ],
+        }
+    )
 
 
 def bind_sync_run_authorization(
@@ -1400,24 +1527,29 @@ def _lock_authorization_source(db: Session, source_id: int) -> None:
     )
 
 
-def _read_local_document(path_value: str) -> bytes:
+def _read_local_document(
+    path_value: str,
+    *,
+    maximum_bytes: int = MAX_DOCUMENT_BYTES,
+    label: str = "authorization",
+) -> bytes:
     if "://" in path_value:
         raise MirrorAuthorizationDocumentError(
-            "authorization input must be a local file"
+            f"{label} input must be a local file"
         )
     path = Path(path_value)
     try:
         path_stat = path.lstat()
     except OSError as error:
         raise MirrorAuthorizationDocumentError(
-            "authorization file is unavailable"
+            f"{label} file is unavailable"
         ) from error
     if (
         not stat_module.S_ISREG(path_stat.st_mode)
-        or not 1 <= path_stat.st_size <= MAX_DOCUMENT_BYTES
+        or not 1 <= path_stat.st_size <= maximum_bytes
     ):
         raise MirrorAuthorizationDocumentError(
-            "authorization file size is invalid"
+            f"{label} file size is invalid"
         )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -1425,7 +1557,7 @@ def _read_local_document(path_value: str) -> bytes:
         descriptor = os.open(path, flags)
     except OSError as error:
         raise MirrorAuthorizationDocumentError(
-            "authorization file is unavailable"
+            f"{label} file is unavailable"
         ) from error
     try:
         with os.fdopen(descriptor, "rb", closefd=True) as stream:
@@ -1434,22 +1566,22 @@ def _read_local_document(path_value: str) -> bytes:
                 not stat_module.S_ISREG(opened_stat.st_mode)
                 or (opened_stat.st_dev, opened_stat.st_ino)
                 != (path_stat.st_dev, path_stat.st_ino)
-                or not 1 <= opened_stat.st_size <= MAX_DOCUMENT_BYTES
+                or not 1 <= opened_stat.st_size <= maximum_bytes
             ):
                 raise MirrorAuthorizationDocumentError(
-                    "authorization file is unavailable"
+                    f"{label} file is unavailable"
                 )
-            document = stream.read(MAX_DOCUMENT_BYTES + 1)
+            document = stream.read(maximum_bytes + 1)
             final_stat = os.fstat(stream.fileno())
     except MirrorAuthorizationDocumentError:
         raise
     except OSError as error:
         raise MirrorAuthorizationDocumentError(
-            "authorization file is unavailable"
+            f"{label} file is unavailable"
         ) from error
     if (
         len(document) != opened_stat.st_size
-        or len(document) > MAX_DOCUMENT_BYTES
+        or len(document) > maximum_bytes
         or (
             opened_stat.st_dev,
             opened_stat.st_ino,
@@ -1466,9 +1598,94 @@ def _read_local_document(path_value: str) -> bytes:
         )
     ):
         raise MirrorAuthorizationDocumentError(
-            "authorization file changed while it was read"
+            f"{label} file changed while it was read"
         )
     return document
+
+
+def _read_batch_manifest(path_value: str) -> tuple[bytes, ...]:
+    raw_manifest = _read_local_document(
+        path_value,
+        maximum_bytes=MAX_BATCH_MANIFEST_BYTES,
+        label="authorization batch manifest",
+    )
+    try:
+        manifest = json.loads(
+            raw_manifest.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise MirrorAuthorizationDocumentError(
+            "authorization batch manifest is not strict JSON"
+        ) from error
+    _bounded_json_tree(
+        manifest,
+        max_nodes=MAX_BATCH_DOCUMENTS * 5 + 8,
+        max_depth=8,
+    )
+    root = _exact_object(
+        manifest,
+        _BATCH_MANIFEST_KEYS,
+        "authorization batch manifest",
+    )
+    if root["schema_version"] != BATCH_SCHEMA_VERSION:
+        raise MirrorAuthorizationDocumentError(
+            "authorization batch schema_version is unsupported"
+        )
+    entries = root["documents"]
+    if (
+        not isinstance(entries, list)
+        or not 1 <= len(entries) <= MAX_BATCH_DOCUMENTS
+    ):
+        raise MirrorAuthorizationDocumentError(
+            "authorization batch documents are invalid"
+        )
+    manifest_directory = Path(path_value).absolute().parent
+    documents: list[bytes] = []
+    source_ids: set[int] = set()
+    for index, raw_entry in enumerate(entries):
+        entry = _exact_object(
+            raw_entry,
+            _BATCH_DOCUMENT_KEYS,
+            f"authorization batch documents[{index}]",
+        )
+        raw_path = _required_text(
+            entry["path"],
+            f"authorization batch documents[{index}].path",
+            4_096,
+        )
+        if "://" in raw_path:
+            raise MirrorAuthorizationDocumentError(
+                "authorization batch document path must be local"
+            )
+        document_path = Path(raw_path)
+        if not document_path.is_absolute():
+            document_path = manifest_directory / document_path
+        document = _read_local_document(str(document_path))
+        evidence = parse_mirror_authorization(document)
+        expected_review = _sha256(
+            entry["review_sha256"],
+            f"authorization batch documents[{index}].review_sha256",
+        )
+        expected_document = _sha256(
+            entry["document_sha256"],
+            f"authorization batch documents[{index}].document_sha256",
+        )
+        if (
+            evidence.review_sha256 != expected_review
+            or evidence.document_sha256 != expected_document
+        ):
+            raise MirrorAuthorizationDocumentError(
+                "authorization batch document hash does not match manifest"
+            )
+        if evidence.source_id in source_ids:
+            raise MirrorAuthorizationDocumentError(
+                "authorization batch contains duplicate source_id"
+            )
+        source_ids.add(evidence.source_id)
+        documents.append(document)
+    return tuple(documents)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1477,7 +1694,9 @@ def _parser() -> argparse.ArgumentParser:
             "Plan or append one explicit SIUR local-mirror authorization"
         )
     )
-    parser.add_argument("--file", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file")
+    source.add_argument("--batch-manifest")
     parser.add_argument(
         "--apply",
         action="store_true",
@@ -1485,34 +1704,85 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--expected-review-sha256")
     parser.add_argument("--expected-document-sha256")
+    parser.add_argument("--expected-batch-sha256")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        if arguments.apply and (
-            arguments.expected_review_sha256 is None
-            or arguments.expected_document_sha256 is None
-        ):
-            raise MirrorAuthorizationDocumentError(
-                "--apply requires --expected-review-sha256 and "
-                "--expected-document-sha256"
-            )
-        if (
-            not arguments.apply
-            and (
-                arguments.expected_review_sha256 is not None
-                or arguments.expected_document_sha256 is not None
-            )
+        single_hashes = (
+            arguments.expected_review_sha256,
+            arguments.expected_document_sha256,
+        )
+        if arguments.file is not None:
+            if arguments.expected_batch_sha256 is not None:
+                raise MirrorAuthorizationDocumentError(
+                    "--expected-batch-sha256 requires --batch-manifest"
+                )
+            if arguments.apply and any(value is None for value in single_hashes):
+                raise MirrorAuthorizationDocumentError(
+                    "--apply with --file requires "
+                    "--expected-review-sha256 and "
+                    "--expected-document-sha256"
+                )
+        else:
+            if any(value is not None for value in single_hashes):
+                raise MirrorAuthorizationDocumentError(
+                    "single-document hashes require --file"
+                )
+            if arguments.apply and arguments.expected_batch_sha256 is None:
+                raise MirrorAuthorizationDocumentError(
+                    "--apply with --batch-manifest requires "
+                    "--expected-batch-sha256"
+                )
+        if not arguments.apply and (
+            any(value is not None for value in single_hashes)
+            or arguments.expected_batch_sha256 is not None
         ):
             raise MirrorAuthorizationDocumentError(
                 "expected hashes are only valid with --apply"
             )
-        document = _read_local_document(arguments.file)
+        document = (
+            _read_local_document(arguments.file)
+            if arguments.file is not None
+            else None
+        )
+        batch_documents = (
+            _read_batch_manifest(arguments.batch_manifest)
+            if arguments.batch_manifest is not None
+            else None
+        )
         register_all_models()
         with SessionLocal() as db:
-            if arguments.apply:
+            if batch_documents is not None and arguments.apply:
+                batch_plan, reviews = apply_mirror_authorization_batch(
+                    db,
+                    batch_documents,
+                    expected_batch_sha256=(
+                        arguments.expected_batch_sha256
+                    ),
+                )
+                result = batch_plan.public_summary(applied=True)
+                result["reviews"] = [
+                    {
+                        **item.public_summary(applied=True),
+                        "review_id": review.id,
+                    }
+                    for item, review in zip(
+                        batch_plan.plans,
+                        reviews,
+                        strict=True,
+                    )
+                ]
+            elif batch_documents is not None:
+                batch_plan = plan_mirror_authorization_batch(
+                    db,
+                    batch_documents,
+                )
+                result = batch_plan.public_summary(applied=False)
+            elif arguments.apply:
+                assert document is not None
                 review = apply_mirror_authorization_review(
                     db,
                     document,
@@ -1530,6 +1800,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = plan.public_summary(applied=True)
                 result["review_id"] = review.id
             else:
+                assert document is not None
                 plan = plan_mirror_authorization_review(db, document)
                 result = plan.public_summary(applied=False)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
@@ -1583,13 +1854,18 @@ def _reject_json_constant(value: str) -> None:
     )
 
 
-def _bounded_json_tree(value: Any) -> None:
+def _bounded_json_tree(
+    value: Any,
+    *,
+    max_nodes: int = 512,
+    max_depth: int = 12,
+) -> None:
     nodes = 0
 
     def visit(item: Any, depth: int) -> None:
         nonlocal nodes
         nodes += 1
-        if nodes > 512 or depth > 12:
+        if nodes > max_nodes or depth > max_depth:
             raise MirrorAuthorizationDocumentError(
                 "authorization document is too complex"
             )

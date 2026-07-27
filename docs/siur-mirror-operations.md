@@ -41,6 +41,50 @@ sus fuentes tienen revisiones explícitas válidas.
 El informe declara `legacy_wms_evidence_required=false` para hacer visible esta
 separación. Este comando no crea ni aprueba evidencia legal.
 
+## Aplicación atómica de revisiones
+
+Cuando la persona revisora confirma varias fuentes, no se aplican una a una.
+Se prepara un manifiesto local estricto:
+
+```json
+{
+  "schema_version": "siur-mirror-authorization-batch-v1",
+  "documents": [
+    {
+      "path": "source-001.authorization.json",
+      "review_sha256": "HASH_SEMANTICO_DEL_DOCUMENTO",
+      "document_sha256": "HASH_EXACTO_DEL_FICHERO"
+    }
+  ]
+}
+```
+
+Las rutas relativas se resuelven desde el directorio del manifiesto. Tanto el
+manifiesto como cada documento deben ser ficheros locales regulares; no se
+siguen enlaces simbólicos ni se aceptan URL. El dry-run valida todos los
+documentos contra las fuentes y cadenas vigentes, no escribe en la base de
+datos y devuelve una única `batch_sha256`:
+
+```bash
+python -m app.reference_layers.mirror_authorization \
+  --batch-manifest /ruta/manifest.json
+```
+
+Solo después de que la persona revisora confirme esa huella exacta se aplica el
+mismo manifiesto:
+
+```bash
+python -m app.reference_layers.mirror_authorization \
+  --batch-manifest /ruta/manifest.json \
+  --apply \
+  --expected-batch-sha256 HASH_DEL_LOTE_CONFIRMADO
+```
+
+La aplicación ordena y bloquea las fuentes, vuelve a validarlo todo y confirma
+las filas en una sola transacción. Si cambia una fuente, un documento, una
+cadena o la huella del lote, no se aplica ninguna revisión. Repetir exactamente
+un lote ya aplicado es idempotente.
+
 ## Sincronización manual acotada
 
 Para comprobar de inmediato una fuente concreta sin esperar a su programación

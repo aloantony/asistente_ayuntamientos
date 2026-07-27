@@ -25,10 +25,12 @@ from app.reference_layers.local_delivery import (
 )
 from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationDocumentError,
+    apply_mirror_authorization_batch,
     apply_mirror_authorization_review,
     authorization_chain_is_valid,
     effective_service_attributions,
     parse_mirror_authorization,
+    plan_mirror_authorization_batch,
     plan_mirror_authorization_review,
     stored_mirror_authorization_review_is_valid,
 )
@@ -360,6 +362,232 @@ def test_cli_is_local_dry_run_by_default_and_applies_exact_hash(
     assert mirror_authorization.main(
         ["--file", "https://example.test/authorization.json"]
     ) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["error_code"] == (
+        "mirror_authorization_document_rejected"
+    )
+
+
+def test_batch_plan_apply_is_ordered_atomic_and_idempotent(
+    db,
+    monkeypatch,
+) -> None:
+    *_, first_source = _seed_source(
+        db,
+        provider_key="mirror-authorization-batch-first",
+    )
+    *_, second_source = _seed_source(
+        db,
+        provider_key="mirror-authorization-batch-second",
+    )
+    first_document = _approved_document(db, first_source)
+    second_document = _approved_document(db, second_source)
+
+    dry_run = plan_mirror_authorization_batch(
+        db,
+        [second_document, first_document],
+    )
+    assert [item.evidence.source_id for item in dry_run.plans] == sorted(
+        [first_source.id, second_source.id]
+    )
+    assert len(dry_run.batch_sha256) == 64
+
+    with pytest.raises(
+        MirrorAuthorizationDocumentError,
+        match="batch hash changed",
+    ):
+        apply_mirror_authorization_batch(
+            db,
+            [first_document, second_document],
+            expected_batch_sha256="f" * 64,
+        )
+    assert db.scalar(
+        select(ReferenceMirrorAuthorizationReview.id)
+    ) is None
+
+    original_flush = db.flush
+
+    def fail_flush(*_args, **_kwargs):
+        raise RuntimeError("simulated batch insert failure")
+
+    monkeypatch.setattr(db, "flush", fail_flush)
+    with pytest.raises(RuntimeError, match="simulated batch insert failure"):
+        apply_mirror_authorization_batch(
+            db,
+            [first_document, second_document],
+            expected_batch_sha256=dry_run.batch_sha256,
+        )
+    monkeypatch.setattr(db, "flush", original_flush)
+    assert db.scalar(
+        select(ReferenceMirrorAuthorizationReview.id)
+    ) is None
+
+    applied_plan, reviews = apply_mirror_authorization_batch(
+        db,
+        [first_document, second_document],
+        expected_batch_sha256=dry_run.batch_sha256,
+    )
+    assert applied_plan.batch_sha256 == dry_run.batch_sha256
+    assert len(reviews) == 2
+    assert db.scalars(
+        select(ReferenceMirrorAuthorizationReview.id)
+    ).all() == sorted(review.id for review in reviews)
+
+    repeated_plan, repeated_reviews = apply_mirror_authorization_batch(
+        db,
+        [second_document, first_document],
+        expected_batch_sha256=dry_run.batch_sha256,
+    )
+    assert repeated_plan.batch_sha256 == dry_run.batch_sha256
+    assert [item.id for item in repeated_reviews] == [
+        item.id for item in reviews
+    ]
+    assert len(
+        db.scalars(
+            select(ReferenceMirrorAuthorizationReview.id)
+        ).all()
+    ) == 2
+
+
+def test_batch_manifest_cli_dry_run_and_exact_apply(
+    db,
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    *_, first_source = _seed_source(
+        db,
+        provider_key="mirror-authorization-cli-batch-first",
+    )
+    *_, second_source = _seed_source(
+        db,
+        provider_key="mirror-authorization-cli-batch-second",
+    )
+    documents = [
+        _approved_document(db, first_source),
+        _approved_document(db, second_source),
+    ]
+    manifest_entries = []
+    for index, document in enumerate(documents, start=1):
+        path = tmp_path / f"authorization-{index}.json"
+        path.write_bytes(document)
+        evidence = parse_mirror_authorization(document)
+        manifest_entries.append(
+            {
+                "path": path.name,
+                "review_sha256": evidence.review_sha256,
+                "document_sha256": evidence.document_sha256,
+            }
+        )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": (
+                    mirror_authorization.BATCH_SCHEMA_VERSION
+                ),
+                "documents": list(reversed(manifest_entries)),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mirror_authorization,
+        "register_all_models",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        mirror_authorization,
+        "SessionLocal",
+        lambda: nullcontext(db),
+    )
+
+    assert mirror_authorization.main(
+        ["--batch-manifest", str(manifest)]
+    ) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["mode"] == "dry-run"
+    assert dry_run["review_count"] == 2
+    assert dry_run["applied"] is False
+    assert db.scalar(
+        select(ReferenceMirrorAuthorizationReview.id)
+    ) is None
+
+    first_path = tmp_path / "authorization-1.json"
+    first_path.write_bytes(documents[0] + b"\n")
+    assert mirror_authorization.main(
+        ["--batch-manifest", str(manifest)]
+    ) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["error_code"] == (
+        "mirror_authorization_document_rejected"
+    )
+    assert db.scalar(
+        select(ReferenceMirrorAuthorizationReview.id)
+    ) is None
+    first_path.write_bytes(documents[0])
+
+    assert mirror_authorization.main(
+        [
+            "--batch-manifest",
+            str(manifest),
+            "--apply",
+            "--expected-batch-sha256",
+            dry_run["batch_sha256"],
+        ]
+    ) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["mode"] == "apply"
+    assert applied["review_count"] == 2
+    assert all(item["review_id"] for item in applied["reviews"])
+    assert len(
+        db.scalars(
+            select(ReferenceMirrorAuthorizationReview.id)
+        ).all()
+    ) == 2
+
+
+def test_batch_manifest_rejects_malformed_document_before_db_access(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    document = tmp_path / "authorization.json"
+    document.write_text("{}", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": (
+                    mirror_authorization.BATCH_SCHEMA_VERSION
+                ),
+                "documents": [
+                    {
+                        "path": document.name,
+                        "review_sha256": "a" * 64,
+                        "document_sha256": "b" * 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    accessed_db = False
+
+    def session_forbidden():
+        nonlocal accessed_db
+        accessed_db = True
+        raise AssertionError("manifest validation must precede DB access")
+
+    monkeypatch.setattr(
+        mirror_authorization,
+        "SessionLocal",
+        session_forbidden,
+    )
+    assert mirror_authorization.main(
+        ["--batch-manifest", str(manifest)]
+    ) == 2
+    assert accessed_db is False
     rejected = json.loads(capsys.readouterr().out)
     assert rejected["error_code"] == (
         "mirror_authorization_document_rejected"
