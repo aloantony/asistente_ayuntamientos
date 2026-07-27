@@ -158,11 +158,6 @@ def operational_status(
             )
         )
     }
-    authorization = _service_authorization(
-        db,
-        snapshot=snapshot,
-        services=services,
-    )
     statuses = catalog_mirror_statuses(
         db,
         provider_key=provider_key,
@@ -185,6 +180,19 @@ def operational_status(
     sources_by_layer: dict[int, list[ReferenceLayerSource]] = defaultdict(list)
     for source in sources:
         sources_by_layer[source.layer_id].append(source)
+    source_authorizations = {
+        source.id: _source_authorization(db, source=source)
+        for source in sources
+    }
+    authorizations = {
+        layer.id: _layer_authorization(
+            layer=layer,
+            service=services.get(layer.service_id),
+            sources=sources_by_layer.get(layer.id, []),
+            source_authorizations=source_authorizations,
+        )
+        for layer in layers
+    }
     latest_source_runs = _latest_runs_by_source(
         db,
         [source.id for source in sources],
@@ -257,10 +265,7 @@ def operational_status(
             assets_by_version.get(history["previous_id"], []),
             current_snapshot_id=snapshot.id,
         )
-        service_authorization = authorization.get(
-            layer.service_id,
-            _missing_service_authorization(),
-        )
+        layer_authorization = authorizations[layer.id]
         recovery = _recovery_candidate(
             state=state,
             state_valid=history["state_valid"],
@@ -275,7 +280,7 @@ def operational_status(
                 "catalog_status": layer.status,
                 "service_id": layer.service_id,
                 "mirror_status": mirror.status,
-                "mirror_authorization": service_authorization,
+                "mirror_authorization": layer_authorization,
                 "delivery_state_integrity": {
                     "valid": history["state_valid"],
                     "promotion_chain_valid": history["chain_valid"],
@@ -311,6 +316,7 @@ def operational_status(
                         expected_generation=(
                             state.generation if state is not None else 0
                         ),
+                        authorization=source_authorizations[source.id],
                     )
                     for source in sources_by_layer.get(layer.id, [])
                 ],
@@ -322,7 +328,12 @@ def operational_status(
         not row["mirror_authorization"]["mirror_authorized"]
         for row in layer_rows
     )
-    service_authorizations = list(authorization.values())
+    selected_authorizations = list(authorizations.values())
+    selected_enabled_source_authorizations = [
+        source_authorizations[source.id]
+        for source in sources
+        if source.enabled
+    ]
     license_status_counts = Counter(
         service.license_status for service in services.values()
     )
@@ -346,17 +357,34 @@ def operational_status(
             "service_count": len(services),
             "mirror_status_counts": dict(sorted(status_counts.items())),
             "mirror_authorization_missing_count": authorization_missing,
-            "mirror_authorization_missing_service_count": sum(
+            # Compatibility field: this is scoped to services represented by
+            # the selected layers, not to unrelated layers of those services.
+            "mirror_authorization_missing_service_count": len(
+                {
+                    item["service_id"]
+                    for item in selected_authorizations
+                    if not item["mirror_authorized"]
+                    and item["service_id"] is not None
+                }
+            ),
+            "mirror_authorization_enabled_source_count": len(
+                selected_enabled_source_authorizations
+            ),
+            "mirror_authorization_missing_source_count": sum(
                 not item["mirror_authorized"]
-                for item in service_authorizations
+                for item in selected_enabled_source_authorizations
+            ),
+            "mirror_authorization_reviewed_source_count": sum(
+                item["mirror_authorized"]
+                for item in selected_enabled_source_authorizations
             ),
             "license_review_service_count": sum(
                 item["license_review_id"] is not None
-                for item in service_authorizations
+                for item in selected_authorizations
             ),
             "delivery_attestation_service_count": sum(
                 item["attestation_id"] is not None
-                for item in service_authorizations
+                for item in selected_authorizations
             ),
             "catalog_license_status_counts": dict(
                 sorted(license_status_counts.items())
@@ -373,108 +401,94 @@ def operational_status(
     }
 
 
-def _service_authorization(
+def _source_authorization(
     db: Session,
     *,
-    snapshot: ReferenceCatalogSnapshot,
-    services: dict[int, ReferenceService],
-) -> dict[int, dict[str, Any]]:
-    service_ids = list(services)
-    if not service_ids:
-        return {}
-    sources_by_service: dict[int, list[ReferenceLayerSource]] = defaultdict(
-        list
-    )
-    for source, service_id in db.execute(
-        select(ReferenceLayerSource, ReferenceLayer.service_id)
-        .join(
-            ReferenceLayer,
-            (ReferenceLayer.id == ReferenceLayerSource.layer_id)
-            & (
-                ReferenceLayer.provider_key
-                == ReferenceLayerSource.provider_key
-            ),
+    source: ReferenceLayerSource,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    review_id: int | None = None
+    review_sha256: str | None = None
+    try:
+        review = require_current_source_authorization(
+            db,
+            source=source,
+            require_acquisition=True,
         )
-        .where(
-            ReferenceLayer.provider_key == snapshot.provider_key,
-            ReferenceLayer.last_seen_snapshot_id == snapshot.id,
-            ReferenceLayer.service_id.in_(service_ids),
-            ReferenceLayer.node_type == "layer",
-            ReferenceLayerSource.enabled.is_(True),
-        )
-        .order_by(
-            ReferenceLayer.service_id,
-            ReferenceLayerSource.layer_id,
-            ReferenceLayerSource.is_primary.desc(),
-            ReferenceLayerSource.priority,
-            ReferenceLayerSource.id,
-        )
-    ):
-        sources_by_service[service_id].append(source)
-    result: dict[int, dict[str, Any]] = {}
-    for service_id, service in services.items():
-        service_sources = sources_by_service.get(service_id, [])
-        blockers: list[str] = []
-        review_ids: list[int] = []
-        if not service_sources:
-            blockers.append("mirror_authorization_missing")
-        for source in service_sources:
-            try:
-                review = require_current_source_authorization(
-                    db,
-                    source=source,
-                    require_acquisition=True,
-                )
-            except MirrorAuthorizationError as error:
-                blockers.append(error.code)
-            else:
-                review_ids.append(review.id)
-        blockers = list(dict.fromkeys(blockers))
-        result[service_id] = {
-            "authorization_model": "source_mirror_review",
-            "legacy_wms_evidence_required": False,
-            "mirror_authorized": not blockers,
-            "authorization_status": (
-                "authorized" if not blockers else "blocked"
-            ),
-            "blocking_reasons": blockers,
-            "service_id": service.id,
-            "service_source_key": service.source_key,
-            "catalog_license_status": service.license_status,
-            "mirror_review_count": len(review_ids),
-            "reviewed_source_count": len(review_ids),
-            "enabled_source_count": len(service_sources),
-            # Legacy WMS evidence remains intentionally separate and does not
-            # authorize local retention or service.
-            "license_review_id": None,
-            "license_review_valid": False,
-            "review_decision": None,
-            "allow_cache": False,
-            "explicit_allow_mirror": not blockers,
-            "attestation_id": None,
-            "attestation_valid": False,
-        }
-    return result
-
-
-def _missing_service_authorization() -> dict[str, Any]:
+    except MirrorAuthorizationError as error:
+        blockers.append(error.code)
+    else:
+        review_id = review.id
+        review_sha256 = review.review_sha256
     return {
         "authorization_model": "source_mirror_review",
+        "authorization_scope": "source",
         "legacy_wms_evidence_required": False,
-        "mirror_authorized": False,
-        "authorization_status": "missing",
-        "blocking_reasons": ["catalog_service_missing"],
-        "service_id": None,
-        "service_source_key": None,
-        "catalog_license_status": None,
-        "mirror_review_count": 0,
-        "reviewed_source_count": 0,
-        "enabled_source_count": 0,
+        "mirror_authorized": not blockers,
+        "authorization_status": (
+            "authorized" if not blockers else "blocked"
+        ),
+        "blocking_reasons": blockers,
+        "source_id": source.id,
+        "source_key": source.source_key,
+        "source_definition_sha256": source.definition_sha256,
+        "enabled": source.enabled,
+        "review_id": review_id,
+        "review_sha256": review_sha256,
+    }
+
+
+def _layer_authorization(
+    *,
+    layer: ReferenceLayer,
+    service: ReferenceService | None,
+    sources: list[ReferenceLayerSource],
+    source_authorizations: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    enabled_sources = [source for source in sources if source.enabled]
+    blockers: list[str] = []
+    reviewed_source_ids: list[int] = []
+    if service is None:
+        blockers.append("catalog_service_missing")
+    if not enabled_sources:
+        blockers.append("mirror_authorization_missing")
+    for source in enabled_sources:
+        source_authorization = source_authorizations.get(source.id)
+        if source_authorization is None:
+            blockers.append("mirror_authorization_missing")
+            continue
+        if source_authorization["mirror_authorized"]:
+            reviewed_source_ids.append(source.id)
+            continue
+        blockers.extend(source_authorization["blocking_reasons"])
+    blockers = list(dict.fromkeys(blockers))
+    return {
+        "authorization_model": "source_mirror_review",
+        "authorization_scope": "layer_enabled_sources",
+        "legacy_wms_evidence_required": False,
+        "mirror_authorized": not blockers,
+        "authorization_status": (
+            "authorized" if not blockers else "blocked"
+        ),
+        "blocking_reasons": blockers,
+        "layer_id": layer.id,
+        "layer_source_key": layer.source_key,
+        "service_id": service.id if service is not None else None,
+        "service_source_key": (
+            service.source_key if service is not None else None
+        ),
+        "catalog_license_status": (
+            service.license_status if service is not None else None
+        ),
+        "mirror_review_count": len(reviewed_source_ids),
+        "reviewed_source_count": len(reviewed_source_ids),
+        "enabled_source_count": len(enabled_sources),
+        "reviewed_source_ids": reviewed_source_ids,
         "license_review_id": None,
         "license_review_valid": False,
         "review_decision": None,
         "allow_cache": False,
-        "explicit_allow_mirror": None,
+        "explicit_allow_mirror": not blockers,
         "attestation_id": None,
         "attestation_valid": False,
     }
@@ -673,6 +687,7 @@ def _source_summary(
     run: ReferenceSyncRun | None,
     *,
     expected_generation: int,
+    authorization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "source_id": source.id,
@@ -687,6 +702,7 @@ def _source_summary(
         "priority": source.priority,
         "next_check_at": source.next_check_at,
         "check_interval_seconds": source.check_interval_seconds,
+        "mirror_authorization": authorization,
         "last_run": (
             {
                 "id": run.id,
