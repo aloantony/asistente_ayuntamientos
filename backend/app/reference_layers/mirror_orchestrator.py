@@ -30,13 +30,18 @@ from app.db.session import SessionLocal
 from app.reference_layers.acquisition import (
     AcquisitionResult,
     ConditionalRequest,
+    DownloadConditionalRequest,
+    ReusableDownloadResource,
     ReferenceAcquisitionError,
     ReferenceAcquisitionPipeline,
+    candidate_from_source_model,
+    configured_download_resources,
     persist_acquisition_result,
 )
 from app.reference_layers.blob_store import (
     ReferenceBlobStore,
     ReferenceBlobStoreError,
+    StoredReferenceBlob,
 )
 from app.reference_layers.delivery_builder import (
     BuiltDeliveryVersion,
@@ -188,7 +193,7 @@ class RunContext:
     run: ReferenceSyncRun
     layer: ReferenceLayer
     styles: tuple[ReferenceLayerStyle, ...]
-    conditional: ConditionalRequest | None
+    conditional: ConditionalRequest | DownloadConditionalRequest | None
     active_version_id: int | None
     active_source_id: int | None
     existing_version_id: int | None
@@ -1132,59 +1137,81 @@ def load_run_context(
             and active_source_id == source.id
             and active_definition_matches
         ):
-            composite_conditional = (
+            composite_transform = (
                 source.protocol == "download"
                 and isinstance(
                     source.config_json.get("vector_transform"),
                     dict,
                 )
             )
-            artifact_query = (
-                select(ReferenceSourceArtifact)
-                .join(
-                    ReferenceDeliveryVersionArtifact,
-                    and_(
-                        ReferenceDeliveryVersionArtifact.artifact_id
-                        == ReferenceSourceArtifact.id,
-                        ReferenceDeliveryVersionArtifact.source_id
-                        == ReferenceSourceArtifact.source_id,
-                    ),
-                )
-                .where(
-                    ReferenceDeliveryVersionArtifact.version_id
-                    == active_version_id,
-                    ReferenceDeliveryVersionArtifact.role == "input",
-                    ReferenceSourceArtifact.source_id == source.id,
-                    ReferenceSourceArtifact.source_url.is_not(None),
-                    or_(
-                        ReferenceSourceArtifact.upstream_etag.is_not(None),
-                        ReferenceSourceArtifact.upstream_last_modified.is_not(None),
-                    ),
-                )
+            resource_specs = configured_download_resources(
+                candidate_from_source_model(source)
             )
-            if composite_conditional:
-                configured_url = source.config_json.get("download_url")
-                dataset_url = (
-                    configured_url
-                    if isinstance(configured_url, str)
-                    else source.endpoint_url
+            if resource_specs is not None:
+                conditional = _load_composite_download_conditional(
+                    db,
+                    source=source,
+                    run=run,
+                    state=state,
+                    active_version_id=active_version_id,
+                    active_run_id=(
+                        active_run.id if active_run is not None else None
+                    ),
                 )
-                if isinstance(dataset_url, str):
-                    artifact_query = artifact_query.where(
-                        ReferenceSourceArtifact.source_url == dataset_url
+            else:
+                artifact_query = (
+                    select(ReferenceSourceArtifact)
+                    .join(
+                        ReferenceDeliveryVersionArtifact,
+                        and_(
+                            ReferenceDeliveryVersionArtifact.artifact_id
+                            == ReferenceSourceArtifact.id,
+                            ReferenceDeliveryVersionArtifact.source_id
+                            == ReferenceSourceArtifact.source_id,
+                        ),
                     )
-            artifact = db.scalar(
-                artifact_query
-                .order_by(ReferenceSourceArtifact.retrieved_at.desc())
-                .limit(1)
-            )
-            conditional = ConditionalRequest.from_artifact(artifact)
+                    .where(
+                        ReferenceDeliveryVersionArtifact.version_id
+                        == active_version_id,
+                        ReferenceDeliveryVersionArtifact.role == "input",
+                        ReferenceSourceArtifact.source_id == source.id,
+                        ReferenceSourceArtifact.source_url.is_not(None),
+                        or_(
+                            ReferenceSourceArtifact.upstream_etag.is_not(None),
+                            ReferenceSourceArtifact.upstream_last_modified.is_not(None),
+                        ),
+                    )
+                )
+                if composite_transform:
+                    configured_url = source.config_json.get("download_url")
+                    dataset_url = (
+                        configured_url
+                        if isinstance(configured_url, str)
+                        else source.endpoint_url
+                    )
+                    if isinstance(dataset_url, str):
+                        artifact_query = artifact_query.where(
+                            ReferenceSourceArtifact.source_url
+                            == dataset_url
+                        )
+                artifact = db.scalar(
+                    artifact_query
+                    .order_by(
+                        ReferenceSourceArtifact.retrieved_at.desc()
+                    )
+                    .limit(1)
+                )
+                conditional = ConditionalRequest.from_artifact(artifact)
             # A dataset-only 304 cannot prove that an independently served
             # GetStyles response and its graphics are unchanged.  The reviewed
-            # masked-GeoPackage path explicitly rechecks its mask and styles
-            # before accepting a dataset 304; other styled sources still take
-            # a full snapshot on every scheduled check.
-            if styles and not composite_conditional:
+            # composite paths either recheck every independent input or bind
+            # their locally authored styles into the unchanged source
+            # definition; other styled sources still take a full snapshot.
+            if (
+                styles
+                and not composite_transform
+                and resource_specs is None
+            ):
                 conditional = None
         context = RunContext(
             lease=lease,
@@ -1200,6 +1227,164 @@ def load_run_context(
         )
         db.expunge_all()
         return context
+
+
+def _load_composite_download_conditional(
+    db: Session,
+    *,
+    source: ReferenceLayerSource,
+    run: ReferenceSyncRun,
+    state: ReferenceLayerDeliveryState | None,
+    active_version_id: int,
+    active_run_id: int | None,
+) -> DownloadConditionalRequest | None:
+    """Rebuild exact reusable inputs and latest validators without new tables."""
+
+    if state is None or active_run_id is None:
+        return None
+    specs = configured_download_resources(
+        candidate_from_source_model(source)
+    )
+    if specs is None:
+        return None
+    datasets = tuple(
+        db.scalars(
+            select(ReferenceSourceArtifact)
+            .join(
+                ReferenceDeliveryVersionArtifact,
+                and_(
+                    ReferenceDeliveryVersionArtifact.artifact_id
+                    == ReferenceSourceArtifact.id,
+                    ReferenceDeliveryVersionArtifact.source_id
+                    == ReferenceSourceArtifact.source_id,
+                ),
+            )
+            .where(
+                ReferenceDeliveryVersionArtifact.version_id
+                == active_version_id,
+                ReferenceDeliveryVersionArtifact.role == "input",
+                ReferenceSourceArtifact.source_id == source.id,
+                ReferenceSourceArtifact.artifact_kind == "dataset",
+            )
+        )
+    )
+    if len(datasets) != len(specs):
+        return None
+    datasets_by_key: dict[str, ReferenceSourceArtifact] = {}
+    for artifact in datasets:
+        metadata = artifact.metadata_json
+        key = (
+            metadata.get("resource_key")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not isinstance(key, str) or key in datasets_by_key:
+            return None
+        datasets_by_key[key] = artifact
+
+    latest_observation_run_id = db.scalar(
+        select(ReferenceSyncRun.id)
+        .where(
+            ReferenceSyncRun.source_id == source.id,
+            ReferenceSyncRun.id < run.id,
+            ReferenceSyncRun.status.in_(("succeeded", "unchanged")),
+            ReferenceSyncRun.source_definition_sha256
+            == run.source_definition_sha256,
+            or_(
+                ReferenceSyncRun.id == active_run_id,
+                ReferenceSyncRun.expected_active_generation
+                == state.generation,
+            ),
+        )
+        .order_by(ReferenceSyncRun.id.desc())
+        .limit(1)
+    )
+    observations_by_key: dict[str, ReferenceSourceArtifact] = {}
+    if latest_observation_run_id is not None:
+        observation_rows = tuple(
+            db.scalars(
+                select(ReferenceSourceArtifact)
+                .join(
+                    ReferenceSyncRunArtifact,
+                    and_(
+                        ReferenceSyncRunArtifact.artifact_id
+                        == ReferenceSourceArtifact.id,
+                        ReferenceSyncRunArtifact.source_id
+                        == ReferenceSourceArtifact.source_id,
+                    ),
+                )
+                .where(
+                    ReferenceSyncRunArtifact.source_id == source.id,
+                    ReferenceSyncRunArtifact.run_id
+                    == latest_observation_run_id,
+                    ReferenceSyncRunArtifact.role == "metadata",
+                    ReferenceSourceArtifact.artifact_kind == "metadata",
+                )
+            )
+        )
+        for artifact in observation_rows:
+            metadata = artifact.metadata_json
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("schema")
+                != "reference-composite-download-observation/v1"
+            ):
+                continue
+            key = metadata.get("resource_key")
+            if isinstance(key, str) and key not in observations_by_key:
+                observations_by_key[key] = artifact
+
+    reusable: list[ReusableDownloadResource] = []
+    try:
+        for spec in specs:
+            dataset = datasets_by_key.get(spec.resource_key)
+            if (
+                dataset is None
+                or dataset.source_url != spec.source_url
+                or dataset.media_type.casefold()
+                != spec.media_type.casefold()
+                or dataset.metadata_json.get("page_index")
+                != spec.page_index
+                or dataset.metadata_json.get("data_format")
+                != spec.data_format
+            ):
+                return None
+            observation = observations_by_key.get(spec.resource_key)
+            validator = dataset
+            if (
+                observation is not None
+                and observation.source_url == spec.source_url
+                and observation.metadata_json.get("page_index")
+                == spec.page_index
+                and observation.metadata_json.get("dataset_sha256")
+                == dataset.sha256
+            ):
+                validator = observation
+            reusable.append(
+                ReusableDownloadResource(
+                    resource_key=spec.resource_key,
+                    page_index=spec.page_index,
+                    source_url=spec.source_url,
+                    final_url=dataset.final_url,
+                    media_type=dataset.media_type,
+                    blob=StoredReferenceBlob(
+                        storage_backend=dataset.storage_backend,
+                        storage_key=dataset.storage_key,
+                        sha256=dataset.sha256,
+                        size_bytes=dataset.size_bytes,
+                    ),
+                    metadata=dict(dataset.metadata_json),
+                    upstream_etag=validator.upstream_etag,
+                    upstream_last_modified=(
+                        validator.upstream_last_modified
+                    ),
+                    source_version=dataset.source_version,
+                    retrieved_at=dataset.retrieved_at,
+                )
+            )
+        return DownloadConditionalRequest(resources=tuple(reusable))
+    except (TypeError, ValueError):
+        return None
 
 
 def revalidate_run_authorization(
@@ -3530,9 +3715,24 @@ def _optional_input_layer(
     source: ReferenceLayerSource,
     artifact: PersistedRunArtifact,
 ) -> str | None:
-    value = artifact.metadata_json.get("input_layer")
-    if value is None:
-        value = source.config_json.get("input_layer")
+    persisted = artifact.metadata_json.get("input_layer")
+    composite = _composite_resource_validation(source, artifact)
+    configured = (
+        composite.get("input_layer")
+        if composite is not None
+        else source.config_json.get("input_layer")
+    )
+    if composite is not None and (
+        not isinstance(persisted, str)
+        or not persisted
+        or not isinstance(configured, str)
+        or persisted != configured
+    ):
+        raise MirrorOrchestrationError(
+            "vector input layer differs from its composite resource",
+            code="vector_input_layer_invalid",
+        )
+    value = persisted if persisted is not None else configured
     return value if isinstance(value, str) and value else None
 
 
@@ -3543,7 +3743,12 @@ def _optional_archive_member(
     required: bool,
 ) -> str | None:
     persisted = artifact.metadata_json.get("archive_member")
-    configured = source.config_json.get("archive_member")
+    composite = _composite_resource_validation(source, artifact)
+    configured = (
+        composite.get("archive_member")
+        if composite is not None
+        else source.config_json.get("archive_member")
+    )
     if persisted is None and configured is None and not required:
         return None
     if (
@@ -3557,6 +3762,40 @@ def _optional_archive_member(
             code="vector_archive_member_invalid",
         )
     return persisted
+
+
+def _composite_resource_validation(
+    source: ReferenceLayerSource,
+    artifact: PersistedRunArtifact,
+) -> Mapping[str, Any] | None:
+    raw = source.config_json.get("download_resources")
+    if raw is None:
+        return None
+    page_index = artifact.metadata_json.get("page_index")
+    resource_key = artifact.metadata_json.get("resource_key")
+    if (
+        not isinstance(raw, list)
+        or isinstance(page_index, bool)
+        or not isinstance(page_index, int)
+        or not 0 <= page_index < len(raw)
+        or not isinstance(resource_key, str)
+    ):
+        raise MirrorOrchestrationError(
+            "vector artifact has no exact composite resource identity",
+            code="vector_page_order_invalid",
+        )
+    item = raw[page_index]
+    validation = item.get("validation") if isinstance(item, dict) else None
+    if (
+        not isinstance(item, dict)
+        or item.get("resource_key") != resource_key
+        or not isinstance(validation, dict)
+    ):
+        raise MirrorOrchestrationError(
+            "vector artifact differs from its composite source definition",
+            code="vector_page_order_invalid",
+        )
+    return validation
 
 
 def _input_artifact_ids(

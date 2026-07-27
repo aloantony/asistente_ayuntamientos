@@ -87,6 +87,7 @@ from app.reference_layers.models import (
     ReferenceLayerDeliveryState,
     ReferenceLayerSource,
     ReferenceLayerStyle,
+    ReferenceSourceArtifact,
     ReferenceSyncRun,
 )
 from app.reference_layers.source_discovery import (
@@ -186,6 +187,43 @@ def _candidate(*, priority: int = 0, key: str = "source:xyz") -> SourceCandidate
             "coverage_required": True,
         },
         source_key=key,
+        definition_sha256="0" * 64,
+    )
+    return replace(
+        draft,
+        definition_sha256=source_candidate_definition_sha256(draft),
+    )
+
+
+def _composite_candidate() -> SourceCandidate:
+    endpoint = "https://sigpac.example.test/downloads/"
+    draft = SourceCandidate(
+        protocol="download",
+        target_kind="vector",
+        endpoint_url=endpoint,
+        remote_name="sigpac",
+        sync_strategy="conditional_get",
+        priority=0,
+        config={
+            "download_resources": [
+                {
+                    "resource_key": key,
+                    "url": f"{endpoint}{key}.zip",
+                    "media_type": "application/zip",
+                    "data_format": "shapefile-zip",
+                    "max_download_bytes": 1024 * 1024,
+                    "max_uncompressed_bytes": 2 * 1024 * 1024,
+                    "validation": {
+                        "archive_member": f"{key}.shp",
+                        "input_layer": key,
+                    },
+                }
+                for key in ("avila", "burgos")
+            ],
+            "max_aggregate_download_bytes": 2 * 1024 * 1024,
+            "max_aggregate_uncompressed_bytes": 4 * 1024 * 1024,
+        },
+        source_key="source:composite-download",
         definition_sha256="0" * 64,
     )
     return replace(
@@ -602,6 +640,265 @@ def test_vector_materialization_routes_ordered_cadastral_zip_parts(
         for item in captured["artifacts"]
     )
     assert supervisor.pulses == 2
+
+
+def test_vector_materialization_routes_ordered_composite_shapefile_archives(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "composite-shapefile-store"),
+        max_blob_bytes=1024 * 1024,
+    )
+    blobs = [
+        store.put_stream(io.BytesIO(b"PK\x03\x04burgos")),
+        store.put_stream(io.BytesIO(b"PK\x03\x04avila")),
+    ]
+    artifacts = (
+        PersistedRunArtifact(
+            artifact_id=1,
+            artifact_kind="dataset",
+            roles=frozenset({"input"}),
+            media_type="application/zip",
+            storage_backend="filesystem",
+            storage_key=blobs[0].storage_key,
+            size_bytes=blobs[0].size_bytes,
+            sha256=blobs[0].sha256,
+            metadata_json={
+                "schema": "reference-composite-download-dataset/v1",
+                "data_format": "shapefile-zip",
+                "resource_key": "burgos",
+                "page_index": 1,
+                "archive_member": "burgos.shp",
+                "input_layer": "burgos",
+            },
+        ),
+        PersistedRunArtifact(
+            artifact_id=2,
+            artifact_kind="dataset",
+            roles=frozenset({"input"}),
+            media_type="application/zip",
+            storage_backend="filesystem",
+            storage_key=blobs[1].storage_key,
+            size_bytes=blobs[1].size_bytes,
+            sha256=blobs[1].sha256,
+            metadata_json={
+                "schema": "reference-composite-download-dataset/v1",
+                "data_format": "shapefile-zip",
+                "resource_key": "avila",
+                "page_index": 0,
+                "archive_member": "avila.shp",
+                "input_layer": "avila",
+            },
+        ),
+    )
+    captured = {}
+    vector_result = object()
+
+    def ingest(_db, **kwargs):
+        captured.update(kwargs)
+        return vector_result
+
+    monkeypatch.setattr(
+        mirror_orchestrator.geo_ingest,
+        "ingest_vector_artifacts",
+        ingest,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "_geoserver_materialization",
+        lambda *_args, **kwargs: kwargs["vector"],
+    )
+    context = SimpleNamespace(
+        styles=(),
+        source=SimpleNamespace(
+            provider_key="siur",
+            layer_id=41,
+            config_json={
+                "download_resources": [
+                    {
+                        "resource_key": "avila",
+                        "validation": {
+                            "archive_member": "avila.shp",
+                            "input_layer": "avila",
+                        },
+                    },
+                    {
+                        "resource_key": "burgos",
+                        "validation": {
+                            "archive_member": "burgos.shp",
+                            "input_layer": "burgos",
+                        },
+                    },
+                ]
+            },
+        ),
+        run=SimpleNamespace(id=71),
+    )
+    supervisor = FakeSupervisor()
+    try:
+        result = mirror_orchestrator.materialize_vector_delivery(
+            lambda: nullcontext(object()),
+            store,
+            context,
+            SimpleNamespace(),
+            artifacts,
+            supervisor,
+            database_url=(
+                "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+            ),
+            max_source_bytes=1024 * 1024,
+            timeout_seconds=30,
+        )
+    finally:
+        store.close()
+
+    assert result is vector_result
+    assert captured["input_driver"] == "SHAPEFILEZIP"
+    assert [
+        (item[1], item[2], item[3])
+        for item in captured["artifacts"]
+    ] == [
+        (blobs[1].sha256, "avila", "avila.shp"),
+        (blobs[0].sha256, "burgos", "burgos.shp"),
+    ]
+    assert supervisor.pulses == 2
+
+
+def test_composite_conditional_uses_only_generation_and_definition_fenced_observations(
+) -> None:
+    candidate = _composite_candidate()
+    source = ReferenceLayerSource(
+        id=41,
+        provider_key="siur",
+        layer_id=17,
+        source_key=candidate.source_key,
+        protocol=candidate.protocol,
+        target_kind=candidate.target_kind,
+        endpoint_url=candidate.endpoint_url,
+        remote_name=candidate.remote_name,
+        sync_strategy=candidate.sync_strategy,
+        config_json=dict(candidate.config),
+        definition_sha256=candidate.definition_sha256,
+        enabled=True,
+        is_primary=True,
+        priority=0,
+    )
+    run = ReferenceSyncRun(
+        id=90,
+        source_id=source.id,
+        source_definition_sha256=source.definition_sha256,
+    )
+    datasets = []
+    observations = []
+    for page_index, key in enumerate(("avila", "burgos")):
+        digest = hashlib.sha256(key.encode()).hexdigest()
+        datasets.append(
+            ReferenceSourceArtifact(
+                id=page_index + 1,
+                source_id=source.id,
+                artifact_kind="dataset",
+                source_url=(
+                    f"https://sigpac.example.test/downloads/{key}.zip"
+                ),
+                final_url=(
+                    f"https://sigpac.example.test/downloads/{key}.zip"
+                ),
+                upstream_etag=f'"{key}-dataset"',
+                media_type="application/zip",
+                storage_backend="filesystem",
+                storage_key=(
+                    f"blobs/sha256/{digest[:2]}/{digest}"
+                ),
+                size_bytes=100 + page_index,
+                sha256=digest,
+                metadata_json={
+                    "schema": (
+                        "reference-composite-download-dataset/v1"
+                    ),
+                    "data_format": "shapefile-zip",
+                    "resource_key": key,
+                    "page_index": page_index,
+                    "uncompressed_bytes": 200 + page_index,
+                },
+                retrieved_at=NOW,
+            )
+        )
+        observations.append(
+            ReferenceSourceArtifact(
+                id=page_index + 11,
+                source_id=source.id,
+                artifact_kind="metadata",
+                source_url=(
+                    f"https://sigpac.example.test/downloads/{key}.zip"
+                ),
+                final_url=(
+                    f"https://sigpac.example.test/downloads/{key}.zip"
+                ),
+                upstream_etag=f'"{key}-observation"',
+                media_type="application/json",
+                storage_backend="filesystem",
+                storage_key=(
+                    "blobs/sha256/"
+                    f"{('f' * 64)[:2]}/{'f' * 64}"
+                ),
+                size_bytes=200,
+                sha256="f" * 64,
+                metadata_json={
+                    "schema": (
+                        "reference-composite-download-observation/v1"
+                    ),
+                    "resource_key": key,
+                    "page_index": page_index,
+                    "dataset_sha256": (
+                        digest if key == "avila" else "0" * 64
+                    ),
+                },
+                retrieved_at=NOW,
+            )
+        )
+
+    class FakeDB:
+        def __init__(self):
+            self.scalars_calls = 0
+
+        def scalar(self, statement):
+            query = str(statement)
+            assert "source_definition_sha256" in query
+            assert "expected_active_generation" in query
+            assert "status IN" in query
+            return 89
+
+        def scalars(self, _statement):
+            self.scalars_calls += 1
+            return iter(
+                datasets
+                if self.scalars_calls == 1
+                else observations
+            )
+
+    conditional = (
+        mirror_orchestrator._load_composite_download_conditional(
+            FakeDB(),
+            source=source,
+            run=run,
+            state=SimpleNamespace(generation=7),
+            active_version_id=71,
+            active_run_id=70,
+        )
+    )
+
+    assert conditional is not None
+    assert [item.resource_key for item in conditional.resources] == [
+        "avila",
+        "burgos",
+    ]
+    assert conditional.resources[0].upstream_etag == (
+        '"avila-observation"'
+    )
+    assert conditional.resources[1].upstream_etag == (
+        '"burgos-dataset"'
+    )
 
 
 def test_vector_materialization_uses_only_derived_geopackage_input(

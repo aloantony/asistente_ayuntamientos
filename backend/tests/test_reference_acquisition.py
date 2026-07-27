@@ -26,12 +26,18 @@ from app.reference_layers.acquisition import (
     AcquisitionPersistenceError,
     AcquisitionValidationError,
     ConditionalRequest,
+    DownloadConditionalRequest,
+    ReusableDownloadResource,
     ReferenceAcquisitionPipeline,
     candidate_from_source_model,
     persist_acquisition_result,
     source_candidate_definition_sha256,
 )
-from app.reference_layers.blob_store import ReferenceBlobStore, StoredReferenceBlob
+from app.reference_layers.blob_store import (
+    InvalidReferenceBlobKeyError,
+    ReferenceBlobStore,
+    StoredReferenceBlob,
+)
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
@@ -307,6 +313,97 @@ def shapefile_zip_payload() -> bytes:
         archive.writestr("roads.shx", b"shx payload")
         archive.writestr("roads.dbf", b"dbf payload")
     return target.getvalue()
+
+
+def composite_shapefile_payload(
+    name: str,
+    version: str,
+    *,
+    member_bytes: int = 16,
+) -> bytes:
+    body = (f"{name}:{version}:".encode() * (member_bytes + 1))[
+        :member_bytes
+    ]
+    target = io.BytesIO()
+    with zipfile.ZipFile(
+        target,
+        "w",
+        compression=zipfile.ZIP_STORED,
+    ) as archive:
+        for suffix in (".shp", ".shx", ".dbf", ".prj"):
+            archive.writestr(f"{name}{suffix}", body + suffix.encode())
+    return target.getvalue()
+
+
+def composite_download_candidate(
+    *,
+    max_download_bytes: int = 64 * 1024,
+    max_uncompressed_bytes: int = 128 * 1024,
+    max_aggregate_download_bytes: int = 256 * 1024,
+    max_aggregate_uncompressed_bytes: int = 512 * 1024,
+) -> SourceCandidate:
+    endpoint = "https://sigpac.example.es/downloads/"
+    resources = []
+    for key in ("avila", "burgos"):
+        resources.append(
+            {
+                "resource_key": key,
+                "url": f"{endpoint}{key}.zip",
+                "media_type": "application/zip",
+                "data_format": "shapefile-zip",
+                "max_download_bytes": max_download_bytes,
+                "max_uncompressed_bytes": max_uncompressed_bytes,
+                "validation": {
+                    "archive_member": f"{key}.shp",
+                    "input_layer": key,
+                },
+            }
+        )
+    return candidate(
+        "download",
+        remote_name="sigpac-composite",
+        endpoint=endpoint,
+        config={
+            "download_resources": resources,
+            "max_aggregate_download_bytes": (
+                max_aggregate_download_bytes
+            ),
+            "max_aggregate_uncompressed_bytes": (
+                max_aggregate_uncompressed_bytes
+            ),
+        },
+    )
+
+
+def composite_conditional_from_result(
+    result: AcquisitionResult,
+) -> DownloadConditionalRequest:
+    datasets = sorted(
+        (
+            item
+            for item in result.artifacts
+            if item.artifact_kind == "dataset"
+        ),
+        key=lambda item: item.metadata["page_index"],
+    )
+    return DownloadConditionalRequest(
+        resources=tuple(
+            ReusableDownloadResource(
+                resource_key=item.metadata["resource_key"],
+                page_index=item.metadata["page_index"],
+                source_url=item.source_url,
+                final_url=item.final_url,
+                media_type=item.media_type,
+                blob=item.blob,
+                metadata=dict(item.metadata),
+                upstream_etag=item.upstream_etag,
+                upstream_last_modified=item.upstream_last_modified,
+                source_version=item.source_version,
+                retrieved_at=item.retrieved_at,
+            )
+            for item in datasets
+        )
+    )
 
 
 def minimal_geopackage_payload(path: Path) -> bytes:
@@ -2926,6 +3023,609 @@ def test_direct_download_is_content_addressed_and_records_conditional_headers(st
     )
 
 
+def test_composite_download_reuses_304_resource_and_replaces_only_changed_part(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+    first_payloads = {
+        "avila": composite_shapefile_payload("avila", "v1"),
+        "burgos": composite_shapefile_payload("burgos", "v1"),
+    }
+
+    def initial_handler(url, etag, modified):
+        assert etag is None
+        assert modified is None
+        key = Path(urlsplit(url).path).stem
+        return Response(
+            first_payloads[key],
+            "application/zip",
+            etag=f'"{key}-v1"',
+        )
+
+    first = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(initial_handler),
+    ).acquire(source)
+    previous = composite_conditional_from_result(first)
+    first_datasets = {
+        item.metadata["resource_key"]: item
+        for item in first.artifacts
+        if item.artifact_kind == "dataset"
+    }
+    second_payload = composite_shapefile_payload("burgos", "v2")
+
+    def update_handler(url, etag, modified):
+        assert modified is None
+        key = Path(urlsplit(url).path).stem
+        assert etag == f'"{key}-v1"'
+        if key == "avila":
+            return Response(status=304, etag='"avila-v1"')
+        return Response(
+            second_payload,
+            "application/zip",
+            etag='"burgos-v2"',
+        )
+
+    transport = FakeTransport(update_handler)
+    updated = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+    ).acquire(source, conditional=previous)
+
+    datasets = sorted(
+        (
+            item
+            for item in updated.artifacts
+            if item.artifact_kind == "dataset"
+        ),
+        key=lambda item: item.metadata["page_index"],
+    )
+    assert updated.not_modified is False
+    assert [item.metadata["resource_key"] for item in datasets] == [
+        "avila",
+        "burgos",
+    ]
+    assert datasets[0].blob == first_datasets["avila"].blob
+    assert datasets[1].blob.sha256 == hashlib.sha256(
+        second_payload
+    ).hexdigest()
+    assert datasets[1].blob != first_datasets["burgos"].blob
+    assert updated.stats["changed_resource_count"] == 1
+    assert updated.stats["http_not_modified_resource_count"] == 1
+    assert updated.stats["downloaded_resource_count"] == 1
+    assert [item["etag"] for item in transport.calls] == [
+        '"avila-v1"',
+        '"burgos-v1"',
+    ]
+    manifest = read_json_artifact(store, updated, "manifest")
+    assert manifest["materialization"]["kind"] == (
+        "direct-dataset-pages"
+    )
+    assert manifest["materialization"]["resource_keys"] == [
+        "avila",
+        "burgos",
+    ]
+    assert manifest["materialization"]["dataset_sha256"] == [
+        item.blob.sha256 for item in datasets
+    ]
+
+
+def test_composite_download_all_304_is_one_unchanged_observation(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+
+    def initial_handler(url, _etag, _modified):
+        key = Path(urlsplit(url).path).stem
+        return Response(
+            composite_shapefile_payload(key, "v1"),
+            "application/zip",
+            etag=f'"{key}-v1"',
+            last_modified="Mon, 27 Jul 2026 08:00:00 GMT",
+        )
+
+    first = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(initial_handler),
+    ).acquire(source)
+    previous = composite_conditional_from_result(first)
+
+    def unchanged_handler(url, etag, modified):
+        key = Path(urlsplit(url).path).stem
+        assert etag == f'"{key}-v1"'
+        assert modified == "Mon, 27 Jul 2026 08:00:00 GMT"
+        return Response(
+            status=304,
+            etag=etag,
+            last_modified=modified,
+        )
+
+    unchanged = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(unchanged_handler),
+    ).acquire(source, conditional=previous)
+
+    assert unchanged.not_modified is True
+    assert unchanged.manifest_sha256 is None
+    assert unchanged.observed_etag is None
+    assert unchanged.stats["not_modified"] is True
+    assert unchanged.stats["changed_resource_count"] == 0
+    assert unchanged.stats["http_not_modified_resource_count"] == 2
+    assert all(
+        item.artifact_kind == "metadata"
+        and item.role == "metadata"
+        and item.metadata["schema"]
+        == "reference-composite-download-observation/v1"
+        for item in unchanged.artifacts
+    )
+    assert [
+        item.metadata["resource_key"] for item in unchanged.artifacts
+    ] == ["avila", "burgos"]
+    assert all(
+        item.upstream_etag
+        == f'"{item.metadata["resource_key"]}-v1"'
+        for item in unchanged.artifacts
+    )
+
+
+def test_composite_download_identical_200_responses_are_content_unchanged(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+    payloads = {
+        key: composite_shapefile_payload(key, "v1")
+        for key in ("avila", "burgos")
+    }
+
+    def initial_handler(url, _etag, _modified):
+        key = Path(urlsplit(url).path).stem
+        return Response(
+            payloads[key],
+            "application/zip",
+            etag=f'"{key}-v1"',
+        )
+
+    first = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(initial_handler),
+    ).acquire(source)
+    previous = composite_conditional_from_result(first)
+
+    def revalidated_handler(url, etag, _modified):
+        key = Path(urlsplit(url).path).stem
+        assert etag == f'"{key}-v1"'
+        return Response(
+            payloads[key],
+            "application/zip",
+            etag=f'"{key}-validator-rotated"',
+        )
+
+    revalidated = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(revalidated_handler),
+    ).acquire(source, conditional=previous)
+
+    assert revalidated.not_modified is True
+    assert revalidated.stats["changed_resource_count"] == 0
+    assert revalidated.stats["downloaded_resource_count"] == 2
+    assert revalidated.stats["http_not_modified_resource_count"] == 0
+    assert all(
+        item.upstream_etag.endswith('-validator-rotated"')
+        for item in revalidated.artifacts
+    )
+
+
+def test_composite_download_rejects_304_without_reusable_state(
+    store,
+    limits,
+):
+    with pytest.raises(AcquisitionValidationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(
+                lambda _url, _etag, _modified: Response(status=304)
+            ),
+        ).acquire(composite_download_candidate())
+
+    assert error.value.code == "unexpected_not_modified"
+    assert list((store.root / "staging").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda config: config["download_resources"][1].update(
+            {"url": config["download_resources"][0]["url"]}
+        ),
+        lambda config: config["download_resources"][1].update(
+            {"data_format": "flatgeobuf"}
+        ),
+        lambda config: config["download_resources"][0].update(
+            {"url": "https://other.example.es/avila.zip"}
+        ),
+        lambda config: config["download_resources"][0][
+            "validation"
+        ].update({"typo_member": "avila.shp"}),
+    ],
+)
+def test_composite_download_invalid_exact_contract_fails_before_network(
+    store,
+    limits,
+    mutate,
+):
+    valid = composite_download_candidate()
+    config = json.loads(json.dumps(valid.config))
+    mutate(config)
+    invalid = candidate(
+        "download",
+        remote_name=valid.remote_name,
+        endpoint=valid.endpoint_url,
+        config=config,
+    )
+    transport = FakeTransport(
+        lambda *_args: pytest.fail(
+            "invalid composite contract reached the network"
+        )
+    )
+
+    with pytest.raises(AcquisitionConfigurationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        ).acquire(invalid)
+
+    assert error.value.code == "composite_download_config_invalid"
+    assert transport.calls == []
+
+
+def test_composite_download_missing_reusable_cas_blob_fails_before_network(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+    payloads = {
+        key: composite_shapefile_payload(key, "v1")
+        for key in ("avila", "burgos")
+    }
+    first = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda url, _etag, _modified: Response(
+                payloads[Path(urlsplit(url).path).stem],
+                "application/zip",
+                etag=(
+                    f'"{Path(urlsplit(url).path).stem}-v1"'
+                ),
+            )
+        ),
+    ).acquire(source)
+    previous = composite_conditional_from_result(first)
+    missing = previous.resources[0].blob
+    store.resolve_blob(missing.storage_key).unlink()
+    transport = FakeTransport(
+        lambda _url, _etag, _modified: pytest.fail(
+            "network must not run with an unavailable reusable blob"
+        )
+    )
+
+    with pytest.raises(InvalidReferenceBlobKeyError):
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        ).acquire(source, conditional=previous)
+
+    assert transport.calls == []
+
+
+def test_composite_download_rejects_reusable_cas_size_change_before_network(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+    first = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda url, _etag, _modified: Response(
+                composite_shapefile_payload(
+                    Path(urlsplit(url).path).stem,
+                    "v1",
+                ),
+                "application/zip",
+                etag=(
+                    f'"{Path(urlsplit(url).path).stem}-v1"'
+                ),
+            )
+        ),
+    ).acquire(source)
+    previous = composite_conditional_from_result(first)
+    changed_path = store.resolve_blob(
+        previous.resources[0].blob.storage_key
+    )
+    with changed_path.open("ab") as stream:
+        stream.write(b"x")
+    transport = FakeTransport(
+        lambda _url, _etag, _modified: pytest.fail(
+            "network must not run after local CAS size drift"
+        )
+    )
+
+    with pytest.raises(AcquisitionPersistenceError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        ).acquire(source, conditional=previous)
+
+    assert error.value.code == "reusable_resource_unavailable"
+    assert transport.calls == []
+
+
+def test_composite_download_reused_sizes_count_toward_aggregate_limit(
+    store,
+    limits,
+):
+    source = composite_download_candidate(
+        max_download_bytes=4_096,
+        max_uncompressed_bytes=8_192,
+        max_aggregate_download_bytes=5_000,
+        max_aggregate_uncompressed_bytes=16_384,
+    )
+    resources = []
+    for page_index, key in enumerate(("avila", "burgos")):
+        payload = composite_shapefile_payload(
+            key,
+            "large-active",
+            member_bytes=650,
+        )
+        assert 2_500 < len(payload) < 4_096
+        blob = store.put_stream(io.BytesIO(payload))
+        resources.append(
+            ReusableDownloadResource(
+                resource_key=key,
+                page_index=page_index,
+                source_url=(
+                    f"https://sigpac.example.es/downloads/{key}.zip"
+                ),
+                final_url=(
+                    f"https://sigpac.example.es/downloads/{key}.zip"
+                ),
+                media_type="application/zip",
+                blob=blob,
+                metadata={
+                    "schema": (
+                        "reference-composite-download-dataset/v1"
+                    ),
+                    "protocol": "download",
+                    "data_format": "shapefile-zip",
+                    "remote_name": "sigpac-composite",
+                    "resource_key": key,
+                    "page_index": page_index,
+                    "resource_count": 2,
+                    "uncompressed_bytes": 2_700,
+                    "archive_member": f"{key}.shp",
+                    "input_layer": key,
+                },
+                upstream_etag=f'"{key}-v1"',
+            )
+        )
+
+    with pytest.raises(AcquisitionLimitError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(
+                lambda _url, etag, _modified: Response(
+                    status=304,
+                    etag=etag,
+                )
+            ),
+        ).acquire(
+            source,
+            conditional=DownloadConditionalRequest(
+                resources=tuple(resources)
+            ),
+        )
+
+    assert error.value.code == "aggregate_download_limit"
+
+
+def test_composite_download_aggregate_limit_rolls_back_all_staging(
+    store,
+    limits,
+):
+    source = composite_download_candidate(
+        max_download_bytes=4_096,
+        max_uncompressed_bytes=4_096,
+        max_aggregate_download_bytes=5_000,
+        max_aggregate_uncompressed_bytes=8_192,
+    )
+    payloads = {
+        key: composite_shapefile_payload(
+            key,
+            "large",
+            member_bytes=650,
+        )
+        for key in ("avila", "burgos")
+    }
+    assert all(len(value) < 4_096 for value in payloads.values())
+    assert sum(map(len, payloads.values())) > 5_000
+
+    with pytest.raises(AcquisitionLimitError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(
+                lambda url, _etag, _modified: Response(
+                    payloads[Path(urlsplit(url).path).stem],
+                    "application/zip",
+                )
+            ),
+        ).acquire(source)
+
+    assert error.value.code == "aggregate_download_limit"
+    assert list((store.root / "staging").iterdir()) == []
+    assert [
+        path
+        for path in (store.root / "blobs" / "sha256").rglob("*")
+        if path.is_file()
+    ] == []
+
+
+def test_composite_download_enforces_each_resource_byte_limit(
+    store,
+    limits,
+):
+    source = composite_download_candidate(
+        max_download_bytes=300,
+        max_uncompressed_bytes=4_096,
+        max_aggregate_download_bytes=1_000,
+        max_aggregate_uncompressed_bytes=8_192,
+    )
+    payload = composite_shapefile_payload(
+        "avila",
+        "oversized",
+        member_bytes=200,
+    )
+    assert len(payload) > 300
+
+    with pytest.raises(AcquisitionLimitError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(
+                lambda _url, _etag, _modified: Response(
+                    payload,
+                    "application/zip",
+                )
+            ),
+        ).acquire(source)
+
+    assert error.value.code == "resource_download_limit"
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_composite_download_late_validation_failure_keeps_first_part_unpublished(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+
+    def handler(url, _etag, _modified):
+        key = Path(urlsplit(url).path).stem
+        if key == "avila":
+            return Response(
+                composite_shapefile_payload(key, "valid"),
+                "application/zip",
+            )
+        return Response(b"not-a-zip", "application/zip")
+
+    with pytest.raises(AcquisitionValidationError):
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(source)
+
+    assert list((store.root / "staging").iterdir()) == []
+    assert [
+        path
+        for path in (store.root / "blobs" / "sha256").rglob("*")
+        if path.is_file()
+    ] == []
+
+
+def test_composite_download_staging_batch_survives_concurrent_gc(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+    cleanup_results = []
+
+    def handler(url, _etag, _modified):
+        key = Path(urlsplit(url).path).stem
+        if key == "burgos":
+            cleanup_results.append(
+                store.cleanup_staging(older_than_seconds=0)
+            )
+        return Response(
+            composite_shapefile_payload(key, "v1"),
+            "application/zip",
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(source)
+
+    assert result.not_modified is False
+    assert len(
+        [
+            item
+            for item in result.artifacts
+            if item.artifact_kind == "dataset"
+        ]
+    ) == 2
+    assert len(cleanup_results) == 1
+    assert cleanup_results[0].deleted_count == 0
+    assert cleanup_results[0].skipped_count >= 2
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_composite_download_rejects_duplicate_resource_content_before_cas(
+    store,
+    limits,
+):
+    source = composite_download_candidate()
+    target = io.BytesIO()
+    with zipfile.ZipFile(
+        target,
+        "w",
+        compression=zipfile.ZIP_STORED,
+    ) as archive:
+        for key in ("avila", "burgos"):
+            for suffix in (".shp", ".shx", ".dbf", ".prj"):
+                archive.writestr(
+                    f"{key}{suffix}",
+                    f"{key}:{suffix}".encode(),
+                )
+    payload = target.getvalue()
+
+    with pytest.raises(AcquisitionValidationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(
+                lambda _url, _etag, _modified: Response(
+                    payload,
+                    "application/zip",
+                )
+            ),
+        ).acquire(source)
+
+    assert error.value.code == "duplicate_resource_content"
+    assert list((store.root / "staging").iterdir()) == []
+    assert [
+        path
+        for path in (store.root / "blobs" / "sha256").rglob("*")
+        if path.is_file()
+    ] == []
+
+
 def test_masked_geopackage_acquisition_keeps_composite_provenance(
     store,
     limits,
@@ -4794,3 +5494,192 @@ def test_persistence_links_content_addressed_artifacts_idempotently(
         )
     ) == 2
     assert all(item.storage_key.endswith(item.sha256) for item in first)
+
+
+def test_partial_composite_update_persists_complete_ordered_input_set_and_fences_race(
+    db,
+    store,
+    limits,
+):
+    definition = ReferenceCatalogDefinition(
+        provider_key="acquisition-composite-test",
+        source_url="https://sigpac.example.es/catalog.json",
+        raw_catalog={"version": 1},
+        services=(
+            ReferenceServiceDefinition(
+                source_key="downloads",
+                title="Composite downloads",
+                upstream_protocol="wms",
+                base_url="https://sigpac.example.es/wms",
+                license_status="pending",
+                cache_policy="mirror",
+            ),
+        ),
+        layers=(
+            ReferenceLayerDefinition(
+                source_key="sigpac",
+                node_type="layer",
+                title="SIGPAC",
+                service_key="downloads",
+                remote_name="sigpac",
+                role="overlay",
+                renderer="raster_tile",
+                delivery_mode="mirror",
+            ),
+        ),
+        retrieved_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+    )
+    apply_catalog_definition(db, definition)
+    layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == definition.provider_key,
+            ReferenceLayer.source_key == "sigpac",
+        )
+    )
+    selected = composite_download_candidate()
+    source = ReferenceLayerSource(
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        source_key=selected.source_key,
+        protocol=selected.protocol,
+        target_kind=selected.target_kind,
+        endpoint_url=selected.endpoint_url,
+        remote_name=selected.remote_name,
+        source_format="application/zip",
+        sync_strategy=selected.sync_strategy,
+        config_json=dict(selected.config),
+        definition_sha256=selected.definition_sha256,
+        enabled=True,
+        is_primary=True,
+        priority=10,
+    )
+    db.add(source)
+    db.flush()
+    now = datetime(2026, 7, 27, 9, tzinfo=timezone.utc)
+
+    def running_run(token: str) -> ReferenceSyncRun:
+        value = ReferenceSyncRun(
+            provider_key=source.provider_key,
+            layer_id=source.layer_id,
+            source_id=source.id,
+            source_definition_json={
+                "source_key": source.source_key
+            },
+            source_definition_sha256=source.definition_sha256,
+            trigger_kind="manual",
+            check_mode="conditional",
+            status="running",
+            attempt_no=1,
+            expected_active_generation=0,
+            lease_token=token,
+            lease_expires_at=now + timedelta(minutes=10),
+            heartbeat_at=now,
+            started_at=now,
+            stats_json={},
+        )
+        db.add(value)
+        db.flush()
+        return value
+
+    payloads = {
+        key: composite_shapefile_payload(key, "v1")
+        for key in ("avila", "burgos")
+    }
+    first_run = running_run("first-lease")
+    first_result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(
+            lambda url, _etag, _modified: Response(
+                payloads[Path(urlsplit(url).path).stem],
+                "application/zip",
+                etag=(
+                    f'"{Path(urlsplit(url).path).stem}-v1"'
+                ),
+            )
+        ),
+    ).acquire(source, run=first_run)
+    persist_acquisition_result(
+        db,
+        source=source,
+        run=first_run,
+        result=first_result,
+        lease_token="first-lease",
+        now=now,
+    )
+    first_run.status = "succeeded"
+    first_run.finished_at = now
+    first_run.lease_token = None
+    first_run.lease_expires_at = None
+    db.flush()
+
+    second_run = running_run("second-lease")
+    previous = composite_conditional_from_result(first_result)
+    updated_payload = composite_shapefile_payload("burgos", "v2")
+
+    def update_handler(url, etag, _modified):
+        key = Path(urlsplit(url).path).stem
+        if key == "avila":
+            return Response(status=304, etag=etag)
+        return Response(
+            updated_payload,
+            "application/zip",
+            etag='"burgos-v2"',
+        )
+
+    second_result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(update_handler),
+    ).acquire(
+        source,
+        run=second_run,
+        conditional=previous,
+    )
+    with pytest.raises(AcquisitionPersistenceError) as fenced:
+        persist_acquisition_result(
+            db,
+            source=source,
+            run=second_run,
+            result=second_result,
+            lease_token="lost-race",
+            now=now,
+        )
+    assert fenced.value.code == "lease_fenced"
+    assert db.scalar(
+        select(func.count())
+        .select_from(ReferenceSyncRunArtifact)
+        .where(ReferenceSyncRunArtifact.run_id == second_run.id)
+    ) == 0
+
+    persist_acquisition_result(
+        db,
+        source=source,
+        run=second_run,
+        result=second_result,
+        lease_token="second-lease",
+        now=now,
+    )
+    inputs = db.execute(
+        select(ReferenceSourceArtifact)
+        .join(
+            ReferenceSyncRunArtifact,
+            ReferenceSyncRunArtifact.artifact_id
+            == ReferenceSourceArtifact.id,
+        )
+        .where(
+            ReferenceSyncRunArtifact.source_id == source.id,
+            ReferenceSyncRunArtifact.run_id == second_run.id,
+            ReferenceSyncRunArtifact.role == "input",
+        )
+    ).scalars().all()
+    inputs.sort(key=lambda item: item.metadata_json["page_index"])
+
+    assert [item.metadata_json["resource_key"] for item in inputs] == [
+        "avila",
+        "burgos",
+    ]
+    assert inputs[0].sha256 == previous.resources[0].blob.sha256
+    assert inputs[1].sha256 == hashlib.sha256(
+        updated_payload
+    ).hexdigest()

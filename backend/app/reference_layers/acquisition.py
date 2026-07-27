@@ -77,6 +77,7 @@ from app.reference_layers.safe_download import (
 )
 from app.reference_layers.source_content_parity import (
     SourceContentParityError,
+    configured_parity_spec,
     evaluate_acquisition_parity,
 )
 from app.reference_layers.source_discovery import (
@@ -149,6 +150,19 @@ _MAX_SLD_TEXT_BYTES = 4 * 1024 * 1024
 _MAX_SLD_EXTRACTED_BYTES = 2 * MAX_PROBE_BYTES
 _MAX_STYLE_RESOURCE_BYTES = 4 * 1024 * 1024
 _MAX_STYLE_RESOURCES_PER_SOURCE = 512
+_MAX_DOWNLOAD_RESOURCES = 256
+_DOWNLOAD_RESOURCE_KEY_RE = re.compile(
+    r"^[a-z0-9][a-z0-9_.-]{0,127}$",
+    re.ASCII,
+)
+_DOWNLOAD_RESOURCE_VALIDATION_KEYS = frozenset(
+    {
+        "archive_member",
+        "input_layer",
+        "reviewed_archive_integrity",
+        "source_content_parity",
+    }
+)
 _STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
 _STYLE_SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
 _WFS_IDENTITY_PROPERTY_RE = re.compile(
@@ -249,6 +263,8 @@ class AcquisitionLimits:
     max_page_bytes: int = 64 * 1024 * 1024
     max_dataset_bytes: int = 20 * 1024 * 1024 * 1024
     max_total_bytes: int = 40 * 1024 * 1024 * 1024
+    max_dataset_uncompressed_bytes: int = 40 * 1024 * 1024 * 1024
+    max_total_uncompressed_bytes: int = 160 * 1024 * 1024 * 1024
     page_size: int = 2_000
     max_pages: int = 10_000
     max_features: int = 20_000_000
@@ -262,6 +278,8 @@ class AcquisitionLimits:
             "max_page_bytes",
             "max_dataset_bytes",
             "max_total_bytes",
+            "max_dataset_uncompressed_bytes",
+            "max_total_uncompressed_bytes",
             "page_size",
             "max_pages",
             "max_features",
@@ -275,6 +293,14 @@ class AcquisitionLimits:
             raise ValueError("max_page_bytes cannot exceed max_dataset_bytes")
         if self.max_dataset_bytes > self.max_total_bytes:
             raise ValueError("max_dataset_bytes cannot exceed max_total_bytes")
+        if (
+            self.max_dataset_uncompressed_bytes
+            > self.max_total_uncompressed_bytes
+        ):
+            raise ValueError(
+                "max_dataset_uncompressed_bytes cannot exceed "
+                "max_total_uncompressed_bytes"
+            )
         for name in ("timeout_seconds", "idle_timeout_seconds"):
             value = getattr(self, name)
             if (
@@ -347,6 +373,178 @@ class ConditionalRequest:
                 else None
             ),
         )
+
+
+@dataclass(frozen=True)
+class DownloadResourceSpec:
+    """One exact, ordered member of a composite direct-download source."""
+
+    resource_key: str
+    page_index: int
+    source_url: str
+    media_type: str
+    data_format: str
+    max_download_bytes: int
+    max_uncompressed_bytes: int
+    validation: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.resource_key, str)
+            or _DOWNLOAD_RESOURCE_KEY_RE.fullmatch(self.resource_key) is None
+        ):
+            raise ValueError("download resource key is invalid")
+        if (
+            isinstance(self.page_index, bool)
+            or not isinstance(self.page_index, int)
+            or self.page_index < 0
+        ):
+            raise ValueError("download resource page index is invalid")
+        normalize_https_url(self.source_url)
+        for name, value, maximum in (
+            ("media_type", self.media_type, 200),
+            ("data_format", self.data_format, 100),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value) > maximum
+                or any(ord(character) < 32 for character in value)
+            ):
+                raise ValueError(f"download resource {name} is invalid")
+        for name, value in (
+            ("max_download_bytes", self.max_download_bytes),
+            ("max_uncompressed_bytes", self.max_uncompressed_bytes),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                raise ValueError(f"download resource {name} is invalid")
+        _bounded_json_object(
+            self.validation,
+            "download resource validation",
+            _MAX_ARTIFACT_METADATA_BYTES,
+        )
+
+
+@dataclass(frozen=True)
+class ReusableDownloadResource:
+    """Immutable active dataset plus its latest per-resource validators."""
+
+    resource_key: str
+    page_index: int
+    source_url: str
+    final_url: str | None
+    media_type: str
+    blob: StoredReferenceBlob
+    metadata: dict[str, Any]
+    upstream_etag: str | None = None
+    upstream_last_modified: datetime | None = None
+    source_version: str | None = None
+    retrieved_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.resource_key, str)
+            or _DOWNLOAD_RESOURCE_KEY_RE.fullmatch(self.resource_key) is None
+        ):
+            raise ValueError("reusable download resource key is invalid")
+        if (
+            isinstance(self.page_index, bool)
+            or not isinstance(self.page_index, int)
+            or self.page_index < 0
+        ):
+            raise ValueError("reusable download resource index is invalid")
+        normalize_https_url(self.source_url)
+        if self.final_url is not None:
+            normalize_https_url(self.final_url)
+        if (
+            not isinstance(self.media_type, str)
+            or not self.media_type
+            or self.media_type != self.media_type.strip()
+            or len(self.media_type) > 200
+        ):
+            raise ValueError("reusable download media type is invalid")
+        if (
+            not isinstance(self.blob, StoredReferenceBlob)
+            or self.blob.storage_backend != "filesystem"
+            or _SHA256_RE.fullmatch(self.blob.sha256) is None
+            or self.blob.size_bytes <= 0
+        ):
+            raise ValueError("reusable download blob identity is invalid")
+        _bounded_optional_text(
+            self.upstream_etag,
+            "reusable download ETag",
+            _MAX_ETAG_CHARS,
+        )
+        _bounded_optional_text(
+            self.source_version,
+            "reusable download source version",
+            _MAX_SOURCE_VERSION_CHARS,
+        )
+        if (
+            self.upstream_last_modified is not None
+            and self.upstream_last_modified.tzinfo is None
+        ):
+            raise ValueError(
+                "reusable download Last-Modified must be timezone-aware"
+            )
+        if self.retrieved_at.tzinfo is None:
+            raise ValueError(
+                "reusable download retrieval time must be timezone-aware"
+            )
+        _bounded_json_object(
+            self.metadata,
+            "reusable download metadata",
+            _MAX_ARTIFACT_METADATA_BYTES,
+        )
+
+    @property
+    def conditional(self) -> ConditionalRequest | None:
+        if (
+            self.upstream_etag is None
+            and self.upstream_last_modified is None
+        ):
+            return None
+        return ConditionalRequest(
+            source_url=self.source_url,
+            etag=self.upstream_etag,
+            last_modified=(
+                format_datetime(
+                    self.upstream_last_modified.astimezone(timezone.utc),
+                    usegmt=True,
+                )
+                if self.upstream_last_modified is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DownloadConditionalRequest:
+    """Complete active state for one exact composite-download definition."""
+
+    resources: tuple[ReusableDownloadResource, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.resources, tuple)
+            or not 1 <= len(self.resources) <= _MAX_DOWNLOAD_RESOURCES
+            or [item.page_index for item in self.resources]
+            != list(range(len(self.resources)))
+            or len({item.resource_key for item in self.resources})
+            != len(self.resources)
+            or len({item.source_url for item in self.resources})
+            != len(self.resources)
+        ):
+            raise ValueError(
+                "composite download conditional state is not exact and ordered"
+            )
 
 
 @dataclass(frozen=True)
@@ -458,6 +656,25 @@ class _TransientDownloaded:
     size_bytes: int
     parsed: Any = None
     workspace_store: ReferenceBlobStore | None = None
+
+
+@dataclass(frozen=True)
+class _StagedDownloadResource:
+    spec: DownloadResourceSpec
+    result: HTTPSDownloadResult
+    path: Path
+    sha256: str
+    size_bytes: int
+    parsed: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ObservedDownloadResource:
+    spec: DownloadResourceSpec
+    result: HTTPSDownloadResult
+    dataset: AcquiredArtifact
+    parsed: dict[str, Any]
+    changed: bool
 
 
 @contextmanager
@@ -639,7 +856,7 @@ class ReferenceAcquisitionPipeline:
         source: SourceCandidate | ReferenceLayerSource,
         *,
         run: ReferenceSyncRun | None = None,
-        conditional: ConditionalRequest | None = None,
+        conditional: ConditionalRequest | DownloadConditionalRequest | None = None,
     ) -> AcquisitionResult:
         candidate = candidate_from_source_model(source) if isinstance(
             source, ReferenceLayerSource
@@ -647,6 +864,20 @@ class ReferenceAcquisitionPipeline:
         _validate_candidate(candidate)
         if isinstance(source, ReferenceLayerSource):
             _validate_run_snapshot(source, run)
+        resource_specs = configured_download_resources(candidate)
+        if isinstance(conditional, DownloadConditionalRequest):
+            if candidate.protocol != "download" or resource_specs is None:
+                raise AcquisitionConfigurationError(
+                    "composite conditional state requires a composite "
+                    "direct-download source",
+                    code="conditional_source_mismatch",
+                )
+        elif resource_specs is not None and conditional is not None:
+            raise AcquisitionConfigurationError(
+                "composite direct-download source requires per-resource "
+                "conditional state",
+                code="conditional_source_mismatch",
+            )
 
         handlers = {
             "wfs": self._acquire_wfs,
@@ -3076,8 +3307,23 @@ class ReferenceAcquisitionPipeline:
         self,
         candidate: SourceCandidate,
         *,
-        conditional: ConditionalRequest | None,
+        conditional: ConditionalRequest | DownloadConditionalRequest | None,
     ) -> AcquisitionResult:
+        resources = configured_download_resources(candidate)
+        if resources is not None:
+            return self._acquire_composite_download(
+                candidate,
+                resources=resources,
+                conditional=cast(
+                    DownloadConditionalRequest | None,
+                    conditional,
+                ),
+            )
+        if isinstance(conditional, DownloadConditionalRequest):
+            raise AcquisitionConfigurationError(
+                "single direct download received composite conditional state",
+                code="conditional_source_mismatch",
+            )
         try:
             transform = parse_masked_geopackage_spec(candidate.config)
         except MaskedGeoPackageError as error:
@@ -3245,6 +3491,537 @@ class ReferenceAcquisitionPipeline:
             feature_count=None,
             stats=stats,
             observed=downloaded.result,
+        )
+
+    def _acquire_composite_download(
+        self,
+        candidate: SourceCandidate,
+        *,
+        resources: tuple[DownloadResourceSpec, ...],
+        conditional: DownloadConditionalRequest | None,
+    ) -> AcquisitionResult:
+        """Acquire an exact ordered resource set as one complete snapshot.
+
+        Changed responses remain under a shared staging lease until every
+        resource has passed its HTTP and file validators.  Only then are the
+        sealed files adopted into the CAS.  A crash during those independent
+        content-addressed renames can leave an unlinked, recoverable blob, but
+        never a partial source version: database linkage and delivery promotion
+        remain separately fenced transactions.
+        """
+
+        aggregate_download_limit, aggregate_uncompressed_limit = (
+            _configured_composite_download_limits(
+                candidate,
+                limits=self.limits,
+            )
+        )
+        previous: dict[str, ReusableDownloadResource] = {}
+        if conditional is not None:
+            if len(conditional.resources) != len(resources):
+                raise AcquisitionConfigurationError(
+                    "composite conditional state has the wrong resource count",
+                    code="conditional_source_mismatch",
+                )
+            for spec, reusable in zip(
+                resources,
+                conditional.resources,
+                strict=True,
+            ):
+                if (
+                    reusable.resource_key != spec.resource_key
+                    or reusable.page_index != spec.page_index
+                    or normalize_https_url(reusable.source_url)
+                    != spec.source_url
+                ):
+                    raise AcquisitionConfigurationError(
+                        "composite conditional state does not match the exact "
+                        "resource order",
+                        code="conditional_source_mismatch",
+                    )
+                self._validate_reusable_download_resource(
+                    candidate,
+                    spec=spec,
+                    reusable=reusable,
+                )
+                previous[spec.resource_key] = reusable
+
+        staged: list[_StagedDownloadResource] = []
+        responses: list[
+            tuple[
+                DownloadResourceSpec,
+                HTTPSDownloadResult,
+                dict[str, Any],
+            ]
+        ] = []
+        downloaded_bytes = 0
+        with self.store.staging_batch() as batch:
+            for spec in resources:
+                reusable = previous.get(spec.resource_key)
+                request = reusable.conditional if reusable is not None else None
+                staged_item, result, parsed = (
+                    self._stage_composite_download_resource(
+                        candidate,
+                        spec=spec,
+                        conditional=request,
+                        staging_batch=batch,
+                    )
+                )
+                if result.not_modified and reusable is None:
+                    raise AcquisitionValidationError(
+                        "resource returned not-modified without an exact "
+                        "reusable artifact",
+                        code="unexpected_not_modified",
+                    )
+                if staged_item is not None:
+                    staged.append(staged_item)
+                    downloaded_bytes += staged_item.size_bytes
+                    if downloaded_bytes > aggregate_download_limit:
+                        raise AcquisitionLimitError(
+                            "composite download exceeds its aggregate byte "
+                            "limit",
+                            code="aggregate_download_limit",
+                        )
+                responses.append((spec, result, parsed))
+
+            staged_by_key = {
+                item.spec.resource_key: item for item in staged
+            }
+            response_digests = [
+                (
+                    staged_by_key[spec.resource_key].sha256
+                    if spec.resource_key in staged_by_key
+                    else previous[spec.resource_key].blob.sha256
+                )
+                for spec in resources
+            ]
+            if len(response_digests) != len(set(response_digests)):
+                raise AcquisitionValidationError(
+                    "composite download resources resolved to duplicate "
+                    "dataset content",
+                    code="duplicate_resource_content",
+                )
+
+            committed = {
+                item.spec.resource_key: self.store.commit_staged_file(
+                    item.path,
+                    max_bytes=item.spec.max_download_bytes,
+                    expected_sha256=item.sha256,
+                    expected_size=item.size_bytes,
+                )
+                for item in staged
+            }
+
+        observed: list[_ObservedDownloadResource] = []
+        total_uncompressed = 0
+        for spec, result, parsed in responses:
+            reusable = previous.get(spec.resource_key)
+            staged_item = staged_by_key.get(spec.resource_key)
+            if staged_item is None:
+                if reusable is None:
+                    raise AcquisitionValidationError(
+                        "composite resource has neither new nor reusable data",
+                        code="missing_artifact",
+                    )
+                dataset = self._reused_composite_dataset(
+                    candidate,
+                    spec=spec,
+                    reusable=reusable,
+                )
+                changed = False
+            else:
+                blob = committed[spec.resource_key]
+                uncompressed_bytes = _resource_uncompressed_bytes(
+                    parsed,
+                    compressed_bytes=blob.size_bytes,
+                )
+                dataset = AcquiredArtifact(
+                    artifact_kind="dataset",
+                    role="input",
+                    media_type=result.content_type or spec.media_type,
+                    blob=blob,
+                    source_url=result.source_url,
+                    final_url=result.final_url,
+                    upstream_etag=result.etag,
+                    upstream_last_modified=_http_datetime(
+                        result.last_modified
+                    ),
+                    metadata={
+                        "schema": "reference-composite-download-dataset/v1",
+                        "protocol": "download",
+                        "data_format": spec.data_format,
+                        "remote_name": candidate.remote_name,
+                        "resource_key": spec.resource_key,
+                        "page_index": spec.page_index,
+                        "resource_count": len(resources),
+                        "uncompressed_bytes": uncompressed_bytes,
+                        **parsed,
+                    },
+                )
+                changed = (
+                    reusable is None
+                    or reusable.blob.sha256 != blob.sha256
+                )
+            uncompressed_bytes = dataset.metadata.get(
+                "uncompressed_bytes"
+            )
+            if (
+                isinstance(uncompressed_bytes, bool)
+                or not isinstance(uncompressed_bytes, int)
+                or not 0 < uncompressed_bytes
+                <= spec.max_uncompressed_bytes
+            ):
+                raise AcquisitionValidationError(
+                    "composite dataset lacks a bounded uncompressed size",
+                    code="resource_uncompressed_size_invalid",
+                )
+            total_uncompressed += uncompressed_bytes
+            if total_uncompressed > aggregate_uncompressed_limit:
+                raise AcquisitionLimitError(
+                    "composite download exceeds its aggregate expansion limit",
+                    code="aggregate_expansion_limit",
+                )
+            observed.append(
+                _ObservedDownloadResource(
+                    spec=spec,
+                    result=result,
+                    dataset=dataset,
+                    parsed=parsed,
+                    changed=changed,
+                )
+            )
+
+        retained_dataset_bytes = sum(
+            item.dataset.blob.size_bytes for item in observed
+        )
+        if retained_dataset_bytes > aggregate_download_limit:
+            raise AcquisitionLimitError(
+                "composite snapshot exceeds its aggregate retained-byte limit",
+                code="aggregate_download_limit",
+            )
+        aggregate_sha256 = _composite_dataset_sha256(observed)
+        observations = [
+            self._composite_download_observation(
+                candidate,
+                item=item,
+                aggregate_sha256=aggregate_sha256,
+            )
+            for item in observed
+        ]
+        changed_count = sum(1 for item in observed if item.changed)
+        not_modified_count = sum(
+            1 for item in observed if item.result.not_modified
+        )
+        stats = {
+            "resource_count": len(observed),
+            "changed_resource_count": changed_count,
+            "http_not_modified_resource_count": not_modified_count,
+            "downloaded_resource_count": len(staged),
+            "downloaded_bytes": downloaded_bytes,
+            "retained_dataset_bytes": retained_dataset_bytes,
+            "aggregate_uncompressed_bytes": total_uncompressed,
+            "aggregate_dataset_sha256": aggregate_sha256,
+            "reusable_blob_verification": (
+                "cas-key-path-and-size"
+                if conditional is not None
+                else "not-applicable"
+            ),
+            "resource_observation_sha256": [
+                item.blob.sha256 for item in observations
+            ],
+        }
+        if changed_count == 0:
+            _enforce_total_bytes(
+                observations,
+                self.limits.max_total_bytes,
+            )
+            return AcquisitionResult(
+                source_key=candidate.source_key,
+                source_definition_sha256=candidate.definition_sha256,
+                protocol=candidate.protocol,
+                target_kind=candidate.target_kind,
+                not_modified=True,
+                artifacts=tuple(observations),
+                manifest_sha256=None,
+                probe=None,
+                observed_etag=None,
+                observed_last_modified=None,
+                observed_version=f"sha256:{aggregate_sha256}",
+                feature_count=None,
+                total_bytes=sum(
+                    item.blob.size_bytes for item in observations
+                ),
+                stats={"not_modified": True, **stats},
+            )
+
+        datasets = [item.dataset for item in observed]
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=datasets,
+        )
+        artifacts = [*datasets, *observations, *style_artifacts]
+        style_digests = _style_digests(style_artifacts)
+        materialization: dict[str, Any] = {
+            "kind": "direct-dataset-pages",
+            "format": resources[0].data_format,
+            "resource_keys": [
+                item.spec.resource_key for item in observed
+            ],
+            "dataset_sha256": [
+                item.dataset.blob.sha256 for item in observed
+            ],
+        }
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        finished = self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=None,
+            stats=stats,
+        )
+        return replace(
+            finished,
+            observed_version=f"sha256:{aggregate_sha256}",
+        )
+
+    def _stage_composite_download_resource(
+        self,
+        candidate: SourceCandidate,
+        *,
+        spec: DownloadResourceSpec,
+        conditional: ConditionalRequest | None,
+        staging_batch: ReferenceStagingBatch,
+    ) -> tuple[
+        _StagedDownloadResource | None,
+        HTTPSDownloadResult,
+        dict[str, Any],
+    ]:
+        requested_url = _require_same_origin(
+            candidate.endpoint_url,
+            spec.source_url,
+        )
+        policy = HTTPSDownloadPolicy(
+            allowed_origins=(_origin(candidate.endpoint_url),),
+            max_response_bytes=min(
+                spec.max_download_bytes,
+                self.store.max_blob_bytes,
+                self.limits.max_dataset_bytes,
+            ),
+            timeout_seconds=self.limits.timeout_seconds,
+            idle_timeout_seconds=self.limits.idle_timeout_seconds,
+            max_redirects=self.limits.max_redirects,
+            allowed_content_types=frozenset(
+                {spec.media_type.casefold()}
+            ),
+        )
+        downloader = self._downloader_factory(policy)
+        with staging_batch.stage(
+            max_bytes=policy.max_response_bytes,
+        ) as staging:
+            try:
+                result = downloader.download(
+                    requested_url,
+                    staging,
+                    etag=conditional.etag if conditional else None,
+                    last_modified=(
+                        conditional.last_modified if conditional else None
+                    ),
+                    accept=spec.media_type,
+                )
+            except ReferenceBlobTooLargeError as error:
+                raise AcquisitionLimitError(
+                    f"download resource {spec.resource_key!r} exceeds its "
+                    "per-file byte limit",
+                    code="resource_download_limit",
+                ) from error
+            _validate_download_result(
+                candidate.endpoint_url,
+                requested_url,
+                result,
+            )
+            response_integrity = _validate_reviewed_archive_http_result(
+                spec.validation,
+                result,
+            )
+            if result.not_modified:
+                if conditional is None:
+                    raise AcquisitionValidationError(
+                        "resource returned not-modified without matching "
+                        "conditional validators",
+                        code="unexpected_not_modified",
+                    )
+                return None, result, {}
+            if (
+                result.sha256 is None
+                or staging.sha256 != result.sha256
+                or staging.size_bytes != result.size_bytes
+            ):
+                raise AcquisitionValidationError(
+                    "composite resource does not match its staged bytes",
+                    code="download_integrity_mismatch",
+                )
+            validator = _dataset_file_validator(
+                spec.data_format,
+                self.limits,
+                config=spec.validation,
+                maximum_uncompressed_bytes=(
+                    spec.max_uncompressed_bytes
+                ),
+            )
+            parsed_value = validator(
+                staging.staging_path,
+                result.size_bytes,
+            )
+            parsed = (
+                dict(parsed_value)
+                if isinstance(parsed_value, Mapping)
+                else {}
+            )
+            if response_integrity is not None:
+                parsed = _merge_reviewed_archive_response(
+                    spec.validation,
+                    parsed,
+                    result,
+                )
+            path = staging.seal()
+            return (
+                _StagedDownloadResource(
+                    spec=spec,
+                    result=result,
+                    path=path,
+                    sha256=result.sha256,
+                    size_bytes=result.size_bytes,
+                    parsed=parsed,
+                ),
+                result,
+                parsed,
+            )
+
+    def _validate_reusable_download_resource(
+        self,
+        candidate: SourceCandidate,
+        *,
+        spec: DownloadResourceSpec,
+        reusable: ReusableDownloadResource,
+    ) -> None:
+        _require_same_origin(candidate.endpoint_url, reusable.source_url)
+        if reusable.final_url is not None:
+            _require_same_origin(
+                candidate.endpoint_url,
+                reusable.final_url,
+            )
+        expected_key = (
+            f"blobs/sha256/{reusable.blob.sha256[:2]}/"
+            f"{reusable.blob.sha256}"
+        )
+        if (
+            reusable.blob.storage_key != expected_key
+            or reusable.blob.size_bytes > spec.max_download_bytes
+            or reusable.media_type.casefold()
+            != spec.media_type.casefold()
+            or reusable.metadata.get("schema")
+            != "reference-composite-download-dataset/v1"
+            or reusable.metadata.get("resource_key")
+            != spec.resource_key
+            or reusable.metadata.get("page_index") != spec.page_index
+            or reusable.metadata.get("data_format") != spec.data_format
+        ):
+            raise AcquisitionValidationError(
+                "active composite resource identity is incompatible",
+                code="reusable_resource_invalid",
+            )
+        # Daily conditional checks deliberately avoid hashing every multi-GB
+        # active archive.  The CAS key was verified at commit time and is
+        # immutable to the application; here we revalidate path safety and
+        # size.  Any changed aggregate is fully copied and hash-verified again
+        # by the multipage materializer before it can become a delivery.
+        path = self.store.resolve_blob(reusable.blob.storage_key)
+        try:
+            size_bytes = path.stat().st_size
+        except OSError as error:
+            raise AcquisitionPersistenceError(
+                "active composite resource cannot be inspected",
+                code="reusable_resource_unavailable",
+            ) from error
+        if size_bytes != reusable.blob.size_bytes:
+            raise AcquisitionPersistenceError(
+                "active composite resource size changed",
+                code="reusable_resource_unavailable",
+            )
+
+    def _reused_composite_dataset(
+        self,
+        candidate: SourceCandidate,
+        *,
+        spec: DownloadResourceSpec,
+        reusable: ReusableDownloadResource,
+    ) -> AcquiredArtifact:
+        del candidate
+        return AcquiredArtifact(
+            artifact_kind="dataset",
+            role="input",
+            media_type=reusable.media_type,
+            blob=reusable.blob,
+            source_url=reusable.source_url,
+            final_url=reusable.final_url,
+            source_version=reusable.source_version,
+            upstream_etag=reusable.upstream_etag,
+            upstream_last_modified=reusable.upstream_last_modified,
+            metadata={
+                **reusable.metadata,
+                "resource_key": spec.resource_key,
+                "page_index": spec.page_index,
+            },
+            retrieved_at=reusable.retrieved_at,
+        )
+
+    def _composite_download_observation(
+        self,
+        candidate: SourceCandidate,
+        *,
+        item: _ObservedDownloadResource,
+        aggregate_sha256: str,
+    ) -> AcquiredArtifact:
+        modified = _http_datetime(item.result.last_modified)
+        document = {
+            "schema": "reference-composite-download-observation/v1",
+            "source_definition_sha256": candidate.definition_sha256,
+            "resource_key": item.spec.resource_key,
+            "page_index": item.spec.page_index,
+            "source_url": item.spec.source_url,
+            "final_url": item.result.final_url,
+            "http_not_modified": item.result.not_modified,
+            "content_changed": item.changed,
+            "dataset_sha256": item.dataset.blob.sha256,
+            "dataset_size_bytes": item.dataset.blob.size_bytes,
+            "etag": item.result.etag,
+            "last_modified": (
+                modified.isoformat() if modified is not None else None
+            ),
+            "aggregate_dataset_sha256": aggregate_sha256,
+        }
+        local = self._local_json_artifact(
+            document,
+            kind="metadata",
+            role="metadata",
+            metadata={
+                "schema": document["schema"],
+                "resource_key": item.spec.resource_key,
+                "page_index": item.spec.page_index,
+                "dataset_sha256": item.dataset.blob.sha256,
+                "aggregate_dataset_sha256": aggregate_sha256,
+            },
+        )
+        return replace(
+            local,
+            source_url=item.spec.source_url,
+            final_url=item.result.final_url,
+            source_version=f"sha256:{aggregate_sha256}",
+            upstream_etag=item.result.etag,
+            upstream_last_modified=modified,
         )
 
     def _finish_masked_geopackage(
@@ -4377,6 +5154,7 @@ def _validate_candidate(candidate: SourceCandidate) -> None:
         endpoint_for_validation = _ANY_TEMPLATE_TOKEN_RE.sub("0", endpoint_for_validation)
     normalize_https_url(endpoint_for_validation)
     _configured_reviewed_archive_styles(candidate)
+    configured_download_resources(candidate)
     _style_request_config(candidate)
 
 
@@ -4458,6 +5236,86 @@ def _validate_reviewed_archive_http_result(
             str(error),
             code="reviewed_archive_response_changed",
         ) from error
+
+
+def _merge_reviewed_archive_response(
+    config: Mapping[str, Any],
+    parsed: Mapping[str, Any],
+    result: HTTPSDownloadResult,
+) -> dict[str, Any]:
+    merged = copy.deepcopy(dict(parsed))
+    response_integrity = _validate_reviewed_archive_http_result(
+        config,
+        result,
+    )
+    if response_integrity is None:
+        return merged
+    archive_integrity = merged.get("reviewed_archive_integrity")
+    if (
+        not isinstance(archive_integrity, dict)
+        or archive_integrity.get("passed") is not True
+        or archive_integrity.get("spec_sha256")
+        != response_integrity["spec_sha256"]
+    ):
+        raise AcquisitionValidationError(
+            "reviewed archive lacks its central-directory evidence",
+            code="reviewed_archive_integrity_missing",
+        )
+    merged["reviewed_archive_integrity"] = {
+        **archive_integrity,
+        "response": response_integrity["response"],
+    }
+    return merged
+
+
+def _resource_uncompressed_bytes(
+    parsed: Mapping[str, Any],
+    *,
+    compressed_bytes: int,
+) -> int:
+    candidates = [
+        parsed.get("uncompressed_bytes"),
+        parsed.get("archive_uncompressed_bytes"),
+    ]
+    package = parsed.get("geopackage_inspection")
+    if isinstance(package, Mapping):
+        candidates.append(package.get("archive_uncompressed_bytes"))
+    values = [
+        item
+        for item in candidates
+        if isinstance(item, int)
+        and not isinstance(item, bool)
+        and item > 0
+    ]
+    return max(values) if values else compressed_bytes
+
+
+def _composite_dataset_sha256(
+    resources: list[_ObservedDownloadResource],
+) -> str:
+    payload = [
+        {
+            "resource_key": item.spec.resource_key,
+            "page_index": item.spec.page_index,
+            "sha256": item.dataset.blob.sha256,
+            "size_bytes": item.dataset.blob.size_bytes,
+        }
+        for item in resources
+    ]
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise AcquisitionValidationError(
+            "composite dataset identity is not canonical",
+            code="composite_identity_invalid",
+        ) from error
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _reviewed_archive_download_maximum(
@@ -4650,6 +5508,229 @@ def _config_text(
     max_chars: int,
 ) -> str:
     return _config_optional_text(config, name, max_chars=max_chars) or default
+
+
+def configured_download_resources(
+    candidate: SourceCandidate,
+) -> tuple[DownloadResourceSpec, ...] | None:
+    """Parse the closed ordered-resource contract for a direct download."""
+
+    raw = candidate.config.get("download_resources")
+    if raw is None:
+        return None
+    if (
+        candidate.protocol != "download"
+        or candidate.target_kind != "vector"
+        or candidate.sync_strategy != "conditional_get"
+        or not isinstance(raw, list)
+        or not 2 <= len(raw) <= _MAX_DOWNLOAD_RESOURCES
+    ):
+        raise AcquisitionConfigurationError(
+            "composite download resources are invalid",
+            code="composite_download_config_invalid",
+        )
+    incompatible = {
+        "download_url",
+        "media_type",
+        "data_format",
+        "vector_transform",
+        "archive_styles",
+        "style_endpoint_url",
+        "style_layer_name",
+        "styles",
+        "style_bundle_sha256",
+    }
+    if incompatible.intersection(candidate.config):
+        raise AcquisitionConfigurationError(
+            "composite download mixes incompatible single-resource config",
+            code="composite_download_config_invalid",
+        )
+    specs: list[DownloadResourceSpec] = []
+    expected_keys = {
+        "resource_key",
+        "url",
+        "media_type",
+        "data_format",
+        "max_download_bytes",
+        "max_uncompressed_bytes",
+        "validation",
+    }
+    supported_formats = {
+        "geojson",
+        "flatgeobuf",
+        "geopackage",
+        "gpkg",
+        "geopackage-zip",
+        "shapefile-zip",
+        "inspire-cadastral-parcel-gml-zip",
+    }
+    for page_index, item in enumerate(raw):
+        if not isinstance(item, dict) or set(item) != expected_keys:
+            raise AcquisitionConfigurationError(
+                "composite download resource shape is invalid",
+                code="composite_download_config_invalid",
+            )
+        validation = item.get("validation")
+        if (
+            not isinstance(validation, dict)
+            or not set(validation)
+            <= _DOWNLOAD_RESOURCE_VALIDATION_KEYS
+        ):
+            raise AcquisitionConfigurationError(
+                "composite download resource validation is invalid",
+                code="composite_download_config_invalid",
+            )
+        try:
+            spec = DownloadResourceSpec(
+                resource_key=item["resource_key"],
+                page_index=page_index,
+                source_url=_require_same_origin(
+                    candidate.endpoint_url,
+                    item["url"],
+                ),
+                media_type=item["media_type"],
+                data_format=item["data_format"].strip().casefold(),
+                max_download_bytes=item["max_download_bytes"],
+                max_uncompressed_bytes=item[
+                    "max_uncompressed_bytes"
+                ],
+                validation=copy.deepcopy(validation),
+            )
+        except (
+            KeyError,
+            AttributeError,
+            TypeError,
+            ValueError,
+            AcquisitionConfigurationError,
+        ) as error:
+            raise AcquisitionConfigurationError(
+                "composite download resource is invalid",
+                code="composite_download_config_invalid",
+            ) from error
+        if spec.data_format not in supported_formats:
+            raise AcquisitionConfigurationError(
+                "composite download format has no multi-artifact "
+                "materializer",
+                code="composite_download_config_invalid",
+            )
+        if spec.data_format == "shapefile-zip":
+            member = _config_optional_text(
+                spec.validation,
+                "archive_member",
+                max_chars=4_096,
+            )
+            input_layer = _config_optional_text(
+                spec.validation,
+                "input_layer",
+                max_chars=1_000,
+            )
+            if (
+                member is None
+                or PurePosixPath(member).suffix.casefold() != ".shp"
+                or PurePosixPath(member).is_absolute()
+                or any(
+                    part in {"", ".", ".."}
+                    for part in PurePosixPath(member).parts
+                )
+                or "\\" in member
+                or input_layer != PurePosixPath(member).stem
+            ):
+                raise AcquisitionConfigurationError(
+                    "composite shapefile resource lacks its exact member",
+                    code="composite_download_config_invalid",
+                )
+        try:
+            archive_profile = configured_reviewed_archive_integrity(
+                spec.validation
+            )
+            parity_profile = configured_parity_spec(spec.validation)
+        except (
+            ReviewedArchiveIntegrityError,
+            SourceContentParityError,
+        ) as error:
+            raise AcquisitionConfigurationError(
+                "composite resource integrity evidence is invalid",
+                code="composite_download_config_invalid",
+            ) from error
+        if (
+            spec.data_format == "geopackage-zip"
+            and archive_profile is None
+            and parity_profile is None
+        ):
+            raise AcquisitionConfigurationError(
+                "composite GeoPackage ZIP lacks exact integrity evidence",
+                code="composite_download_config_invalid",
+            )
+        specs.append(spec)
+    if (
+        len({item.resource_key for item in specs}) != len(specs)
+        or len({item.source_url for item in specs}) != len(specs)
+        or len({item.data_format for item in specs}) != 1
+    ):
+        raise AcquisitionConfigurationError(
+            "composite resources are not unique and format-consistent",
+            code="composite_download_config_invalid",
+        )
+    for name in (
+        "max_aggregate_download_bytes",
+        "max_aggregate_uncompressed_bytes",
+    ):
+        value = candidate.config.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+        ):
+            raise AcquisitionConfigurationError(
+                f"composite download {name} is invalid",
+                code="composite_download_config_invalid",
+            )
+    if (
+        candidate.config["max_aggregate_download_bytes"]
+        < max(item.max_download_bytes for item in specs)
+        or candidate.config["max_aggregate_uncompressed_bytes"]
+        < max(item.max_uncompressed_bytes for item in specs)
+    ):
+        raise AcquisitionConfigurationError(
+            "composite aggregate limits cannot fit one configured resource",
+            code="composite_download_config_invalid",
+        )
+    return tuple(specs)
+
+
+def _configured_composite_download_limits(
+    candidate: SourceCandidate,
+    *,
+    limits: AcquisitionLimits,
+) -> tuple[int, int]:
+    download = candidate.config.get("max_aggregate_download_bytes")
+    uncompressed = candidate.config.get(
+        "max_aggregate_uncompressed_bytes"
+    )
+    if (
+        isinstance(download, bool)
+        or not isinstance(download, int)
+        or download > limits.max_total_bytes
+        or isinstance(uncompressed, bool)
+        or not isinstance(uncompressed, int)
+        or uncompressed > limits.max_total_uncompressed_bytes
+    ):
+        raise AcquisitionConfigurationError(
+            "composite aggregate limits exceed acquisition hard limits",
+            code="composite_download_config_invalid",
+        )
+    resources = configured_download_resources(candidate) or ()
+    if any(
+        item.max_download_bytes > limits.max_dataset_bytes
+        or item.max_uncompressed_bytes
+        > limits.max_dataset_uncompressed_bytes
+        for item in resources
+    ):
+        raise AcquisitionConfigurationError(
+            "composite per-resource limits exceed acquisition hard limits",
+            code="composite_download_config_invalid",
+        )
+    return download, uncompressed
 
 
 def _configured_media_types(
@@ -5668,21 +6749,37 @@ def _dataset_file_validator(
     limits: AcquisitionLimits,
     *,
     config: Mapping[str, Any] | None = None,
+    maximum_uncompressed_bytes: int | None = None,
 ) -> FileValidator:
     normalized = data_format.strip().casefold()
+    maximum_uncompressed = (
+        limits.max_total_bytes
+        if maximum_uncompressed_bytes is None
+        else maximum_uncompressed_bytes
+    )
+    if (
+        isinstance(maximum_uncompressed, bool)
+        or not isinstance(maximum_uncompressed, int)
+        or maximum_uncompressed <= 0
+        or maximum_uncompressed
+        > limits.max_total_uncompressed_bytes
+    ):
+        raise AcquisitionConfigurationError(
+            "dataset uncompressed byte limit is invalid"
+        )
     if normalized in {"zip", "shapefile-zip"}:
         return lambda path, size: _validate_reviewed_zip_dataset(
             path,
             size,
             require_shapefile=normalized == "shapefile-zip",
-            maximum_uncompressed=limits.max_total_bytes,
+            maximum_uncompressed=maximum_uncompressed,
             config=config or {},
         )
     if normalized == "inspire-cadastral-parcel-gml-zip":
         return lambda path, size: _validate_cadastral_parcel_gml_zip(
             path,
             size,
-            maximum_uncompressed=limits.max_total_bytes,
+            maximum_uncompressed=maximum_uncompressed,
         )
     if normalized == "geotiff-zip":
         vat_spec = _configured_raster_vat(config or {})
@@ -5711,14 +6808,16 @@ def _dataset_file_validator(
         )
         maximum = config.get(
             "archive_max_uncompressed_bytes",
-            limits.max_total_bytes,
+            maximum_uncompressed,
         )
         if (
             archive_member is None
             or input_layer is None
             or isinstance(maximum, bool)
             or not isinstance(maximum, int)
-            or not 100 <= maximum <= limits.max_total_bytes
+            or not 100
+            <= maximum
+            <= maximum_uncompressed
         ):
             raise AcquisitionConfigurationError(
                 "GeoPackage ZIP reviewed member configuration is invalid"
@@ -5827,12 +6926,13 @@ def _validate_reviewed_zip_dataset(
     maximum_uncompressed: int,
     config: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    _validate_zip_dataset(
+    inspection = _validate_zip_dataset(
         path,
         size_bytes,
         require_shapefile=require_shapefile,
         maximum_uncompressed=maximum_uncompressed,
     )
+    archive_members = inspection.pop("archive_members")
     try:
         archive_profile = configured_reviewed_archive_integrity(config)
     except ReviewedArchiveIntegrityError as error:
@@ -5850,17 +6950,19 @@ def _validate_reviewed_zip_dataset(
             str(error),
             code="reviewed_archive_integrity_failed",
         ) from error
-    if integrity is None:
-        return None
-    if integrity["passed"] is not True:
+    if integrity is not None and integrity["passed"] is not True:
         raise AcquisitionValidationError(
             "ZIP central directory changed",
             code="reviewed_archive_integrity_failed",
         )
-    result: dict[str, Any] = {
-        "reviewed_archive_integrity": integrity
-    }
-    if require_shapefile:
+    result: dict[str, Any] = dict(inspection)
+    if integrity is not None:
+        result["reviewed_archive_integrity"] = integrity
+    if require_shapefile and (
+        integrity is not None
+        or "archive_member" in config
+        or "input_layer" in config
+    ):
         archive_member = _config_optional_text(
             config,
             "archive_member",
@@ -5880,10 +6982,7 @@ def _validate_reviewed_zip_dataset(
                 f"{archive_member[:-4]}{suffix}"
                 for suffix in (".shp", ".shx", ".dbf", ".prj")
             }.issubset(
-                {
-                    item["name"]
-                    for item in integrity["entries"]
-                }
+                set(archive_members)
             )
         ):
             raise AcquisitionConfigurationError(
@@ -5900,7 +6999,7 @@ def _validate_zip_dataset(
     *,
     require_shapefile: bool,
     maximum_uncompressed: int,
-) -> None:
+) -> dict[str, Any]:
     if size_bytes < 22:
         raise AcquisitionValidationError("ZIP dataset is too small")
     try:
@@ -5909,6 +7008,7 @@ def _validate_zip_dataset(
             if not entries or len(entries) > 100_000:
                 raise AcquisitionValidationError("ZIP dataset entry count is invalid")
             total_uncompressed = 0
+            member_names: list[str] = []
             shapefile_parts: dict[str, set[str]] = {}
             for entry in entries:
                 name = entry.filename
@@ -5924,6 +7024,7 @@ def _validate_zip_dataset(
                     raise AcquisitionValidationError("ZIP dataset has an unsafe entry")
                 if entry.is_dir():
                     continue
+                member_names.append(name)
                 total_uncompressed += entry.file_size
                 if total_uncompressed > maximum_uncompressed:
                     raise AcquisitionLimitError(
@@ -5944,6 +7045,11 @@ def _validate_zip_dataset(
             corrupt = archive.testzip()
             if corrupt is not None:
                 raise AcquisitionValidationError("ZIP dataset contains a corrupt entry")
+            return {
+                "archive_entry_count": len(entries),
+                "archive_uncompressed_bytes": total_uncompressed,
+                "archive_members": member_names,
+            }
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         if isinstance(exc, ReferenceAcquisitionError):
             raise
