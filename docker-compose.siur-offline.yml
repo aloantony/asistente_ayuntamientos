@@ -47,6 +47,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
       LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
+      REFERENCE_REMOTE_PROXY_ENABLED: "false"
       REDIS_URL: redis://127.0.0.1:6379/0
     depends_on: !override
       postgres:
@@ -64,6 +65,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
       LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
+      REFERENCE_REMOTE_PROXY_ENABLED: "false"
     depends_on: !override
       postgres:
         condition: service_healthy
@@ -78,6 +80,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@127.0.0.1:5432/app
       LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
+      REFERENCE_REMOTE_PROXY_ENABLED: "false"
     depends_on: !override
       postgres:
         condition: service_healthy
@@ -89,9 +92,14 @@ services:
 
   frontend:
     network_mode: "service:siur-offline-netns"
+    build:
+      args:
+        NEXT_PUBLIC_API_BASE_URL: /api
+        API_PROXY_TARGET: http://127.0.0.1:8000
     environment:
       API_PROXY_TARGET: http://127.0.0.1:8000
       HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_BASE_URL: /api
     depends_on: !override
       backend:
         condition: service_started

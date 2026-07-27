@@ -12,7 +12,10 @@ MAIN_COMPOSE = REPOSITORY / "docker-compose.yml"
 OFFLINE_COMPOSE = REPOSITORY / "docker-compose.siur-offline.yml"
 
 
-def _resolved_compose(*files: Path) -> dict[str, object]:
+def _resolved_compose(
+    *files: Path,
+    environment_overrides: dict[str, str] | None = None,
+) -> dict[str, object]:
     environment = os.environ.copy()
     environment.update(
         {
@@ -24,6 +27,8 @@ def _resolved_compose(*files: Path) -> dict[str, object]:
             "REDIS_URL": "redis://127.0.0.1:6379/0",
         }
     )
+    if environment_overrides is not None:
+        environment.update(environment_overrides)
     command = ["docker", "compose"]
     for compose_file in files:
         command.extend(("-f", str(compose_file)))
@@ -160,6 +165,53 @@ class SiurOfflineComposeContractTests(unittest.TestCase):
             public_geoserver_ports[0]["host_ip"],
             "127.0.0.1",
         )
+
+    def test_offline_contract_overrides_hostile_remote_configuration(
+        self,
+    ) -> None:
+        compose = _resolved_compose(
+            MAIN_COMPOSE,
+            OFFLINE_COMPOSE,
+            environment_overrides={
+                "API_PROXY_TARGET": "https://hostile.example.invalid",
+                "NEXT_PUBLIC_API_BASE_URL": (
+                    "https://hostile.example.invalid/api"
+                ),
+                "REFERENCE_REMOTE_PROXY_ENABLED": "true",
+            },
+        )
+        services = compose["services"]
+        frontend = services["frontend"]
+
+        self.assertEqual(
+            frontend["build"]["args"]["NEXT_PUBLIC_API_BASE_URL"],
+            "/api",
+        )
+        self.assertEqual(
+            frontend["build"]["args"]["API_PROXY_TARGET"],
+            "http://127.0.0.1:8000",
+        )
+        self.assertEqual(
+            frontend["environment"]["NEXT_PUBLIC_API_BASE_URL"],
+            "/api",
+        )
+        self.assertEqual(
+            frontend["environment"]["API_PROXY_TARGET"],
+            "http://127.0.0.1:8000",
+        )
+        for service_name in (
+            "backend",
+            "worker",
+            "reference-worker",
+            "reference-scheduler",
+        ):
+            self.assertEqual(
+                services[service_name]["environment"][
+                    "REFERENCE_REMOTE_PROXY_ENABLED"
+                ],
+                "false",
+                service_name,
+            )
 
     def test_offline_startup_chain_replaces_online_namespace_dependencies(
         self,
