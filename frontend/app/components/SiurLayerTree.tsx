@@ -188,7 +188,10 @@ export function SiurLayerTree({
           selectedStyle?.legend_available ??
           (styles.length === 0 && layer.legend_available);
         const legendUrl =
-          legendAvailable && catalog?.organization_id
+          legendAvailable &&
+          catalog?.organization_id &&
+          layer.active_version_id &&
+          layer.active_generation
             ? buildReferenceLegendUrl(
                 catalog.organization_id,
                 layer.id,
