@@ -97,6 +97,12 @@ from app.reference_layers.reviewed_ortho_evidence import (
     reviewed_ign_ortho_live_capabilities_gate,
     reviewed_ign_ortho_source_projection,
 )
+from app.reference_layers.reviewed_archive_integrity import (
+    ReviewedArchiveIntegrityError,
+    configured_reviewed_archive_integrity,
+    inspect_reviewed_archive,
+    validate_reviewed_archive_response,
+)
 
 
 ArtifactKind = Literal[
@@ -429,6 +435,7 @@ class _Downloader(Protocol):
 DownloaderFactory = Callable[[HTTPSDownloadPolicy], _Downloader]
 Validator = Callable[[bytes], Any]
 FileValidator = Callable[[Path, int], Any]
+ResultValidator = Callable[[HTTPSDownloadResult], Any]
 
 
 @dataclass(frozen=True)
@@ -665,6 +672,7 @@ class ReferenceAcquisitionPipeline:
         allowed_media_types: frozenset[str] | None,
         validator: Validator | None = None,
         file_validator: FileValidator | None = None,
+        result_validator: ResultValidator | None = None,
         conditional: ConditionalRequest | None = None,
         reviewed_origin_url: str | None = None,
         reviewed_sha256: str | None = None,
@@ -721,6 +729,8 @@ class ReferenceAcquisitionPipeline:
                 requested_url,
                 result,
             )
+            if result_validator is not None:
+                result_validator(result)
             if result.not_modified:
                 if applied_conditional is None:
                     raise AcquisitionValidationError(
@@ -3130,10 +3140,14 @@ class ReferenceAcquisitionPipeline:
                     downloaded=downloaded,
                     transform=transform,
                 )
+        download_maximum = _reviewed_archive_download_maximum(
+            candidate.config,
+            default=self.limits.max_dataset_bytes,
+        )
         downloaded = self._download(
             candidate,
             download_url,
-            max_bytes=self.limits.max_dataset_bytes,
+            max_bytes=download_maximum,
             accept=media_type,
             allowed_media_types=allowed,
             file_validator=_dataset_file_validator(
@@ -3141,10 +3155,46 @@ class ReferenceAcquisitionPipeline:
                 self.limits,
                 config=candidate.config,
             ),
+            result_validator=lambda result: (
+                _validate_reviewed_archive_http_result(
+                    candidate.config,
+                    result,
+                )
+            ),
             conditional=conditional,
+        )
+        response_integrity = _validate_reviewed_archive_http_result(
+            candidate.config,
+            downloaded.result,
         )
         if downloaded.result.not_modified:
             return self._unchanged(candidate, downloaded.result)
+        if response_integrity is not None:
+            archive_integrity = (
+                downloaded.parsed.get("reviewed_archive_integrity")
+                if isinstance(downloaded.parsed, dict)
+                else None
+            )
+            if (
+                not isinstance(archive_integrity, dict)
+                or archive_integrity.get("passed") is not True
+                or archive_integrity.get("spec_sha256")
+                != response_integrity["spec_sha256"]
+            ):
+                raise AcquisitionValidationError(
+                    "reviewed archive lacks its central-directory evidence",
+                    code="reviewed_archive_integrity_missing",
+                )
+            downloaded = replace(
+                downloaded,
+                parsed={
+                    **downloaded.parsed,
+                    "reviewed_archive_integrity": {
+                        **archive_integrity,
+                        "response": response_integrity["response"],
+                    },
+                },
+            )
         dataset = self._remote_artifact(
             downloaded,
             kind="dataset",
@@ -4408,6 +4458,38 @@ def _validate_download_result(
         )
 
 
+def _validate_reviewed_archive_http_result(
+    config: Mapping[str, Any],
+    result: HTTPSDownloadResult,
+) -> dict[str, Any] | None:
+    try:
+        return validate_reviewed_archive_response(config, result)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="reviewed_archive_response_changed",
+        ) from error
+
+
+def _reviewed_archive_download_maximum(
+    config: Mapping[str, Any],
+    *,
+    default: int,
+) -> int:
+    try:
+        configured = configured_reviewed_archive_integrity(config)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionConfigurationError(
+            "reviewed archive integrity configuration is invalid"
+        ) from error
+    if configured is None:
+        return default
+    maximum = configured[0]["response_constraints"][
+        "max_content_length"
+    ]
+    return min(default, maximum)
+
+
 def _probe_request(
     candidate: SourceCandidate,
 ) -> tuple[str, str, frozenset[str]]:
@@ -5600,11 +5682,12 @@ def _dataset_file_validator(
 ) -> FileValidator:
     normalized = data_format.strip().casefold()
     if normalized in {"zip", "shapefile-zip"}:
-        return lambda path, size: _validate_zip_dataset(
+        return lambda path, size: _validate_reviewed_zip_dataset(
             path,
             size,
             require_shapefile=normalized == "shapefile-zip",
             maximum_uncompressed=limits.max_total_bytes,
+            config=config or {},
         )
     if normalized == "inspire-cadastral-parcel-gml-zip":
         return lambda path, size: _validate_cadastral_parcel_gml_zip(
@@ -5689,32 +5772,137 @@ def _validate_geopackage_zip(
             expected_layer=input_layer,
             maximum_uncompressed_bytes=maximum_uncompressed,
         )
-        parity = evaluate_acquisition_parity(config, inspection)
-    except SourceContentParityError as error:
-        raise AcquisitionConfigurationError(
-            "GeoPackage ZIP parity configuration is invalid"
-        ) from error
     except GeoPackageArchiveError as error:
         raise AcquisitionValidationError(
             str(error),
             code="geopackage_zip_invalid",
         ) from error
-    if parity is None:
+    try:
+        parity = evaluate_acquisition_parity(config, inspection)
+    except SourceContentParityError as error:
         raise AcquisitionConfigurationError(
-            "GeoPackage ZIP requires source-content parity"
+            "GeoPackage ZIP parity configuration is invalid"
+        ) from error
+    try:
+        archive_profile = configured_reviewed_archive_integrity(config)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionConfigurationError(
+            "GeoPackage ZIP reviewed archive configuration is invalid"
+        ) from error
+    try:
+        archive_integrity = (
+            inspect_reviewed_archive(path, config=config)
+            if archive_profile is not None
+            else None
         )
-    if parity["passed"] is not True:
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="reviewed_archive_integrity_failed",
+        ) from error
+    if parity is None and archive_integrity is None:
+        raise AcquisitionConfigurationError(
+            "GeoPackage ZIP requires exact reviewed integrity evidence"
+        )
+    if parity is not None and parity["passed"] is not True:
         failed = ", ".join(parity["failed_checks"])
         raise AcquisitionValidationError(
             f"GeoPackage ZIP content parity failed: {failed}",
             code="source_content_parity_failed",
         )
-    return {
+    if (
+        archive_integrity is not None
+        and archive_integrity["passed"] is not True
+    ):
+        raise AcquisitionValidationError(
+            "GeoPackage ZIP central directory changed",
+            code="reviewed_archive_integrity_failed",
+        )
+    result = {
         "archive_member": archive_member,
         "input_layer": input_layer,
         "geopackage_inspection": inspection,
-        "source_content_parity": parity,
     }
+    if parity is not None:
+        result["source_content_parity"] = parity
+    if archive_integrity is not None:
+        result["reviewed_archive_integrity"] = archive_integrity
+    return result
+
+
+def _validate_reviewed_zip_dataset(
+    path: Path,
+    size_bytes: int,
+    *,
+    require_shapefile: bool,
+    maximum_uncompressed: int,
+    config: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    _validate_zip_dataset(
+        path,
+        size_bytes,
+        require_shapefile=require_shapefile,
+        maximum_uncompressed=maximum_uncompressed,
+    )
+    try:
+        archive_profile = configured_reviewed_archive_integrity(config)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionConfigurationError(
+            "ZIP reviewed archive configuration is invalid"
+        ) from error
+    try:
+        integrity = (
+            inspect_reviewed_archive(path, config=config)
+            if archive_profile is not None
+            else None
+        )
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="reviewed_archive_integrity_failed",
+        ) from error
+    if integrity is None:
+        return None
+    if integrity["passed"] is not True:
+        raise AcquisitionValidationError(
+            "ZIP central directory changed",
+            code="reviewed_archive_integrity_failed",
+        )
+    result: dict[str, Any] = {
+        "reviewed_archive_integrity": integrity
+    }
+    if require_shapefile:
+        archive_member = _config_optional_text(
+            config,
+            "archive_member",
+            max_chars=4_096,
+        )
+        input_layer = _config_optional_text(
+            config,
+            "input_layer",
+            max_chars=1_000,
+        )
+        if (
+            archive_member is None
+            or not archive_member.casefold().endswith(".shp")
+            or input_layer is None
+            or input_layer != PurePosixPath(archive_member).stem
+            or not {
+                f"{archive_member[:-4]}{suffix}"
+                for suffix in (".shp", ".shx", ".dbf", ".prj")
+            }.issubset(
+                {
+                    item["name"]
+                    for item in integrity["entries"]
+                }
+            )
+        ):
+            raise AcquisitionConfigurationError(
+                "Shapefile ZIP reviewed member configuration is invalid"
+            )
+        result["archive_member"] = archive_member
+        result["input_layer"] = input_layer
+    return result
 
 
 def _validate_zip_dataset(

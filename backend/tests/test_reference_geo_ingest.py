@@ -623,6 +623,82 @@ def test_vector_ingest_accepts_one_reviewed_geopackage_zip_member(
     ]
 
 
+def test_vector_ingest_accepts_one_reviewed_shapefile_zip_member(
+    db,
+    tmp_path,
+) -> None:
+    source = Path(tmp_path, "reviewed-shapefile.zip")
+    member = "hy.hidro_cyl_cursos.shp"
+    with zipfile.ZipFile(
+        source,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.writestr(member, b"shape")
+        archive.writestr("hy.hidro_cyl_cursos.shx", b"index")
+        archive.writestr("hy.hidro_cyl_cursos.dbf", b"attributes")
+        archive.writestr("hy.hidro_cyl_cursos.prj", b"projection")
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    def runner(argv, environment, timeout):
+        del environment, timeout
+        assert argv[1:3] == ["-if", "ESRI Shapefile"]
+        assert argv[-1] == "hy.hidro_cyl_cursos"
+        assert argv[-2].startswith("/vsizip/")
+        assert argv[-2].endswith(f"/{member}")
+        staging_table = argv[argv.index("-nln") + 1].split(".", 1)[1]
+        db.execute(
+            text(
+                f"""
+                CREATE TABLE reference_data_staging.{staging_table} (
+                    source_fid bigserial PRIMARY KEY,
+                    geom geometry(MultiLineString, 3857)
+                )
+                """
+            )
+        )
+        db.execute(
+            text(
+                f"""
+                INSERT INTO reference_data_staging.{staging_table} (geom)
+                VALUES (ST_Multi(ST_GeomFromText(
+                    'LINESTRING(0 0,1000 1000)',
+                    3857
+                )))
+                """
+            )
+        )
+        return GeoCommandResult(b"", b"")
+
+    result = ingest_vector_artifact(
+        db,
+        database=GeoDatabaseTarget.from_url(
+            "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+        ),
+        source_path=source,
+        input_sha256=source_sha256,
+        provider_key="siur",
+        layer_id=108,
+        run_id=109,
+        input_layer="hy.hidro_cyl_cursos",
+        input_driver="SHAPEFILEZIP",
+        archive_member=member,
+        runner=runner,
+    )
+
+    assert result.feature_count == 1
+    assert result.validation_json["checks"]["input_manifest"] == [
+        {
+            "ordinal": 0,
+            "input_sha256": source_sha256,
+            "input_driver": "SHAPEFILEZIP",
+            "input_layer": "hy.hidro_cyl_cursos",
+            "archive_member": member,
+            "size_bytes": source.stat().st_size,
+        }
+    ]
+
+
 def test_vector_ingest_rejects_wrong_geopackage_zip_member_before_gdal(
     db,
     tmp_path,

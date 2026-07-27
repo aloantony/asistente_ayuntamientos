@@ -1001,10 +1001,11 @@ def acquisition_candidates(
                     code="reviewed_idecyl_evidence_invalid",
                 )
             config = deepcopy(reviewed_idecyl.candidate_config)
-            config["archive_styles"] = _idecyl_archive_style_config(
-                layer,
-                config.get("archive_styles"),
-            )
+            if "archive_styles" in config:
+                config["archive_styles"] = _idecyl_archive_style_config(
+                    layer,
+                    config["archive_styles"],
+                )
             config["reviewed_equivalence"] = deepcopy(
                 reviewed_idecyl.evidence
             )

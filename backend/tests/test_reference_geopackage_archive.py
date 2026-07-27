@@ -26,6 +26,10 @@ from app.reference_layers.acquisition import (
 )
 from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.safe_download import HTTPSDownloadResult
+from app.reference_layers.reviewed_archive_integrity import (
+    INTEGRITY_SPEC_SCHEMA,
+    canonical_json_sha256 as reviewed_integrity_sha256,
+)
 from app.reference_layers.source_content_parity import (
     PARITY_SPEC_SCHEMA,
     SourceContentParityError,
@@ -206,6 +210,37 @@ def _parity_config(inspection: dict) -> dict:
     }
 
 
+def _reviewed_archive_config(
+    *,
+    required_members: list[str],
+    license_member: str,
+    license_sha256: str,
+) -> dict:
+    semantic = {
+        "schema_version": INTEGRITY_SPEC_SCHEMA,
+        "response_constraints": {
+            "content_type": "application/x-zip-compressed",
+            "max_content_length": 2 * 1024 * 1024,
+            "require_etag": True,
+            "require_last_modified": True,
+        },
+        "archive_constraints": {
+            "max_entries": 8,
+            "max_uncompressed_bytes": 2 * 1024 * 1024,
+            "required_members": sorted(required_members),
+            "license_member": license_member,
+            "license_max_uncompressed_bytes": 64 * 1024,
+            "license_sha256_allowlist": [license_sha256],
+        },
+    }
+    return {
+        "reviewed_archive_integrity": {
+            **semantic,
+            "spec_sha256": reviewed_integrity_sha256(semantic),
+        }
+    }
+
+
 def _sld() -> bytes:
     return b"""<?xml version="1.0" encoding="UTF-8"?>
 <sld:StyledLayerDescriptor version="1.0.0"
@@ -232,8 +267,16 @@ def _sld() -> bytes:
 
 
 class _Download:
-    def __init__(self, body: bytes) -> None:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        content_type: str = "application/zip",
+        last_modified: str | None = None,
+    ) -> None:
         self.body = body
+        self.content_type = content_type
+        self.last_modified = last_modified
 
     def __call__(self, _policy):
         return self
@@ -248,18 +291,18 @@ class _Download:
         accept=None,
     ) -> HTTPSDownloadResult:
         del etag, last_modified
-        assert accept == "application/zip"
+        assert accept == self.content_type
         sink.write(self.body)
         return HTTPSDownloadResult(
             source_url=url,
             final_url=url,
             status_code=200,
             not_modified=False,
-            content_type="application/zip",
+            content_type=self.content_type,
             size_bytes=len(self.body),
             sha256=hashlib.sha256(self.body).hexdigest(),
             etag='"reviewed-v1"',
-            last_modified=None,
+            last_modified=self.last_modified,
             redirects=0,
             redirect_chain=(url,),
         )
@@ -384,6 +427,64 @@ def test_acquisition_persists_exact_archive_parity_and_sld(
         inspection["archive_sha256"]
     )
     assert acquired_style.metadata["parity_kind"] == "exact"
+
+
+def test_acquisition_accepts_reviewed_live_geopackage_without_pinning_data_hash(
+    tmp_path,
+) -> None:
+    path = _archive(tmp_path)
+    license_member = "Licencia-IGCYL.txt"
+    license_body = b"Audited IGCYL license text"
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr(license_member, license_body)
+    config = {
+        "media_type": "application/x-zip-compressed",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        **_reviewed_archive_config(
+            required_members=[
+                license_member,
+                "dataset/reviewed.gpkg",
+            ],
+            license_member=license_member,
+            license_sha256=hashlib.sha256(license_body).hexdigest(),
+        ),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        result = ReferenceAcquisitionPipeline(
+            store,
+            limits=AcquisitionLimits(
+                max_probe_bytes=256 * 1024,
+                max_page_bytes=512 * 1024,
+                max_dataset_bytes=2 * 1024 * 1024,
+                max_total_bytes=4 * 1024 * 1024,
+                page_size=100,
+                max_pages=2,
+                max_features=100,
+                timeout_seconds=10,
+                idle_timeout_seconds=2,
+            ),
+            downloader_factory=_Download(
+                path.read_bytes(),
+                content_type="application/x-zip-compressed",
+                last_modified="Sun, 27 Jul 2026 12:00:00 GMT",
+            ),
+        ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+    dataset = next(item for item in result.artifacts if item.role == "input")
+    gate = dataset.metadata["reviewed_archive_integrity"]
+    assert gate["passed"] is True
+    assert gate["response"]["etag"] == '"reviewed-v1"'
+    assert gate["license_sha256"] == hashlib.sha256(
+        license_body
+    ).hexdigest()
+    assert dataset.metadata["geopackage_inspection"]["feature_count"] == 4
+    assert "source_content_parity" not in dataset.metadata
 
 
 def test_acquisition_rejects_changed_style_even_with_new_data_parity(

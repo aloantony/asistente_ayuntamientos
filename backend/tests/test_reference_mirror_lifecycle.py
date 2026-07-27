@@ -52,6 +52,9 @@ from app.reference_layers.local_metadata_contract import (
     local_metadata_asset_descriptor,
     local_metadata_precommit_gate,
 )
+from app.reference_layers.idecyl_exact_evidence import (
+    idecyl_exact_source_inventory,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -371,6 +374,59 @@ def _seed_bootstrap(db, *, provider_key: str = "mirror-lifecycle-test"):
         )
     )
     return definition, layer, snapshot, sources, applied
+
+
+def _idecyl_reviewable_archive_definition(
+    *,
+    provider_key: str = "idecyl-reviewable-archives",
+) -> ReferenceCatalogDefinition:
+    reviewed = [
+        item
+        for item in idecyl_exact_source_inventory()
+        if item.audit_layer_id != 39
+        and item.local_service_status == "candidate"
+    ]
+    assert len(reviewed) == 18
+    return ReferenceCatalogDefinition(
+        provider_key=provider_key,
+        source_url="https://idecyl.jcyl.es/siur/settings.json",
+        raw_catalog={"revision": "reviewable-archives-v3"},
+        services=tuple(
+            ReferenceServiceDefinition(
+                source_key=f"service:idecyl:{item.audit_layer_id}",
+                title=f"IDECyL {item.audit_layer_id}",
+                upstream_protocol="wms",
+                base_url=item.catalog_endpoint_url,
+                default_format="image/png",
+                license_status="pending",
+                cache_policy="mirror",
+            )
+            for item in reviewed
+        ),
+        layers=tuple(
+            ReferenceLayerDefinition(
+                source_key=item.catalog_layer_source_key,
+                node_type="layer",
+                title=item.catalog_remote_name,
+                service_key=f"service:idecyl:{item.audit_layer_id}",
+                remote_name=item.catalog_remote_name,
+                role="overlay",
+                renderer="raster_tile",
+                delivery_mode="mirror",
+                image_format="image/png",
+                bounds={
+                    "west": -7.1,
+                    "south": 40.0,
+                    "east": -1.7,
+                    "north": 43.3,
+                },
+                min_zoom=6,
+                max_zoom=18,
+            )
+            for item in reviewed
+        ),
+        retrieved_at=NOW,
+    )
 
 
 def _only_source_due(db, source, *, at: datetime = NOW):
@@ -985,6 +1041,106 @@ def test_bootstrap_is_dry_run_idempotent_and_preserves_manual_sources(db) -> Non
     )
     assert len(strategy_rows) == 1
     assert strategy_rows[0].generation == 1
+
+
+def test_18_idecyl_archives_persist_enabled_but_cannot_queue_without_review(
+    db,
+) -> None:
+    definition = _idecyl_reviewable_archive_definition()
+    apply_catalog_definition(db, definition)
+    plan = build_mirror_bootstrap_plan(
+        db,
+        provider_key=definition.provider_key,
+    )
+
+    assert len(plan.sources) == 18
+    assert len(plan.new_source_keys) == 18
+    applied = apply_mirror_bootstrap_plan(db, plan)
+    assert applied.created_count == 18
+    sources = list(
+        db.scalars(
+            select(ReferenceLayerSource)
+            .where(
+                ReferenceLayerSource.provider_key
+                == definition.provider_key
+            )
+            .order_by(ReferenceLayerSource.layer_id)
+        )
+    )
+    assert len(sources) == 18
+    assert all(
+        source.enabled
+        and source.is_primary
+        and source.protocol == "download"
+        and source.target_kind == "vector"
+        and source.definition_sha256
+        == _canonical_sha256(
+            {
+                "protocol": source.protocol,
+                "target_kind": source.target_kind,
+                "endpoint_url": source.endpoint_url,
+                "remote_name": source.remote_name,
+                "sync_strategy": source.sync_strategy,
+                "priority": source.priority,
+                "config": source.config_json,
+            }
+        )
+        for source in sources
+    )
+    due = NOW - timedelta(seconds=1)
+    for source in sources:
+        source.next_check_at = due
+    db.commit()
+
+    assert (
+        reference_mirror_lifecycle.enqueue_due_sources(
+            db,
+            now=NOW,
+            require_authorization=True,
+        )
+        == ()
+    )
+    assert db.scalar(
+        select(func.count(ReferenceSyncRun.id)).where(
+            ReferenceSyncRun.provider_key == definition.provider_key
+        )
+    ) == 0
+    assert all(
+        db.get(ReferenceLayerSource, source.id).next_check_at == due
+        for source in sources
+    )
+    strategies = list(
+        db.scalars(
+            select(ReferenceLayerMirrorStrategy).where(
+                ReferenceLayerMirrorStrategy.provider_key
+                == definition.provider_key
+            )
+        )
+    )
+    assert len(strategies) == 18
+    assert all(
+        strategy.strategy == "vector"
+        and strategy.generation == 1
+        for strategy in strategies
+    )
+
+    repeated = build_mirror_bootstrap_plan(
+        db,
+        provider_key=definition.provider_key,
+    )
+    assert repeated.new_source_keys == ()
+    assert repeated.updated_source_keys == ()
+    no_op = apply_mirror_bootstrap_plan(db, repeated)
+    assert no_op.created_count == no_op.updated_count == 0
+    assert {
+        strategy.generation
+        for strategy in db.scalars(
+            select(ReferenceLayerMirrorStrategy).where(
+                ReferenceLayerMirrorStrategy.provider_key
+                == definition.provider_key
+            )
+        )
+    } == {1}
 
 
 def test_bootstrap_rejects_stale_plan_and_deactivates_superseded_auto_sources(
