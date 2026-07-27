@@ -360,6 +360,108 @@ def test_reviewed_ortho_requires_exact_official_product_attribution(db) -> None:
     assert plan.evidence.attribution == reviewed.required_attribution
 
 
+def test_reviewed_archive_requires_exact_license_and_attribution(db) -> None:
+    _, _, _, source = _seed_source(
+        db,
+        provider_key="auth-reviewed-archive-license",
+    )
+    source.config_json = {
+        "reviewed_equivalence": {
+            "schema": "siur-idecyl-local-service-evidence/v3",
+            "license_evidence": {
+                "license_name": "IGCYL-NC",
+                "license_url": (
+                    "https://ftp.itacyl.es/cartografia/"
+                    "LICENCIA-IGCYL-NC-2012.pdf"
+                ),
+                "required_attribution": "© Junta de Castilla y León",
+                "recipient_acceptance_required": True,
+            },
+        },
+    }
+    source.definition_sha256 = canonical_json_sha256(
+        {
+            "protocol": source.protocol,
+            "target_kind": source.target_kind,
+            "endpoint_url": source.endpoint_url,
+            "remote_name": source.remote_name,
+            "sync_strategy": source.sync_strategy,
+            "priority": source.priority,
+            "config": source.config_json,
+        }
+    )
+    db.commit()
+
+    wrong = mirror_authorization_document(
+        db,
+        source,
+        allowed_origins=[
+            "https://data.example.test",
+            "https://ftp.itacyl.es",
+        ],
+    )
+    with pytest.raises(
+        MirrorAuthorizationDocumentError,
+        match="reviewed source evidence",
+    ):
+        plan_mirror_authorization_review(db, wrong)
+
+    value = json.loads(wrong)
+    value["license"]["name"] = "IGCYL-NC"
+    value["license"]["url"] = (
+        "https://ftp.itacyl.es/cartografia/"
+        "LICENCIA-IGCYL-NC-2012.pdf"
+    )
+    value["license"]["attribution"] = "© Junta de Castilla y León"
+    plan = plan_mirror_authorization_review(
+        db,
+        json.dumps(value, ensure_ascii=False).encode(),
+    )
+
+    assert plan.evidence.license_name == "IGCYL-NC"
+    assert plan.evidence.attribution == "© Junta de Castilla y León"
+
+
+def test_reviewed_license_binding_fails_closed_when_incomplete(db) -> None:
+    _, _, _, source = _seed_source(
+        db,
+        provider_key="auth-reviewed-license-incomplete",
+    )
+    source.config_json = {
+        "reviewed_equivalence": {
+            "schema": "siur-idecyl-local-service-evidence/v3",
+            "license_evidence": {
+                "license_name": "IGCYL-NC",
+                "license_url": (
+                    "https://ftp.itacyl.es/cartografia/"
+                    "LICENCIA-IGCYL-NC-2012.pdf"
+                ),
+            },
+        },
+    }
+    source.definition_sha256 = canonical_json_sha256(
+        {
+            "protocol": source.protocol,
+            "target_kind": source.target_kind,
+            "endpoint_url": source.endpoint_url,
+            "remote_name": source.remote_name,
+            "sync_strategy": source.sync_strategy,
+            "priority": source.priority,
+            "config": source.config_json,
+        }
+    )
+    db.commit()
+
+    with pytest.raises(
+        MirrorAuthorizationDocumentError,
+        match="incomplete reviewed license binding",
+    ):
+        plan_mirror_authorization_review(
+            db,
+            _approved_document(db, source),
+        )
+
+
 def test_plan_apply_requires_exact_hash_and_linear_chain(db) -> None:
     _, _, _, source = _seed_source(db)
     document = _approved_document(db, source)

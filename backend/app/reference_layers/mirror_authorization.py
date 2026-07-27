@@ -1237,6 +1237,16 @@ def _validate_evidence_for_source(
         raise MirrorAuthorizationDocumentError(
             "authorization license or attribution does not match the reviewed product"
         )
+    reviewed_license = _reviewed_license_binding(source)
+    if reviewed_license is not None and (
+        evidence.license_name,
+        evidence.license_url,
+        evidence.attribution,
+    ) != reviewed_license:
+        raise MirrorAuthorizationDocumentError(
+            "authorization license or attribution does not match the "
+            "reviewed source evidence"
+        )
     _validate_urls_within_origins(
         (
             source.endpoint_url,
@@ -1250,6 +1260,7 @@ def _validate_review_source(
     review: ReferenceMirrorAuthorizationReview,
     source: ReferenceLayerSource,
 ) -> None:
+    reviewed_license: tuple[str, str, str] | None = None
     try:
         if (
             review.provider_key != source.provider_key
@@ -1275,6 +1286,7 @@ def _validate_review_source(
             ),
             review.allowed_origins_json,
         )
+        reviewed_license = _reviewed_license_binding(source)
     except (
         MirrorAuthorizationDocumentError,
         TypeError,
@@ -1285,6 +1297,93 @@ def _validate_review_source(
             "mirror authorization source changed",
             code="mirror_authorization_source_changed",
         ) from error
+    if reviewed_license is not None and (
+        review.license_name,
+        review.license_url,
+        review.attribution,
+    ) != reviewed_license:
+        raise MirrorAuthorizationError(
+            "mirror authorization license or attribution no longer matches "
+            "the reviewed source evidence",
+            code="mirror_authorization_invalid",
+        )
+
+
+def _reviewed_license_binding(
+    source: ReferenceLayerSource,
+) -> tuple[str, str, str] | None:
+    """Extract one exact license binding from immutable source evidence.
+
+    Some reviewed source profiles carry their product license at the top
+    level, while archive-backed profiles keep it in ``license_evidence``.
+    A partial or contradictory binding must not silently degrade to an
+    operator-supplied free-text license.
+    """
+
+    config = source.config_json
+    if not isinstance(config, dict):
+        raise MirrorAuthorizationDocumentError(
+            "reviewed source configuration is invalid"
+        )
+    equivalence = config.get("reviewed_equivalence")
+    if equivalence is None:
+        return None
+    if not isinstance(equivalence, dict):
+        raise MirrorAuthorizationDocumentError(
+            "reviewed source evidence is invalid"
+        )
+
+    fields = {
+        "license_name",
+        "license_url",
+        "required_attribution",
+    }
+    locations: list[tuple[str, Mapping[str, Any]]] = [
+        ("reviewed_equivalence", equivalence)
+    ]
+    nested = equivalence.get("license_evidence")
+    if nested is not None:
+        if not isinstance(nested, dict):
+            raise MirrorAuthorizationDocumentError(
+                "reviewed source license evidence is invalid"
+            )
+        locations.append(("reviewed_equivalence.license_evidence", nested))
+
+    bindings: list[tuple[str, str, str]] = []
+    for label, value in locations:
+        present = fields.intersection(value)
+        if not present:
+            continue
+        if present != fields:
+            raise MirrorAuthorizationDocumentError(
+                f"{label} has an incomplete reviewed license binding"
+            )
+        bindings.append(
+            (
+                _required_text(
+                    value["license_name"],
+                    f"{label}.license_name",
+                    500,
+                ),
+                _https_url(
+                    value["license_url"],
+                    f"{label}.license_url",
+                    8_192,
+                ),
+                _required_text(
+                    value["required_attribution"],
+                    f"{label}.required_attribution",
+                    8_192,
+                ),
+            )
+        )
+    if not bindings:
+        return None
+    if len(set(bindings)) != 1:
+        raise MirrorAuthorizationDocumentError(
+            "reviewed source license bindings contradict each other"
+        )
+    return bindings[0]
 
 
 def _require_permissions(
