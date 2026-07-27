@@ -497,6 +497,17 @@ WFS_CAPABILITIES = b"""<wfs:WFS_Capabilities version="2.0.0"
  </wfs:FeatureType></wfs:FeatureTypeList></wfs:WFS_Capabilities>"""
 
 
+def wfs_1x_capabilities(version: str) -> bytes:
+    return (
+        f'<wfs:WFS_Capabilities version="{version}" '
+        'xmlns:wfs="http://www.opengis.net/wfs">'
+        "<wfs:FeatureTypeList><wfs:FeatureType>"
+        "<wfs:Name>workspace:roads</wfs:Name>"
+        "</wfs:FeatureType></wfs:FeatureTypeList>"
+        "</wfs:WFS_Capabilities>"
+    ).encode()
+
+
 def wfs_hits_response(count: int) -> Response:
     return Response(
         (
@@ -504,6 +515,27 @@ def wfs_hits_response(count: int) -> Response:
             '<wfs:FeatureCollection '
             'xmlns:wfs="http://www.opengis.net/wfs/2.0" '
             f'numberMatched="{count}" numberReturned="0"/>'
+        ).encode(),
+        "application/xml",
+    )
+
+
+def wfs_1x_hits_response(
+    count: int,
+    *,
+    member: bool = False,
+) -> Response:
+    rendered_member = (
+        '<gml:featureMember xmlns:gml="http://www.opengis.net/gml"/>'
+        if member
+        else ""
+    )
+    return Response(
+        (
+            '<wfs:FeatureCollection '
+            'xmlns:wfs="http://www.opengis.net/wfs" '
+            f'numberOfFeatures="{count}">'
+            f"{rendered_member}</wfs:FeatureCollection>"
         ).encode(),
         "application/xml",
     )
@@ -617,7 +649,7 @@ def test_wfs_downloads_bounded_pages_and_builds_ingestion_manifest(store, limits
     assert list((store.root / "staging").iterdir()) == []
 
 
-def test_legacy_wfs_fails_before_second_page_without_transaction_safety(
+def test_legacy_wfs_never_downloads_without_transaction_safety_or_contract(
     store,
     limits,
 ):
@@ -636,7 +668,9 @@ def test_legacy_wfs_fails_before_second_page_without_transaction_safety(
         return json_response(
             {
                 "type": "FeatureCollection",
-                "numberMatched": 3,
+                # Even an apparently complete first response is not enough:
+                # capped services can make this count look complete.
+                "numberMatched": 2,
                 "features": [
                     {
                         "type": "Feature",
@@ -657,8 +691,129 @@ def test_legacy_wfs_fails_before_second_page_without_transaction_safety(
         ).acquire(candidate("wfs"))
 
     assert captured.value.code == "wfs_paging_not_transaction_safe"
-    assert feature_calls == 1
+    assert feature_calls == 0
     assert list((store.root / "staging").iterdir()) == []
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+def test_wfs_1x_hits_omit_max_features_and_accept_number_of_features(
+    store,
+    limits,
+    version,
+):
+    hits_calls = 0
+    feature_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal hits_calls, feature_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(
+                wfs_1x_capabilities(version),
+                "application/xml",
+            )
+        assert query["typeName"] == ["workspace:roads"]
+        if query.get("resultType") == ["hits"]:
+            hits_calls += 1
+            assert "maxFeatures" not in query
+            return wfs_1x_hits_response(1)
+        feature_calls += 1
+        assert "maxFeatures" not in query
+        assert "startIndex" not in query
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "totalFeatures": 1,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"fid": 1},
+                        "geometry": None,
+                    }
+                ],
+            }
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            config={"wfs_snapshot": {"mode": "single_response"}},
+        )
+    )
+
+    assert result.feature_count == 1
+    assert hits_calls == 2
+    assert feature_calls == 2
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+def test_wfs_1x_hits_reject_non_empty_feature_collection(
+    store,
+    limits,
+    version,
+):
+    feature_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal feature_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(
+                wfs_1x_capabilities(version),
+                "application/xml",
+            )
+        feature_calls += 1
+        return wfs_1x_hits_response(1, member=True)
+
+    with pytest.raises(AcquisitionValidationError, match="empty WFS hits"):
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {"mode": "single_response"},
+                },
+            )
+        )
+
+    assert feature_calls == 1
+
+
+def test_wfs_2_hits_require_explicit_zero_number_returned(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        assert query.get("resultType") == ["hits"]
+        return Response(
+            b'<wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs/2.0" '
+            b'numberMatched="1"/>',
+            "application/xml",
+        )
+
+    with pytest.raises(AcquisitionValidationError, match="prove a feature count"):
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {"mode": "single_response"},
+                },
+            )
+        )
 
 
 def test_wfs_safe_snapshot_converges_and_rewrites_ephemeral_ids(
@@ -770,6 +925,11 @@ def test_wfs_safe_snapshot_aborts_when_content_changes_between_passes(
     limits,
 ):
     feature_calls = 0
+    blobs_before = {
+        item
+        for item in (store.root / "blobs" / "sha256").rglob("*")
+        if item.is_file()
+    }
 
     def handler(url, _etag, _modified):
         nonlocal feature_calls
@@ -826,6 +986,14 @@ def test_wfs_safe_snapshot_aborts_when_content_changes_between_passes(
     assert captured.value.retryable is True
     assert feature_calls == 4
     assert list((store.root / "staging").iterdir()) == []
+    blobs_after = {
+        item
+        for item in (store.root / "blobs" / "sha256").rglob("*")
+        if item.is_file()
+    }
+    assert {
+        item.name for item in blobs_after - blobs_before
+    } == {hashlib.sha256(WFS_CAPABILITIES).hexdigest()}
 
 
 def test_wfs_safe_snapshot_deduplicates_by_reviewed_stable_identity(
@@ -1155,6 +1323,115 @@ def test_wfs_paged_snapshot_uses_independent_hits_count_when_pages_are_capped(
     assert result.stats["sort_by"] == "fid A"
 
 
+def test_wfs_paged_snapshot_finishes_on_exact_count_at_page_limit(
+    store,
+    limits,
+):
+    feature_calls = 0
+    expected_count = limits.page_size * limits.max_pages
+
+    def handler(url, _etag, _modified):
+        nonlocal feature_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(expected_count)
+        offset = int(query["startIndex"][0])
+        feature_calls += 1
+        values = range(offset + 1, offset + limits.page_size + 1)
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": expected_count,
+                "numberReturned": limits.page_size,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"fid": value},
+                        "geometry": None,
+                    }
+                    for value in values
+                ],
+            }
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            config={
+                "wfs_snapshot": {
+                    "mode": "paged",
+                    "identity_properties": ["fid"],
+                }
+            },
+        )
+    )
+
+    assert result.feature_count == expected_count
+    assert result.stats["page_count"] == limits.max_pages
+    assert feature_calls == 2 * limits.max_pages
+
+
+def test_wfs_paged_snapshot_rejects_more_features_than_hits_count(
+    store,
+    limits,
+):
+    feature_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal feature_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(3)
+        offset = int(query["startIndex"][0])
+        feature_calls += 1
+        values = [1, 2] if offset == 0 else [3, 4]
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 3,
+                "numberReturned": 2,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"fid": value},
+                        "geometry": None,
+                    }
+                    for value in values
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {
+                        "mode": "paged",
+                        "identity_properties": ["fid"],
+                    }
+                },
+            )
+        )
+
+    assert captured.value.code == "unstable_snapshot"
+    assert captured.value.retryable is True
+    assert feature_calls == 2
+    assert list((store.root / "staging").iterdir()) == []
+
+
 def test_wfs_reviewed_paged_snapshot_accepts_11000_with_default_limits(
     store,
 ):
@@ -1336,6 +1613,148 @@ def test_wfs_convergence_applies_one_aggregate_upstream_byte_budget(
         )
 
     assert captured.value.code == "snapshot_too_large"
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_wfs_upstream_byte_stats_include_capabilities_and_styles(
+    store,
+    limits,
+):
+    upstream_bytes = 0
+    style_document = sld_payload("workspace:blue")
+
+    def respond(response):
+        nonlocal upstream_bytes
+        upstream_bytes += len(response.body)
+        return response
+
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        request = query.get("request", [None])[0]
+        if request == "GetCapabilities":
+            return respond(Response(WFS_CAPABILITIES, "application/xml"))
+        if request == "GetStyles":
+            return respond(
+                Response(
+                    style_document,
+                    "application/vnd.ogc.sld+xml",
+                )
+            )
+        if query.get("resultType") == ["hits"]:
+            return respond(wfs_hits_response(1))
+        return respond(
+            json_response(
+                {
+                    "type": "FeatureCollection",
+                    "numberMatched": 1,
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"fid": 1},
+                            "geometry": None,
+                        }
+                    ],
+                }
+            )
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            remote_name="workspace:roads",
+            config={
+                "wfs_snapshot": {"mode": "single_response"},
+                **style_config(("style:blue", "workspace:blue")),
+            },
+        )
+    )
+
+    assert result.stats["upstream_observed_bytes"] == upstream_bytes
+    assert result.stats["upstream_capabilities_bytes"] == len(
+        WFS_CAPABILITIES
+    )
+    assert result.stats["upstream_style_bytes"] == len(style_document)
+    assert result.stats["retained_bytes_before_manifest"] < result.total_bytes
+
+
+def test_wfs_remote_budget_rejects_style_after_both_snapshot_passes(
+    store,
+    limits,
+):
+    hits = wfs_hits_response(1)
+    data = json_response(
+        {
+            "type": "FeatureCollection",
+            "numberMatched": 1,
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"fid": 1},
+                    "geometry": None,
+                }
+            ],
+        }
+    )
+    style_document = sld_payload("workspace:blue")
+    remote_limit = (
+        len(WFS_CAPABILITIES)
+        + 2 * (len(hits.body) + len(data.body))
+        + len(style_document)
+        - 1
+    )
+    largest_response = max(
+        len(WFS_CAPABILITIES),
+        len(hits.body),
+        len(data.body),
+        len(style_document),
+    )
+    constrained = replace(
+        limits,
+        max_probe_bytes=largest_response,
+        max_page_bytes=largest_response,
+        max_dataset_bytes=largest_response,
+        max_total_bytes=remote_limit,
+    )
+    style_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal style_calls
+        query = parse_qs(urlsplit(url).query)
+        request = query.get("request", [None])[0]
+        if request == "GetCapabilities":
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if request == "GetStyles":
+            style_calls += 1
+            return Response(
+                style_document,
+                "application/vnd.ogc.sld+xml",
+            )
+        if query.get("resultType") == ["hits"]:
+            return hits
+        return data
+
+    with pytest.raises(AcquisitionLimitError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=constrained,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                remote_name="workspace:roads",
+                config={
+                    "wfs_snapshot": {"mode": "single_response"},
+                    **style_config(("style:blue", "workspace:blue")),
+                },
+            )
+        )
+
+    assert captured.value.code == "snapshot_too_large"
+    assert style_calls == 1
     assert list((store.root / "staging").iterdir()) == []
 
 

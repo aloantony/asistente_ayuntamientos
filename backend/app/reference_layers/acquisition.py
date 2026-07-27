@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 from app.reference_layers.blob_store import (
     ReferenceBlobStore,
     ReferenceBlobTooLargeError,
+    ReferenceStagingBatch,
     ReferenceStagingWriter,
     StoredReferenceBlob,
 )
@@ -521,8 +522,18 @@ class _CanonicalWFSPage:
 
 
 @dataclass(frozen=True)
+class _StagedWFSPage:
+    path: Path
+    sha256: str
+    size_bytes: int
+    observed: HTTPSDownloadResult
+    source_version: str
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _WFSSnapshotPass:
-    artifacts: tuple[AcquiredArtifact, ...]
+    staged_pages: tuple[_StagedWFSPage, ...]
     page_count: int
     feature_count: int
     number_matched: int
@@ -1002,14 +1013,15 @@ class ReferenceAcquisitionPipeline:
             metadata=metadata,
         )
 
-    def _local_wfs_page_artifact(
+    def _stage_wfs_page(
         self,
         payload: dict[str, Any],
         *,
+        batch: ReferenceStagingBatch,
         observed: HTTPSDownloadResult,
         source_version: str,
         metadata: dict[str, Any],
-    ) -> AcquiredArtifact:
+    ) -> _StagedWFSPage:
         encoded = _canonical_json(payload) + b"\n"
         maximum = min(
             self.limits.max_page_bytes,
@@ -1021,27 +1033,49 @@ class ReferenceAcquisitionPipeline:
                 "canonical WFS page exceeds the page byte limit",
                 code="page_too_large",
             )
-        blob = self.store.put_stream(
-            io.BytesIO(encoded),
-            max_bytes=maximum,
+        with batch.stage(max_bytes=maximum) as staging:
+            staging.write(encoded)
+            path = staging.seal()
+        return _StagedWFSPage(
+            path=path,
+            sha256=staging.sha256,
+            size_bytes=staging.size_bytes,
+            observed=observed,
+            source_version=source_version,
+            metadata=metadata,
+        )
+
+    def _commit_staged_wfs_page(
+        self,
+        staged: _StagedWFSPage,
+    ) -> AcquiredArtifact:
+        blob = self.store.commit_staged_file(
+            staged.path,
+            max_bytes=min(
+                self.limits.max_page_bytes,
+                self.store.max_blob_bytes,
+                self.limits.max_total_bytes,
+            ),
+            expected_sha256=staged.sha256,
+            expected_size=staged.size_bytes,
         )
         return AcquiredArtifact(
             artifact_kind="dataset",
             role=(
                 "input"
-                if metadata.get("feature_count") != 0
+                if staged.metadata.get("feature_count") != 0
                 else "observation"
             ),
             media_type="application/geo+json",
             blob=blob,
-            source_url=observed.source_url,
-            final_url=observed.final_url,
-            source_version=source_version,
-            upstream_etag=observed.etag,
+            source_url=staged.observed.source_url,
+            final_url=staged.observed.final_url,
+            source_version=staged.source_version,
+            upstream_etag=staged.observed.etag,
             upstream_last_modified=_http_datetime(
-                observed.last_modified
+                staged.observed.last_modified
             ),
-            metadata=metadata,
+            metadata=staged.metadata,
         )
 
     def _remote_artifact(
@@ -1209,6 +1243,8 @@ class ReferenceAcquisitionPipeline:
     def _acquire_styles(
         self,
         candidate: SourceCandidate,
+        *,
+        remote_byte_budget: int | None = None,
     ) -> list[AcquiredArtifact]:
         request = _style_request_config(candidate)
         if request is None or not request.styles:
@@ -1219,6 +1255,31 @@ class ReferenceAcquisitionPipeline:
                 code="style_count_limit",
             )
 
+        remote_observed_bytes = 0
+
+        def budgeted_max_bytes(maximum: int) -> int:
+            if remote_byte_budget is None:
+                return maximum
+            remaining = remote_byte_budget - remote_observed_bytes
+            if remaining <= 0:
+                raise AcquisitionLimitError(
+                    "style downloads exhaust the aggregate remote byte limit",
+                    code="snapshot_too_large",
+                )
+            return min(maximum, remaining)
+
+        def account(downloaded: _Downloaded) -> None:
+            nonlocal remote_observed_bytes
+            remote_observed_bytes += downloaded.result.size_bytes
+            if (
+                remote_byte_budget is not None
+                and remote_observed_bytes > remote_byte_budget
+            ):
+                raise AcquisitionLimitError(
+                    "style downloads exceed the aggregate remote byte limit",
+                    code="snapshot_too_large",
+                )
+
         url = _merge_query(
             request.endpoint_url,
             {
@@ -1228,23 +1289,36 @@ class ReferenceAcquisitionPipeline:
                 "layers": request.layer_name,
             },
         )
-        downloaded = self._download(
-            candidate,
-            url,
-            max_bytes=self.limits.max_probe_bytes,
-            accept=(
-                "application/vnd.ogc.sld+xml, application/xml;q=0.9, "
-                "text/xml;q=0.8"
-            ),
-            allowed_media_types=_XML_MEDIA_TYPES,
-            validator=lambda payload: _parse_style_bundle(
-                payload,
-                layer_name=request.layer_name,
-                style_names=tuple(item.remote_name for item in request.styles),
-            ),
-            reviewed_origin_url=request.endpoint_url,
-            reviewed_sha256=request.expected_bundle_sha256,
-        )
+        try:
+            downloaded = self._download(
+                candidate,
+                url,
+                max_bytes=budgeted_max_bytes(
+                    self.limits.max_probe_bytes
+                ),
+                accept=(
+                    "application/vnd.ogc.sld+xml, application/xml;q=0.9, "
+                    "text/xml;q=0.8"
+                ),
+                allowed_media_types=_XML_MEDIA_TYPES,
+                validator=lambda payload: _parse_style_bundle(
+                    payload,
+                    layer_name=request.layer_name,
+                    style_names=tuple(
+                        item.remote_name for item in request.styles
+                    ),
+                ),
+                reviewed_origin_url=request.endpoint_url,
+                reviewed_sha256=request.expected_bundle_sha256,
+            )
+        except ReferenceBlobTooLargeError as error:
+            if remote_byte_budget is None:
+                raise
+            raise AcquisitionLimitError(
+                "style bundle exceeds the aggregate remote byte limit",
+                code="snapshot_too_large",
+            ) from error
+        account(downloaded)
         parsed = cast(_ParsedStyleBundle, downloaded.parsed)
         bundle = self._remote_artifact(
             downloaded,
@@ -1290,21 +1364,35 @@ class ReferenceAcquisitionPipeline:
                     continue
                 resource = resources_by_url.get(resolved_url)
                 if resource is None:
-                    downloaded_resource = self._download(
-                        candidate,
-                        resolved_url,
-                        max_bytes=min(
-                            _MAX_STYLE_RESOURCE_BYTES,
-                            self.limits.max_page_bytes,
-                        ),
-                        accept=(
-                            "image/png, image/jpeg, image/gif, "
-                            "image/svg+xml, image/webp;q=0.9"
-                        ),
-                        allowed_media_types=_STYLE_RESOURCE_MEDIA_TYPES,
-                        validator=_inspect_style_resource,
-                        reviewed_origin_url=request.endpoint_url,
-                    )
+                    try:
+                        downloaded_resource = self._download(
+                            candidate,
+                            resolved_url,
+                            max_bytes=budgeted_max_bytes(
+                                min(
+                                    _MAX_STYLE_RESOURCE_BYTES,
+                                    self.limits.max_page_bytes,
+                                )
+                            ),
+                            accept=(
+                                "image/png, image/jpeg, image/gif, "
+                                "image/svg+xml, image/webp;q=0.9"
+                            ),
+                            allowed_media_types=(
+                                _STYLE_RESOURCE_MEDIA_TYPES
+                            ),
+                            validator=_inspect_style_resource,
+                            reviewed_origin_url=request.endpoint_url,
+                        )
+                    except ReferenceBlobTooLargeError as error:
+                        if remote_byte_budget is None:
+                            raise
+                        raise AcquisitionLimitError(
+                            "style resource exceeds the aggregate remote "
+                            "byte limit",
+                            code="snapshot_too_large",
+                        ) from error
+                    account(downloaded_resource)
                     inspection = cast(
                         _StyleResourceInspection,
                         downloaded_resource.parsed,
@@ -1675,6 +1763,12 @@ class ReferenceAcquisitionPipeline:
         paging_is_transaction_safe = _wfs_paging_is_transaction_safe(
             capabilities_document
         )
+        if paging_is_transaction_safe is not True:
+            raise AcquisitionValidationError(
+                "WFS pagination requires a transaction-safe capability or "
+                "an explicit reviewed snapshot contract",
+                code="wfs_paging_not_transaction_safe",
+            )
 
         artifacts = [capabilities]
         page_artifacts: list[AcquiredArtifact] = []
@@ -1778,17 +1872,6 @@ class ReferenceAcquisitionPipeline:
                 or page.count < page_size
                 or (expected_matched is not None and offset >= expected_matched)
             )
-            if paging_is_transaction_safe is not True:
-                terminal = (
-                    expected_matched is not None
-                    and total_features == expected_matched
-                )
-                if not terminal:
-                    raise AcquisitionValidationError(
-                        "WFS requires pagination without a transaction-safe "
-                        "capability or reviewed snapshot contract",
-                        code="wfs_paging_not_transaction_safe",
-                    )
             if terminal:
                 break
         if not terminal:
@@ -1856,9 +1939,11 @@ class ReferenceAcquisitionPipeline:
         count_parameter: str,
         snapshot_spec: _WFSSnapshotSpec,
     ) -> AcquisitionResult:
+        staged_pages: list[_StagedWFSPage] = []
+
         def read_pass(
             *,
-            retain_artifacts: bool,
+            stage_pages: bool,
             byte_budget: int,
         ) -> _WFSSnapshotPass:
             if snapshot_spec.mode == "single_response":
@@ -1869,7 +1954,10 @@ class ReferenceAcquisitionPipeline:
                     version=version,
                     type_parameter=type_parameter,
                     count_parameter=count_parameter,
-                    retain_artifacts=retain_artifacts,
+                    staging_batch=(
+                        staging_batch if stage_pages else None
+                    ),
+                    staged_pages=staged_pages if stage_pages else None,
                     byte_budget=byte_budget,
                 )
             return self._read_paged_wfs_pass(
@@ -1881,39 +1969,86 @@ class ReferenceAcquisitionPipeline:
                 type_parameter=type_parameter,
                 count_parameter=count_parameter,
                 snapshot_spec=snapshot_spec,
-                retain_artifacts=retain_artifacts,
+                staging_batch=staging_batch if stage_pages else None,
+                staged_pages=staged_pages if stage_pages else None,
                 byte_budget=byte_budget,
             )
 
-        first = read_pass(
-            retain_artifacts=True,
-            byte_budget=self.limits.max_total_bytes,
-        )
+        capabilities_observed_bytes = capabilities.blob.size_bytes
         remaining_byte_budget = (
-            self.limits.max_total_bytes - first.observed_bytes
+            self.limits.max_total_bytes - capabilities_observed_bytes
         )
         if remaining_byte_budget <= 0:
             raise AcquisitionLimitError(
-                "WFS convergence reads exceed the aggregate byte limit",
+                "WFS capabilities exhaust the aggregate remote byte limit",
                 code="snapshot_too_large",
             )
-        verification = read_pass(
-            retain_artifacts=False,
-            byte_budget=remaining_byte_budget,
-        )
-        if _wfs_snapshot_pass_identity(first) != _wfs_snapshot_pass_identity(
-            verification
-        ):
-            raise AcquisitionValidationError(
-                "WFS snapshot did not converge across complete reads",
-                code="unstable_snapshot",
-                retryable=True,
+        staging_batch = self.store.staging_batch()
+        try:
+            first = read_pass(
+                stage_pages=True,
+                byte_budget=remaining_byte_budget,
             )
+            remaining_byte_budget -= first.observed_bytes
+            if remaining_byte_budget <= 0:
+                raise AcquisitionLimitError(
+                    "WFS convergence reads exhaust the aggregate remote "
+                    "byte limit",
+                    code="snapshot_too_large",
+                )
+            verification = read_pass(
+                stage_pages=False,
+                byte_budget=remaining_byte_budget,
+            )
+            remaining_byte_budget -= verification.observed_bytes
+            if _wfs_snapshot_pass_identity(
+                first
+            ) != _wfs_snapshot_pass_identity(verification):
+                raise AcquisitionValidationError(
+                    "WFS snapshot did not converge across complete reads",
+                    code="unstable_snapshot",
+                    retryable=True,
+                )
 
-        page_artifacts = list(first.artifacts)
-        style_artifacts = self._acquire_styles(candidate)
+            style_artifacts = self._acquire_styles(
+                candidate,
+                remote_byte_budget=max(0, remaining_byte_budget),
+            )
+            style_observed_bytes = sum(
+                item.blob.size_bytes
+                for item in style_artifacts
+                if item.source_url is not None
+            )
+            if style_observed_bytes > remaining_byte_budget:
+                raise AcquisitionLimitError(
+                    "WFS styles exceed the aggregate remote byte limit",
+                    code="snapshot_too_large",
+                )
+            retained_bytes_before_manifest = (
+                capabilities.blob.size_bytes
+                + sum(item.size_bytes for item in staged_pages)
+                + sum(item.blob.size_bytes for item in style_artifacts)
+            )
+            if retained_bytes_before_manifest > self.limits.max_total_bytes:
+                raise AcquisitionLimitError(
+                    "WFS retained snapshot exceeds the aggregate byte limit",
+                    code="snapshot_too_large",
+                )
+            page_artifacts = [
+                self._commit_staged_wfs_page(item)
+                for item in first.staged_pages
+            ]
+        finally:
+            staging_batch.close()
+
         artifacts = [capabilities, *page_artifacts, *style_artifacts]
         _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        upstream_observed_bytes = (
+            capabilities_observed_bytes
+            + first.observed_bytes
+            + verification.observed_bytes
+            + style_observed_bytes
+        )
         stats: dict[str, Any] = {
             "page_count": first.page_count,
             "feature_count": first.feature_count,
@@ -1926,8 +2061,14 @@ class ReferenceAcquisitionPipeline:
             "snapshot_convergence_passes": 2,
             "snapshot_identity_sha256": first.identity_sha256,
             "snapshot_content_sha256": first.content_sha256,
-            "upstream_observed_bytes": (
+            "upstream_observed_bytes": upstream_observed_bytes,
+            "upstream_capabilities_bytes": capabilities_observed_bytes,
+            "upstream_snapshot_pass_bytes": (
                 first.observed_bytes + verification.observed_bytes
+            ),
+            "upstream_style_bytes": style_observed_bytes,
+            "retained_bytes_before_manifest": sum(
+                item.blob.size_bytes for item in artifacts
             ),
         }
         materialization: dict[str, Any] = {
@@ -1993,7 +2134,8 @@ class ReferenceAcquisitionPipeline:
         version: str,
         type_parameter: str,
         count_parameter: str,
-        retain_artifacts: bool,
+        staging_batch: ReferenceStagingBatch | None,
+        staged_pages: list[_StagedWFSPage] | None,
         byte_budget: int,
     ) -> _WFSSnapshotPass:
         expected_count, hits = self._observe_wfs_hits(
@@ -2054,35 +2196,41 @@ class ReferenceAcquisitionPipeline:
             page,
             collection=canonical_name,
         )
-        artifacts: tuple[AcquiredArtifact, ...] = ()
-        if retain_artifacts:
-            artifacts = (
-                self._local_wfs_page_artifact(
-                    canonical.document,
-                    observed=observed.result,
-                    source_version=version,
-                    metadata={
-                        "protocol": "wfs",
-                        "data_format": "geojson",
-                        "collection": canonical_name,
-                        "page_index": 0,
-                        "offset": 0,
-                        "feature_count": page.count,
-                        "terminal_empty_page": page.count == 0,
-                        "canonical_snapshot": True,
-                        "snapshot_mode": "single_response",
-                        "stable_identity_derivation": (
-                            "canonical-feature-content-and-occurrence"
-                        ),
-                        "page_identity_sha256": (
-                            canonical.identity_sha256
-                        ),
-                        "page_content_sha256": (
-                            canonical.content_sha256
-                        ),
-                    },
-                ),
+        pass_staged_pages: tuple[_StagedWFSPage, ...] = ()
+        if staged_pages is not None:
+            if staging_batch is None:
+                raise AcquisitionPersistenceError(
+                    "WFS staging batch is unavailable",
+                    code="staging_unavailable",
+                )
+            staged = self._stage_wfs_page(
+                canonical.document,
+                batch=staging_batch,
+                observed=observed.result,
+                source_version=version,
+                metadata={
+                    "protocol": "wfs",
+                    "data_format": "geojson",
+                    "collection": canonical_name,
+                    "page_index": 0,
+                    "offset": 0,
+                    "feature_count": page.count,
+                    "terminal_empty_page": page.count == 0,
+                    "canonical_snapshot": True,
+                    "snapshot_mode": "single_response",
+                    "stable_identity_derivation": (
+                        "canonical-feature-content-and-occurrence"
+                    ),
+                    "page_identity_sha256": (
+                        canonical.identity_sha256
+                    ),
+                    "page_content_sha256": (
+                        canonical.content_sha256
+                    ),
+                },
             )
+            staged_pages.append(staged)
+            pass_staged_pages = (staged,)
         identity_hasher = hashlib.sha256()
         content_hasher = hashlib.sha256()
         for record in canonical.identity_records:
@@ -2090,7 +2238,7 @@ class ReferenceAcquisitionPipeline:
         for record in canonical.content_records:
             _update_record_hash(content_hasher, record)
         return _WFSSnapshotPass(
-            artifacts=artifacts,
+            staged_pages=pass_staged_pages,
             page_count=1,
             feature_count=page.count,
             number_matched=page.number_matched,
@@ -2126,8 +2274,9 @@ class ReferenceAcquisitionPipeline:
             "version": version,
             type_parameter: canonical_name,
             "resultType": "hits",
-            count_parameter: "1",
         }
+        if version.startswith("2."):
+            params[count_parameter] = "1"
         observed = self._observe_download(
             candidate,
             _merge_query(candidate.endpoint_url, params),
@@ -2137,7 +2286,10 @@ class ReferenceAcquisitionPipeline:
             ),
             accept="application/xml, text/xml;q=0.9",
             allowed_media_types=_XML_MEDIA_TYPES,
-            validator=_parse_wfs_hits,
+            validator=lambda payload: _parse_wfs_hits(
+                payload,
+                version=version,
+            ),
         )
         matched = cast(int, observed.parsed)
         if matched > self.limits.max_features:
@@ -2158,14 +2310,15 @@ class ReferenceAcquisitionPipeline:
         type_parameter: str,
         count_parameter: str,
         snapshot_spec: _WFSSnapshotSpec,
-        retain_artifacts: bool,
+        staging_batch: ReferenceStagingBatch | None,
+        staged_pages: list[_StagedWFSPage] | None,
         byte_budget: int,
     ) -> _WFSSnapshotPass:
         if snapshot_spec.sort_by is None:
             raise AcquisitionConfigurationError(
                 "paged WFS snapshot has no deterministic sort"
             )
-        page_artifacts: list[AcquiredArtifact] = []
+        pass_staged_pages: list[_StagedWFSPage] = []
         expected_count, hits = self._observe_wfs_hits(
             candidate,
             canonical_name=canonical_name,
@@ -2297,41 +2450,58 @@ class ReferenceAcquisitionPipeline:
                     "WFS snapshot exceeds the feature limit",
                     code="feature_limit",
                 )
-            if retain_artifacts:
-                page_artifacts.append(
-                    self._local_wfs_page_artifact(
-                        canonical.document,
-                        observed=observed.result,
-                        source_version=version,
-                        metadata={
-                            "protocol": "wfs",
-                            "data_format": "geojson",
-                            "collection": canonical_name,
-                            "page_index": page_index,
-                            "offset": offset,
-                            "feature_count": page.count,
-                            "terminal_empty_page": page.count == 0,
-                            "canonical_snapshot": True,
-                            "stable_identity_properties": list(
-                                snapshot_spec.identity_properties
-                            ),
-                            "sort_by": snapshot_spec.sort_by,
-                            "page_identity_sha256": (
-                                canonical.identity_sha256
-                            ),
-                            "page_content_sha256": (
-                                canonical.content_sha256
-                            ),
-                        },
+            if total_features > expected_count:
+                raise AcquisitionValidationError(
+                    "WFS snapshot exceeded its independent hits count",
+                    code="unstable_snapshot",
+                    retryable=True,
+                )
+            if staged_pages is not None:
+                if staging_batch is None:
+                    raise AcquisitionPersistenceError(
+                        "WFS staging batch is unavailable",
+                        code="staging_unavailable",
                     )
+                staged = self._stage_wfs_page(
+                    canonical.document,
+                    batch=staging_batch,
+                    observed=observed.result,
+                    source_version=version,
+                    metadata={
+                        "protocol": "wfs",
+                        "data_format": "geojson",
+                        "collection": canonical_name,
+                        "page_index": page_index,
+                        "offset": offset,
+                        "feature_count": page.count,
+                        "terminal_empty_page": page.count == 0,
+                        "canonical_snapshot": True,
+                        "stable_identity_properties": list(
+                            snapshot_spec.identity_properties
+                        ),
+                        "sort_by": snapshot_spec.sort_by,
+                        "page_identity_sha256": (
+                            canonical.identity_sha256
+                        ),
+                        "page_content_sha256": (
+                            canonical.content_sha256
+                        ),
+                    },
                 )
-                _enforce_total_bytes(
-                    page_artifacts,
-                    self.limits.max_total_bytes,
-                )
+                staged_pages.append(staged)
+                pass_staged_pages.append(staged)
+                if (
+                    sum(item.size_bytes for item in pass_staged_pages)
+                    > self.limits.max_total_bytes
+                ):
+                    raise AcquisitionLimitError(
+                        "canonical WFS pages exceed the retained byte limit",
+                        code="snapshot_too_large",
+                    )
             offset += page.count
             terminal = (
-                page.count == 0
+                total_features == expected_count
+                or page.count == 0
                 or page.count < page_size
             )
             if terminal:
@@ -2359,7 +2529,7 @@ class ReferenceAcquisitionPipeline:
                 retryable=True,
             )
         return _WFSSnapshotPass(
-            artifacts=tuple(page_artifacts),
+            staged_pages=tuple(pass_staged_pages),
             page_count=len(page_identity_sha256),
             feature_count=total_features,
             number_matched=expected_count,
@@ -4915,7 +5085,11 @@ def _strict_json(document: bytes) -> Any:
     return value
 
 
-def _parse_wfs_hits(document: bytes) -> int:
+def _parse_wfs_hits(
+    document: bytes,
+    *,
+    version: str,
+) -> int:
     lowered = document.lower()
     if (
         not document
@@ -4946,18 +5120,45 @@ def _parse_wfs_hits(document: bytes) -> int:
         raise AcquisitionValidationError(
             "response is not an empty WFS hits collection"
         )
-    matched = _optional_count(
-        root.get("numberMatched") or root.get("totalFeatures"),
-        name="numberMatched",
-    )
-    returned = _optional_count(
-        root.get("numberReturned"),
-        name="numberReturned",
-    )
-    if matched is None or returned != 0:
+    if version.startswith("2."):
+        matched = _optional_count(
+            root.get("numberMatched"),
+            name="numberMatched",
+        )
+        returned = _optional_count(
+            root.get("numberReturned"),
+            name="numberReturned",
+        )
+        complete = matched is not None and returned == 0
+    elif version.startswith("1."):
+        declared_counts = [
+            _optional_count(root.get(name), name=name)
+            for name in (
+                "numberOfFeatures",
+                "numberMatched",
+                "totalFeatures",
+            )
+            if root.get(name) is not None
+        ]
+        matched = declared_counts[0] if declared_counts else None
+        returned = _optional_count(
+            root.get("numberReturned"),
+            name="numberReturned",
+        )
+        complete = (
+            matched is not None
+            and all(item == matched for item in declared_counts)
+            and returned in {None, 0}
+        )
+    else:
+        raise AcquisitionValidationError(
+            "WFS hits response uses an unsupported version"
+        )
+    if not complete:
         raise AcquisitionValidationError(
             "WFS hits response does not prove a feature count"
         )
+    assert matched is not None
     return matched
 
 

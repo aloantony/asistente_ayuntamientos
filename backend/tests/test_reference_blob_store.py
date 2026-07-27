@@ -144,6 +144,90 @@ def test_completed_staging_file_is_adopted_without_copying(store) -> None:
     assert stat.S_IMODE(destination.stat().st_mode) == 0o640
 
 
+def test_sealed_staging_file_is_adopted_only_after_explicit_commit(store) -> None:
+    payload = b"canonical WFS page"
+    expected = hashlib.sha256(payload).hexdigest()
+
+    with store.staging_batch() as batch:
+        with batch.stage(max_bytes=len(payload)) as staging:
+            staging.write(payload)
+            path = staging.seal()
+            inode = path.stat().st_ino
+
+        assert path.exists()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert list(
+            (store.root / "blobs" / "sha256").rglob(expected)
+        ) == []
+
+        stored = store.commit_staged_file(
+            path,
+            max_bytes=len(payload),
+            expected_sha256=expected,
+            expected_size=len(payload),
+        )
+
+    destination = store.resolve_blob(stored.storage_key)
+    assert destination.read_bytes() == payload
+    assert destination.stat().st_ino == inode
+    assert not path.exists()
+
+
+def test_sealing_without_a_staging_batch_lease_is_rejected(store) -> None:
+    with pytest.raises(ReferenceBlobStoreError, match="batch lease"):
+        with store.stage() as staging:
+            staging.write(b"unleased snapshot")
+            staging.seal()
+
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_active_staging_batch_lease_blocks_concurrent_cleanup(store) -> None:
+    with store.staging_batch() as batch:
+        with batch.stage() as staging:
+            staging.write(b"snapshot awaiting convergence")
+            path = staging.seal()
+        os.utime(path, (100, 100))
+        os.utime(batch.lease_path, (100, 100))
+
+        result = store.cleanup_staging(
+            older_than_seconds=0,
+            now=1_000,
+        )
+
+        assert result.deleted_count == 0
+        assert result.skipped_count == 2
+        assert path.exists()
+        assert batch.lease_path.exists()
+
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_staging_cleanup_collects_unlocked_crashed_batch(store) -> None:
+    lease_id = "f" * 32
+    staging_dir = store.root / "staging"
+    lease = staging_dir / f"{lease_id}.lease"
+    page = staging_dir / f"{lease_id}-{'e' * 32}.part"
+    lease.write_bytes(b"")
+    page.write_bytes(b"sealed page from crashed process")
+    os.chmod(lease, 0o600)
+    os.chmod(page, 0o600)
+    os.utime(lease, (100, 100))
+    os.utime(page, (100, 100))
+
+    result = store.cleanup_staging(
+        older_than_seconds=100,
+        now=1_000,
+    )
+
+    assert result.deleted_count == 2
+    assert result.deleted_bytes == len(
+        b"sealed page from crashed process"
+    )
+    assert not lease.exists()
+    assert not page.exists()
+
+
 def test_completed_file_outside_staging_or_with_wrong_identity_is_rejected(
     store,
     tmp_path,
