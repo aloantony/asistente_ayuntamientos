@@ -22,9 +22,18 @@ from app.reference_layers.catalog import (
     ReferenceServiceDefinition,
 )
 from app.reference_layers.idecyl_exact_evidence import (
+    EVIDENCE_SCHEMA as IDECYL_EXACT_EVIDENCE_SCHEMA,
     IDECyLExactEvidenceError,
     is_idecyl_geoserver_catalog_endpoint,
     reviewed_idecyl_exact_source,
+)
+from app.reference_layers.idecyl_local_style_evidence import (
+    IDECyLLocalStyleEvidenceError,
+    ReviewedIDECyLLocalStyle,
+    idecyl_local_style_config,
+    idecyl_local_style_expected_source_definition,
+    reviewed_idecyl_local_style,
+    reviewed_idecyl_local_style_for_source,
 )
 from app.reference_layers.mirror_coverage import (
     SIUR_LAYER_PREFIX,
@@ -143,6 +152,7 @@ class ReviewedLocalStyleRecipe:
         "catastro_parcels",
         "eurostat_grid",
         "flood_polygons",
+        "idecyl_polygon_outline",
         "ines_raster",
     ]
     catalog_style_source_key: str
@@ -152,6 +162,10 @@ class ReviewedLocalStyleRecipe:
     reviewed_equivalence: dict[str, Any]
     reviewed_equivalence_sha256: str
     style_reference: dict[str, Any]
+    audit_layer_id: int | None = None
+    catalog_style_is_default: bool | None = None
+    source_definition: dict[str, Any] | None = None
+    source_definition_sha256: str | None = None
 
 
 _REVIEWED_NATIVE_WMS = {
@@ -1026,6 +1040,19 @@ def acquisition_candidates(
                     layer,
                     config["archive_styles"],
                 )
+            try:
+                local_style = reviewed_idecyl_local_style_for_source(
+                    reviewed_idecyl
+                )
+            except IDECyLLocalStyleEvidenceError as error:
+                raise SourceDiscoveryError(
+                    "reviewed IDECyL local-style evidence is invalid",
+                    code="reviewed_idecyl_local_style_evidence_invalid",
+                ) from error
+            if local_style is not None:
+                config["reviewed_local_style"] = (
+                    _idecyl_local_style_config(layer, local_style)
+                )
             if reviewed_idecyl.protocol == "wfs":
                 config.update(_geoserver_style_config(endpoint, layer))
             config["reviewed_equivalence"] = deepcopy(
@@ -1387,6 +1414,32 @@ def _idecyl_archive_style_config(
             code="reviewed_idecyl_style_identity_invalid",
         ) from error
     return result
+
+
+def _idecyl_local_style_config(
+    layer: ReferenceLayerDefinition,
+    reviewed: ReviewedIDECyLLocalStyle,
+) -> dict[str, Any]:
+    expected = idecyl_local_style_config(reviewed)
+    styles = [
+        style
+        for style in layer.styles
+        if style.status in {"active", "degraded"}
+    ]
+    if (
+        len(layer.styles) != 1
+        or len(styles) != 1
+        or layer.style_name != reviewed.catalog_style_source_key
+        or styles[0].source_key != reviewed.catalog_style_source_key
+        or styles[0].remote_name != reviewed.remote_style_name
+        or styles[0].title != reviewed.style_title
+        or styles[0].is_default is not reviewed.is_default
+    ):
+        raise SourceDiscoveryError(
+            "catalog IDECyL style differs from the reviewed local adaptation",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    return expected
 
 
 def _reviewed_dataset_source(
@@ -1882,6 +1935,36 @@ def reviewed_local_style_profile_identity(
 ) -> tuple[str, str, str, str, str, str] | None:
     """Return the immutable style identity for an allowlisted recipe."""
 
+    idecyl = reviewed_idecyl_local_style(profile)
+    if idecyl is not None:
+        if (
+            catalog_style_source_key is not None
+            and catalog_style_source_key
+            != idecyl.catalog_style_source_key
+        ):
+            return None
+        definition = idecyl_local_style_expected_source_definition(
+            idecyl
+        )
+        reviewed_equivalence = definition["config"][
+            "reviewed_equivalence"
+        ]
+        return (
+            "idecyl_polygon_outline",
+            idecyl.catalog_style_source_key,
+            idecyl.remote_style_name,
+            idecyl.catalog_remote_name,
+            idecyl.selected_layer_name,
+            hashlib.sha256(
+                json.dumps(
+                    reviewed_equivalence,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
     identities = _reviewed_local_style_identities(profile)
     reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
     if reviewed is None or not identities:
@@ -1928,6 +2011,15 @@ def reviewed_local_style_profile_reference(
 ) -> dict[str, Any] | None:
     """Return the exact official reference accepted for persisted evidence."""
 
+    idecyl = reviewed_idecyl_local_style(profile)
+    if idecyl is not None:
+        if (
+            catalog_style_source_key is not None
+            and catalog_style_source_key
+            != idecyl.catalog_style_source_key
+        ):
+            return None
+        return deepcopy(idecyl.evidence)
     identities = _reviewed_local_style_identities(profile)
     reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
     if reviewed is None or not identities:
@@ -1949,6 +2041,32 @@ def reviewed_local_style_profile_reference(
     return _reviewed_local_style_reference(reviewed, identity)
 
 
+def reviewed_local_style_expected_source_definition(
+    profile: str,
+    catalog_style_source_key: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Return the exact full source definition for an IDECyL adaptation."""
+
+    reviewed = reviewed_idecyl_local_style(profile)
+    if (
+        reviewed is None
+        or catalog_style_source_key
+        != reviewed.catalog_style_source_key
+    ):
+        return None
+    definition = idecyl_local_style_expected_source_definition(reviewed)
+    digest = hashlib.sha256(
+        json.dumps(
+            definition,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return deepcopy(definition), digest
+
+
 def reviewed_local_style_recipes(
     candidate: SourceCandidate,
 ) -> tuple[ReviewedLocalStyleRecipe, ...]:
@@ -1963,10 +2081,14 @@ def reviewed_local_style_recipes(
     raw_equivalence = candidate.config.get("reviewed_equivalence")
     if raw_equivalence is None:
         return ()
-    if (
-        not isinstance(raw_equivalence, dict)
-        or raw_equivalence.get("schema") != _REVIEWED_DATASET_SOURCE_SCHEMA
-    ):
+    if not isinstance(raw_equivalence, dict):
+        return ()
+    if raw_equivalence.get("schema") == IDECYL_EXACT_EVIDENCE_SCHEMA:
+        return _reviewed_idecyl_local_style_recipes(
+            candidate,
+            raw_equivalence,
+        )
+    if raw_equivalence.get("schema") != _REVIEWED_DATASET_SOURCE_SCHEMA:
         return ()
     profile = raw_equivalence.get("profile")
     if not isinstance(profile, str):
@@ -2046,6 +2168,72 @@ def reviewed_local_style_recipes(
             ),
         )
         for identity in identities
+    )
+
+
+def _reviewed_idecyl_local_style_recipes(
+    candidate: SourceCandidate,
+    raw_equivalence: dict[str, Any],
+) -> tuple[ReviewedLocalStyleRecipe, ...]:
+    profile = raw_equivalence.get("profile")
+    if not isinstance(profile, str):
+        raise SourceDiscoveryError(
+            "reviewed IDECyL local-style profile is invalid",
+            code="reviewed_local_style_invalid",
+        )
+    reviewed = reviewed_idecyl_local_style(profile)
+    if reviewed is None:
+        return ()
+    expected_definition = idecyl_local_style_expected_source_definition(
+        reviewed
+    )
+    expected = _candidate(
+        protocol=expected_definition["protocol"],
+        target_kind=expected_definition["target_kind"],
+        endpoint_url=expected_definition["endpoint_url"],
+        remote_name=expected_definition["remote_name"],
+        sync_strategy=expected_definition["sync_strategy"],
+        priority=expected_definition["priority"],
+        config=deepcopy(expected_definition["config"]),
+    )
+    if candidate != expected:
+        raise SourceDiscoveryError(
+            "reviewed IDECyL local style does not match its source definition",
+            code="reviewed_local_style_invalid",
+        )
+    reviewed_equivalence = expected_definition["config"][
+        "reviewed_equivalence"
+    ]
+    reviewed_equivalence_sha256 = hashlib.sha256(
+        json.dumps(
+            reviewed_equivalence,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return (
+        ReviewedLocalStyleRecipe(
+            schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
+            profile=reviewed.profile,
+            style_kind="idecyl_polygon_outline",
+            catalog_style_source_key=(
+                reviewed.catalog_style_source_key
+            ),
+            remote_style_name=reviewed.remote_style_name,
+            catalog_layer_name=reviewed.catalog_remote_name,
+            selected_layer_name=reviewed.selected_layer_name,
+            reviewed_equivalence=deepcopy(reviewed_equivalence),
+            reviewed_equivalence_sha256=(
+                reviewed_equivalence_sha256
+            ),
+            style_reference=deepcopy(reviewed.evidence),
+            audit_layer_id=reviewed.audit_layer_id,
+            catalog_style_is_default=reviewed.is_default,
+            source_definition=candidate_definition(expected),
+            source_definition_sha256=expected.definition_sha256,
+        ),
     )
 
 

@@ -25,6 +25,9 @@ from app.reference_layers.local_style_adaptation import (
     local_style_package_metadata,
     validate_zero_resource_local_adaptation,
 )
+from app.reference_layers.idecyl_exact_evidence import (
+    idecyl_exact_source_inventory,
+)
 from app.reference_layers.source_discovery import acquisition_candidates
 from app.reference_layers.style_parity import _RequiredStyle, _sld_item
 
@@ -155,6 +158,96 @@ def _ines_candidate(*, potential: bool = True):
             else "Biodiversidad_INES_ErosionLaminar"
         ),
     )
+
+
+def _idecyl_cami_candidate():
+    reviewed = next(
+        item
+        for item in idecyl_exact_source_inventory()
+        if item.audit_layer_id == 86
+    )
+    service = ReferenceServiceDefinition(
+        source_key="service:idecyl-mineria",
+        title="IDECyL minería",
+        upstream_protocol="wms",
+        base_url=reviewed.catalog_endpoint_url,
+        default_format="image/png",
+    )
+    style_name = "cami_cyl_cuadricula_default"
+    layer = ReferenceLayerDefinition(
+        source_key=reviewed.catalog_layer_source_key,
+        node_type="layer",
+        title="Cuadrícula minera",
+        service_key=service.source_key,
+        remote_name=reviewed.catalog_remote_name,
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        bounds={
+            "west": -7.6,
+            "south": 39.9,
+            "east": -1.3,
+            "north": 43.4,
+        },
+        style_name=style_name,
+        styles=(
+            ReferenceLayerStyleDefinition(
+                source_key=style_name,
+                title="Borde celdas negro",
+                remote_name=style_name,
+                is_default=True,
+            ),
+        ),
+    )
+    selected = acquisition_candidates(service, layer)
+    assert len(selected) == 1
+    return selected[0]
+
+
+def _idecyl_cami_dataset_metadata():
+    data_schema = [
+        {
+            "declared_type": "INTEGER",
+            "default": None,
+            "hidden": 0,
+            "name": "fid",
+            "not_null": True,
+            "ordinal": 0,
+            "primary_key_ordinal": 1,
+        },
+        {
+            "declared_type": "MULTIPOLYGON",
+            "default": None,
+            "hidden": 0,
+            "name": "geometry",
+            "not_null": False,
+            "ordinal": 1,
+            "primary_key_ordinal": 0,
+        },
+        {
+            "declared_type": "REAL",
+            "default": None,
+            "hidden": 0,
+            "name": "area",
+            "not_null": False,
+            "ordinal": 2,
+            "primary_key_ordinal": 0,
+        },
+    ]
+    return {
+        "input_layer": "cuadricula",
+        "geopackage_inspection": {
+            "schema_version": "reference-geopackage-zip-inspection/v1",
+            "archive_member": "cami_cyl.gpkg",
+            "feature_layer": "cuadricula",
+            "feature_layers": ["cuadricula"],
+            "geometry_column": "geometry",
+            "geometry_type": "MULTIPOLYGON",
+            "crs": "EPSG:25830",
+            "data_schema": data_schema,
+            "data_schema_sha256": canonical_json_sha256(data_schema),
+        },
+    }
 
 
 def _vat_metadata(*, potential: bool = True):
@@ -303,6 +396,175 @@ def test_eurostat_grid_style_parity_is_adapted_for_all_three_styles() -> None:
         assert item.verified is True
         assert item.parity_kind == "adapted"
         assert item.resources == ()
+
+
+def test_idecyl_cami_authors_hash_bound_black_outline_from_inspected_schema() -> None:
+    candidate = _idecyl_cami_candidate()
+    metadata = _idecyl_cami_dataset_metadata()
+
+    first = generate_reviewed_local_style(
+        candidate,
+        dataset_metadata=metadata,
+    )
+    second = generate_reviewed_local_style(
+        candidate,
+        dataset_metadata=deepcopy(metadata),
+    )
+
+    assert first is not None
+    assert second == first
+    root = ElementTree.fromstring(first.document)
+    css = {
+        element.attrib["name"]: (element.text or "")
+        for element in root.findall(".//sld:CssParameter", SLD)
+    }
+    assert css == {
+        "fill": "#ffffff",
+        "fill-opacity": "0",
+        "stroke": "#000000",
+        "stroke-width": "1",
+    }
+    assert root.findtext(".//sld:NamedLayer/sld:Name", namespaces=SLD) == (
+        "cuadricula"
+    )
+    assert root.findtext(".//sld:UserStyle/sld:Name", namespaces=SLD) == (
+        "cami_cyl_cuadricula_default"
+    )
+    assert root.findall(".//sld:ExternalGraphic", SLD) == []
+    assert root.findall(".//sld:OnlineResource", SLD) == []
+    assert root.findall(".//sld:InlineContent", SLD) == []
+
+    evidence = first.metadata["authored_local_evidence"]
+    assert evidence["schema"] == (
+        "siur-authored-idecyl-local-style-adaptation/v1"
+    )
+    assert evidence["generator_version"] == (
+        "siur-sld-1.0-idecyl-local-adaptation/v1"
+    )
+    assert evidence["audit_layer_id"] == 86
+    assert evidence["profile"] == (
+        "idecyl-cami-cyl-cuadricula-archive-20260727-v3"
+    )
+    assert evidence["catalog_style_source_key"] == (
+        "cami_cyl_cuadricula_default"
+    )
+    assert evidence["remote_style_name"] == (
+        "cami_cyl_cuadricula_default"
+    )
+    assert evidence["catalog_style_is_default"] is True
+    assert evidence["parity_kind"] == "adapted"
+    assert evidence["exact_style_claim"] is False
+    assert evidence["source_definition_sha256"] == (
+        "1d000ad61b43edf1a37d80bf92bf025"
+        "3e09efc4c0bb430daa5f814f39fe2c4d0"
+    )
+    assert canonical_json_sha256(evidence["source_definition"]) == (
+        evidence["source_definition_sha256"]
+    )
+    assert evidence["reviewed_equivalence_sha256"] == (
+        "3555e2cea32ac246bd1da6847f23aadb"
+        "a76a23e308504afe03f6889d86950db8"
+    )
+    assert evidence["recipe"]["dataset_inspection"][
+        "geometry_type"
+    ] == "MULTIPOLYGON"
+    assert evidence["recipe"]["dataset_inspection"][
+        "data_schema"
+    ] == metadata["geopackage_inspection"]["data_schema"]
+    assert evidence["dataset_schema_sha256"] == evidence["recipe"][
+        "dataset_schema_sha256"
+    ]
+
+    validate_zero_resource_local_adaptation(
+        style_metadata=first.metadata,
+        package_metadata=local_style_package_metadata(first),
+        sld_sha256=first.sld_sha256,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "geometry", "schema", "layer", "crs"],
+)
+def test_idecyl_cami_rejects_missing_or_changed_dataset_schema(
+    mutation: str,
+) -> None:
+    metadata = _idecyl_cami_dataset_metadata()
+    if mutation == "missing":
+        metadata.pop("geopackage_inspection")
+        expected_code = "local_style_dataset_schema_missing"
+    elif mutation == "geometry":
+        metadata["geopackage_inspection"]["geometry_type"] = "POLYGON"
+        expected_code = "local_style_dataset_schema_changed"
+    elif mutation == "schema":
+        metadata["geopackage_inspection"]["data_schema"][2]["name"] = (
+            "changed"
+        )
+        metadata["geopackage_inspection"]["data_schema_sha256"] = (
+            canonical_json_sha256(
+                metadata["geopackage_inspection"]["data_schema"]
+            )
+        )
+        expected_code = "local_style_dataset_schema_changed"
+    elif mutation == "layer":
+        metadata["input_layer"] = "changed"
+        expected_code = "local_style_dataset_schema_changed"
+    else:
+        metadata["geopackage_inspection"]["crs"] = "EPSG:4326"
+        expected_code = "local_style_dataset_schema_changed"
+
+    with pytest.raises(LocalStyleAdaptationError) as captured:
+        generate_reviewed_local_style(
+            _idecyl_cami_candidate(),
+            dataset_metadata=metadata,
+        )
+
+    assert captured.value.code == expected_code
+
+
+def test_idecyl_cami_rejects_changed_source_definition() -> None:
+    candidate = _idecyl_cami_candidate()
+    changed = replace(
+        candidate,
+        endpoint_url="https://opendata.jcyl.es/changed.zip",
+    )
+
+    with pytest.raises(LocalStyleAdaptationError) as captured:
+        generate_reviewed_local_style(
+            changed,
+            dataset_metadata=_idecyl_cami_dataset_metadata(),
+        )
+
+    assert captured.value.code == "reviewed_local_style_invalid"
+
+
+def test_idecyl_cami_persisted_evidence_rejects_rehashed_source_binding() -> None:
+    authored = generate_reviewed_local_style(
+        _idecyl_cami_candidate(),
+        dataset_metadata=_idecyl_cami_dataset_metadata(),
+    )
+    assert authored is not None
+    style_metadata = deepcopy(authored.metadata)
+    evidence = style_metadata["authored_local_evidence"]
+    evidence["source_definition"]["endpoint_url"] = (
+        "https://opendata.jcyl.es/changed.zip"
+    )
+    evidence["source_definition_sha256"] = canonical_json_sha256(
+        evidence["source_definition"]
+    )
+    evidence_sha256 = canonical_json_sha256(evidence)
+    style_metadata["authored_local_evidence_sha256"] = evidence_sha256
+    package_metadata = local_style_package_metadata(authored)
+    package_metadata["authored_local_evidence_sha256"] = evidence_sha256
+
+    with pytest.raises(LocalStyleAdaptationError) as captured:
+        validate_zero_resource_local_adaptation(
+            style_metadata=style_metadata,
+            package_metadata=package_metadata,
+            sld_sha256=authored.sld_sha256,
+        )
+
+    assert captured.value.code == "local_style_evidence_invalid"
 
 
 def test_pluralization_preserves_existing_profile_hashes() -> None:

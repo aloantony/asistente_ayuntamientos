@@ -1771,13 +1771,35 @@ class ReferenceAcquisitionPipeline:
                 Mapping,
             )
         ]
+        geopackage_artifacts = [
+            item
+            for item in dataset_artifacts
+            if isinstance(
+                item.metadata.get("geopackage_inspection"),
+                Mapping,
+            )
+        ]
         if len(vat_artifacts) > 1:
             raise AcquisitionValidationError(
                 "reviewed raster style has ambiguous VAT evidence",
                 code="local_style_vat_invalid",
             )
+        if (
+            len(geopackage_artifacts) > 1
+            or (vat_artifacts and geopackage_artifacts)
+        ):
+            raise AcquisitionValidationError(
+                "reviewed local style has ambiguous dataset evidence",
+                code="local_style_dataset_evidence_ambiguous",
+            )
         dataset_metadata = (
-            vat_artifacts[0].metadata if vat_artifacts else None
+            vat_artifacts[0].metadata
+            if vat_artifacts
+            else (
+                geopackage_artifacts[0].metadata
+                if geopackage_artifacts
+                else None
+            )
         )
         try:
             authored_styles = generate_reviewed_local_styles(

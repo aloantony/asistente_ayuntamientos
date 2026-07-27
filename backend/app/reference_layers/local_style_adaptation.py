@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -16,6 +17,7 @@ from app.reference_layers.source_discovery import (
     SourceDiscoveryError,
     reviewed_local_style_profile_identity,
     reviewed_local_style_profile_reference,
+    reviewed_local_style_expected_source_definition,
     reviewed_local_style_recipe,
     reviewed_local_style_recipes,
 )
@@ -25,6 +27,12 @@ SLD_NAMESPACE = "http://www.opengis.net/sld"
 OGC_NAMESPACE = "http://www.opengis.net/ogc"
 AUTHORED_STYLE_SCHEMA = "siur-authored-local-style-adaptation/v1"
 AUTHORED_STYLE_GENERATOR = "siur-sld-1.0-local-adaptation/v1"
+IDECYL_AUTHORED_STYLE_SCHEMA = (
+    "siur-authored-idecyl-local-style-adaptation/v1"
+)
+IDECYL_AUTHORED_STYLE_GENERATOR = (
+    "siur-sld-1.0-idecyl-local-adaptation/v1"
+)
 STYLE_ARTIFACT_SCHEMA = "reference-style-sld/v1"
 STYLE_PACKAGE_SCHEMA = "reference-style-package/v1"
 STYLE_PACKAGE_FORMAT = "deterministic-style-zip/v1"
@@ -134,6 +142,13 @@ def _generate_reviewed_local_style(
             reviewed.profile,
             reviewed.style_reference,
         )
+    elif reviewed.style_kind == "idecyl_polygon_outline":
+        recipe = _idecyl_polygon_outline_recipe(
+            reviewed.profile,
+            reviewed.catalog_style_source_key,
+            reviewed.style_reference,
+            dataset_metadata,
+        )
     elif reviewed.style_kind == "ines_raster":
         recipe = _ines_recipe(
             reviewed.profile,
@@ -167,9 +182,20 @@ def _generate_reviewed_local_style(
     )
     sld_sha256 = hashlib.sha256(document).hexdigest()
     recipe_sha256 = canonical_json_sha256(recipe)
+    idecyl_adaptation = (
+        reviewed.style_kind == "idecyl_polygon_outline"
+    )
     evidence = {
-        "schema": AUTHORED_STYLE_SCHEMA,
-        "generator_version": AUTHORED_STYLE_GENERATOR,
+        "schema": (
+            IDECYL_AUTHORED_STYLE_SCHEMA
+            if idecyl_adaptation
+            else AUTHORED_STYLE_SCHEMA
+        ),
+        "generator_version": (
+            IDECYL_AUTHORED_STYLE_GENERATOR
+            if idecyl_adaptation
+            else AUTHORED_STYLE_GENERATOR
+        ),
         "profile": reviewed.profile,
         "style_kind": reviewed.style_kind,
         "parity_kind": "adapted",
@@ -186,6 +212,32 @@ def _generate_reviewed_local_style(
         "sld_sha256": sld_sha256,
         "resource_count": 0,
     }
+    if idecyl_adaptation:
+        if (
+            reviewed.audit_layer_id is None
+            or reviewed.catalog_style_is_default is not True
+            or reviewed.source_definition is None
+            or reviewed.source_definition_sha256 is None
+        ):
+            raise LocalStyleAdaptationError(
+                "IDECyL local style lacks its source binding",
+                code="local_style_evidence_invalid",
+            )
+        evidence.update(
+            {
+                "audit_layer_id": reviewed.audit_layer_id,
+                "catalog_style_is_default": (
+                    reviewed.catalog_style_is_default
+                ),
+                "source_definition": deepcopy(reviewed.source_definition),
+                "source_definition_sha256": (
+                    reviewed.source_definition_sha256
+                ),
+                "dataset_schema_sha256": recipe[
+                    "dataset_schema_sha256"
+                ],
+            }
+        )
     evidence_sha256 = canonical_json_sha256(evidence)
     metadata = {
         "schema": STYLE_ARTIFACT_SCHEMA,
@@ -276,7 +328,7 @@ def validate_zero_resource_local_adaptation(
             "authored local style evidence hash is invalid",
             code="local_style_evidence_invalid",
         )
-    expected_evidence_keys = {
+    base_evidence_keys = {
         "schema",
         "generator_version",
         "profile",
@@ -293,6 +345,21 @@ def validate_zero_resource_local_adaptation(
         "sld_sha256",
         "resource_count",
     }
+    idecyl_evidence = (
+        evidence.get("schema") == IDECYL_AUTHORED_STYLE_SCHEMA
+    )
+    expected_evidence_keys = (
+        base_evidence_keys
+        | {
+            "audit_layer_id",
+            "catalog_style_is_default",
+            "source_definition",
+            "source_definition_sha256",
+            "dataset_schema_sha256",
+        }
+        if idecyl_evidence
+        else base_evidence_keys
+    )
     profile = evidence.get("profile")
     catalog_style_source_key = evidence.get(
         "catalog_style_source_key"
@@ -308,8 +375,18 @@ def validate_zero_resource_local_adaptation(
     )
     if (
         set(evidence) != expected_evidence_keys
-        or evidence.get("schema") != AUTHORED_STYLE_SCHEMA
-        or evidence.get("generator_version") != AUTHORED_STYLE_GENERATOR
+        or evidence.get("schema")
+        != (
+            IDECYL_AUTHORED_STYLE_SCHEMA
+            if idecyl_evidence
+            else AUTHORED_STYLE_SCHEMA
+        )
+        or evidence.get("generator_version")
+        != (
+            IDECYL_AUTHORED_STYLE_GENERATOR
+            if idecyl_evidence
+            else AUTHORED_STYLE_GENERATOR
+        )
         or evidence.get("parity_kind") != "adapted"
         or evidence.get("exact_style_claim") is not False
         or evidence.get("resource_count") != 0
@@ -348,6 +425,43 @@ def validate_zero_resource_local_adaptation(
             "authored local style recipe hash is invalid",
             code="local_style_evidence_invalid",
         )
+    if idecyl_evidence:
+        source_identity = (
+            reviewed_local_style_expected_source_definition(
+                profile,
+                catalog_style_source_key,
+            )
+        )
+        source_reference = recipe.get("source_reference")
+        source_definition = evidence.get("source_definition")
+        source_definition_sha256 = evidence.get(
+            "source_definition_sha256"
+        )
+        if (
+            source_identity is None
+            or not isinstance(source_definition, Mapping)
+            or dict(source_definition) != source_identity[0]
+            or source_definition_sha256 != source_identity[1]
+            or canonical_json_sha256(source_definition)
+            != source_definition_sha256
+            or not isinstance(source_reference, Mapping)
+            or evidence.get("audit_layer_id")
+            != source_reference.get("audit_layer_id")
+            or evidence.get("catalog_style_is_default")
+            is not source_reference.get("catalog_style", {}).get(
+                "is_default"
+            )
+            or evidence.get("dataset_schema_sha256")
+            != recipe.get("dataset_schema_sha256")
+            or _SHA256_RE.fullmatch(
+                str(evidence.get("dataset_schema_sha256", ""))
+            )
+            is None
+        ):
+            raise LocalStyleAdaptationError(
+                "authored IDECyL source or schema binding is invalid",
+                code="local_style_evidence_invalid",
+            )
     expected_sld = _render_recipe_sld(
         profile=profile,
         style_kind=identity[0],
@@ -547,6 +661,109 @@ def _flood_recipe(
     }
 
 
+def _idecyl_polygon_outline_recipe(
+    profile: str,
+    catalog_style_source_key: str,
+    reference: Mapping[str, Any],
+    dataset_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    expected = reviewed_local_style_profile_reference(
+        profile,
+        catalog_style_source_key,
+    )
+    if expected is None or dict(reference) != expected:
+        raise LocalStyleAdaptationError(
+            "IDECyL local-style reference is invalid",
+            code="local_style_recipe_invalid",
+        )
+    expected_dataset = expected.get("dataset_inspection")
+    visual = expected.get("visual_recipe")
+    if (
+        not isinstance(expected_dataset, Mapping)
+        or not isinstance(visual, Mapping)
+        or expected.get("audit_layer_id") != 86
+        or expected.get("parity_kind") != "adapted"
+        or expected.get("exact_style_claim") is not False
+        or visual.get("schema")
+        != "siur-idecyl-simple-vector-style/v1"
+        or visual.get("symbolizer") != "polygon"
+        or visual.get("fill_color") != "#ffffff"
+        or visual.get("fill_opacity") != 0
+        or visual.get("outline_color") != "#000000"
+        or visual.get("outline_width") != 1
+    ):
+        raise LocalStyleAdaptationError(
+            "IDECyL local visual recipe is invalid",
+            code="local_style_recipe_invalid",
+        )
+    if not isinstance(dataset_metadata, Mapping):
+        raise LocalStyleAdaptationError(
+            "IDECyL local style requires inspected GeoPackage evidence",
+            code="local_style_dataset_schema_missing",
+        )
+    inspection = dataset_metadata.get("geopackage_inspection")
+    if not isinstance(inspection, Mapping):
+        raise LocalStyleAdaptationError(
+            "IDECyL local style requires inspected GeoPackage evidence",
+            code="local_style_dataset_schema_missing",
+        )
+    data_schema = inspection.get("data_schema")
+    if not isinstance(data_schema, list):
+        raise LocalStyleAdaptationError(
+            "IDECyL GeoPackage schema evidence is invalid",
+            code="local_style_dataset_schema_changed",
+        )
+    compatibility = {
+        "inspection_schema": inspection.get("schema_version"),
+        "archive_member": inspection.get("archive_member"),
+        "feature_layer": inspection.get("feature_layer"),
+        "feature_layers": inspection.get("feature_layers"),
+        "geometry_column": inspection.get("geometry_column"),
+        "geometry_type": inspection.get("geometry_type"),
+        "srs": inspection.get("crs"),
+        "data_schema": data_schema,
+        "data_schema_sha256": inspection.get("data_schema_sha256"),
+    }
+    expected_compatibility = {
+        key: deepcopy(expected_dataset[key])
+        for key in (
+            "inspection_schema",
+            "archive_member",
+            "feature_layer",
+            "feature_layers",
+            "geometry_column",
+            "geometry_type",
+            "srs",
+            "data_schema",
+            "data_schema_sha256",
+        )
+    }
+    if (
+        compatibility != expected_compatibility
+        or dataset_metadata.get("input_layer")
+        != expected_dataset["feature_layer"]
+        or canonical_json_sha256(data_schema)
+        != expected_dataset["data_schema_sha256"]
+    ):
+        raise LocalStyleAdaptationError(
+            "IDECyL GeoPackage schema or geometry changed",
+            code="local_style_dataset_schema_changed",
+        )
+    return {
+        "schema": "siur-local-style-symbolizer/v1",
+        "symbolizer": "polygon",
+        "fill_color": visual["fill_color"],
+        "fill_opacity": visual["fill_opacity"],
+        "outline_color": visual["outline_color"],
+        "outline_width": visual["outline_width"],
+        "dataset_inspection": compatibility,
+        "dataset_schema_sha256": canonical_json_sha256(compatibility),
+        "adaptation_status": "adapted",
+        "exact_style_claim": False,
+        "source_reference": deepcopy(expected),
+    }
+
+
 def _ines_recipe(
     profile: str,
     reference: Mapping[str, Any],
@@ -701,6 +918,53 @@ def _validate_recipe(
             profile,
             recipe.get("source_reference", {}),
         )
+    elif style_kind == "idecyl_polygon_outline":
+        source_reference = recipe.get("source_reference")
+        inspection = recipe.get("dataset_inspection")
+        catalog_style = (
+            source_reference.get("catalog_style")
+            if isinstance(source_reference, Mapping)
+            else None
+        )
+        catalog_style_source_key = (
+            catalog_style.get("catalog_style_source_key")
+            if isinstance(catalog_style, Mapping)
+            else None
+        )
+        if (
+            not isinstance(source_reference, Mapping)
+            or not isinstance(inspection, Mapping)
+            or not isinstance(catalog_style_source_key, str)
+        ):
+            raise LocalStyleAdaptationError(
+                "persisted IDECyL style recipe is invalid",
+                code="local_style_evidence_invalid",
+            )
+        rebuilt = _idecyl_polygon_outline_recipe(
+            profile,
+            catalog_style_source_key,
+            source_reference,
+            {
+                "input_layer": inspection.get("feature_layer"),
+                "geopackage_inspection": {
+                    "schema_version": inspection.get(
+                        "inspection_schema"
+                    ),
+                    "archive_member": inspection.get("archive_member"),
+                    "feature_layer": inspection.get("feature_layer"),
+                    "feature_layers": inspection.get("feature_layers"),
+                    "geometry_column": inspection.get(
+                        "geometry_column"
+                    ),
+                    "geometry_type": inspection.get("geometry_type"),
+                    "crs": inspection.get("srs"),
+                    "data_schema": inspection.get("data_schema"),
+                    "data_schema_sha256": inspection.get(
+                        "data_schema_sha256"
+                    ),
+                },
+            },
+        )
     elif style_kind == "ines_raster":
         _validate_persisted_ines_recipe(profile, recipe)
         return
@@ -790,6 +1054,17 @@ def _render_recipe_sld(
             layer_name=layer_name,
             style_name=style_name,
             title="Inundabilidad — adaptación local",
+            fill_color=cast(str, recipe["fill_color"]),
+            fill_opacity=str(recipe["fill_opacity"]),
+            outline_color=cast(str, recipe["outline_color"]),
+            outline_width=str(recipe["outline_width"]),
+            label_field=None,
+        )
+    if style_kind == "idecyl_polygon_outline":
+        return _vector_sld(
+            layer_name=layer_name,
+            style_name=style_name,
+            title="Cuadrícula minera — adaptación local SIUR",
             fill_color=cast(str, recipe["fill_color"]),
             fill_opacity=str(recipe["fill_opacity"]),
             outline_color=cast(str, recipe["outline_color"]),
@@ -1043,6 +1318,12 @@ def _validate_generated_sld(
         if symbolizers != ["PolygonSymbolizer"]:
             raise LocalStyleAdaptationError(
                 "flood SLD symbolizers are incomplete",
+                code="local_style_sld_invalid",
+            )
+    elif style_kind == "idecyl_polygon_outline":
+        if symbolizers != ["PolygonSymbolizer"]:
+            raise LocalStyleAdaptationError(
+                "IDECyL SLD symbolizer is incomplete",
                 code="local_style_sld_invalid",
             )
     elif style_kind == "ines_raster":

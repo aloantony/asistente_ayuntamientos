@@ -141,9 +141,10 @@ def _layer(
     remote_name: str,
     *,
     with_telecom_styles: bool = False,
+    with_cami_style: bool = False,
 ) -> ReferenceLayerDefinition:
-    styles = (
-        tuple(
+    if with_telecom_styles:
+        styles = tuple(
             ReferenceLayerStyleDefinition(
                 source_key=name.casefold(),
                 title=name,
@@ -153,9 +154,20 @@ def _layer(
             )
             for index, name in enumerate(TELECOM_STYLES)
         )
-        if with_telecom_styles
-        else ()
-    )
+        style_name = TELECOM_STYLES[0]
+    elif with_cami_style:
+        style_name = "cami_cyl_cuadricula_default"
+        styles = (
+            ReferenceLayerStyleDefinition(
+                source_key=style_name,
+                title="Borde celdas negro",
+                remote_name=style_name,
+                is_default=True,
+            ),
+        )
+    else:
+        styles = ()
+        style_name = TELECOM_STYLES[0]
     return ReferenceLayerDefinition(
         source_key=source_key,
         node_type="layer",
@@ -173,7 +185,7 @@ def _layer(
         },
         min_zoom=6,
         max_zoom=18,
-        style_name=TELECOM_STYLES[0],
+        style_name=style_name,
         styles=styles,
     )
 
@@ -363,6 +375,7 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
             _layer(
                 reviewed.catalog_layer_source_key,
                 reviewed.catalog_remote_name,
+                with_cami_style=layer_id == 86,
             ),
         )
 
@@ -379,6 +392,23 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         assert candidate.config["input_layer"]
         assert "archive_styles" not in candidate.config
         assert "source_content_parity" not in candidate.config
+        if layer_id == 86:
+            assert candidate.config["reviewed_local_style"] == {
+                "schema": "siur-reviewed-idecyl-local-style/v1",
+                "audit_layer_id": 86,
+                "profile": reviewed.profile,
+                "recipe_identity_sha256": (
+                    "9cdde3badf9b6bd3af2425431680685"
+                    "b75a6a97fd552b4be1e292a8e7cfef79d"
+                ),
+                "catalog_style_source_key": (
+                    "cami_cyl_cuadricula_default"
+                ),
+                "remote_name": "cami_cyl_cuadricula_default",
+                "is_default": True,
+            }
+        else:
+            assert "reviewed_local_style" not in candidate.config
         integrity = configured_reviewed_archive_integrity(
             candidate.config
         )
@@ -403,6 +433,48 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         inventory[layer_id].candidate_config["data_format"]
         == "geopackage-zip"
         for layer_id in REVIEWABLE_ARCHIVE_IDS - {105}
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["source_key", "remote_name", "title", "default"],
+)
+def test_layer_86_local_style_catalog_identity_fails_closed(
+    mutation: str,
+) -> None:
+    reviewed = next(
+        item
+        for item in idecyl_exact_source_inventory()
+        if item.audit_layer_id == 86
+    )
+    valid = _layer(
+        reviewed.catalog_layer_source_key,
+        reviewed.catalog_remote_name,
+        with_cami_style=True,
+    )
+    style = valid.styles[0]
+    if mutation == "source_key":
+        changed = replace(style, source_key="changed")
+        layer = replace(valid, styles=(changed,))
+    elif mutation == "remote_name":
+        changed = replace(style, remote_name="changed")
+        layer = replace(valid, styles=(changed,))
+    elif mutation == "title":
+        changed = replace(style, title="changed")
+        layer = replace(valid, styles=(changed,))
+    else:
+        changed = replace(style, is_default=False)
+        layer = replace(valid, styles=(changed,))
+
+    with pytest.raises(SourceDiscoveryError) as captured:
+        acquisition_candidates(
+            _service(reviewed.catalog_endpoint_url),
+            layer,
+        )
+
+    assert captured.value.code == (
+        "reviewed_idecyl_local_style_identity_invalid"
     )
 
 

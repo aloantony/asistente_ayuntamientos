@@ -52,6 +52,12 @@ from app.reference_layers.models import (
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
 )
+from app.reference_layers.idecyl_exact_evidence import (
+    idecyl_exact_source_inventory,
+)
+from app.reference_layers.idecyl_local_style_evidence import (
+    idecyl_local_style_inventory,
+)
 from app.reference_layers.masked_geopackage import (
     MaskIdentity,
     MaskedGeoPackageResult,
@@ -292,6 +298,50 @@ def reviewed_eurostat_grid_candidate(
         },
         style_name="rejilla_eurostat_cyl_morado",
         styles=styles,
+    )
+    selected = acquisition_candidates(service, layer)
+    assert len(selected) == 1
+    return selected[0]
+
+
+def reviewed_idecyl_cami_candidate() -> SourceCandidate:
+    reviewed = next(
+        item
+        for item in idecyl_exact_source_inventory()
+        if item.audit_layer_id == 86
+    )
+    service = ReferenceServiceDefinition(
+        source_key="service:idecyl-mineria",
+        title="IDECyL minería",
+        upstream_protocol="wms",
+        base_url=reviewed.catalog_endpoint_url,
+        default_format="image/png",
+    )
+    style_name = "cami_cyl_cuadricula_default"
+    layer = ReferenceLayerDefinition(
+        source_key=reviewed.catalog_layer_source_key,
+        node_type="layer",
+        title="Cuadrícula minera",
+        service_key=service.source_key,
+        remote_name=reviewed.catalog_remote_name,
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        bounds={
+            "west": -7.6,
+            "south": 39.9,
+            "east": -1.3,
+            "north": 43.4,
+        },
+        style_name=style_name,
+        styles=(
+            ReferenceLayerStyleDefinition(
+                source_key=style_name,
+                title="Borde celdas negro",
+                remote_name=style_name,
+                is_default=True,
+            ),
+        ),
     )
     selected = acquisition_candidates(service, layer)
     assert len(selected) == 1
@@ -4618,6 +4668,81 @@ def test_reviewed_geotiff_zip_preserves_complete_vat_value_mapping(
         for value, class_value in sorted(mapping)
     ]
     assert len(vat["sha256"]) == 64
+
+
+def test_reviewed_idecyl_geopackage_authors_style_from_inspection(
+    store,
+    limits,
+) -> None:
+    reviewed_style = idecyl_local_style_inventory()[0]
+    inspection = reviewed_style.evidence["dataset_inspection"]
+    dataset_blob = store.put_stream(
+        io.BytesIO(b"validated GeoPackage placeholder"),
+        max_bytes=limits.max_dataset_bytes,
+    )
+    dataset = AcquiredArtifact(
+        artifact_kind="dataset",
+        role="primary",
+        media_type="application/zip",
+        blob=dataset_blob,
+        metadata={
+            "input_layer": inspection["feature_layer"],
+            "geopackage_inspection": {
+                "schema_version": inspection["inspection_schema"],
+                "archive_member": inspection["archive_member"],
+                "feature_layer": inspection["feature_layer"],
+                "feature_layers": inspection["feature_layers"],
+                "geometry_column": inspection["geometry_column"],
+                "geometry_type": inspection["geometry_type"],
+                "crs": inspection["srs"],
+                "data_schema": inspection["data_schema"],
+                "data_schema_sha256": inspection[
+                    "data_schema_sha256"
+                ],
+            },
+        },
+    )
+
+    artifacts = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+    )._author_reviewed_local_style(
+        reviewed_idecyl_cami_candidate(),
+        dataset_artifacts=[dataset],
+    )
+
+    style = next(
+        item for item in artifacts if item.artifact_kind == "style"
+    )
+    package = next(
+        item
+        for item in artifacts
+        if item.artifact_kind == "style_package"
+    )
+    with store.open_blob(style.blob.storage_key) as source:
+        root = ElementTree.fromstring(source.read())
+    css = {
+        element.attrib["name"]: (element.text or "")
+        for element in root.iter()
+        if element.tag.endswith("}CssParameter")
+    }
+    evidence = style.metadata["authored_local_evidence"]
+    assert css == {
+        "fill": "#ffffff",
+        "fill-opacity": "0",
+        "stroke": "#000000",
+        "stroke-width": "1",
+    }
+    assert evidence["audit_layer_id"] == 86
+    assert evidence["parity_kind"] == "adapted"
+    assert evidence["exact_style_claim"] is False
+    assert evidence["dataset_schema_sha256"] == evidence["recipe"][
+        "dataset_schema_sha256"
+    ]
+    assert package.metadata["sld_sha256"] == style.blob.sha256
+    assert package.metadata["package_members"] == [
+        {"path": "style.sld", "sha256": style.blob.sha256}
+    ]
 
 
 def test_reviewed_ines_download_authors_colormap_from_validated_vat(
