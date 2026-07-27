@@ -8,7 +8,7 @@ import hashlib
 import json
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.reference_layers.catalog import canonical_normalized_definition_sha256
@@ -92,6 +92,7 @@ class MirrorStrategyPlan:
 @dataclass(frozen=True)
 class AppliedMirrorStrategyPlan:
     plan_sha256: str
+    generation: int
     created_count: int
     unchanged_count: int
     blocked_count: int
@@ -166,44 +167,39 @@ def apply_mirror_strategy_plan(
     db: Session,
     plan: MirrorStrategyPlan,
 ) -> AppliedMirrorStrategyPlan:
-    """Persist one immutable assignment per current catalog leaf."""
+    """Append one complete immutable generation when the plan changed."""
 
     # Source rows are created immediately before this function inside the
     # bootstrap transaction. Make their identities visible to the FK lookup
     # before deriving the immutable strategy evidence.
     db.flush()
-    snapshot = _current_snapshot(db, plan.provider_key)
-    if snapshot.id != plan.snapshot_id:
-        raise MirrorStrategyError("strategy plan is based on a stale snapshot")
-    existing = {
-        row.layer_id: row
-        for row in db.scalars(
-            select(ReferenceLayerMirrorStrategy).where(
-                ReferenceLayerMirrorStrategy.provider_key == plan.provider_key,
-                ReferenceLayerMirrorStrategy.catalog_snapshot_id == plan.snapshot_id,
-            )
+    snapshot = _current_snapshot(db, plan.provider_key, for_update=True)
+    if (
+        snapshot.id != plan.snapshot_id
+        or snapshot.definition_sha256 != plan.catalog_definition_sha256
+    ):
+        raise MirrorStrategyError(
+            "strategy plan is based on a stale snapshot"
         )
-    }
-    layers = {
+    layers_by_source_key = {
         item.source_key: item
         for item in db.scalars(
-            select(ReferenceLayer).where(
+            select(ReferenceLayer)
+            .where(
                 ReferenceLayer.provider_key == plan.provider_key,
                 ReferenceLayer.last_seen_snapshot_id == plan.snapshot_id,
                 ReferenceLayer.node_type == "layer",
             )
+            .order_by(ReferenceLayer.id)
         )
     }
-    created = 0
-    unchanged = 0
-    row_by_layer: dict[int, ReferenceLayerMirrorStrategy] = {}
+    _validate_plan_assignments(plan, layers_by_source_key)
+
+    resolved_source_ids: dict[int, int | None] = {}
+    evidence_sha256_by_layer: dict[int, str] = {}
     for assignment in plan.assignments:
-        row = existing.get(assignment.layer_id)
         source_id = None
         if assignment.source_key is not None:
-            layer = layers.get(assignment.layer_source_key)
-            if layer is None:
-                raise MirrorStrategyError("strategy layer is not in the snapshot")
             source_id = db.scalar(
                 select(ReferenceLayerSource.id).where(
                     ReferenceLayerSource.provider_key == plan.provider_key,
@@ -215,51 +211,80 @@ def apply_mirror_strategy_plan(
                 raise MirrorStrategyError(
                     f"strategy source is not reconciled: {assignment.source_key}"
                 )
-        evidence_sha256 = canonical_sha256(assignment.evidence)
-        if row is not None:
-            if not _row_matches(
-                row,
-                assignment,
-                source_id,
-                evidence_sha256,
-                plan.catalog_definition_sha256,
-            ):
-                raise MirrorStrategyError(
-                    "immutable strategy assignment changed for snapshot"
+        resolved_source_ids[assignment.layer_id] = source_id
+        evidence_sha256_by_layer[assignment.layer_id] = canonical_sha256(
+            assignment.evidence
+        )
+
+    latest_generation = int(
+        db.scalar(
+            select(func.max(ReferenceLayerMirrorStrategy.generation)).where(
+                ReferenceLayerMirrorStrategy.provider_key
+                == plan.provider_key,
+                ReferenceLayerMirrorStrategy.catalog_snapshot_id
+                == plan.snapshot_id,
+            )
+        )
+        or 0
+    )
+    existing_rows = (
+        list(
+            db.scalars(
+                select(ReferenceLayerMirrorStrategy)
+                .where(
+                    ReferenceLayerMirrorStrategy.provider_key
+                    == plan.provider_key,
+                    ReferenceLayerMirrorStrategy.catalog_snapshot_id
+                    == plan.snapshot_id,
+                    ReferenceLayerMirrorStrategy.generation
+                    == latest_generation,
                 )
-            unchanged += 1
-            row_by_layer[assignment.layer_id] = row
-            continue
+                .order_by(ReferenceLayerMirrorStrategy.layer_id)
+            )
+        )
+        if latest_generation
+        else []
+    )
+    if existing_rows and _generation_matches_plan(
+        db,
+        rows=existing_rows,
+        plan=plan,
+        layers_by_source_key=layers_by_source_key,
+        source_ids=resolved_source_ids,
+        evidence_sha256_by_layer=evidence_sha256_by_layer,
+    ):
+        return AppliedMirrorStrategyPlan(
+            plan_sha256=plan.plan_sha256,
+            generation=latest_generation,
+            created_count=0,
+            unchanged_count=len(plan.assignments),
+            blocked_count=sum(
+                item.strategy == "blocked" for item in plan.assignments
+            ),
+        )
+
+    generation = latest_generation + 1
+    validated_at = datetime.now(timezone.utc)
+    row_by_layer: dict[int, ReferenceLayerMirrorStrategy] = {}
+    for assignment in plan.assignments:
         row = ReferenceLayerMirrorStrategy(
             provider_key=plan.provider_key,
             layer_id=assignment.layer_id,
             catalog_snapshot_id=plan.snapshot_id,
             catalog_definition_sha256=plan.catalog_definition_sha256,
             strategy=assignment.strategy,
-            source_id=source_id,
+            source_id=resolved_source_ids[assignment.layer_id],
             strategy_reason_code=assignment.reason_code,
             strategy_reason=assignment.reason[:_MAX_REASON_LENGTH],
             evidence_json=assignment.evidence,
-            evidence_sha256=evidence_sha256,
-            generation=1,
-            validated_at=datetime.now(timezone.utc),
+            evidence_sha256=evidence_sha256_by_layer[assignment.layer_id],
+            generation=generation,
+            validated_at=validated_at,
         )
         db.add(row)
-        db.flush()
         row_by_layer[assignment.layer_id] = row
-        created += 1
+    db.flush()
 
-    strategy_ids = tuple(row.id for row in row_by_layer.values())
-    existing_dependencies = {
-        (item.strategy_id, item.dependency_layer_id): item
-        for item in db.scalars(
-            select(ReferenceLayerMirrorStrategyDependency).where(
-                ReferenceLayerMirrorStrategyDependency.provider_key
-                == plan.provider_key,
-                ReferenceLayerMirrorStrategyDependency.strategy_id.in_(strategy_ids),
-            )
-        )
-    }
     for assignment in plan.assignments:
         row = row_by_layer[assignment.layer_id]
         if assignment.strategy != "composition":
@@ -267,24 +292,15 @@ def apply_mirror_strategy_plan(
         for dependency_order, dependency_key in enumerate(
             assignment.dependency_source_keys
         ):
-            dependency_layer = layers.get(dependency_key)
-            if dependency_layer is None:
-                raise MirrorStrategyError(
-                    f"composition dependency is not in the snapshot: {dependency_key}"
-                )
+            dependency_layer = layers_by_source_key[dependency_key]
             dependency_strategy = row_by_layer.get(dependency_layer.id)
-            if dependency_strategy is None or dependency_strategy.strategy == "blocked":
+            if (
+                dependency_strategy is None
+                or dependency_strategy.strategy == "blocked"
+            ):
                 raise MirrorStrategyError(
                     f"composition dependency is blocked: {dependency_key}"
                 )
-            dependency_key = (row.id, dependency_layer.id)
-            existing_dependency = existing_dependencies.get(dependency_key)
-            if existing_dependency is not None:
-                if existing_dependency.dependency_order != dependency_order:
-                    raise MirrorStrategyError(
-                        "immutable composition dependency order changed"
-                    )
-                continue
             db.add(
                 ReferenceLayerMirrorStrategyDependency(
                     provider_key=plan.provider_key,
@@ -297,8 +313,9 @@ def apply_mirror_strategy_plan(
     db.flush()
     return AppliedMirrorStrategyPlan(
         plan_sha256=plan.plan_sha256,
-        created_count=created,
-        unchanged_count=unchanged,
+        generation=generation,
+        created_count=len(plan.assignments),
+        unchanged_count=0,
         blocked_count=sum(
             item.strategy == "blocked" for item in plan.assignments
         ),
@@ -311,15 +328,300 @@ def current_mirror_strategies(
     provider_key: str,
     snapshot_id: int,
 ) -> dict[int, ReferenceLayerMirrorStrategy]:
-    return {
-        row.layer_id: row
-        for row in db.scalars(
-            select(ReferenceLayerMirrorStrategy).where(
+    """Return only the latest complete generation for a catalog snapshot."""
+
+    latest_generation = (
+        select(func.max(ReferenceLayerMirrorStrategy.generation))
+        .where(
+            ReferenceLayerMirrorStrategy.provider_key == provider_key,
+            ReferenceLayerMirrorStrategy.catalog_snapshot_id == snapshot_id,
+        )
+        .scalar_subquery()
+    )
+    rows = list(
+        db.scalars(
+            select(ReferenceLayerMirrorStrategy)
+            .where(
                 ReferenceLayerMirrorStrategy.provider_key == provider_key,
-                ReferenceLayerMirrorStrategy.catalog_snapshot_id == snapshot_id,
+                ReferenceLayerMirrorStrategy.catalog_snapshot_id
+                == snapshot_id,
+                ReferenceLayerMirrorStrategy.generation == latest_generation,
+            )
+            .order_by(ReferenceLayerMirrorStrategy.layer_id)
+        )
+    )
+    if not rows:
+        return {}
+    if not _generation_is_complete(
+        db,
+        provider_key=provider_key,
+        snapshot_id=snapshot_id,
+        rows=rows,
+    ):
+        raise MirrorStrategyError(
+            "current mirror strategy generation is incomplete"
+        )
+    return {row.layer_id: row for row in rows}
+
+
+def _validate_plan_assignments(
+    plan: MirrorStrategyPlan,
+    layers_by_source_key: dict[str, ReferenceLayer],
+) -> None:
+    assignments = plan.assignments
+    expected_layer_ids = {
+        layer.id for layer in layers_by_source_key.values()
+    }
+    assignment_layer_ids = [item.layer_id for item in assignments]
+    assignment_source_keys = [
+        item.layer_source_key for item in assignments
+    ]
+    if (
+        not assignments
+        or len(set(assignment_layer_ids)) != len(assignment_layer_ids)
+        or len(set(assignment_source_keys)) != len(assignment_source_keys)
+        or set(assignment_layer_ids) != expected_layer_ids
+        or set(assignment_source_keys) != set(layers_by_source_key)
+    ):
+        raise MirrorStrategyError(
+            "strategy plan is not a complete catalog leaf assignment"
+        )
+    for assignment in assignments:
+        layer = layers_by_source_key.get(assignment.layer_source_key)
+        if layer is None or layer.id != assignment.layer_id:
+            raise MirrorStrategyError(
+                "strategy assignment layer identity is invalid"
+            )
+        if (
+            assignment.strategy not in STRATEGIES
+            or not assignment.reason_code
+            or len(assignment.reason_code) > 64
+            or not isinstance(assignment.reason, str)
+            or not isinstance(assignment.evidence, dict)
+        ):
+            raise MirrorStrategyError("strategy assignment shape is invalid")
+        if assignment.strategy in {"vector", "raster", "tiles"}:
+            valid_shape = (
+                bool(assignment.source_key)
+                and not assignment.dependency_source_keys
+            )
+        elif assignment.strategy == "composition":
+            valid_shape = (
+                assignment.source_key is None
+                and bool(assignment.dependency_source_keys)
+                and len(set(assignment.dependency_source_keys))
+                == len(assignment.dependency_source_keys)
+                and all(
+                    dependency_key in layers_by_source_key
+                    and dependency_key != assignment.layer_source_key
+                    for dependency_key in assignment.dependency_source_keys
+                )
+                and assignment.evidence.get("dependencies")
+                == list(assignment.dependency_source_keys)
+            )
+        else:
+            valid_shape = (
+                assignment.source_key is None
+                and not assignment.dependency_source_keys
+            )
+        if not valid_shape:
+            raise MirrorStrategyError("strategy assignment shape is invalid")
+
+
+def _generation_matches_plan(
+    db: Session,
+    *,
+    rows: list[ReferenceLayerMirrorStrategy],
+    plan: MirrorStrategyPlan,
+    layers_by_source_key: dict[str, ReferenceLayer],
+    source_ids: dict[int, int | None],
+    evidence_sha256_by_layer: dict[int, str],
+) -> bool:
+    rows_by_layer = {row.layer_id: row for row in rows}
+    if (
+        len(rows_by_layer) != len(rows)
+        or set(rows_by_layer)
+        != {assignment.layer_id for assignment in plan.assignments}
+    ):
+        return False
+    dependencies = _dependencies_by_strategy(db, rows)
+    for assignment in plan.assignments:
+        row = rows_by_layer[assignment.layer_id]
+        if not _row_matches(
+            row,
+            assignment,
+            source_ids[assignment.layer_id],
+            evidence_sha256_by_layer[assignment.layer_id],
+            plan.catalog_definition_sha256,
+        ):
+            return False
+        actual = dependencies.get(row.id, ())
+        expected = (
+            tuple(
+                layers_by_source_key[key].id
+                for key in assignment.dependency_source_keys
+            )
+            if assignment.strategy == "composition"
+            else ()
+        )
+        if (
+            tuple(item.dependency_layer_id for item in actual) != expected
+            or tuple(item.dependency_order for item in actual)
+            != tuple(range(len(expected)))
+            or any(
+                item.strategy_layer_id != assignment.layer_id
+                for item in actual
+            )
+        ):
+            return False
+    return True
+
+
+def _generation_is_complete(
+    db: Session,
+    *,
+    provider_key: str,
+    snapshot_id: int,
+    rows: list[ReferenceLayerMirrorStrategy],
+) -> bool:
+    snapshot = db.scalar(
+        select(ReferenceCatalogSnapshot).where(
+            ReferenceCatalogSnapshot.provider_key == provider_key,
+            ReferenceCatalogSnapshot.id == snapshot_id,
+        )
+    )
+    layers = list(
+        db.scalars(
+            select(ReferenceLayer).where(
+                ReferenceLayer.provider_key == provider_key,
+                ReferenceLayer.last_seen_snapshot_id == snapshot_id,
+                ReferenceLayer.node_type == "layer",
             )
         )
-    }
+    )
+    rows_by_layer = {row.layer_id: row for row in rows}
+    generations = {row.generation for row in rows}
+    if (
+        snapshot is None
+        or not rows
+        or len(rows_by_layer) != len(rows)
+        or len(generations) != 1
+        or set(rows_by_layer) != {layer.id for layer in layers}
+        or any(
+            row.provider_key != provider_key
+            or row.catalog_snapshot_id != snapshot_id
+            or row.catalog_definition_sha256 != snapshot.definition_sha256
+            or not _stored_evidence_is_valid(row)
+            for row in rows
+        )
+    ):
+        return False
+
+    layers_by_source_key = {layer.source_key: layer for layer in layers}
+    dependencies = _dependencies_by_strategy(db, rows)
+    graph: dict[int, tuple[int, ...]] = {}
+    for row in rows:
+        actual = dependencies.get(row.id, ())
+        if any(item.strategy_layer_id != row.layer_id for item in actual):
+            return False
+        actual_ids = tuple(item.dependency_layer_id for item in actual)
+        if tuple(item.dependency_order for item in actual) != tuple(
+            range(len(actual))
+        ):
+            return False
+        if row.strategy != "composition":
+            if actual:
+                return False
+            graph[row.layer_id] = ()
+            continue
+        raw_dependencies = (
+            row.evidence_json.get("dependencies")
+            if isinstance(row.evidence_json, dict)
+            else None
+        )
+        if (
+            not isinstance(raw_dependencies, list)
+            or not raw_dependencies
+            or any(
+                not isinstance(item, str)
+                or item not in layers_by_source_key
+                for item in raw_dependencies
+            )
+        ):
+            return False
+        expected_ids = tuple(
+            layers_by_source_key[item].id for item in raw_dependencies
+        )
+        if (
+            actual_ids != expected_ids
+            or any(
+                dependency_id not in rows_by_layer
+                for dependency_id in actual_ids
+            )
+            or any(
+                rows_by_layer[dependency_id].strategy == "blocked"
+                for dependency_id in actual_ids
+            )
+        ):
+            return False
+        graph[row.layer_id] = actual_ids
+    return not _dependency_graph_has_cycle(graph)
+
+
+def _dependencies_by_strategy(
+    db: Session,
+    rows: list[ReferenceLayerMirrorStrategy],
+) -> dict[int, tuple[ReferenceLayerMirrorStrategyDependency, ...]]:
+    if not rows:
+        return {}
+    grouped: dict[int, list[ReferenceLayerMirrorStrategyDependency]] = {}
+    for dependency in db.scalars(
+        select(ReferenceLayerMirrorStrategyDependency)
+        .where(
+            ReferenceLayerMirrorStrategyDependency.provider_key
+            == rows[0].provider_key,
+            ReferenceLayerMirrorStrategyDependency.strategy_id.in_(
+                [row.id for row in rows]
+            ),
+        )
+        .order_by(
+            ReferenceLayerMirrorStrategyDependency.strategy_id,
+            ReferenceLayerMirrorStrategyDependency.dependency_order,
+            ReferenceLayerMirrorStrategyDependency.id,
+        )
+    ):
+        grouped.setdefault(dependency.strategy_id, []).append(dependency)
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def _dependency_graph_has_cycle(
+    graph: dict[int, tuple[int, ...]],
+) -> bool:
+    visiting: set[int] = set()
+    visited: set[int] = set()
+
+    def visit(layer_id: int) -> bool:
+        if layer_id in visiting:
+            return True
+        if layer_id in visited:
+            return False
+        visiting.add(layer_id)
+        if any(visit(dependency_id) for dependency_id in graph[layer_id]):
+            return True
+        visiting.remove(layer_id)
+        visited.add(layer_id)
+        return False
+
+    return any(visit(layer_id) for layer_id in graph)
+
+
+def _stored_evidence_is_valid(
+    row: ReferenceLayerMirrorStrategy,
+) -> bool:
+    try:
+        return canonical_sha256(row.evidence_json) == row.evidence_sha256
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return False
 
 
 def _derive_assignment(
@@ -413,7 +715,10 @@ def _derive_assignment(
             layer,
             "source_target_unsupported",
             f"source target kind is unsupported: {selected.target_kind}",
-            {"source_key": selected.source_key, "target_kind": selected.target_kind},
+            {
+                "source_key": selected.source_key,
+                "target_kind": selected.target_kind,
+            },
         )
     substitution = reviewed_ign_ortho_public_projection(selected.config)
     reason_code = "candidate_selected"
@@ -553,6 +858,7 @@ def _row_matches(
         and row.source_id == source_id
         and row.strategy_reason_code == assignment.reason_code
         and row.strategy_reason == assignment.reason[:_MAX_REASON_LENGTH]
+        and row.evidence_json == assignment.evidence
         and row.evidence_sha256 == evidence_sha256
         and row.catalog_definition_sha256 == catalog_definition_sha256
     )
@@ -561,14 +867,17 @@ def _row_matches(
 def _current_snapshot(
     db: Session,
     provider_key: str,
+    *,
+    for_update: bool = False,
 ) -> ReferenceCatalogSnapshot:
-    snapshot = db.scalar(
-        select(ReferenceCatalogSnapshot).where(
-            ReferenceCatalogSnapshot.provider_key == provider_key,
-            ReferenceCatalogSnapshot.is_current.is_(True),
-            ReferenceCatalogSnapshot.status == "applied",
-        )
+    query = select(ReferenceCatalogSnapshot).where(
+        ReferenceCatalogSnapshot.provider_key == provider_key,
+        ReferenceCatalogSnapshot.is_current.is_(True),
+        ReferenceCatalogSnapshot.status == "applied",
     )
+    if for_update:
+        query = query.with_for_update()
+    snapshot = db.scalar(query)
     if snapshot is None:
         raise MirrorStrategyError("current applied catalog is unavailable")
     return snapshot

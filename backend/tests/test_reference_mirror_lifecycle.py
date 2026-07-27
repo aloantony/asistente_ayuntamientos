@@ -871,6 +871,12 @@ def test_bootstrap_is_dry_run_idempotent_and_preserves_manual_sources(db) -> Non
     result = apply_mirror_bootstrap_plan(db, plan)
     assert result.created_count == 3
     assert result.updated_count == 0
+    assert db.scalar(
+        select(func.count(ReferenceLayerMirrorStrategy.id)).where(
+            ReferenceLayerMirrorStrategy.provider_key
+            == definition.provider_key
+        )
+    ) == 1
     auto_sources = list(
         db.scalars(
             select(ReferenceLayerSource).where(
@@ -897,6 +903,16 @@ def test_bootstrap_is_dry_run_idempotent_and_preserves_manual_sources(db) -> Non
     no_op = apply_mirror_bootstrap_plan(db, repeated)
     assert no_op.created_count == no_op.updated_count == 0
     assert db.get(ReferenceLayerSource, manual.id).enabled is False
+    strategy_rows = list(
+        db.scalars(
+            select(ReferenceLayerMirrorStrategy).where(
+                ReferenceLayerMirrorStrategy.provider_key
+                == definition.provider_key
+            )
+        )
+    )
+    assert len(strategy_rows) == 1
+    assert strategy_rows[0].generation == 1
 
 
 def test_bootstrap_rejects_stale_plan_and_deactivates_superseded_auto_sources(

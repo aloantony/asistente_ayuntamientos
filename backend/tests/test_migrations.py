@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260727_0046"
+HEAD_REVISION = "20260727_0047"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -2019,7 +2019,10 @@ def assert_reference_mirror_strategy_schema(inspector: Inspector) -> None:
             "reference_layer_mirror_strategies"
         )
     } == {
-        "uq_reference_layer_mirror_strategies_snapshot_layer",
+        (
+            "uq_reference_layer_mirror_strategies_"
+            "snapshot_generation_layer"
+        ),
         "uq_reference_layer_mirror_strategies_provider_id",
     }
     assert {
@@ -2028,6 +2031,17 @@ def assert_reference_mirror_strategy_schema(inspector: Inspector) -> None:
             "reference_layer_mirror_strategy_dependencies"
         )
     } == {"uq_reference_layer_mirror_strategy_dependencies_item"}
+    assert {
+        index["name"]: index["column_names"]
+        for index in inspector.get_indexes(
+            "reference_layer_mirror_strategies"
+        )
+    }["ix_reference_layer_mirror_strategies_current"] == [
+        "provider_key",
+        "catalog_snapshot_id",
+        "generation",
+        "layer_id",
+    ]
     assert {
         constraint["name"]
         for constraint in inspector.get_check_constraints(
@@ -2255,7 +2269,7 @@ def test_reference_strategy_matrix_schema_is_reversible(
         engine.dispose()
 
 
-def test_reference_strategy_placeholder_reconciliation_from_0045(
+def test_reference_strategy_generations_preserve_history_and_refuse_downgrade(
     migration_database_url: str,
 ) -> None:
     run_alembic(migration_database_url, "upgrade", "20260726_0039")
@@ -2263,41 +2277,40 @@ def test_reference_strategy_placeholder_reconciliation_from_0045(
     try:
         with engine.begin() as connection:
             fixture = seed_reference_mirror_strategy_placeholder(connection)
-
         run_alembic(migration_database_url, "upgrade", "20260726_0045")
         with engine.begin() as connection:
-            placeholder = connection.execute(
+            reviewed_layer_id, reviewed_strategy_id = (
+                add_reviewed_reference_mirror_strategy(
+                    connection,
+                    fixture,
+                )
+            )
+            reviewed_source_id = connection.execute(
                 text(
                     """
-                    SELECT id, strategy, source_id, strategy_reason,
-                           evidence_json::jsonb, evidence_sha256,
-                           generation, validated_at = created_at
+                    SELECT source_id
                     FROM reference_layer_mirror_strategies
-                    WHERE provider_key = 'siur'
-                      AND layer_id = :layer_id
-                      AND catalog_snapshot_id = :snapshot_id
-                      AND strategy_reason_code =
-                          'migration_backfill_required'
+                    WHERE id = :strategy_id
                     """
                 ),
-                fixture,
-            ).one()
-            assert placeholder[1:] == (
-                "blocked",
-                None,
-                "strategy matrix must be reconciled after migration",
-                {},
-                (
-                    "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310"
-                    "c060f61caaff8a"
-                ),
-                1,
-                True,
-            )
-            _, reviewed_strategy_id = add_reviewed_reference_mirror_strategy(
-                connection,
-                fixture,
-            )
+                {"strategy_id": reviewed_strategy_id},
+            ).scalar_one()
+
+        run_alembic(migration_database_url, "upgrade", "20260727_0046")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260727_0046"
+            assert connection.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM reference_layer_mirror_strategies
+                    WHERE strategy_reason_code =
+                        'migration_backfill_required'
+                    """
+                )
+            ).scalar_one() == 0
             reviewed_before = connection.execute(
                 text(
                     """
@@ -2311,16 +2324,6 @@ def test_reference_strategy_placeholder_reconciliation_from_0045(
 
         run_alembic(migration_database_url, "upgrade", "head")
         with engine.begin() as connection:
-            assert connection.execute(
-                text(
-                    """
-                    SELECT count(*)
-                    FROM reference_layer_mirror_strategies
-                    WHERE strategy_reason_code =
-                        'migration_backfill_required'
-                    """
-                )
-            ).scalar_one() == 0
             assert connection.execute(
                 text(
                     """
@@ -2344,14 +2347,28 @@ def test_reference_strategy_placeholder_reconciliation_from_0045(
                         'siur', :layer_id, :snapshot_id,
                         :definition_sha256, 'vector', :source_id,
                         'reviewed_vector_source',
-                        'reviewed replacement for the synthetic blocker',
+                        'reviewed successor generation',
                         CAST('{"reviewed": true}' AS JSON),
-                        repeat('f', 64), 1, now()
+                        repeat('f', 64), 2, now()
                     ) RETURNING id
                     """
                 ),
-                fixture,
+                {
+                    **fixture,
+                    "layer_id": reviewed_layer_id,
+                    "source_id": reviewed_source_id,
+                },
             ).scalar_one()
+            assert connection.execute(
+                text(
+                    """
+                    SELECT array_agg(generation ORDER BY generation)
+                    FROM reference_layer_mirror_strategies
+                    WHERE layer_id = :layer_id
+                    """
+                ),
+                {"layer_id": reviewed_layer_id},
+            ).scalar_one() == [1, 2]
 
         with pytest.raises(DBAPIError) as immutable:
             with engine.begin() as connection:
@@ -2367,8 +2384,18 @@ def test_reference_strategy_placeholder_reconciliation_from_0045(
                 )
         assert immutable.value.orig.sqlstate == "55000"
 
-        run_alembic(migration_database_url, "downgrade", "20260726_0045")
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260727_0046",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "generation > 1 exists" in refused.stderr
         with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
             assert connection.execute(
                 text(
                     """
@@ -2380,9 +2407,40 @@ def test_reference_strategy_placeholder_reconciliation_from_0045(
                 reviewed_strategy_id,
                 replacement_strategy_id,
             ]
+    finally:
+        engine.dispose()
+
+
+def test_reference_strategy_generation_downgrade_allows_generation_one(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0039")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            fixture = seed_reference_mirror_strategy_placeholder(connection)
+        run_alembic(migration_database_url, "upgrade", "20260726_0045")
+        with engine.begin() as connection:
+            reviewed_layer_id, reviewed_strategy_id = (
+                add_reviewed_reference_mirror_strategy(
+                    connection,
+                    fixture,
+                )
+            )
+        run_alembic(migration_database_url, "upgrade", "20260727_0046")
         run_alembic(migration_database_url, "upgrade", "head")
-        run_alembic(migration_database_url, "check")
+        run_alembic(migration_database_url, "downgrade", "20260727_0046")
         with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    """
+                    SELECT strategy_reason_code, generation
+                    FROM reference_layer_mirror_strategies
+                    WHERE layer_id = :layer_id
+                    """
+                ),
+                {"layer_id": reviewed_layer_id},
+            ).one() == ("reviewed_vector_source", 1)
             assert connection.execute(
                 text(
                     """
@@ -2393,129 +2451,136 @@ def test_reference_strategy_placeholder_reconciliation_from_0045(
                     """
                 )
             ).scalar_one() == 0
-    finally:
-        engine.dispose()
-
-
-def test_reference_strategy_placeholder_reconciliation_rejects_altered_row(
-    migration_database_url: str,
-) -> None:
-    run_alembic(migration_database_url, "upgrade", "20260726_0039")
-    engine = create_engine(migration_database_url)
-    try:
-        with engine.begin() as connection:
-            fixture = seed_reference_mirror_strategy_placeholder(connection)
-        run_alembic(migration_database_url, "upgrade", "20260726_0045")
-
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    """
-                    ALTER TABLE reference_layer_mirror_strategies
-                    DISABLE TRIGGER
-                        trg_reference_layer_mirror_strategy_immutable
-                    """
-                )
-            )
-            connection.execute(
-                text(
-                    """
-                    UPDATE reference_layer_mirror_strategies
-                    SET strategy_reason = 'altered synthetic evidence'
-                    WHERE layer_id = :layer_id
-                    """
-                ),
-                fixture,
-            )
-            connection.execute(
-                text(
-                    """
-                    ALTER TABLE reference_layer_mirror_strategies
-                    ENABLE TRIGGER
-                        trg_reference_layer_mirror_strategy_immutable
-                    """
-                )
-            )
-
-        refused = run_alembic(
-            migration_database_url,
-            "upgrade",
-            "head",
-            check=False,
-        )
-        assert refused.returncode != 0
-        assert "do not match the exact 0040 fingerprint" in refused.stderr
-        with engine.connect() as connection:
             assert connection.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260726_0045"
-            assert connection.execute(
-                text(
-                    """
-                    SELECT tgenabled
-                    FROM pg_trigger
-                    WHERE tgrelid =
-                        'reference_layer_mirror_strategies'::regclass
-                      AND tgname =
-                        'trg_reference_layer_mirror_strategy_immutable'
-                    """
-                )
-            ).scalar_one() == "O"
-    finally:
-        engine.dispose()
-
-
-def test_reference_strategy_placeholder_reconciliation_rejects_dependency(
-    migration_database_url: str,
-) -> None:
-    run_alembic(migration_database_url, "upgrade", "20260726_0039")
-    engine = create_engine(migration_database_url)
-    try:
-        with engine.begin() as connection:
-            fixture = seed_reference_mirror_strategy_placeholder(connection)
-        run_alembic(migration_database_url, "upgrade", "20260726_0045")
-
-        with engine.begin() as connection:
-            placeholder_id = connection.execute(
                 text(
                     """
                     SELECT id
                     FROM reference_layer_mirror_strategies
-                    WHERE layer_id = :layer_id
+                    WHERE id = :strategy_id
                     """
                 ),
-                fixture,
-            ).scalar_one()
-            dependency_layer_id = connection.execute(
+                {"strategy_id": reviewed_strategy_id},
+            ).scalar_one() == reviewed_strategy_id
+            assert {
+                item["name"]
+                for item in inspect(connection).get_unique_constraints(
+                    "reference_layer_mirror_strategies"
+                )
+            } == {
+                "uq_reference_layer_mirror_strategies_snapshot_layer",
+                "uq_reference_layer_mirror_strategies_provider_id",
+            }
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+    finally:
+        engine.dispose()
+
+
+def test_reference_strategy_dependencies_require_the_same_generation(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260726_0039")
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            fixture = seed_reference_mirror_strategy_placeholder(connection)
+        run_alembic(migration_database_url, "upgrade", "20260726_0045")
+        with engine.begin() as connection:
+            dependency_layer_id, dependency_strategy_id = (
+                add_reviewed_reference_mirror_strategy(
+                    connection,
+                    fixture,
+                )
+            )
+            dependency_source_id = connection.execute(
                 text(
                     """
-                    INSERT INTO reference_layers (
-                        last_seen_snapshot_id, service_id, provider_key,
-                        source_key, node_type, title, remote_name, role,
-                        renderer, delivery_mode, sort_order,
-                        default_visible, default_opacity, queryable,
-                        downloadable, status
+                    SELECT source_id
+                    FROM reference_layer_mirror_strategies
+                    WHERE id = :strategy_id
+                    """
+                ),
+                {"strategy_id": dependency_strategy_id},
+            ).scalar_one()
+        run_alembic(migration_database_url, "upgrade", "20260727_0046")
+        run_alembic(migration_database_url, "upgrade", "head")
+
+        with engine.begin() as connection:
+            composition_strategy_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layer_mirror_strategies (
+                        provider_key, layer_id, catalog_snapshot_id,
+                        catalog_definition_sha256, strategy, source_id,
+                        strategy_reason_code, strategy_reason,
+                        evidence_json, evidence_sha256, generation,
+                        validated_at
                     ) VALUES (
-                        :snapshot_id, :service_id, 'siur',
-                        'layer:0046-unexpected-dependency', 'layer',
-                        '0046 unexpected dependency',
-                        'test:0046-unexpected-dependency', 'overlay',
-                        'vector_tile', 'mirror', 2, false, 1,
-                        true, true, 'active'
+                        'siur', :layer_id, :snapshot_id,
+                        :definition_sha256, 'composition', NULL,
+                        'composition_declared',
+                        'reviewed composition generation',
+                        CAST(
+                            '{"dependencies":["layer:0046-reviewed"]}'
+                            AS JSON
+                        ),
+                        repeat('f', 64), 2, now()
                     ) RETURNING id
                     """
                 ),
                 fixture,
             ).scalar_one()
+
+        with pytest.raises(DBAPIError) as cross_generation:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO
+                            reference_layer_mirror_strategy_dependencies (
+                                provider_key, strategy_id,
+                                strategy_layer_id, dependency_layer_id,
+                                dependency_order
+                            ) VALUES (
+                                'siur', :strategy_id, :strategy_layer_id,
+                                :dependency_layer_id, 0
+                            )
+                        """
+                    ),
+                    {
+                        "strategy_id": composition_strategy_id,
+                        "strategy_layer_id": fixture["layer_id"],
+                        "dependency_layer_id": dependency_layer_id,
+                    },
+                )
+        assert cross_generation.value.orig.sqlstate == "23514"
+        assert "same generation" in str(cross_generation.value)
+
+        with engine.begin() as connection:
             connection.execute(
                 text(
                     """
-                    ALTER TABLE
-                        reference_layer_mirror_strategy_dependencies
-                    DISABLE TRIGGER
-                        trg_reference_layer_mirror_strategy_dependency_validate
+                    INSERT INTO reference_layer_mirror_strategies (
+                        provider_key, layer_id, catalog_snapshot_id,
+                        catalog_definition_sha256, strategy, source_id,
+                        strategy_reason_code, strategy_reason,
+                        evidence_json, evidence_sha256, generation,
+                        validated_at
+                    ) VALUES (
+                        'siur', :layer_id, :snapshot_id,
+                        :definition_sha256, 'vector', :source_id,
+                        'reviewed_vector_source',
+                        'reviewed dependency generation',
+                        CAST('{"reviewed": true}' AS JSON),
+                        repeat('e', 64), 2, now()
+                    )
                     """
-                )
+                ),
+                {
+                    **fixture,
+                    "layer_id": dependency_layer_id,
+                    "source_id": dependency_source_id,
+                },
             )
             connection.execute(
                 text(
@@ -2531,44 +2596,11 @@ def test_reference_strategy_placeholder_reconciliation_rejects_dependency(
                     """
                 ),
                 {
-                    "strategy_id": placeholder_id,
+                    "strategy_id": composition_strategy_id,
                     "strategy_layer_id": fixture["layer_id"],
                     "dependency_layer_id": dependency_layer_id,
                 },
             )
-            connection.execute(
-                text(
-                    """
-                    ALTER TABLE
-                        reference_layer_mirror_strategy_dependencies
-                    ENABLE TRIGGER
-                        trg_reference_layer_mirror_strategy_dependency_validate
-                    """
-                )
-            )
-
-        refused = run_alembic(
-            migration_database_url,
-            "upgrade",
-            "head",
-            check=False,
-        )
-        assert refused.returncode != 0
-        assert "synthetic 0040 rows have unexpected dependencies" in (
-            refused.stderr
-        )
-        with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260726_0045"
-            assert connection.execute(
-                text(
-                    """
-                    SELECT count(*)
-                    FROM reference_layer_mirror_strategy_dependencies
-                    """
-                )
-            ).scalar_one() == 1
     finally:
         engine.dispose()
 
