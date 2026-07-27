@@ -486,9 +486,27 @@ def read_json_artifact(store, result, kind: str, *, metadata_kind: str | None = 
 
 
 WFS_CAPABILITIES = b"""<wfs:WFS_Capabilities version="2.0.0"
- xmlns:wfs="http://www.opengis.net/wfs/2.0">
+ xmlns:wfs="http://www.opengis.net/wfs/2.0"
+ xmlns:ows="http://www.opengis.net/ows/1.1">
+ <ows:OperationsMetadata>
+  <ows:Constraint name="PagingIsTransactionSafe">
+   <ows:DefaultValue>true</ows:DefaultValue>
+  </ows:Constraint>
+ </ows:OperationsMetadata>
  <wfs:FeatureTypeList><wfs:FeatureType><wfs:Name>workspace:roads</wfs:Name>
  </wfs:FeatureType></wfs:FeatureTypeList></wfs:WFS_Capabilities>"""
+
+
+def wfs_hits_response(count: int) -> Response:
+    return Response(
+        (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<wfs:FeatureCollection '
+            'xmlns:wfs="http://www.opengis.net/wfs/2.0" '
+            f'numberMatched="{count}" numberReturned="0"/>'
+        ).encode(),
+        "application/xml",
+    )
 
 
 def style_config(
@@ -596,6 +614,728 @@ def test_wfs_downloads_bounded_pages_and_builds_ingestion_manifest(store, limits
         policy.allowed_origins == ("https://data.example.es",)
         for policy in transport.policies
     )
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_legacy_wfs_fails_before_second_page_without_transaction_safety(
+    store,
+    limits,
+):
+    feature_calls = 0
+    unsafe_capabilities = WFS_CAPABILITIES.replace(
+        b"<ows:DefaultValue>true</ows:DefaultValue>",
+        b"<ows:DefaultValue>false</ows:DefaultValue>",
+    )
+
+    def handler(url, _etag, _modified):
+        nonlocal feature_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(unsafe_capabilities, "application/xml")
+        feature_calls += 1
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 3,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": f"road-{value}",
+                        "properties": {},
+                        "geometry": None,
+                    }
+                    for value in (1, 2)
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(candidate("wfs"))
+
+    assert captured.value.code == "wfs_paging_not_transaction_safe"
+    assert feature_calls == 1
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_wfs_safe_snapshot_converges_and_rewrites_ephemeral_ids(
+    store,
+    limits,
+):
+    feature_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal feature_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(3)
+        assert query["sortBy"] == ["stable_id A"]
+        assert query["count"] == ["2"]
+        offset = int(query["startIndex"][0])
+        pass_index = feature_calls // 2
+        feature_calls += 1
+        values = [1, 2] if offset == 0 else [3]
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 3,
+                "numberReturned": len(values),
+                "timeStamp": f"volatile-pass-{pass_index}",
+                "links": [
+                    {
+                        "rel": "next",
+                        "href": f"https://volatile.example/{pass_index}",
+                    }
+                ],
+                "crs": {
+                    "type": "name",
+                    "properties": {"name": "urn:ogc:def:crs:EPSG::25830"},
+                },
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": f"ephemeral-{pass_index}-{value}",
+                        "properties": {
+                            "stable_id": value,
+                            "name": f"road-{value}",
+                        },
+                        "geometry": None,
+                    }
+                    for value in values
+                ],
+            }
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            config={
+                "wfs_snapshot": {
+                    "mode": "paged",
+                    "identity_properties": ["stable_id"],
+                }
+            },
+        )
+    )
+
+    assert feature_calls == 4
+    assert result.feature_count == 3
+    assert result.stats["snapshot_convergence_passes"] == 2
+    assert result.stats["stable_identity_count"] == 3
+    assert result.stats["stable_identity_properties"] == ["stable_id"]
+    assert result.stats["sort_by"] == "stable_id A"
+    assert len(result.stats["snapshot_identity_sha256"]) == 64
+    assert len(result.stats["snapshot_content_sha256"]) == 64
+    pages = [
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "dataset"
+    ]
+    assert len(pages) == 2
+    canonical_ids: list[str] = []
+    for artifact in pages:
+        with store.open_blob(artifact.blob.storage_key) as source:
+            page = json.load(source)
+        assert "timeStamp" not in page
+        assert "links" not in page
+        assert page["numberMatched"] == 3
+        assert page["numberReturned"] == len(page["features"])
+        assert page["crs"]["properties"]["name"].endswith("25830")
+        canonical_ids.extend(
+            feature["id"] for feature in page["features"]
+        )
+    assert len(canonical_ids) == len(set(canonical_ids)) == 3
+    assert all(value.startswith("siur-wfs-") for value in canonical_ids)
+    assert all("ephemeral" not in value for value in canonical_ids)
+    manifest = read_json_artifact(store, result, "manifest")
+    assert manifest["materialization"]["canonical_snapshot"] is True
+    assert (
+        manifest["materialization"]["snapshot_content_sha256"]
+        == result.stats["snapshot_content_sha256"]
+    )
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_wfs_safe_snapshot_aborts_when_content_changes_between_passes(
+    store,
+    limits,
+):
+    feature_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal feature_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(3)
+        offset = int(query["startIndex"][0])
+        pass_index = feature_calls // 2
+        feature_calls += 1
+        values = [1, 2] if offset == 0 else [3]
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 3,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": f"source-{value}",
+                        "properties": {
+                            "stable_id": value,
+                            "name": (
+                                "changed"
+                                if pass_index == 1 and value == 3
+                                else f"road-{value}"
+                            ),
+                        },
+                        "geometry": None,
+                    }
+                    for value in values
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {
+                        "mode": "paged",
+                        "identity_properties": ["stable_id"],
+                    }
+                },
+            )
+        )
+
+    assert captured.value.code == "unstable_snapshot"
+    assert captured.value.retryable is True
+    assert feature_calls == 4
+    assert list((store.root / "staging").iterdir()) == []
+
+
+def test_wfs_safe_snapshot_deduplicates_by_reviewed_stable_identity(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(4)
+        offset = int(query["startIndex"][0])
+        values = [1, 2] if offset == 0 else [2, 3]
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 4,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": f"distinct-source-id-{offset}-{value}",
+                        "properties": {"stable_id": value},
+                        "geometry": None,
+                    }
+                    for value in values
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {
+                        "mode": "paged",
+                        "identity_properties": ["stable_id"],
+                    }
+                },
+            )
+        )
+
+    assert captured.value.code == "unstable_pagination"
+    assert captured.value.retryable is True
+
+
+def test_wfs_safe_snapshot_requires_advertised_complete_count(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(1)
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"stable_id": 1},
+                        "geometry": None,
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {
+                        "mode": "paged",
+                        "identity_properties": ["stable_id"],
+                    }
+                },
+            )
+        )
+
+    assert captured.value.code == "snapshot_completeness_unproven"
+    assert captured.value.retryable is True
+
+
+def test_wfs_safe_snapshot_requires_every_identity_property(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(1)
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 1,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"other": 1},
+                        "geometry": None,
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {
+                        "mode": "paged",
+                        "identity_properties": ["stable_id"],
+                    }
+                },
+            )
+        )
+
+    assert captured.value.code == "missing_pagination_identity"
+
+
+def test_wfs_single_response_converges_as_a_canonical_multiset(
+    store,
+    limits,
+):
+    full_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal full_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            assert query["count"] == ["1"]
+            return wfs_hits_response(3)
+        assert "count" not in query
+        assert "startIndex" not in query
+        assert "sortBy" not in query
+        values = [("a", 1), ("b", 2), ("a", 1)]
+        if full_calls:
+            values.reverse()
+        pass_index = full_calls
+        full_calls += 1
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 3,
+                "numberReturned": 3,
+                "timeStamp": f"volatile-{pass_index}",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": f"volatile-{pass_index}-{index}",
+                        "properties": {"name": name, "value": value},
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [value, value],
+                        },
+                    }
+                    for index, (name, value) in enumerate(values)
+                ],
+            }
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            config={
+                "wfs_snapshot": {"mode": "single_response"},
+            },
+        )
+    )
+
+    assert full_calls == 2
+    assert result.feature_count == 3
+    assert result.stats["snapshot_mode"] == "single_response"
+    assert result.stats["stable_identity_derivation"] == (
+        "canonical-feature-content-and-occurrence"
+    )
+    dataset = next(
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "dataset"
+    )
+    with store.open_blob(dataset.blob.storage_key) as source:
+        document = json.load(source)
+    assert "timeStamp" not in document
+    assert [item["properties"]["name"] for item in document["features"]] == [
+        "a",
+        "a",
+        "b",
+    ]
+    identifiers = [item["id"] for item in document["features"]]
+    assert len(identifiers) == len(set(identifiers)) == 3
+    assert all(item.startswith("siur-wfs-") for item in identifiers)
+
+
+def test_wfs_single_response_aborts_when_multiset_changes(
+    store,
+    limits,
+):
+    full_calls = 0
+
+    def handler(url, _etag, _modified):
+        nonlocal full_calls
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(2)
+        full_calls += 1
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 2,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            "value": (
+                                value
+                                if full_calls == 1 or value == 1
+                                else 3
+                            )
+                        },
+                        "geometry": None,
+                    }
+                    for value in (1, 2)
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {"mode": "single_response"},
+                },
+            )
+        )
+
+    assert captured.value.code == "unstable_snapshot"
+    assert captured.value.retryable is True
+    assert full_calls == 2
+
+
+def test_wfs_paged_snapshot_uses_independent_hits_count_when_pages_are_capped(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(5)
+        offset = int(query["startIndex"][0])
+        values = {
+            0: [1, 2],
+            2: [3, 4],
+            4: [5],
+        }[offset]
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                # Mirrors GeoServer's capped page declaration: the independent
+                # hits request, not this value, proves the complete count.
+                "numberMatched": 3,
+                "numberReturned": len(values),
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"fid": value},
+                        "geometry": None,
+                    }
+                    for value in values
+                ],
+            }
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            config={
+                "wfs_snapshot": {
+                    "mode": "paged",
+                    "identity_properties": ["fid"],
+                }
+            },
+        )
+    )
+
+    assert result.feature_count == 5
+    assert result.stats["number_matched"] == 5
+    assert result.stats["page_count"] == 3
+    assert result.stats["sort_by"] == "fid A"
+
+
+def test_wfs_reviewed_paged_snapshot_accepts_11000_with_default_limits(
+    store,
+):
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(1)
+        assert query["count"] == ["11000"]
+        assert query["sortBy"] == ["fid A"]
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 1,
+                "numberReturned": 1,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"fid": 1},
+                        "geometry": None,
+                    }
+                ],
+            }
+        )
+
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=AcquisitionLimits(),
+        downloader_factory=FakeTransport(handler),
+    ).acquire(
+        candidate(
+            "wfs",
+            config={
+                "page_size": 11_000,
+                "wfs_snapshot": {
+                    "mode": "paged",
+                    "identity_properties": ["fid"],
+                },
+            },
+        )
+    )
+
+    assert result.feature_count == 1
+    assert result.stats["page_size"] == 11_000
+
+
+def test_wfs_paged_snapshot_requires_strict_identity_order(
+    store,
+    limits,
+):
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(3)
+        offset = int(query["startIndex"][0])
+        values = [1, 3] if offset == 0 else [2]
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 3,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"fid": value},
+                        "geometry": None,
+                    }
+                    for value in values
+                ],
+            }
+        )
+
+    with pytest.raises(AcquisitionValidationError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {
+                        "mode": "paged",
+                        "identity_properties": ["fid"],
+                    }
+                },
+            )
+        )
+
+    assert captured.value.code == "unstable_pagination"
+    assert captured.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    "snapshot_config",
+    [
+        {},
+        {"mode": "single_response", "identity_properties": ["fid"]},
+        {"mode": "paged"},
+        {"mode": "paged", "identity_properties": []},
+        {"mode": "unknown"},
+    ],
+)
+def test_wfs_snapshot_rejects_invalid_contract_configuration(
+    store,
+    limits,
+    snapshot_config,
+):
+    transport = FakeTransport(
+        lambda url, _etag, _modified: Response(
+            WFS_CAPABILITIES,
+            "application/xml",
+        )
+        if parse_qs(urlsplit(url).query).get("request")
+        == ["GetCapabilities"]
+        else pytest.fail("invalid WFS snapshot config reached GetFeature")
+    )
+
+    with pytest.raises(AcquisitionConfigurationError):
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        ).acquire(
+            candidate(
+                "wfs",
+                config={"wfs_snapshot": snapshot_config},
+            )
+        )
+
+
+def test_wfs_convergence_applies_one_aggregate_upstream_byte_budget(
+    store,
+    limits,
+):
+    padded = "x" * 420
+
+    def handler(url, _etag, _modified):
+        query = parse_qs(urlsplit(url).query)
+        if query.get("request") == ["GetCapabilities"]:
+            return Response(WFS_CAPABILITIES, "application/xml")
+        if query.get("resultType") == ["hits"]:
+            return wfs_hits_response(1)
+        return json_response(
+            {
+                "type": "FeatureCollection",
+                "numberMatched": 1,
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"payload": padded},
+                        "geometry": None,
+                    }
+                ],
+            }
+        )
+
+    constrained = replace(
+        limits,
+        max_probe_bytes=512,
+        max_page_bytes=1_024,
+        max_dataset_bytes=1_024,
+        max_total_bytes=1_200,
+    )
+    with pytest.raises(AcquisitionLimitError) as captured:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=constrained,
+            downloader_factory=FakeTransport(handler),
+        ).acquire(
+            candidate(
+                "wfs",
+                config={
+                    "wfs_snapshot": {"mode": "single_response"},
+                },
+            )
+        )
+
+    assert captured.value.code == "snapshot_too_large"
     assert list((store.root / "staging").iterdir()) == []
 
 

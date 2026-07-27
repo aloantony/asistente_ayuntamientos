@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from app.reference_layers.blob_store import (
     ReferenceBlobStore,
+    ReferenceBlobTooLargeError,
     ReferenceStagingWriter,
     StoredReferenceBlob,
 )
@@ -138,6 +139,10 @@ _MAX_STYLE_RESOURCE_BYTES = 4 * 1024 * 1024
 _MAX_STYLE_RESOURCES_PER_SOURCE = 512
 _STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
 _STYLE_SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+_WFS_IDENTITY_PROPERTY_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.-]{0,254}$",
+    re.ASCII,
+)
 _MAX_NESTED_ATOM_FEEDS = 100
 _DBF_FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,10}$")
 _MAX_RASTER_VAT_BYTES = 8 * 1024 * 1024
@@ -495,6 +500,39 @@ class _FeaturePage:
     number_matched: int | None
     next_url: str | None
     feature_ids: tuple[str, ...]
+    collection: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _WFSSnapshotSpec:
+    mode: Literal["single_response", "paged"]
+    identity_properties: tuple[str, ...]
+    sort_by: str | None
+
+
+@dataclass(frozen=True)
+class _CanonicalWFSPage:
+    document: dict[str, Any]
+    identity_records: tuple[bytes, ...]
+    identity_sort_keys: tuple[tuple[tuple[int, Any], ...], ...]
+    content_records: tuple[bytes, ...]
+    identity_sha256: str
+    content_sha256: str
+
+
+@dataclass(frozen=True)
+class _WFSSnapshotPass:
+    artifacts: tuple[AcquiredArtifact, ...]
+    page_count: int
+    feature_count: int
+    number_matched: int
+    source_feature_ids_observed: int
+    identity_sha256: str
+    content_sha256: str
+    page_identity_sha256: tuple[str, ...]
+    page_content_sha256: tuple[str, ...]
+    observed_bytes: int
+    observed: HTTPSDownloadResult
 
 
 @dataclass(frozen=True)
@@ -710,6 +748,78 @@ class ReferenceAcquisitionPipeline:
             )
         return _Downloaded(result=result, blob=blob, parsed=parsed)
 
+    def _observe_download(
+        self,
+        candidate: SourceCandidate,
+        url: str,
+        *,
+        max_bytes: int,
+        accept: str,
+        allowed_media_types: frozenset[str] | None,
+        validator: Validator,
+    ) -> _Downloaded:
+        """Validate one response without retaining its upstream representation."""
+
+        requested_url = _require_same_origin(candidate.endpoint_url, url)
+        effective_max_bytes = min(
+            max_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        downloader = self._downloader_factory(
+            HTTPSDownloadPolicy(
+                allowed_origins=(_origin(candidate.endpoint_url),),
+                max_response_bytes=effective_max_bytes,
+                timeout_seconds=self.limits.timeout_seconds,
+                idle_timeout_seconds=self.limits.idle_timeout_seconds,
+                max_redirects=self.limits.max_redirects,
+                allowed_content_types=allowed_media_types,
+            )
+        )
+        with _strict_staging(
+            self.store,
+            max_bytes=effective_max_bytes,
+        ) as staging:
+            try:
+                result = downloader.download(
+                    requested_url,
+                    staging,
+                    accept=accept,
+                )
+            except ReferenceBlobTooLargeError as error:
+                raise AcquisitionLimitError(
+                    "snapshot observation exceeds its remaining byte budget",
+                    code="snapshot_too_large",
+                ) from error
+            _validate_download_result(
+                candidate.endpoint_url,
+                requested_url,
+                result,
+            )
+            if result.not_modified:
+                raise AcquisitionValidationError(
+                    "snapshot observation unexpectedly returned not-modified",
+                    code="partial_not_modified",
+                )
+            if (
+                result.sha256 is None
+                or staging.sha256 != result.sha256
+                or staging.size_bytes != result.size_bytes
+            ):
+                raise AcquisitionValidationError(
+                    "snapshot observation does not match staged bytes",
+                    code="download_integrity_mismatch",
+                )
+            try:
+                payload = staging.staging_path.read_bytes()
+            except OSError as error:
+                raise AcquisitionValidationError(
+                    "staged artifact could not be read for validation",
+                    code="staging_read_failed",
+                ) from error
+            parsed = validator(payload)
+        return _Downloaded(result=result, blob=None, parsed=parsed)
+
     @contextmanager
     def _download_transient(
         self,
@@ -888,6 +998,48 @@ class ReferenceAcquisitionPipeline:
                 _http_datetime(observed.last_modified)
                 if observed is not None
                 else None
+            ),
+            metadata=metadata,
+        )
+
+    def _local_wfs_page_artifact(
+        self,
+        payload: dict[str, Any],
+        *,
+        observed: HTTPSDownloadResult,
+        source_version: str,
+        metadata: dict[str, Any],
+    ) -> AcquiredArtifact:
+        encoded = _canonical_json(payload) + b"\n"
+        maximum = min(
+            self.limits.max_page_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        if len(encoded) > maximum:
+            raise AcquisitionLimitError(
+                "canonical WFS page exceeds the page byte limit",
+                code="page_too_large",
+            )
+        blob = self.store.put_stream(
+            io.BytesIO(encoded),
+            max_bytes=maximum,
+        )
+        return AcquiredArtifact(
+            artifact_kind="dataset",
+            role=(
+                "input"
+                if metadata.get("feature_count") != 0
+                else "observation"
+            ),
+            media_type="application/geo+json",
+            blob=blob,
+            source_url=observed.source_url,
+            final_url=observed.final_url,
+            source_version=source_version,
+            upstream_etag=observed.etag,
+            upstream_last_modified=_http_datetime(
+                observed.last_modified
             ),
             metadata=metadata,
         )
@@ -1476,9 +1628,19 @@ class ReferenceAcquisitionPipeline:
         conditional: ConditionalRequest | None,
     ) -> AcquisitionResult:
         del conditional  # A page-level 304 cannot prove a complete snapshot.
-        probe, capabilities, _document = self._probe(candidate)
+        probe, capabilities, capabilities_document = self._probe(candidate)
         canonical_name = probe.canonical_name or ""
-        page_size = _configured_page_size(candidate.config, self.limits.page_size)
+        snapshot_spec = _wfs_snapshot_spec(candidate.config)
+        page_size = _configured_page_size(
+            candidate.config,
+            self.limits.page_size,
+            maximum=(
+                min(self.limits.max_features, 100_000)
+                if snapshot_spec is not None
+                and snapshot_spec.mode == "paged"
+                else None
+            ),
+        )
         output_format = _config_text(
             candidate.config,
             "output_format",
@@ -1497,6 +1659,22 @@ class ReferenceAcquisitionPipeline:
                 "WFS advertised an unsupported version",
                 code="unsupported_wfs_version",
             )
+        if snapshot_spec is not None:
+            return self._acquire_convergent_wfs(
+                candidate,
+                probe=probe,
+                capabilities=capabilities,
+                canonical_name=canonical_name,
+                page_size=page_size,
+                output_format=output_format,
+                version=version,
+                type_parameter=type_parameter,
+                count_parameter=count_parameter,
+                snapshot_spec=snapshot_spec,
+            )
+        paging_is_transaction_safe = _wfs_paging_is_transaction_safe(
+            capabilities_document
+        )
 
         artifacts = [capabilities]
         page_artifacts: list[AcquiredArtifact] = []
@@ -1600,6 +1778,17 @@ class ReferenceAcquisitionPipeline:
                 or page.count < page_size
                 or (expected_matched is not None and offset >= expected_matched)
             )
+            if paging_is_transaction_safe is not True:
+                terminal = (
+                    expected_matched is not None
+                    and total_features == expected_matched
+                )
+                if not terminal:
+                    raise AcquisitionValidationError(
+                        "WFS requires pagination without a transaction-safe "
+                        "capability or reviewed snapshot contract",
+                        code="wfs_paging_not_transaction_safe",
+                    )
             if terminal:
                 break
         if not terminal:
@@ -1651,6 +1840,536 @@ class ReferenceAcquisitionPipeline:
             feature_count=total_features,
             stats=stats,
             observed=downloaded.result,
+        )
+
+    def _acquire_convergent_wfs(
+        self,
+        candidate: SourceCandidate,
+        *,
+        probe: SourceProbe,
+        capabilities: AcquiredArtifact,
+        canonical_name: str,
+        page_size: int,
+        output_format: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        snapshot_spec: _WFSSnapshotSpec,
+    ) -> AcquisitionResult:
+        def read_pass(
+            *,
+            retain_artifacts: bool,
+            byte_budget: int,
+        ) -> _WFSSnapshotPass:
+            if snapshot_spec.mode == "single_response":
+                return self._read_single_response_wfs_pass(
+                    candidate,
+                    canonical_name=canonical_name,
+                    output_format=output_format,
+                    version=version,
+                    type_parameter=type_parameter,
+                    count_parameter=count_parameter,
+                    retain_artifacts=retain_artifacts,
+                    byte_budget=byte_budget,
+                )
+            return self._read_paged_wfs_pass(
+                candidate,
+                canonical_name=canonical_name,
+                page_size=page_size,
+                output_format=output_format,
+                version=version,
+                type_parameter=type_parameter,
+                count_parameter=count_parameter,
+                snapshot_spec=snapshot_spec,
+                retain_artifacts=retain_artifacts,
+                byte_budget=byte_budget,
+            )
+
+        first = read_pass(
+            retain_artifacts=True,
+            byte_budget=self.limits.max_total_bytes,
+        )
+        remaining_byte_budget = (
+            self.limits.max_total_bytes - first.observed_bytes
+        )
+        if remaining_byte_budget <= 0:
+            raise AcquisitionLimitError(
+                "WFS convergence reads exceed the aggregate byte limit",
+                code="snapshot_too_large",
+            )
+        verification = read_pass(
+            retain_artifacts=False,
+            byte_budget=remaining_byte_budget,
+        )
+        if _wfs_snapshot_pass_identity(first) != _wfs_snapshot_pass_identity(
+            verification
+        ):
+            raise AcquisitionValidationError(
+                "WFS snapshot did not converge across complete reads",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+
+        page_artifacts = list(first.artifacts)
+        style_artifacts = self._acquire_styles(candidate)
+        artifacts = [capabilities, *page_artifacts, *style_artifacts]
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        stats: dict[str, Any] = {
+            "page_count": first.page_count,
+            "feature_count": first.feature_count,
+            "number_matched": first.number_matched,
+            "feature_ids_observed": (
+                first.source_feature_ids_observed
+            ),
+            "stable_identity_count": first.feature_count,
+            "snapshot_mode": snapshot_spec.mode,
+            "snapshot_convergence_passes": 2,
+            "snapshot_identity_sha256": first.identity_sha256,
+            "snapshot_content_sha256": first.content_sha256,
+            "upstream_observed_bytes": (
+                first.observed_bytes + verification.observed_bytes
+            ),
+        }
+        materialization: dict[str, Any] = {
+            "kind": "feature-pages",
+            "format": "geojson",
+            "collection": canonical_name,
+            "canonical_snapshot": True,
+            "snapshot_mode": snapshot_spec.mode,
+            "snapshot_convergence_passes": 2,
+            "snapshot_identity_sha256": first.identity_sha256,
+            "snapshot_content_sha256": first.content_sha256,
+            "page_artifact_sha256": [
+                item.blob.sha256
+                for item in page_artifacts
+                if item.role == "input"
+            ],
+        }
+        if snapshot_spec.mode == "paged":
+            stats.update(
+                {
+                    "page_size": page_size,
+                    "stable_identity_properties": list(
+                        snapshot_spec.identity_properties
+                    ),
+                    "sort_by": snapshot_spec.sort_by,
+                }
+            )
+            materialization.update(
+                {
+                    "stable_identity_properties": list(
+                        snapshot_spec.identity_properties
+                    ),
+                    "sort_by": snapshot_spec.sort_by,
+                }
+            )
+        else:
+            stats["stable_identity_derivation"] = (
+                "canonical-feature-content-and-occurrence"
+            )
+            materialization["stable_identity_derivation"] = (
+                "canonical-feature-content-and-occurrence"
+            )
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=probe,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=first.feature_count,
+            stats=stats,
+            observed=verification.observed,
+        )
+
+    def _read_single_response_wfs_pass(
+        self,
+        candidate: SourceCandidate,
+        *,
+        canonical_name: str,
+        output_format: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        retain_artifacts: bool,
+        byte_budget: int,
+    ) -> _WFSSnapshotPass:
+        expected_count, hits = self._observe_wfs_hits(
+            candidate,
+            canonical_name=canonical_name,
+            version=version,
+            type_parameter=type_parameter,
+            count_parameter=count_parameter,
+            byte_budget=byte_budget,
+        )
+        remaining_byte_budget = (
+            byte_budget - hits.result.size_bytes
+        )
+        if remaining_byte_budget <= 0:
+            raise AcquisitionLimitError(
+                "WFS snapshot exceeds the aggregate byte limit",
+                code="snapshot_too_large",
+            )
+        params = {
+            "service": "WFS",
+            "request": "GetFeature",
+            "version": version,
+            type_parameter: canonical_name,
+            "outputFormat": output_format,
+        }
+        observed = self._observe_download(
+            candidate,
+            _merge_query(candidate.endpoint_url, params),
+            max_bytes=min(
+                self.limits.max_page_bytes,
+                remaining_byte_budget,
+            ),
+            accept="application/geo+json, application/json;q=0.9",
+            allowed_media_types=_JSON_MEDIA_TYPES,
+            validator=lambda payload: _parse_feature_collection(
+                payload,
+                page_size=self.limits.max_features,
+                allow_next=False,
+            ),
+        )
+        page = cast(_FeaturePage, observed.parsed)
+        if (
+            page.number_matched is None
+            or page.number_matched != expected_count
+            or page.count != expected_count
+        ):
+            raise AcquisitionValidationError(
+                "single-response WFS did not prove its complete feature count",
+                code="snapshot_completeness_unproven",
+                retryable=True,
+            )
+        if page.count > self.limits.max_features:
+            raise AcquisitionLimitError(
+                "WFS snapshot exceeds the feature limit",
+                code="feature_limit",
+            )
+        canonical = _canonical_single_response_wfs_page(
+            page,
+            collection=canonical_name,
+        )
+        artifacts: tuple[AcquiredArtifact, ...] = ()
+        if retain_artifacts:
+            artifacts = (
+                self._local_wfs_page_artifact(
+                    canonical.document,
+                    observed=observed.result,
+                    source_version=version,
+                    metadata={
+                        "protocol": "wfs",
+                        "data_format": "geojson",
+                        "collection": canonical_name,
+                        "page_index": 0,
+                        "offset": 0,
+                        "feature_count": page.count,
+                        "terminal_empty_page": page.count == 0,
+                        "canonical_snapshot": True,
+                        "snapshot_mode": "single_response",
+                        "stable_identity_derivation": (
+                            "canonical-feature-content-and-occurrence"
+                        ),
+                        "page_identity_sha256": (
+                            canonical.identity_sha256
+                        ),
+                        "page_content_sha256": (
+                            canonical.content_sha256
+                        ),
+                    },
+                ),
+            )
+        identity_hasher = hashlib.sha256()
+        content_hasher = hashlib.sha256()
+        for record in canonical.identity_records:
+            _update_record_hash(identity_hasher, record)
+        for record in canonical.content_records:
+            _update_record_hash(content_hasher, record)
+        return _WFSSnapshotPass(
+            artifacts=artifacts,
+            page_count=1,
+            feature_count=page.count,
+            number_matched=page.number_matched,
+            source_feature_ids_observed=len(page.feature_ids),
+            identity_sha256=identity_hasher.hexdigest(),
+            content_sha256=content_hasher.hexdigest(),
+            page_identity_sha256=(canonical.identity_sha256,),
+            page_content_sha256=(canonical.content_sha256,),
+            observed_bytes=(
+                hits.result.size_bytes + observed.result.size_bytes
+            ),
+            observed=observed.result,
+        )
+
+    def _observe_wfs_hits(
+        self,
+        candidate: SourceCandidate,
+        *,
+        canonical_name: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        byte_budget: int,
+    ) -> tuple[int, _Downloaded]:
+        if byte_budget <= 0:
+            raise AcquisitionLimitError(
+                "WFS snapshot has no remaining byte budget",
+                code="snapshot_too_large",
+            )
+        params = {
+            "service": "WFS",
+            "request": "GetFeature",
+            "version": version,
+            type_parameter: canonical_name,
+            "resultType": "hits",
+            count_parameter: "1",
+        }
+        observed = self._observe_download(
+            candidate,
+            _merge_query(candidate.endpoint_url, params),
+            max_bytes=min(
+                self.limits.max_probe_bytes,
+                byte_budget,
+            ),
+            accept="application/xml, text/xml;q=0.9",
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=_parse_wfs_hits,
+        )
+        matched = cast(int, observed.parsed)
+        if matched > self.limits.max_features:
+            raise AcquisitionLimitError(
+                "WFS reports too many features",
+                code="feature_limit",
+            )
+        return matched, observed
+
+    def _read_paged_wfs_pass(
+        self,
+        candidate: SourceCandidate,
+        *,
+        canonical_name: str,
+        page_size: int,
+        output_format: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        snapshot_spec: _WFSSnapshotSpec,
+        retain_artifacts: bool,
+        byte_budget: int,
+    ) -> _WFSSnapshotPass:
+        if snapshot_spec.sort_by is None:
+            raise AcquisitionConfigurationError(
+                "paged WFS snapshot has no deterministic sort"
+            )
+        page_artifacts: list[AcquiredArtifact] = []
+        expected_count, hits = self._observe_wfs_hits(
+            candidate,
+            canonical_name=canonical_name,
+            version=version,
+            type_parameter=type_parameter,
+            count_parameter=count_parameter,
+            byte_budget=byte_budget,
+        )
+        seen_identities: set[bytes] = set()
+        seen_source_feature_ids: set[str] = set()
+        identity_hasher = hashlib.sha256()
+        content_hasher = hashlib.sha256()
+        page_identity_sha256: list[str] = []
+        page_content_sha256: list[str] = []
+        page_reported_matched: int | None = None
+        total_features = 0
+        offset = 0
+        observed_bytes = hits.result.size_bytes
+        previous_identity_sort_key: tuple[
+            tuple[int, Any],
+            ...,
+        ] | None = None
+        terminal = False
+        last_result: HTTPSDownloadResult | None = None
+        for page_index in range(self.limits.max_pages):
+            params = {
+                "service": "WFS",
+                "request": "GetFeature",
+                "version": version,
+                type_parameter: canonical_name,
+                "outputFormat": output_format,
+                count_parameter: str(page_size),
+                "sortBy": snapshot_spec.sort_by,
+            }
+            if version.startswith("2.") or offset:
+                params["startIndex"] = str(offset)
+            remaining_byte_budget = byte_budget - observed_bytes
+            if remaining_byte_budget <= 0:
+                raise AcquisitionLimitError(
+                    "WFS pagination exceeds the aggregate byte limit",
+                    code="snapshot_too_large",
+                )
+            observed = self._observe_download(
+                candidate,
+                _merge_query(candidate.endpoint_url, params),
+                max_bytes=min(
+                    self.limits.max_page_bytes,
+                    remaining_byte_budget,
+                ),
+                accept=(
+                    "application/geo+json, application/json;q=0.9"
+                ),
+                allowed_media_types=_JSON_MEDIA_TYPES,
+                validator=lambda payload: _parse_feature_collection(
+                    payload,
+                    page_size=page_size,
+                    allow_next=False,
+                ),
+            )
+            last_result = observed.result
+            observed_bytes += observed.result.size_bytes
+            if observed_bytes > byte_budget:
+                raise AcquisitionLimitError(
+                    "WFS pagination exceeds the aggregate byte limit",
+                    code="snapshot_too_large",
+                )
+            page = cast(_FeaturePage, observed.parsed)
+            if page.number_matched is None:
+                raise AcquisitionValidationError(
+                    "ordered WFS snapshot omitted its complete feature count",
+                    code="snapshot_completeness_unproven",
+                    retryable=True,
+                )
+            if page_reported_matched is None:
+                page_reported_matched = page.number_matched
+            elif page.number_matched != page_reported_matched:
+                raise AcquisitionValidationError(
+                    "WFS feature count changed during ordered pagination",
+                    code="unstable_snapshot",
+                    retryable=True,
+                )
+            canonical = _canonical_wfs_page(
+                page,
+                collection=canonical_name,
+                snapshot_spec=snapshot_spec,
+            )
+            for identity_sort_key in canonical.identity_sort_keys:
+                if (
+                    previous_identity_sort_key is not None
+                    and identity_sort_key
+                    <= previous_identity_sort_key
+                ):
+                    raise AcquisitionValidationError(
+                        "WFS stable identities are not strictly ordered",
+                        code="unstable_pagination",
+                        retryable=True,
+                    )
+                previous_identity_sort_key = identity_sort_key
+            duplicates = seen_identities.intersection(
+                canonical.identity_records
+            )
+            if duplicates:
+                raise AcquisitionValidationError(
+                    "WFS repeated stable feature identities across pages",
+                    code="unstable_pagination",
+                    retryable=True,
+                )
+            seen_identities.update(canonical.identity_records)
+            duplicates = seen_source_feature_ids.intersection(
+                page.feature_ids
+            )
+            if duplicates:
+                raise AcquisitionValidationError(
+                    "WFS repeated source feature identifiers across pages",
+                    code="unstable_pagination",
+                    retryable=True,
+                )
+            seen_source_feature_ids.update(page.feature_ids)
+            for identity_record in canonical.identity_records:
+                _update_record_hash(identity_hasher, identity_record)
+            for content_record in canonical.content_records:
+                _update_record_hash(content_hasher, content_record)
+            page_identity_sha256.append(canonical.identity_sha256)
+            page_content_sha256.append(canonical.content_sha256)
+
+            total_features += page.count
+            if total_features > self.limits.max_features:
+                raise AcquisitionLimitError(
+                    "WFS snapshot exceeds the feature limit",
+                    code="feature_limit",
+                )
+            if retain_artifacts:
+                page_artifacts.append(
+                    self._local_wfs_page_artifact(
+                        canonical.document,
+                        observed=observed.result,
+                        source_version=version,
+                        metadata={
+                            "protocol": "wfs",
+                            "data_format": "geojson",
+                            "collection": canonical_name,
+                            "page_index": page_index,
+                            "offset": offset,
+                            "feature_count": page.count,
+                            "terminal_empty_page": page.count == 0,
+                            "canonical_snapshot": True,
+                            "stable_identity_properties": list(
+                                snapshot_spec.identity_properties
+                            ),
+                            "sort_by": snapshot_spec.sort_by,
+                            "page_identity_sha256": (
+                                canonical.identity_sha256
+                            ),
+                            "page_content_sha256": (
+                                canonical.content_sha256
+                            ),
+                        },
+                    )
+                )
+                _enforce_total_bytes(
+                    page_artifacts,
+                    self.limits.max_total_bytes,
+                )
+            offset += page.count
+            terminal = (
+                page.count == 0
+                or page.count < page_size
+            )
+            if terminal:
+                break
+        if not terminal:
+            raise AcquisitionLimitError(
+                "WFS pagination exceeds the page limit",
+                code="page_limit",
+            )
+        if total_features != expected_count:
+            raise AcquisitionValidationError(
+                "WFS snapshot does not match its independent hits count",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        if len(seen_identities) != total_features:
+            raise AcquisitionValidationError(
+                "WFS snapshot lacks unique stable feature identities",
+                code="missing_pagination_identity",
+            )
+        if last_result is None:
+            raise AcquisitionValidationError(
+                "WFS snapshot did not return an observation",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        return _WFSSnapshotPass(
+            artifacts=tuple(page_artifacts),
+            page_count=len(page_identity_sha256),
+            feature_count=total_features,
+            number_matched=expected_count,
+            source_feature_ids_observed=len(seen_source_feature_ids),
+            identity_sha256=identity_hasher.hexdigest(),
+            content_sha256=content_hasher.hexdigest(),
+            page_identity_sha256=tuple(page_identity_sha256),
+            page_content_sha256=tuple(page_content_sha256),
+            observed_bytes=observed_bytes,
+            observed=last_result,
         )
 
     def _acquire_ogc_api(
@@ -3886,13 +4605,275 @@ def _style_request_config(candidate: SourceCandidate) -> _StyleRequest | None:
     )
 
 
-def _configured_page_size(config: Mapping[str, Any], default: int) -> int:
+def _configured_page_size(
+    config: Mapping[str, Any],
+    default: int,
+    *,
+    maximum: int | None = None,
+) -> int:
+    upper_bound = default if maximum is None else maximum
     value = config.get("page_size", default)
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= default:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= upper_bound
+    ):
         raise AcquisitionConfigurationError(
-            f"source page_size must be between 1 and {default}"
+            f"source page_size must be between 1 and {upper_bound}"
         )
     return value
+
+
+def _wfs_snapshot_spec(
+    config: Mapping[str, Any],
+) -> _WFSSnapshotSpec | None:
+    raw = config.get("wfs_snapshot")
+    if raw is None:
+        return None
+    if "sort_by" in config:
+        raise AcquisitionConfigurationError(
+            "wfs_snapshot cannot be combined with legacy sort_by"
+        )
+    if not isinstance(raw, dict):
+        raise AcquisitionConfigurationError(
+            "source config wfs_snapshot is invalid"
+        )
+    mode = raw.get("mode")
+    if mode == "single_response":
+        if set(raw) != {"mode"}:
+            raise AcquisitionConfigurationError(
+                "single-response WFS snapshot config is invalid"
+            )
+        return _WFSSnapshotSpec(
+            mode="single_response",
+            identity_properties=(),
+            sort_by=None,
+        )
+    if mode != "paged" or set(raw) != {
+        "mode",
+        "identity_properties",
+    }:
+        raise AcquisitionConfigurationError(
+            "source config wfs_snapshot is invalid"
+        )
+    identity_properties = raw.get("identity_properties")
+    if (
+        not isinstance(identity_properties, list)
+        or not 1 <= len(identity_properties) <= 16
+        or any(
+            not isinstance(item, str)
+            or _WFS_IDENTITY_PROPERTY_RE.fullmatch(item) is None
+            for item in identity_properties
+        )
+        or len(identity_properties) != len(set(identity_properties))
+    ):
+        raise AcquisitionConfigurationError(
+            "WFS stable identity properties are invalid"
+        )
+    normalized = tuple(identity_properties)
+    return _WFSSnapshotSpec(
+        mode="paged",
+        identity_properties=normalized,
+        sort_by=",".join(f"{item} A" for item in normalized),
+    )
+
+
+def _canonical_single_response_wfs_page(
+    page: _FeaturePage,
+    *,
+    collection: str,
+) -> _CanonicalWFSPage:
+    sortable: list[tuple[bytes, dict[str, Any]]] = []
+    for feature in page.collection["features"]:
+        stable_content = {
+            key: copy.deepcopy(value)
+            for key, value in feature.items()
+            if key != "id"
+        }
+        sortable.append(
+            (_canonical_json(stable_content), stable_content)
+        )
+    sortable.sort(key=lambda item: item[0])
+
+    identity_records: list[bytes] = []
+    content_records: list[bytes] = []
+    canonical_features: list[dict[str, Any]] = []
+    previous_content: bytes | None = None
+    occurrence = 0
+    for content_record, stable_content in sortable:
+        occurrence = occurrence + 1 if content_record == previous_content else 0
+        previous_content = content_record
+        identity_record = (
+            hashlib.sha256(content_record).digest()
+            + struct.pack(">Q", occurrence)
+        )
+        stable_identifier = hashlib.sha256(
+            collection.encode("utf-8")
+            + b"\0"
+            + identity_record
+        ).hexdigest()
+        stable_feature = copy.deepcopy(stable_content)
+        stable_feature["id"] = f"siur-wfs-{stable_identifier}"
+        canonical_features.append(stable_feature)
+        identity_records.append(identity_record)
+        content_records.append(content_record)
+
+    document = _canonical_wfs_collection(
+        page,
+        features=canonical_features,
+    )
+    identity_hasher = hashlib.sha256()
+    for record in identity_records:
+        _update_record_hash(identity_hasher, record)
+    return _CanonicalWFSPage(
+        document=document,
+        identity_records=tuple(identity_records),
+        identity_sort_keys=(),
+        content_records=tuple(content_records),
+        identity_sha256=identity_hasher.hexdigest(),
+        content_sha256=hashlib.sha256(
+            _canonical_json(document)
+        ).hexdigest(),
+    )
+
+
+def _canonical_wfs_page(
+    page: _FeaturePage,
+    *,
+    collection: str,
+    snapshot_spec: _WFSSnapshotSpec,
+) -> _CanonicalWFSPage:
+    identity_records: list[bytes] = []
+    identity_sort_keys: list[tuple[tuple[int, Any], ...]] = []
+    content_records: list[bytes] = []
+    canonical_features: list[dict[str, Any]] = []
+    for feature in page.collection["features"]:
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            raise AcquisitionValidationError(
+                "WFS stable identity requires feature properties",
+                code="missing_pagination_identity",
+            )
+        identity: list[list[Any]] = []
+        sort_key: list[tuple[int, Any]] = []
+        for property_name in snapshot_spec.identity_properties:
+            if property_name not in properties:
+                raise AcquisitionValidationError(
+                    "WFS feature omits a stable identity property",
+                    code="missing_pagination_identity",
+                )
+            value = properties[property_name]
+            if (
+                value is None
+                or isinstance(value, bool)
+                or not isinstance(value, (str, int, float))
+                or (
+                    isinstance(value, float)
+                    and not math.isfinite(value)
+                )
+                or (
+                    isinstance(value, str)
+                    and (
+                        len(value) > 4096
+                        or any(
+                            ord(character) < 32
+                            for character in value
+                        )
+                    )
+                )
+            ):
+                raise AcquisitionValidationError(
+                    "WFS stable identity property is invalid",
+                    code="missing_pagination_identity",
+                )
+            identity.append([property_name, value])
+            sort_key.append(
+                (
+                    0 if isinstance(value, (int, float)) else 1,
+                    value,
+                )
+            )
+        identity_record = _canonical_json(identity)
+        if len(identity_record) > 8192:
+            raise AcquisitionLimitError(
+                "WFS stable identity exceeds its byte limit",
+                code="feature_identity_limit",
+            )
+        identity_records.append(identity_record)
+        identity_sort_keys.append(tuple(sort_key))
+        stable_feature = copy.deepcopy(feature)
+        stable_identifier = hashlib.sha256(
+            collection.encode("utf-8")
+            + b"\0"
+            + identity_record
+        ).hexdigest()
+        stable_feature["id"] = f"siur-wfs-{stable_identifier}"
+        canonical_features.append(stable_feature)
+        content_records.append(_canonical_json(stable_feature))
+
+    document = _canonical_wfs_collection(
+        page,
+        features=canonical_features,
+    )
+    identity_hasher = hashlib.sha256()
+    for record in identity_records:
+        _update_record_hash(identity_hasher, record)
+    return _CanonicalWFSPage(
+        document=document,
+        identity_records=tuple(identity_records),
+        identity_sort_keys=tuple(identity_sort_keys),
+        content_records=tuple(content_records),
+        identity_sha256=identity_hasher.hexdigest(),
+        content_sha256=hashlib.sha256(
+            _canonical_json(document)
+        ).hexdigest(),
+    )
+
+
+def _canonical_wfs_collection(
+    page: _FeaturePage,
+    *,
+    features: list[dict[str, Any]],
+) -> dict[str, Any]:
+    document = {
+        key: copy.deepcopy(value)
+        for key, value in page.collection.items()
+        if key
+        not in {
+            "features",
+            "links",
+            "numberMatched",
+            "numberReturned",
+            "timeStamp",
+            "totalFeatures",
+        }
+    }
+    document["features"] = features
+    document["numberMatched"] = page.number_matched
+    document["numberReturned"] = page.count
+    return document
+
+
+def _update_record_hash(
+    digest: Any,
+    record: bytes,
+) -> None:
+    digest.update(struct.pack(">Q", len(record)))
+    digest.update(record)
+
+
+def _wfs_snapshot_pass_identity(
+    value: _WFSSnapshotPass,
+) -> tuple[Any, ...]:
+    return (
+        value.page_count,
+        value.feature_count,
+        value.number_matched,
+        value.identity_sha256,
+        value.content_sha256,
+        value.page_identity_sha256,
+        value.page_content_sha256,
+    )
 
 
 def _strict_json(document: bytes) -> Any:
@@ -3932,6 +4913,100 @@ def _strict_json(document: bytes) -> Any:
         elif isinstance(item, float) and not math.isfinite(item):
             raise AcquisitionValidationError("JSON contains a non-finite number")
     return value
+
+
+def _parse_wfs_hits(document: bytes) -> int:
+    lowered = document.lower()
+    if (
+        not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError(
+            "WFS hits response is unsafe or oversized"
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "WFS hits response is malformed XML"
+        ) from error
+    elements = list(root.iter())
+    if (
+        _xml_local(root.tag) != "FeatureCollection"
+        or len(elements) > 1_000
+        or any(
+            _xml_local(element.tag)
+            in {"member", "featureMember", "featureMembers"}
+            for element in elements[1:]
+        )
+    ):
+        raise AcquisitionValidationError(
+            "response is not an empty WFS hits collection"
+        )
+    matched = _optional_count(
+        root.get("numberMatched") or root.get("totalFeatures"),
+        name="numberMatched",
+    )
+    returned = _optional_count(
+        root.get("numberReturned"),
+        name="numberReturned",
+    )
+    if matched is None or returned != 0:
+        raise AcquisitionValidationError(
+            "WFS hits response does not prove a feature count"
+        )
+    return matched
+
+
+def _wfs_paging_is_transaction_safe(
+    document: bytes,
+) -> bool | None:
+    lowered = document.lower()
+    if (
+        not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError(
+            "WFS capabilities are unsafe or oversized"
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "WFS capabilities are malformed XML"
+        ) from error
+    values: list[bool] = []
+    for element in root.iter():
+        if (
+            _xml_local(element.tag) != "Constraint"
+            or element.get("name") != "PagingIsTransactionSafe"
+        ):
+            continue
+        rendered = [
+            (child.text or "").strip().casefold()
+            for child in element.iter()
+            if _xml_local(child.tag) in {"DefaultValue", "Value"}
+            and (child.text or "").strip()
+        ]
+        if len(rendered) != 1 or rendered[0] not in {
+            "true",
+            "false",
+        }:
+            return None
+        values.append(rendered[0] == "true")
+    if not values:
+        return None
+    if len(values) != 1:
+        raise AcquisitionValidationError(
+            "WFS capabilities repeat PagingIsTransactionSafe"
+        )
+    return values[0]
 
 
 def _parse_feature_collection(
@@ -4008,6 +5083,7 @@ def _parse_feature_collection(
         number_matched=matched,
         next_url=next_url,
         feature_ids=tuple(feature_ids),
+        collection=root,
     )
 
 
