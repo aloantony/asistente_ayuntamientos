@@ -178,6 +178,13 @@ bytes almacenados, duración, siguiente comprobación, resultado de validación 
 error de la actualización más reciente. El frontend diferencia “local
 disponible”, “sincronizando”, “sirviendo versión anterior” y “bloqueada”, sin
 confundir un error de actualización con la indisponibilidad del mapa vigente.
+Mientras el visor está abierto, vuelve a consultar el catálogo cada 15 segundos
+y al recuperar visibilidad. Las URLs de tesela, leyenda e identificación quedan
+ligadas al identificador y generación activos; una promoción o rollback cambia
+la URL y no puede reutilizar durante cinco minutos la respuesta privada de la
+versión anterior. Los errores `tileerror` de Leaflet se muestran en el panel y
+provocan una comprobación inmediata del catálogo, en lugar de dejar una capa
+vacía sin explicación.
 
 La recuperación documentada parte de PostgreSQL, los artefactos y el directorio
 de GeoServer. Este último incluye toda la configuración persistente de
