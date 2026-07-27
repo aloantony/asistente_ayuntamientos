@@ -3,14 +3,16 @@
 The original v1 audit recorded possible acquisition routes.  It did not prove
 that those routes could be retained and served locally.  This module treats
 that file only as an immutable catalog identity inventory and applies the
-superseding v3 technical classification:
+superseding v4 technical classification:
 
-* 12 exact identities remain restricted, including two SIGPAC identities with a
-  deterministic official HTTPS distribution that still require IGCYL-NC
-  review; and
-* 19 exact identities may produce technical download candidates, while every
-  download and local service remains subject to separately persisted human
-  mirror authorization.
+* two SIGPAC identities remain restricted pending a bounded multi-archive
+  implementation and IGCYL-NC review;
+* ten exact WFS identities may use the separately hash-bound, convergent
+  snapshot recipes; and
+* 19 exact archive identities remain technical candidates.
+
+All 29 candidates remain non-authorizing.  Every network acquisition and local
+service still requires separately persisted human mirror authorization.
 """
 
 from __future__ import annotations
@@ -26,6 +28,14 @@ from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+from app.reference_layers.idecyl_wfs_snapshot_evidence import (
+    IDECyLWFSSnapshotEvidenceError,
+    MANIFEST_RESOURCE as WFS_SNAPSHOT_MANIFEST_RESOURCE,
+    MANIFEST_SHA256 as WFS_SNAPSHOT_MANIFEST_SHA256,
+    idecyl_wfs_snapshot_evidence,
+    idecyl_wfs_snapshot_inventory,
+    idecyl_wfs_snapshot_projection,
+)
 from app.reference_layers.reviewed_archive_integrity import (
     ReviewedArchiveIntegrityError,
     configured_reviewed_archive_integrity,
@@ -37,20 +47,28 @@ from app.reference_layers.source_content_parity import (
 )
 
 
-EVIDENCE_SCHEMA = "siur-idecyl-local-service-evidence/v3"
-MANIFEST_SCHEMA = "siur-idecyl-local-service-classification/v3"
+EVIDENCE_SCHEMA = "siur-idecyl-local-service-evidence/v4"
+MANIFEST_SCHEMA = "siur-idecyl-local-service-classification/v4"
+PREVIOUS_MANIFEST_SCHEMA = "siur-idecyl-local-service-classification/v3"
 LEGACY_MANIFEST_SCHEMA = "siur-idecyl-exact-evidence-manifest/v1"
-MANIFEST_RESOURCE = "evidence/idecyl_exact/decision-manifest-v3.json"
+MANIFEST_RESOURCE = "evidence/idecyl_exact/decision-manifest-v4.json"
 PREVIOUS_MANIFEST_RESOURCE = (
+    "evidence/idecyl_exact/decision-manifest-v3.json"
+)
+BASE_MANIFEST_RESOURCE = (
     "evidence/idecyl_exact/decision-manifest-v2.json"
 )
 LEGACY_MANIFEST_RESOURCE = "evidence/idecyl_exact/manifest-v1.json"
 RECORDS_RESOURCE = "evidence/idecyl_exact/records-20260727.xml"
 MANIFEST_SHA256 = (
+    "b86639df85b697463f757bb6255165b1"
+    "afd58b9f643be65cef617cfb23aedbf0"
+)
+PREVIOUS_MANIFEST_SHA256 = (
     "201deb9372cc1201bf1645ec8249cdf9"
     "fdac69784915d71492a0db7b36a01eb5"
 )
-PREVIOUS_MANIFEST_SHA256 = (
+BASE_MANIFEST_SHA256 = (
     "3b642924170117914ef23b10da606aad"
     "c7476674d60fee39eace25457642c948"
 )
@@ -68,6 +86,8 @@ SOURCE_SNAPSHOT_SHA256 = (
 )
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_PREVIOUS_MANIFEST_BYTES = 256 * 1024
+MAX_BASE_MANIFEST_BYTES = 256 * 1024
+MAX_WFS_SNAPSHOT_MANIFEST_BYTES = 256 * 1024
 MAX_LEGACY_MANIFEST_BYTES = 256 * 1024
 MAX_RECORDS_BYTES = 2 * 1024 * 1024
 
@@ -191,6 +211,23 @@ _IGCYL_NC_REVIEW_REQUIREMENTS = [
         "comercial específica de la Junta de Castilla y León."
     ),
 ]
+_IGCYL_NC_CANDIDATE_REASON_CODES = [
+    "igcyl_nc_recipient_acceptance_requires_review",
+    "igcyl_nc_visible_attribution_requires_review",
+    "igcyl_nc_commercial_license_required_if_commercial",
+    "local_service_requires_persisted_human_review",
+]
+_WFS_LICENSE_EVIDENCE = {
+    "authorization_effect": _AUTHORIZATION_EFFECT,
+    "authorization_granted": False,
+    "commercial_license_required_if_commercial": True,
+    "license_name": "LICENCIA-IGCYL-NC",
+    "license_url": _IGCYL_NC_LICENSE_URL,
+    "local_download_authorized": False,
+    "local_service_authorized": False,
+    "recipient_acceptance_required": True,
+    "required_attribution": "© Junta de Castilla y León",
+}
 
 LocalServiceStatus = Literal[
     "candidate",
@@ -299,6 +336,14 @@ def _committed_evidence_package() -> _EvidencePackage:
             MAX_PREVIOUS_MANIFEST_BYTES,
         ),
         _resource_body(
+            BASE_MANIFEST_RESOURCE,
+            MAX_BASE_MANIFEST_BYTES,
+        ),
+        _resource_body(
+            WFS_SNAPSHOT_MANIFEST_RESOURCE,
+            MAX_WFS_SNAPSHOT_MANIFEST_BYTES,
+        ),
+        _resource_body(
             LEGACY_MANIFEST_RESOURCE,
             MAX_LEGACY_MANIFEST_BYTES,
         ),
@@ -310,6 +355,8 @@ def _committed_evidence_package() -> _EvidencePackage:
 def _load_evidence_package(
     manifest_body: bytes,
     previous_manifest_body: bytes,
+    base_manifest_body: bytes,
+    wfs_snapshot_manifest_body: bytes,
     legacy_manifest_body: bytes,
     records_body: bytes,
     *,
@@ -321,6 +368,11 @@ def _load_evidence_package(
     _bounded_bytes(
         previous_manifest_body,
         MAX_PREVIOUS_MANIFEST_BYTES,
+    )
+    _bounded_bytes(base_manifest_body, MAX_BASE_MANIFEST_BYTES)
+    _bounded_bytes(
+        wfs_snapshot_manifest_body,
+        MAX_WFS_SNAPSHOT_MANIFEST_BYTES,
     )
     _bounded_bytes(legacy_manifest_body, MAX_LEGACY_MANIFEST_BYTES)
     _bounded_bytes(records_body, MAX_RECORDS_BYTES)
@@ -335,6 +387,16 @@ def _load_evidence_package(
         "IDECyL previous classification manifest",
     )
     _exact_digest(
+        base_manifest_body,
+        BASE_MANIFEST_SHA256,
+        "IDECyL base classification manifest",
+    )
+    _exact_digest(
+        wfs_snapshot_manifest_body,
+        WFS_SNAPSHOT_MANIFEST_SHA256,
+        "IDECyL WFS snapshot observation manifest",
+    )
+    _exact_digest(
         legacy_manifest_body,
         LEGACY_MANIFEST_SHA256,
         "IDECyL legacy inventory",
@@ -346,37 +408,79 @@ def _load_evidence_package(
     )
 
     manifest = _json_object(manifest_body)
+    previous_manifest = _json_object(previous_manifest_body)
     legacy = _json_object(legacy_manifest_body)
-    if set(manifest) != {
+    if (
+        set(manifest) != {
+            "schema",
+            "capture",
+            "wfs_candidate_sources",
+        }
+        or manifest.get("schema") != MANIFEST_SCHEMA
+    ):
+        raise IDECyLExactEvidenceError(
+            "IDECyL successor classification manifest shape is invalid"
+        )
+    if set(previous_manifest) != {
         "schema",
         "capture",
         "technical_classifications",
         "candidate_source",
         "restricted_https_distributions",
         "reviewable_archive_sources",
-    } or manifest.get("schema") != MANIFEST_SCHEMA:
+    } or previous_manifest.get("schema") != PREVIOUS_MANIFEST_SCHEMA:
         raise IDECyLExactEvidenceError(
-            "IDECyL classification manifest shape is invalid"
+            "IDECyL previous classification manifest shape is invalid"
         )
     legacy_sources, legacy_records = _legacy_inventory(legacy)
-    capture = _capture(manifest.get("capture"))
+    successor_capture = _successor_capture(manifest.get("capture"))
+    capture = _capture(previous_manifest.get("capture"))
     classifications = _classifications(
-        manifest.get("technical_classifications"),
+        previous_manifest.get("technical_classifications"),
         legacy_sources,
     )
     candidate = _candidate_source(
-        manifest.get("candidate_source"),
+        previous_manifest.get("candidate_source"),
         legacy_sources,
         legacy_records,
     )
     reviewable_archives = _reviewable_archive_sources(
-        manifest.get("reviewable_archive_sources"),
+        previous_manifest.get("reviewable_archive_sources"),
         legacy_sources,
     )
     restricted_distributions = _restricted_https_distributions(
-        manifest.get("restricted_https_distributions"),
+        previous_manifest.get("restricted_https_distributions"),
         legacy_sources,
     )
+    wfs_candidates = _wfs_candidate_sources(
+        manifest.get("wfs_candidate_sources"),
+        legacy_sources,
+    )
+    for layer_id, selected in wfs_candidates.items():
+        previous = classifications[layer_id]
+        classifications[layer_id] = {
+            **previous,
+            "local_service_status": "candidate",
+            "reason_codes": deepcopy(selected["reason_codes"]),
+        }
+    resulting = successor_capture["resulting_classification"]
+    restricted_layer_ids = sorted(
+        layer_id
+        for layer_id, item in classifications.items()
+        if item["local_service_status"] == "restricted"
+    )
+    if (
+        sum(
+            item["local_service_status"] == "candidate"
+            for item in classifications.values()
+        )
+        != resulting["candidate_count"]
+        or len(restricted_layer_ids) != resulting["restricted_count"]
+        or restricted_layer_ids != resulting["restricted_layer_ids"]
+    ):
+        raise IDECyLExactEvidenceError(
+            "IDECyL resulting classification summary changed"
+        )
 
     sources: list[ReviewedIDECyLExactSource] = []
     by_identity: dict[
@@ -393,7 +497,10 @@ def _load_evidence_package(
         selected = (
             candidate
             if layer_id == _CANDIDATE_LAYER_ID
-            else reviewable_archives.get(layer_id)
+            else (
+                reviewable_archives.get(layer_id)
+                or wfs_candidates.get(layer_id)
+            )
         )
         restricted_distribution = restricted_distributions.get(layer_id)
         profile = (
@@ -440,6 +547,12 @@ def _load_evidence_package(
                 "previous_classification_manifest_sha256": (
                     PREVIOUS_MANIFEST_SHA256
                 ),
+                "base_classification_manifest_resource": (
+                    BASE_MANIFEST_RESOURCE
+                ),
+                "base_classification_manifest_sha256": (
+                    BASE_MANIFEST_SHA256
+                ),
                 "legacy_inventory_resource": LEGACY_MANIFEST_RESOURCE,
                 "legacy_inventory_sha256": LEGACY_MANIFEST_SHA256,
                 "metadata_records_resource": RECORDS_RESOURCE,
@@ -477,6 +590,26 @@ def _load_evidence_package(
                 evidence["direct_distribution"] = deepcopy(
                     selected["direct_distribution"]
                 )
+            elif layer_id in _WFS_LAYER_IDS:
+                evidence["evidence_binding"].update(
+                    {
+                        "wfs_snapshot_manifest_resource": (
+                            WFS_SNAPSHOT_MANIFEST_RESOURCE
+                        ),
+                        "wfs_snapshot_manifest_sha256": (
+                            WFS_SNAPSHOT_MANIFEST_SHA256
+                        ),
+                    }
+                )
+                evidence["license_evidence"] = deepcopy(
+                    successor_capture["license_evidence"]
+                )
+                evidence["wfs_snapshot_evidence"] = deepcopy(
+                    selected["wfs_snapshot_evidence"]
+                )
+                evidence["wfs_snapshot_projection"] = deepcopy(
+                    selected["wfs_snapshot_projection"]
+                )
             else:
                 evidence["audit_capture"] = deepcopy(
                     selected["audit_capture"]
@@ -488,6 +621,11 @@ def _load_evidence_package(
                 selected["review_requirements"]
             )
             candidate_config = {}
+            config_source = (
+                selected["candidate_config"]
+                if layer_id in _WFS_LAYER_IDS
+                else selected
+            )
             for key in (
                 "data_format",
                 "media_type",
@@ -497,9 +635,12 @@ def _load_evidence_package(
                 "archive_styles",
                 "source_content_parity",
                 "reviewed_archive_integrity",
+                "discovery",
+                "page_size",
+                "wfs_snapshot",
             ):
-                if key in selected:
-                    candidate_config[key] = deepcopy(selected[key])
+                if key in config_source:
+                    candidate_config[key] = deepcopy(config_source[key])
         source = ReviewedIDECyLExactSource(
             profile=profile,
             audit_layer_id=layer_id,
@@ -662,8 +803,8 @@ def _capture(value: Any) -> dict[str, Any]:
         )
     _resource_binding(
         value["supersedes_classification"],
-        resource=PREVIOUS_MANIFEST_RESOURCE,
-        digest=PREVIOUS_MANIFEST_SHA256,
+        resource=BASE_MANIFEST_RESOURCE,
+        digest=BASE_MANIFEST_SHA256,
         source_snapshot=False,
     )
     _resource_binding(
@@ -689,6 +830,34 @@ def _capture(value: Any) -> dict[str, Any]:
         expected_count=6,
     )
     return value
+
+
+def _successor_capture(value: Any) -> dict[str, Any]:
+    expected = {
+        "authorization_effect": _AUTHORIZATION_EFFECT,
+        "authorization_granted": False,
+        "license_evidence": _WFS_LICENSE_EVIDENCE,
+        "local_download_authorized": False,
+        "local_service_authorized": False,
+        "previous_classification": {
+            "resource": PREVIOUS_MANIFEST_RESOURCE,
+            "sha256": PREVIOUS_MANIFEST_SHA256,
+        },
+        "resulting_classification": {
+            "candidate_count": 29,
+            "restricted_count": 2,
+            "restricted_layer_ids": [123, 166],
+        },
+        "wfs_snapshot_observations": {
+            "resource": WFS_SNAPSHOT_MANIFEST_RESOURCE,
+            "sha256": WFS_SNAPSHOT_MANIFEST_SHA256,
+        },
+    }
+    if value != expected:
+        raise IDECyLExactEvidenceError(
+            "IDECyL successor classification capture changed"
+        )
+    return deepcopy(expected)
 
 
 def _resource_binding(
@@ -867,6 +1036,156 @@ def _expected_classification(
     raise IDECyLExactEvidenceError(
         "IDECyL classification has no reviewed technical route"
     )
+
+
+def _wfs_candidate_sources(
+    value: Any,
+    legacy_sources: dict[int, dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Validate the v4 delta against every byte-bound WFS observation."""
+
+    try:
+        observations = idecyl_wfs_snapshot_inventory()
+    except IDECyLWFSSnapshotEvidenceError as error:
+        raise IDECyLExactEvidenceError(
+            "IDECyL WFS snapshot evidence is invalid"
+        ) from error
+    if (
+        [item.audit_layer_id for item in observations]
+        != sorted(_WFS_LAYER_IDS)
+    ):
+        raise IDECyLExactEvidenceError(
+            "IDECyL WFS candidate observations are incomplete"
+        )
+
+    expected_sources: list[dict[str, Any]] = []
+    resolved: dict[int, dict[str, Any]] = {}
+    for observation in observations:
+        layer_id = observation.audit_layer_id
+        legacy = legacy_sources.get(layer_id)
+        if legacy is None or observation.catalog_identity != {
+            "catalog_layer_source_key": legacy[
+                "catalog_layer_source_key"
+            ],
+            "catalog_endpoint_url": legacy["catalog_endpoint_url"],
+            "catalog_remote_name": legacy["catalog_remote_name"],
+        }:
+            raise IDECyLExactEvidenceError(
+                "IDECyL WFS candidate catalog identity changed"
+            )
+        try:
+            snapshot_evidence = idecyl_wfs_snapshot_evidence(observation)
+            snapshot_projection = idecyl_wfs_snapshot_projection(
+                snapshot_evidence
+            )
+        except IDECyLWFSSnapshotEvidenceError as error:
+            raise IDECyLExactEvidenceError(
+                "IDECyL WFS candidate projection is invalid"
+            ) from error
+        metadata_status, published_metadata_fid = (
+            _expected_metadata_binding(
+                layer_id,
+                legacy["metadata_fid"],
+            )
+        )
+        if (
+            snapshot_projection is None
+            or snapshot_projection["authorization_effect"]
+            != _AUTHORIZATION_EFFECT
+            or snapshot_projection["authorization_granted"] is not False
+            or snapshot_projection["local_download_authorized"] is not False
+            or snapshot_projection["local_service_authorized"] is not False
+            or snapshot_projection["license_name"]
+            != _WFS_LICENSE_EVIDENCE["license_name"]
+            or snapshot_projection["license_url"]
+            != _WFS_LICENSE_EVIDENCE["license_url"]
+            or snapshot_projection["required_matching_passes"] != 2
+            or snapshot_projection["endpoint_url"]
+            != observation.endpoint_url
+            or snapshot_projection["type_name"] != observation.type_name
+            or snapshot_projection["crs"] != "EPSG:25830"
+            or snapshot_projection["wfs_version"] != "2.0.0"
+            or snapshot_projection["metadata_binding"]
+            != {
+                "status": metadata_status,
+                "expected_metadata_fid": legacy["metadata_fid"],
+                "published_metadata_fid": published_metadata_fid,
+            }
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL WFS candidate projection changed"
+            )
+
+        method = snapshot_projection["safe_snapshot_method"]
+        if method == "single_response":
+            if (
+                snapshot_projection["page_size"] is not None
+                or snapshot_projection["sort_by"] != []
+            ):
+                raise IDECyLExactEvidenceError(
+                    "IDECyL single-response WFS recipe changed"
+                )
+            candidate_config = {
+                "discovery": "wfs_capabilities",
+                "wfs_snapshot": {"mode": "single_response"},
+            }
+        elif method == "paged":
+            if (
+                snapshot_projection["page_size"] != 11_000
+                or snapshot_projection["identity_properties"] != ["fid"]
+                or snapshot_projection["sort_by"] != ["fid"]
+            ):
+                raise IDECyLExactEvidenceError(
+                    "IDECyL paged WFS recipe changed"
+                )
+            candidate_config = {
+                "discovery": "wfs_capabilities",
+                "page_size": 11_000,
+                "wfs_snapshot": {
+                    "identity_properties": ["fid"],
+                    "mode": "paged",
+                },
+            }
+        else:
+            raise IDECyLExactEvidenceError(
+                "IDECyL WFS snapshot method is unsupported"
+            )
+
+        expected = {
+            "audit_layer_id": layer_id,
+            "authorization_effect": _AUTHORIZATION_EFFECT,
+            "candidate_config": candidate_config,
+            "profile": (
+                f"idecyl-{legacy['catalog_remote_name']}"
+                "-wfs-snapshot-20260727-v4"
+            ),
+            "reason_codes": _IGCYL_NC_CANDIDATE_REASON_CODES,
+            "selected_endpoint_url": observation.endpoint_url,
+            "selected_protocol": "wfs",
+            "selected_remote_name": observation.type_name,
+            "selected_sync_strategy": "full_snapshot",
+            "selected_target_kind": "vector",
+            "snapshot_evidence_sha256": _canonical_json_sha256(
+                snapshot_evidence
+            ),
+            "snapshot_projection_sha256": _canonical_json_sha256(
+                snapshot_projection
+            ),
+        }
+        expected_sources.append(expected)
+        resolved[layer_id] = {
+            **deepcopy(expected),
+            "review_requirements": deepcopy(
+                _IGCYL_NC_REVIEW_REQUIREMENTS
+            ),
+            "wfs_snapshot_evidence": deepcopy(snapshot_evidence),
+            "wfs_snapshot_projection": deepcopy(snapshot_projection),
+        }
+    if value != expected_sources:
+        raise IDECyLExactEvidenceError(
+            "IDECyL WFS candidate list or configuration changed"
+        )
+    return resolved
 
 
 def _expected_metadata_binding(

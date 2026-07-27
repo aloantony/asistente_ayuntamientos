@@ -15,6 +15,8 @@ from app.reference_layers.catalog import (
     ReferenceServiceDefinition,
 )
 from app.reference_layers.idecyl_exact_evidence import (
+    BASE_MANIFEST_RESOURCE,
+    BASE_MANIFEST_SHA256,
     EVIDENCE_SCHEMA,
     IDECyLExactEvidenceError,
     LEGACY_MANIFEST_RESOURCE,
@@ -25,6 +27,8 @@ from app.reference_layers.idecyl_exact_evidence import (
     PREVIOUS_MANIFEST_SHA256,
     RECORDS_RESOURCE,
     RECORDS_SHA256,
+    WFS_SNAPSHOT_MANIFEST_RESOURCE,
+    WFS_SNAPSHOT_MANIFEST_SHA256,
     _load_evidence_package,
     idecyl_exact_source_inventory,
     reviewed_idecyl_exact_source,
@@ -100,6 +104,18 @@ REVIEWABLE_ARCHIVE_IDS = {
     279,
     296,
 }
+WFS_CANDIDATE_IDS = {
+    78,
+    84,
+    118,
+    142,
+    161,
+    171,
+    194,
+    243,
+    246,
+    281,
+}
 
 
 def _resource_body(resource_path: str) -> bytes:
@@ -171,6 +187,19 @@ def _canonical_sha256(value: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_json_bytes(value: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def _walk_strings(value: Any) -> list[str]:
     result: list[str] = []
     stack = [value]
@@ -195,11 +224,11 @@ def test_classification_covers_all_31_layers_fail_closed() -> None:
     assert sum(
         item.local_service_status == "candidate"
         for item in inventory
-    ) == 19
+    ) == 29
     assert sum(
         item.local_service_status == "restricted"
         for item in inventory
-    ) == 12
+    ) == 2
     assert sum(
         item.local_service_status == "permission_pending"
         for item in inventory
@@ -208,7 +237,7 @@ def test_classification_covers_all_31_layers_fail_closed() -> None:
         item.audit_layer_id
         for item in inventory
         if item.local_service_status == "candidate"
-    } == {39, *REVIEWABLE_ARCHIVE_IDS}
+    } == {39, *REVIEWABLE_ARCHIVE_IDS, *WFS_CANDIDATE_IDS}
     assert all(item.evidence["schema"] == EVIDENCE_SCHEMA for item in inventory)
 
 
@@ -366,6 +395,106 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
     )
 
 
+def test_all_10_wfs_sources_build_exact_convergent_candidates() -> None:
+    inventory = {
+        item.audit_layer_id: item
+        for item in idecyl_exact_source_inventory()
+    }
+    definitions: set[str] = set()
+
+    for layer_id in sorted(WFS_CANDIDATE_IDS):
+        reviewed = inventory[layer_id]
+        candidates = acquisition_candidates(
+            _service(reviewed.catalog_endpoint_url),
+            _layer(
+                reviewed.catalog_layer_source_key,
+                reviewed.catalog_remote_name,
+            ),
+        )
+
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate.protocol == "wfs"
+        assert candidate.target_kind == "vector"
+        assert candidate.sync_strategy == "full_snapshot"
+        assert candidate.endpoint_url.startswith(
+            "https://idecyl.jcyl.es/geoserver/"
+        )
+        assert candidate.endpoint_url.endswith("/wfs")
+        assert ":" in candidate.remote_name
+        assert candidate.config["discovery"] == "wfs_capabilities"
+        assert candidate.config["reviewed_equivalence"] == reviewed.evidence
+        assert candidate.config["style_endpoint_url"] == (
+            reviewed.catalog_endpoint_url
+        )
+        assert candidate.config["style_layer_name"] == (
+            reviewed.catalog_remote_name
+        )
+        assert candidate.config["styles"] == []
+        assert candidate.definition_sha256 == _canonical_sha256(
+            candidate_definition(candidate)
+        )
+        definitions.add(candidate.definition_sha256)
+
+        snapshot = candidate.config["wfs_snapshot"]
+        projection = reviewed.evidence["wfs_snapshot_projection"]
+        assert projection["required_matching_passes"] == 2
+        assert projection["authorization_granted"] is False
+        assert projection["local_download_authorized"] is False
+        assert projection["local_service_authorized"] is False
+        if layer_id in {243, 281}:
+            assert candidate.config["page_size"] == 11_000
+            assert snapshot == {
+                "identity_properties": ["fid"],
+                "mode": "paged",
+            }
+        else:
+            assert "page_size" not in candidate.config
+            assert snapshot == {"mode": "single_response"}
+
+    assert len(definitions) == 10
+
+
+def test_wfs_candidates_project_hash_bound_non_authorizing_license() -> None:
+    for reviewed in idecyl_exact_source_inventory():
+        if reviewed.audit_layer_id not in WFS_CANDIDATE_IDS:
+            continue
+
+        assert reviewed.reason_codes == (
+            "igcyl_nc_recipient_acceptance_requires_review",
+            "igcyl_nc_visible_attribution_requires_review",
+            "igcyl_nc_commercial_license_required_if_commercial",
+            "local_service_requires_persisted_human_review",
+        )
+        assert reviewed.profile == (
+            f"idecyl-{reviewed.catalog_remote_name}"
+            "-wfs-snapshot-20260727-v4"
+        )
+        license_evidence = reviewed.evidence["license_evidence"]
+        assert license_evidence == {
+            "authorization_effect": (
+                "none_without_persisted_human_mirror_review"
+            ),
+            "authorization_granted": False,
+            "commercial_license_required_if_commercial": True,
+            "license_name": "LICENCIA-IGCYL-NC",
+            "license_url": (
+                "https://ftp.itacyl.es/cartografia/"
+                "LICENCIA-IGCYL-NC-2012.pdf"
+            ),
+            "local_download_authorized": False,
+            "local_service_authorized": False,
+            "recipient_acceptance_required": True,
+            "required_attribution": "© Junta de Castilla y León",
+        }
+        assert reviewed.evidence["authorization_effect"] == (
+            "none_without_persisted_human_mirror_review"
+        )
+        assert reviewed.evidence["wfs_snapshot_evidence"]["license_gate"][
+            "authorization_granted"
+        ] is False
+
+
 def test_reviewable_archives_require_acceptance_attribution_and_conditional_license() -> None:
     inventory = {
         item.audit_layer_id: item
@@ -401,13 +530,13 @@ def test_reviewable_archives_require_acceptance_attribution_and_conditional_lice
         )
 
 
-def test_the_other_12_exact_identities_cannot_generate_a_candidate() -> None:
+def test_only_the_two_sigpac_identities_cannot_generate_a_candidate() -> None:
     blocked = [
         item
         for item in idecyl_exact_source_inventory()
         if item.local_service_status != "candidate"
     ]
-    assert len(blocked) == 12
+    assert {item.audit_layer_id for item in blocked} == {123, 166}
 
     for reviewed in blocked:
         with pytest.raises(SourceDiscoveryError) as captured:
@@ -483,6 +612,11 @@ def test_candidate_identity_or_style_drift_fails_closed() -> None:
     [
         (MANIFEST_RESOURCE, MANIFEST_SHA256),
         (PREVIOUS_MANIFEST_RESOURCE, PREVIOUS_MANIFEST_SHA256),
+        (BASE_MANIFEST_RESOURCE, BASE_MANIFEST_SHA256),
+        (
+            WFS_SNAPSHOT_MANIFEST_RESOURCE,
+            WFS_SNAPSHOT_MANIFEST_SHA256,
+        ),
         (LEGACY_MANIFEST_RESOURCE, LEGACY_MANIFEST_SHA256),
         (RECORDS_RESOURCE, RECORDS_SHA256),
     ],
@@ -494,12 +628,70 @@ def test_committed_evidence_bytes_are_exact(
     assert hashlib.sha256(_resource_body(resource_path)).hexdigest() == expected
 
 
+def test_v4_manifest_is_canonical_and_explicitly_non_authorizing() -> None:
+    body = _resource_body(MANIFEST_RESOURCE)
+    parsed = json.loads(body)
+
+    assert body == _canonical_json_bytes(parsed)
+    assert parsed["schema"] == (
+        "siur-idecyl-local-service-classification/v4"
+    )
+    assert len(parsed["wfs_candidate_sources"]) == 10
+    assert parsed["capture"]["authorization_granted"] is False
+    assert parsed["capture"]["local_download_authorized"] is False
+    assert parsed["capture"]["local_service_authorized"] is False
+    assert parsed["capture"]["resulting_classification"] == {
+        "candidate_count": 29,
+        "restricted_count": 2,
+        "restricted_layer_ids": [123, 166],
+    }
+    assert parsed["capture"]["license_evidence"][
+        "required_attribution"
+    ] == "© Junta de Castilla y León"
+
+
+@pytest.mark.parametrize("mutation", ["list", "config", "authorization"])
+def test_recomputed_v4_digest_rejects_wfs_candidate_drift(
+    mutation: str,
+) -> None:
+    parsed = json.loads(_resource_body(MANIFEST_RESOURCE))
+    if mutation == "list":
+        parsed["wfs_candidate_sources"].pop()
+        match = "candidate list or configuration changed"
+    elif mutation == "config":
+        parsed["wfs_candidate_sources"][0]["candidate_config"][
+            "wfs_snapshot"
+        ]["mode"] = "paged"
+        match = "candidate list or configuration changed"
+    else:
+        parsed["capture"]["authorization_granted"] = True
+        match = "successor classification capture changed"
+    tampered = _canonical_json_bytes(parsed)
+
+    with pytest.raises(IDECyLExactEvidenceError, match=match):
+        _load_evidence_package(
+            tampered,
+            _resource_body(PREVIOUS_MANIFEST_RESOURCE),
+            _resource_body(BASE_MANIFEST_RESOURCE),
+            _resource_body(WFS_SNAPSHOT_MANIFEST_RESOURCE),
+            _resource_body(LEGACY_MANIFEST_RESOURCE),
+            _resource_body(RECORDS_RESOURCE),
+            expected_manifest_sha256=hashlib.sha256(tampered).hexdigest(),
+        )
+
+
 def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
     manifest = _resource_body(MANIFEST_RESOURCE)
     previous = _resource_body(PREVIOUS_MANIFEST_RESOURCE)
+    base = _resource_body(BASE_MANIFEST_RESOURCE)
+    wfs_snapshot = _resource_body(WFS_SNAPSHOT_MANIFEST_RESOURCE)
     legacy = _resource_body(LEGACY_MANIFEST_RESOURCE)
     records = _resource_body(RECORDS_RESOURCE)
-    tampered = manifest.replace(b'"candidate"', b'"restricted"', 1)
+    tampered = manifest.replace(
+        b'"mode": "single_response"',
+        b'"mode": "paged"',
+        1,
+    )
     assert tampered != manifest
 
     with pytest.raises(
@@ -509,6 +701,8 @@ def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
         _load_evidence_package(
             tampered,
             previous,
+            base,
+            wfs_snapshot,
             legacy,
             records,
             expected_manifest_sha256=MANIFEST_SHA256,
@@ -516,11 +710,13 @@ def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
 
     with pytest.raises(
         IDECyLExactEvidenceError,
-        match="technical classification changed",
+        match="candidate list or configuration changed",
     ):
         _load_evidence_package(
             tampered,
             previous,
+            base,
+            wfs_snapshot,
             legacy,
             records,
             expected_manifest_sha256=hashlib.sha256(tampered).hexdigest(),
@@ -534,6 +730,11 @@ def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
             "previous",
             "previous classification manifest failed its local digest",
         ),
+        ("base", "base classification manifest failed its local digest"),
+        (
+            "wfs_snapshot",
+            "WFS snapshot observation manifest failed its local digest",
+        ),
         ("legacy", "legacy inventory failed its local digest"),
         ("records", "metadata records failed its local digest"),
     ],
@@ -544,10 +745,20 @@ def test_tampered_bound_inputs_are_rejected(
 ) -> None:
     manifest = _resource_body(MANIFEST_RESOURCE)
     previous = _resource_body(PREVIOUS_MANIFEST_RESOURCE)
+    base = _resource_body(BASE_MANIFEST_RESOURCE)
+    wfs_snapshot = _resource_body(WFS_SNAPSHOT_MANIFEST_RESOURCE)
     legacy = _resource_body(LEGACY_MANIFEST_RESOURCE)
     records = _resource_body(RECORDS_RESOURCE)
     if resource_name == "previous":
         previous = previous.replace(b'"restricted"', b'"candidate"', 1)
+    elif resource_name == "base":
+        base = base.replace(b'"restricted"', b'"candidate"', 1)
+    elif resource_name == "wfs_snapshot":
+        wfs_snapshot = wfs_snapshot.replace(
+            b'"observed_feature_count": 9657',
+            b'"observed_feature_count": 9658',
+            1,
+        )
     elif resource_name == "legacy":
         legacy = legacy.replace(b"telefonia_movil", b"telefonia_Xovil", 1)
     else:
@@ -561,6 +772,8 @@ def test_tampered_bound_inputs_are_rejected(
         _load_evidence_package(
             manifest,
             previous,
+            base,
+            wfs_snapshot,
             legacy,
             records,
             expected_manifest_sha256=MANIFEST_SHA256,
