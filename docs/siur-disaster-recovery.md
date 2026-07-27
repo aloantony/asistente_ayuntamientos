@@ -4,9 +4,10 @@ Este runbook cubre el estado no reconstruible del espejo local:
 
 - el dump lógico de PostgreSQL;
 - `reference_artifacts`, salvo parciales de `staging` y su lock;
-- el directorio de datos de GeoServer completo. Schema 5 no excluye ni exige
-  el placeholder histórico `gwc-cache`: si aún existe debe estar vacío y se
-  respalda como un directorio ordinario.
+- el directorio de datos de GeoServer, salvo la base HSQL reconstruible de
+  cuota en la ruta exacta `gwc/diskquota_page_store_hsql`. Schema 6 no excluye
+  ni exige el placeholder histórico `gwc-cache`: si aún existe debe estar
+  vacío y se respalda como un directorio ordinario.
 
 El volumen `reference_transient` se excluye deliberadamente: contiene solo
 descargas brutas de trabajo, nunca artefactos promovidos. Los parciales se
@@ -18,12 +19,14 @@ reconstruye desde el estado durable de PostgreSQL al reiniciar scheduler y
 workers. Las teselas se regeneran bajo demanda a partir de los artefactos
 locales restaurados. Compose fija `GEOWEBCACHE_CACHE_DIR` a la ruta persistente
 `/opt/geoserver_data/gwc`, dentro de `geoserver_data`: quedan en el backup
-`gwc-gs.xml`, `gwc-layers/`, `gwc/geowebcache.xml`, la definición del
-FileBlobStore y cualquier otra configuración persistente. Las teselas se
-escriben mediante el FileBlobStore explícito `siur-tile-cache-v3`, cuyo
-`baseDirectory` exacto es `/var/lib/geowebcache`, sobre un volumen distinto.
-La cuota deseada está versionada en `.env.example` y se vuelve a aplicar y
-releer con el comando de este documento. Esta separación sigue la
+`gwc-gs.xml`, `gwc-layers/`, `gwc/geowebcache.xml`,
+`gwc/geowebcache-diskquota.xml`, la definición del FileBlobStore y cualquier
+otra configuración persistente. Las teselas se escriben mediante el
+FileBlobStore explícito `siur-tile-cache-v3` —se conserva ese identificador por
+compatibilidad—, cuyo `baseDirectory` exacto es `/var/lib/geowebcache`, sobre
+el filesystem dedicado v4. La base HSQL solo contabiliza esas teselas y se
+regenera tras un restore; respaldarla restauraría contadores obsoletos. Esta
+separación sigue la
 [configuración oficial de GeoWebCache integrado](https://docs.geoserver.org/3.0.x/en/user/geowebcache/config/),
 que distingue `GEOWEBCACHE_CACHE_DIR` de `gwc-layers/` y
 `gwc/geowebcache.xml`, y el
@@ -32,14 +35,17 @@ que permite separar su `baseDirectory`.
 
 En este despliegue, `GEOWEBCACHE_CACHE_DIR` **no es el directorio de teselas**:
 es la raíz persistente de configuración de GeoWebCache integrado. La ubicación
-antigua `/opt/geoserver_data/gwc-cache` solo aparece en manifests schema 2–4 y
-como placeholder vacío de compatibilidad. El manifest schema 5 fija por
-separado y de forma verificable la configuración
-`/opt/geoserver_data/gwc`, el volumen `geowebcache_tile_cache_v3`, el
+antigua `/opt/geoserver_data/gwc-cache` solo aparece como exclusión en
+manifests schema 2–4 y como placeholder vacío de compatibilidad. El manifest
+schema 6 fija por separado y de forma verificable la configuración
+`/opt/geoserver_data/gwc`, el volumen `geowebcache_tile_cache_v4`, el
 FileBlobStore `siur-tile-cache-v3` y su directorio de teselas
-`/var/lib/geowebcache`. También fija `default=true`, `enabled=true` y layout
-`DEFAULT`; el tamaño de bloque se vuelve a medir en el filesystem destino
-porque el volumen de teselas no forma parte del backup.
+`/var/lib/geowebcache`, además de excluir solo
+`gwc/diskquota_page_store_hsql`. También fija `default=true`, `enabled=true` y
+layout `DEFAULT`; el tamaño de bloque se vuelve a medir en el filesystem
+destino porque el volumen de teselas no forma parte del backup. La exclusión
+se audita sin seguir enlaces: un symlink, hardlink, fichero especial,
+filesystem cruzado o mount anidado hace abortar el backup.
 
 La definición restaurada puede contener el tamaño de bloque del filesystem de
 origen. Antes de abrir el gateway, `gwc-bootstrap` permite cambiar **solo** ese
@@ -51,13 +57,14 @@ está vacío. Relee después el XML y deja en su JSON
 adicional, aborta sin migrar.
 
 Compose usa ahora el volumen de teselas versionado
-`geowebcache_tile_cache_v3` con `nocopy`. Los anteriores
-`geowebcache_tile_cache_v2` y `geowebcache_data` quedan sin montar y **no se
+`geowebcache_tile_cache_v4` con `nocopy`, enlazado a un filesystem dedicado con
+techo real. Los anteriores `geowebcache_tile_cache_v2`,
+`geowebcache_tile_cache_v3` y `geowebcache_data` quedan sin montar y **no se
 borran, copian ni renombran automáticamente**. Deben conservarse para rollback
 e inspeccionarse fuera de línea, porque podrían mezclar configuración
 persistente y teselas derivadas. El control de cuota falla si encuentra
-configuración dentro de v3. La migración segura conserva la configuración
-canónica en `geoserver_data`, arranca v3 vacío y deja que regenere únicamente
+configuración dentro de v4. La migración segura conserva la configuración
+canónica en `geoserver_data`, arranca v4 vacío y deja que regenere únicamente
 teselas.
 
 La herramienta no ofrece ninguna operación de borrado al operador. `create` y
@@ -134,6 +141,45 @@ Preparar fuera del repositorio:
    postgresql://app:CONTRASEÑA@127.0.0.1:5432/app
    ```
 
+4. un filesystem dedicado de teselas. Para los valores predeterminados se
+   reserva por adelantado una imagen ext4 de 28 GiB y más de 5,5 millones de
+   inodos. Estos comandos requieren root y `mkfs.ext4` destruye el contenido
+   del fichero indicado: comprobar las dos rutas antes de ejecutarlos.
+
+   ```bash
+   sudo install -d -m 0750 -o 999 -g 2000 \
+     /var/lib/asistente_ayuntamientos/gwc-cache-v4
+   sudo fallocate -l 28G \
+     /var/lib/asistente_ayuntamientos/gwc-cache-v4.ext4
+   sudo mkfs.ext4 -F -m 0 -i 4096 -L siur-gwc-v4 \
+     /var/lib/asistente_ayuntamientos/gwc-cache-v4.ext4
+   ```
+
+   Añadir una entrada persistente equivalente a `/etc/fstab`:
+
+   ```text
+   /var/lib/asistente_ayuntamientos/gwc-cache-v4.ext4 /var/lib/asistente_ayuntamientos/gwc-cache-v4 ext4 loop,nodev,nosuid,noexec,noatime 0 2
+   ```
+
+   Montar y fijar la propiedad que usa Compose:
+
+   ```bash
+   sudo mount /var/lib/asistente_ayuntamientos/gwc-cache-v4
+   sudo chown 999:2000 \
+     /var/lib/asistente_ayuntamientos/gwc-cache-v4
+   sudo chmod 0750 \
+     /var/lib/asistente_ayuntamientos/gwc-cache-v4
+   findmnt -T /var/lib/asistente_ayuntamientos/gwc-cache-v4
+   df -B1 /var/lib/asistente_ayuntamientos/gwc-cache-v4
+   df -i /var/lib/asistente_ayuntamientos/gwc-cache-v4
+   ```
+
+   Definir
+   `GEOWEBCACHE_TILE_CACHE_HOST_PATH=/var/lib/asistente_ayuntamientos/gwc-cache-v4`.
+   Si el mount falta tras un reinicio, Compose solo ve el directorio padre:
+   `gwc-config-init` lo detecta por identidad/capacidad y bloquea GeoServer
+   antes de escribir. No continuar hasta que `findmnt` muestre `siur-gwc-v4`.
+
 No usar `postgresql+psycopg://` y no pasar la URL en la línea de comandos. El
 programa la analiza y entrega host, puerto, usuario, base y contraseña
 únicamente mediante variables privadas de libpq; ni argv, ni el manifest, ni
@@ -144,40 +190,62 @@ nombre no secreto `app_drill_*` necesario para activar la restauración directa.
 
 GeoWebCache tiene la cuota deshabilitada por defecto. La configuración local
 predeterminada exige un techo de 20 GiB, una reserva de 5 GiB, limpieza cada
-60 segundos y política LRU. Son configurables mediante:
+10 segundos, dos limpiadores, política LRU, 2 GiB de burst y un filesystem
+dedicado de como máximo 28 GiB. Son configurables mediante:
 
 ```text
 GEOWEBCACHE_DISK_QUOTA_GIB
 GEOWEBCACHE_DISK_QUOTA_MIN_FREE_GIB
 GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS
 GEOWEBCACHE_DISK_QUOTA_POLICY
+GEOWEBCACHE_PHYSICAL_BURST_MARGIN_GIB
+GEOWEBCACHE_PHYSICAL_HARD_LIMIT_GIB
+GEOWEBCACHE_TILE_CACHE_HOST_PATH
 ```
+
+La cuota de GWC es blanda: detecta el exceso periódicamente y limpia después.
+Por eso no basta para proteger el servidor. El mount dedicado es el límite
+duro; debe tener capacidad total entre
+`cuota + reserva + burst` y `hard limit`. El gateway deja de servir al superar
+`cuota + burst` o perder la reserva, y el propio filesystem impide crecer más
+allá de su capacidad aunque una petición ya estuviera en curso.
 
 GeoServer ya no publica ningún puerto del host. `geoserver-network`, un
 contenedor sin secretos, solo reserva el namespace de red y mapea
 `127.0.0.1:${GEOSERVER_PORT}` al puerto 8081 de `gwc-gateway`; el Tomcat de
-GeoServer escucha únicamente en el 8080 no publicado de ese namespace.
-`gwc-bootstrap` entra por ese loopback privado, mide v3, aplica el contrato y
-lo relee antes de que arranque el gateway. Reintenta únicamente
-indisponibilidad de red durante un máximo de 180 segundos.
+GeoServer tiene un `server.xml` versionado cuyo único conector HTTP escucha en
+`127.0.0.1:8080` dentro de ese namespace. No responde por la IP bridge ni por
+el host. Antes de Tomcat, `gwc-config-init` mide v4 y materializa de forma
+atómica `gwc/geowebcache-diskquota.xml`; no usa el PUT REST no persistente.
+Después, `gwc-bootstrap` entra por el loopback privado, crea o revalida el
+FileBlobStore y relee todo el contrato. Reintenta únicamente indisponibilidad
+de red durante un máximo de 180 segundos.
 
 El one-shot no es la autorización permanente. Antes de **cada** petición WMS,
 REST o de publicación, `gwc-gateway` consulta de nuevo la salud de GeoServer,
-el único FileBlobStore completo, el block-size del mount y la cuota. Solo
-entonces reenvía al 8080 fijo. Una credencial incorrecta, reinicio, XML/JSON
-inválido, store extra o diferencia de contrato devuelve 503 y no llega a
-GeoServer. El gateway tampoco permite mutar blobstores o cuota por su puerto;
-esas escrituras solo existen en el camino privado del bootstrap. Sus únicas
-variables sensibles son las credenciales administrativas de GeoServer.
+el único FileBlobStore completo, el block-size y límite físico del mount, la
+cuota XML y el endpoint versionado de salud. Este último demuestra que el
+monitor está habilitado y ejecutándose, que tiene una tarea periódica viva,
+que el proveedor no cayó en `DummyQuotaStore`, que el delegate exacto es
+`JDBCQuotaStore` con `HSQLDialect` y que una lectura real de uso funciona.
+Solo entonces reenvía al 8080 fijo. Una credencial incorrecta, reinicio,
+XML/JSON inválido, HSQL corrupto/no escribible, store extra, mount incorrecto
+o diferencia de contrato devuelve 503 y no llega a GeoServer. El gateway
+tampoco permite mutar blobstores o cuota por su puerto; la única mutación REST
+del bootstrap es el FileBlobStore. Sus únicas variables sensibles son las
+credenciales administrativas de GeoServer.
 
 `backend`, `worker`, `reference-worker` y `reference-scheduler` dependen de
 `gwc-gateway` sano; `frontend` queda condicionado a través de `backend`. Aun
 después del arranque, si el healthcheck se vuelve rojo los servicios pueden
 seguir vivos, pero toda entrega o publicación GeoServer continúa bloqueada por
-la validación por petición. Arrancar `geoserver` solo es diagnóstico: no abre
-ningún puerto utilizable. El dry-run operativo sigue disponible con el
+la validación por petición. Las credenciales administrativas y PostGIS se
+vacían explícitamente en backend, worker genérico y scheduler; solo el worker
+de referencia encargado de publicar conserva ese privilegio. Arrancar
+`geoserver` solo es diagnóstico: no abre ningún puerto utilizable. El dry-run
+operativo sigue disponible con el
 namespace ya arrancado; lee por REST todos los blobstores y la cuota y mide el
-filesystem real de v3:
+filesystem real de v4:
 
 ```bash
 docker compose --profile operations run --rm -T --no-deps gwc-ops
@@ -186,6 +254,8 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops
 El informe distingue:
 
 - capacidad, uso y espacio libre del filesystem;
+- identidad distinta a su padre, capacidad total acotada, margen de burst y
+  reserva del mount duro;
 - definición actual y deseada del FileBlobStore fijo
   `siur-tile-cache-v3` (`default=true`, `enabled=true`,
   `baseDirectory=/var/lib/geowebcache`, layout `DEFAULT` y tamaño de bloque
@@ -196,8 +266,7 @@ El informe distingue:
 - inodos usados/libres y una reserva conservadora para millones de teselas
   pequeñas;
 - techo configurado y reserva mínima;
-- una ampliación física conservadora de al menos el 125 % del crecimiento
-  lógico restante;
+- una ampliación física de al menos el 100 % del crecimiento lógico restante;
 - margen libre actual `libre - reserva`;
 - crecimiento restante `max(cuota - caché actual, 0)` y los márgenes decisivos
   de bloques físicos e inodos;
@@ -205,8 +274,8 @@ El informe distingue:
 
 Solo si todos los márgenes son no negativos se permite aplicar. Por ejemplo,
 con caché vacía, 6 GiB libres, cuota de 20 GiB y reserva de 5 GiB se rechaza:
-se reservan 25 GiB físicos para el crecimiento más 5 GiB libres, por lo que
-faltan 24 GiB, además de comprobar la reserva de inodos.
+se necesitan 20 GiB de crecimiento más 5 GiB libres, por lo que faltan
+19 GiB, además de comprobar la reserva de inodos.
 
 ```bash
 docker compose --profile operations run --rm -T --no-deps gwc-ops \
@@ -215,29 +284,35 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops \
   --apply
 ```
 
-En `--apply`, el cliente primero lista y lee por XML todos los blobstores. Si el
+`--apply` es una operación de bootstrap, no el comando genérico de
+mantenimiento. El cliente primero lista y lee por XML todos los blobstores. Si el
 identificador reservado ya existe con otra ruta, estado o layout, o si existe
 **cualquier** otro blobstore —aunque no sea el predeterminado—, aborta sin
 mutar. Una diferencia exclusiva de block-size usa la migración vacía y
-auditada descrita arriba; con datos aborta. Si falta y la lista está vacía,
+auditada descrita arriba únicamente porque `gwc-bootstrap` activa esa opción;
+el comando genérico nunca la autoriza. Con datos aborta. Si falta y la lista está vacía,
 hace el `PUT` XML oficial a
 `/geoserver/gwc/rest/blobstores/siur-tile-cache-v3.xml`, vuelve a listar y
-releer la representación canónica completa y solo entonces configura la cuota.
+releer la representación canónica completa. La creación exige HTTP 201 y una
+actualización exacta exige 200.
 El default anónimo que GeoWebCache genera cuando no hay ninguno configurado no
 forma parte de la lista REST; GeoWebCache 2.0.0 lo sustituye al añadir el
 default explícito, sin reescribir otro blobstore persistido.
 
-Después, el cliente hace `PUT /geoserver/gwc/rest/diskquota.json` y a
-continuación `GET` del mismo recurso. Un estado HTTP inesperado, XML/JSON
-incompleto o cualquier diferencia de blobstore, cuota, intervalo o política
-hace fallar la operación; no se declara éxito por haber recibido solo un
-`PUT`. El contrato de cuota corresponde a la
+La cuota ya fue escrita antes de Tomcat. El cliente usa
+`GET /geoserver/gwc/rest/diskquota.xml`, porque GeoServer 3.0.0 devuelve XML
+incluso desde la ruta `.json`, y exige la forma XML real completa: enabled,
+bytes, intervalo de 10 segundos, dos limpiadores y política. Después consulta
+la extensión de salud y repite ambas lecturas tras el FileBlobStore. Un estado
+HTTP inesperado o cualquier diferencia hace fallar la operación. El contrato
+de cuota corresponde a la
 [API oficial de cuota de GeoWebCache en GeoServer
 3.0](https://docs.geoserver.org/3.0.x/en/user/geowebcache/rest/diskquota/).
 
 Repetir el dry-run y archivar su JSON como evidencia. Después de una
-restauración, ejecutar otra vez este bloque. Solo el volumen v3 de teselas se
-reconstruye; toda la configuración GWC se restaura con el data dir.
+restauración, ejecutar otra vez este bloque. El volumen v4 de teselas y la base
+HSQL se reconstruyen; el XML declarativo y el resto de configuración GWC se
+restauran con el data dir.
 
 ### Fallo o reinicio del gate
 
@@ -267,25 +342,26 @@ reconstruye; toda la configuración GWC se restaura con el data dir.
 1. Adquirir el lease del runtime y detener escritores, frontend/backend y
    GeoServer. No ejecutar `down -v`.
 2. Crear un backup verificado de `geoserver_data` y conservar intactos los
-   volúmenes v2 y `geowebcache_data`.
+   volúmenes v2/v3 y `geowebcache_data`.
 3. Desplegar Compose: `GEOWEBCACHE_CACHE_DIR` debe resolver a
-   `/opt/geoserver_data/gwc`; solo v3 debe estar montado en
-   `/var/lib/geowebcache`. No montar v2 y v3 simultáneamente.
-4. Arrancar el namespace y GeoServer sin gateway, ejecutar primero el dry-run
-   y después iniciar explícitamente `gwc-bootstrap`. No iniciar el gateway ni
-   los consumidores hasta que termine con código cero. Archivar el JSON con
+   `/opt/geoserver_data/gwc`; solo el filesystem v4 dedicado debe estar montado
+   en `/var/lib/geowebcache`. No montar dos generaciones simultáneamente.
+4. Ejecutar `gwc-config-init`; solo con código cero arrancar namespace y
+   GeoServer. Después iniciar `gwc-bootstrap`. No iniciar consumidores hasta
+   que termine con código cero. Archivar ambos JSON con
+   `physical_limit.safe=true`, `quota_store_health.verified=true`,
    `blob_store.verified=true`, `disk_quota.verified=true` y `verified=true`.
 5. Iniciar `gwc-gateway`, esperar a que esté sano y generar una tesela de
-   prueba. Demostrar que aparece únicamente en v3; no
+   prueba. Demostrar que aparece únicamente en v4; no
    promover el despliegue si `geowebcache.xml`, `gwc-gs.xml`, `gwc-layers` o
    metadatos de configuración aparecen en ese volumen.
 
 Para rollback, detener de nuevo todos los escritores y GeoServer, volver al
-Compose anterior y montar el volumen v2 original sin modificarlo. No copiar
-v3 sobre v2 ni borrar ninguno de los dos. La configuración nueva permanece en
+Compose anterior y montar el volumen original sin modificarlo. No copiar v4
+sobre v2/v3 ni borrar ninguno. La configuración nueva permanece en
 el backup/data dir; si la revisión anterior no la entiende, restaurar el backup
 verificado de `geoserver_data` tomado en el paso 2. Tras confirmar el rollback,
-mantener v3 desconectado para análisis o una nueva migración.
+mantener v4 desconectado para análisis o una nueva migración.
 
 ## Crear un backup consistente
 
@@ -433,18 +509,20 @@ docker compose --profile operations run --rm -T --no-deps \
   --backup /backups/siur-backup-20260726T120000Z
 ```
 
-El verificador conserva compatibilidad de lectura con backups schema 2, 3 y 4
-ya publicados. Los schema 2 y 3 no se restauran automáticamente porque carecen
-del baseline canónico de miembros de extensiones; schema 4 sí conserva ese
-baseline y sigue siendo restaurable. Los backups nuevos son schema 5: además de
-la identidad PostgreSQL, versiones requeridas de extensiones, `ctime`, número
-de enlaces e inventario canónico hashado de miembros, declaran el contrato
-exacto del FileBlobStore v3 descrito al principio.
+El verificador conserva compatibilidad de lectura con backups schema 2–5 ya
+publicados. Los schema 2 y 3 no se restauran automáticamente porque carecen del
+baseline canónico de miembros de extensiones; schema 4 y 5 sí lo conservan y
+siguen siendo restaurables. Los backups nuevos son schema 6: además de la
+identidad PostgreSQL, versiones requeridas de extensiones, `ctime`, número de
+enlaces e inventario canónico hashado de miembros, declaran el contrato exacto
+del FileBlobStore/físico v4 y la exclusión HSQL descritos al principio.
 
-En schema 5, `trees.geoserver_data.excluded_paths` es `[]`: una instalación
-limpia sin `gwc-cache` verifica, restaura y puede volver a respaldarse sin crear
-ese path. Schema 2–4 conservan y verifican exactamente su exclusión histórica
-`["gwc-cache"]`.
+En schema 6, `trees.geoserver_data.excluded_paths` es exactamente
+`["gwc/diskquota_page_store_hsql"]`. Una restauración no recrea esa base
+contable; GeoServer inicia una nueva y el endpoint de salud debe demostrarla
+antes de servir. El ciclo backup → restore → backup conserva la misma
+exclusión aunque el path todavía no exista. Schema 5 conserva `[]` y schema
+2–4 su exclusión histórica `["gwc-cache"]`.
 
 Solo tras obtener `"verified": true`, volver a ejecutar el bootstrap, esperar
 al gateway sano y levantar los consumidores:

@@ -1,12 +1,17 @@
-x-gwc-admin-environment: &gwc-admin-environment
-  GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
-  GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
-  GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS: ${GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS:-60}
+x-gwc-contract-environment: &gwc-contract-environment
+  GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS: ${GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS:-10}
   GEOWEBCACHE_DISK_QUOTA_GIB: ${GEOWEBCACHE_DISK_QUOTA_GIB:-20}
   GEOWEBCACHE_DISK_QUOTA_MIN_FREE_GIB: ${GEOWEBCACHE_DISK_QUOTA_MIN_FREE_GIB:-5}
   GEOWEBCACHE_DISK_QUOTA_POLICY: ${GEOWEBCACHE_DISK_QUOTA_POLICY:-LRU}
+  GEOWEBCACHE_PHYSICAL_BURST_MARGIN_GIB: ${GEOWEBCACHE_PHYSICAL_BURST_MARGIN_GIB:-2}
+  GEOWEBCACHE_PHYSICAL_HARD_LIMIT_GIB: ${GEOWEBCACHE_PHYSICAL_HARD_LIMIT_GIB:-28}
   LOCAL_GEOSERVER_BASE_URL: ${LOCAL_GEOSERVER_BASE_URL:-http://127.0.0.1:8081/geoserver}
   LOCAL_GEOSERVER_TIMEOUT_SECONDS: ${LOCAL_GEOSERVER_TIMEOUT_SECONDS:-8}
+
+x-gwc-admin-environment: &gwc-admin-environment
+  <<: *gwc-contract-environment
+  GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
+  GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
 
 services:
   backend:
@@ -46,6 +51,10 @@ services:
     user: "0:${REFERENCE_STORAGE_GID:-2000}"
     env_file:
       - .env
+    environment:
+      GEOSERVER_ADMIN_USER: ""
+      GEOSERVER_ADMIN_PASSWORD: ""
+      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
     network_mode: host
     command:
       ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
@@ -152,7 +161,10 @@ services:
       - "127.0.0.1:${GEOSERVER_PORT:-8081}:8081"
 
   geoserver:
-    image: docker.osgeo.org/geoserver:3.0.0
+    build:
+      context: .
+      dockerfile: ops/geoserver/Dockerfile
+    image: asistente-ayuntamientos-geoserver:3.0.0-siur
     network_mode: service:geoserver-network
     environment:
       GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
@@ -160,17 +172,19 @@ services:
       RUN_UNPRIVILEGED: "true"
       RUN_WITH_USER_UID: "999"
       RUN_WITH_USER_GID: ${REFERENCE_STORAGE_GID:-2000}
-      CHANGE_OWNERSHIP_ON_FOLDERS: "/opt /opt/geoserver_data /var/lib/geowebcache"
+      # The bounded cache mount is provisioned with exact ownership on the
+      # host. Never recursively chown a potentially multi-million-tile cache.
+      CHANGE_OWNERSHIP_ON_FOLDERS: "/opt /opt/geoserver_data"
       SKIP_DEMO_DATA: "true"
       # This path stores persistent GWC configuration, not the tile cache.
-      # The explicit FileBlobStore below points tiles at the separate v3 mount.
+      # The explicit FileBlobStore below points tiles at the separate v4 mount.
       GEOWEBCACHE_CACHE_DIR: /opt/geoserver_data/gwc
     volumes:
       - geoserver_data:/opt/geoserver_data
-      # Versioned tile-only volume. The GWC REST bootstrap configures this
-      # exact path as the default FileBlobStore before enabling disk quota.
+      # Versioned tile-only volume. Pre-start XML enables quota; the REST
+      # bootstrap creates and re-reads only the exact FileBlobStore.
       - type: volume
-        source: geowebcache_tile_cache_v3
+        source: geowebcache_tile_cache_v4
         target: /var/lib/geowebcache
         volume:
           nocopy: true
@@ -178,6 +192,9 @@ services:
     depends_on:
       geoserver-network:
         condition: service_started
+        restart: true
+      gwc-config-init:
+        condition: service_completed_successfully
         restart: true
       postgres:
         condition: service_healthy
@@ -191,6 +208,39 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  gwc-config-init:
+    build:
+      context: ./backend
+    user: "0:${REFERENCE_STORAGE_GID:-2000}"
+    read_only: true
+    network_mode: none
+    environment:
+      <<: *gwc-contract-environment
+      PYTHONDONTWRITEBYTECODE: "1"
+    command:
+      [
+        "python",
+        "-m",
+        "app.reference_layers.gwc_config_init",
+        "--geoserver-data-path",
+        "/opt/geoserver_data",
+        "--cache-path",
+        "/var/lib/geowebcache",
+        "--owner-uid",
+        "999",
+        "--owner-gid",
+        "${REFERENCE_STORAGE_GID:-2000}",
+        "--apply",
+      ]
+    volumes:
+      - geoserver_data:/opt/geoserver_data
+      - type: volume
+        source: geowebcache_tile_cache_v4
+        target: /var/lib/geowebcache
+        read_only: true
+        volume:
+          nocopy: true
 
   gwc-bootstrap:
     build:
@@ -213,7 +263,7 @@ services:
       ]
     volumes:
       - type: volume
-        source: geowebcache_tile_cache_v3
+        source: geowebcache_tile_cache_v4
         target: /var/lib/geowebcache
         read_only: true
         volume:
@@ -250,7 +300,7 @@ services:
       ]
     volumes:
       - type: volume
-        source: geowebcache_tile_cache_v3
+        source: geowebcache_tile_cache_v4
         target: /var/lib/geowebcache
         read_only: true
         volume:
@@ -269,8 +319,8 @@ services:
       retries: 3
       start_period: 5s
     depends_on:
-      gwc-bootstrap:
-        condition: service_completed_successfully
+      geoserver-network:
+        condition: service_started
         restart: true
 
   gwc-ops:
@@ -291,7 +341,7 @@ services:
       ]
     volumes:
       - type: volume
-        source: geowebcache_tile_cache_v3
+        source: geowebcache_tile_cache_v4
         target: /var/lib/geowebcache
         read_only: true
         volume:
@@ -320,4 +370,9 @@ volumes:
   reference_artifacts:
   reference_transient:
   geoserver_data:
-  geowebcache_tile_cache_v3:
+  geowebcache_tile_cache_v4:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${GEOWEBCACHE_TILE_CACHE_HOST_PATH:?GEOWEBCACHE_TILE_CACHE_HOST_PATH must reference a dedicated hard-limited filesystem mount}

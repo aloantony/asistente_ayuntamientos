@@ -310,6 +310,13 @@ def make_sources(tmp_path: Path) -> tuple[Path, Path]:
         "<gwc-configuration/>",
         encoding="utf-8",
     )
+    quota_store = geoserver / "gwc" / "diskquota_page_store_hsql"
+    quota_store.mkdir()
+    (quota_store / "diskquota.data").write_bytes(b"reconstructible-runtime")
+    (quota_store / "diskquota.properties").write_text(
+        "modified=yes\n",
+        encoding="ascii",
+    )
     (geoserver / "gwc-layers").mkdir()
     (geoserver / "gwc-layers" / "siur.xml").write_text(
         "<layer-configuration/>",
@@ -463,6 +470,7 @@ def downgrade_geowebcache_contract(
     geowebcache.pop("configuration_directory")
     geowebcache.pop("volume")
     geowebcache.pop("blob_store")
+    geowebcache.pop("quota_store_excluded_path", None)
     geoserver_tree = manifest["trees"]["geoserver_data"]  # type: ignore[index]
     geoserver_tree["excluded_paths"] = ["gwc-cache"]
 
@@ -547,6 +555,26 @@ def downgrade_backup_to_schema_v4(backup: Path) -> None:
     rewrite_manifest(backup, mutate)
 
 
+def downgrade_backup_to_schema_v5(backup: Path) -> None:
+    def mutate(manifest: dict[str, object]) -> None:
+        manifest["schema_version"] = 5
+        exclusions = manifest["excluded_reconstructible_state"]
+        geowebcache = next(  # type: ignore[arg-type]
+            item
+            for item in exclusions
+            if item["component"] == "geowebcache"
+        )
+        geowebcache["excluded_scope"] = (
+            "external explicit FileBlobStore v3 tile volume only"
+        )
+        geowebcache["volume"] = "geowebcache_tile_cache_v3"
+        geowebcache.pop("quota_store_excluded_path")
+        geoserver_tree = manifest["trees"]["geoserver_data"]  # type: ignore[index]
+        geoserver_tree["excluded_paths"] = []
+
+    rewrite_manifest(backup, mutate)
+
+
 def create_request(
     tmp_path: Path,
     *,
@@ -617,7 +645,9 @@ def test_create_defaults_to_read_only_dry_run_and_inventories_exclusions(
         ".reference-blob-store.lock",
         "staging",
     ]
-    assert result["geoserver_data"]["excluded_paths"] == []  # type: ignore[index]
+    assert result["geoserver_data"]["excluded_paths"] == [  # type: ignore[index]
+        "gwc/diskquota_page_store_hsql"
+    ]
     assert {  # type: ignore[index]
         item["component"]
         for item in result["excluded_reconstructible_state"]
@@ -666,7 +696,7 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         ".reference-blob-store.lock",
         "staging",
     ]
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     assert manifest["consistency"]["postgres_system_identifier"] == (
         SOURCE_SYSTEM_IDENTIFIER
     )
@@ -700,7 +730,15 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         "owners_must_differ_from_restore_role": True,
         "restore_comments": False,
     }
-    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == []
+    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == [
+        "gwc/diskquota_page_store_hsql"
+    ]
+    assert all(
+        not entry["path"].startswith(
+            "gwc/diskquota_page_store_hsql"
+        )
+        for entry in manifest["trees"]["geoserver_data"]["entries"]
+    )
     evidence = (backup / QUIESCENCE_EVIDENCE_NAME).read_bytes()
     assert evidence == (
         tmp_path / "quiescence.json"
@@ -719,12 +757,13 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         "component": "geowebcache",
         "included": False,
         "excluded_scope": (
-            "external explicit FileBlobStore v3 tile volume only"
+            "external dedicated FileBlobStore v4 tile volume and exact "
+            "gwc/diskquota_page_store_hsql runtime quota database"
         ),
         "configuration_included": True,
         "configuration_directory": "/opt/geoserver_data/gwc",
         "cache_directory": "/var/lib/geowebcache",
-        "volume": "geowebcache_tile_cache_v3",
+        "volume": "geowebcache_tile_cache_v4",
         "blob_store": {
             "type": "FileBlobStore",
             "id": "siur-tile-cache-v3",
@@ -734,11 +773,12 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
             "path_generator_type": "DEFAULT",
             "file_system_block_size": "measured-from-target-filesystem",
         },
+        "quota_store_excluded_path": "gwc/diskquota_page_store_hsql",
         "reconstruction": (
-            "restore the complete GeoServer data directory, reapply and "
-            "verify the exact FileBlobStore and declarative disk quota, then "
-            "regenerate requested tiles from restored local delivery "
-            "artifacts"
+            "restore the complete GeoServer data directory, reapply the "
+            "pre-start quota XML, recreate and verify a fresh HSQL quota "
+            "store plus exact FileBlobStore, then regenerate requested tiles "
+            "from restored local delivery artifacts"
         ),
     }
     assert (
@@ -803,7 +843,9 @@ def test_declared_exclusions_verify_even_when_runtime_paths_are_absent(
         ".reference-blob-store.lock",
         "staging",
     ]
-    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == []
+    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == [
+        "gwc/diskquota_page_store_hsql"
+    ]
 
 
 def test_verify_detects_payload_tampering(
@@ -882,6 +924,18 @@ def test_verify_and_restore_dry_run_remain_compatible_with_schema_v4_backup(
     assert not request.destination.exists()
 
 
+def test_verify_remains_compatible_with_schema_v5_backup(
+    tmp_path: Path,
+) -> None:
+    backup, runner, _reference, _geoserver = completed_backup(tmp_path)
+    downgrade_backup_to_schema_v5(backup)
+
+    verification = verify_backup(backup, runner=runner)
+
+    assert verification["verified"] is True
+    assert verification["manifest_schema_version"] == 5
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
@@ -889,6 +943,7 @@ def test_verify_and_restore_dry_run_remain_compatible_with_schema_v4_backup(
         ("configuration_directory", "/wrong/configuration"),
         ("cache_directory", "/wrong/tiles"),
         ("volume", "wrong-volume"),
+        ("quota_store_excluded_path", "gwc/wrong"),
         (
             "blob_store",
             {
@@ -903,7 +958,7 @@ def test_verify_and_restore_dry_run_remain_compatible_with_schema_v4_backup(
         ),
     ],
 )
-def test_schema_v5_rejects_mutated_geowebcache_recovery_contract(
+def test_schema_v6_rejects_mutated_geowebcache_recovery_contract(
     tmp_path: Path,
     field: str,
     replacement: object,
@@ -924,6 +979,29 @@ def test_schema_v5_rejects_mutated_geowebcache_recovery_contract(
     with pytest.raises(
         DisasterRecoveryVerificationError,
         match="FileBlobStore backup scope",
+    ):
+        verify_backup(backup, runner=runner)
+
+
+def test_schema_v6_rejects_manifest_entry_inside_excluded_quota_store(
+    tmp_path: Path,
+) -> None:
+    backup, runner, _reference, _geoserver = completed_backup(tmp_path)
+
+    def mutate(manifest: dict[str, object]) -> None:
+        entries = manifest["trees"]["geoserver_data"]["entries"]  # type: ignore[index]
+        file_entry = next(  # type: ignore[arg-type]
+            entry for entry in entries if entry["kind"] == "file"
+        )
+        file_entry["path"] = (
+            "gwc/diskquota_page_store_hsql/stale-quota.data"
+        )
+
+    rewrite_manifest(backup, mutate)
+
+    with pytest.raises(
+        DisasterRecoveryVerificationError,
+        match="state declared as excluded",
     ):
         verify_backup(backup, runner=runner)
 
@@ -1266,7 +1344,54 @@ def test_create_rejects_nonempty_legacy_geowebcache_mountpoint(
         create_backup(request, now=NOW)
 
 
-def test_schema_v5_includes_but_does_not_require_empty_legacy_placeholder(
+def test_create_rejects_symlink_inside_excluded_quota_store(
+    tmp_path: Path,
+) -> None:
+    reference, geoserver = make_sources(tmp_path)
+    quota_store = geoserver / "gwc" / "diskquota_page_store_hsql"
+    (quota_store / "unsafe-link").symlink_to(
+        geoserver / "gwc" / "geowebcache.xml"
+    )
+    request = create_request(
+        tmp_path,
+        reference=reference,
+        geoserver=geoserver,
+        with_evidence=False,
+    )
+
+    with pytest.raises(
+        DisasterRecoverySafetyError,
+        match="cannot contain symlinks",
+    ):
+        create_backup(request, now=NOW)
+
+
+def test_create_rejects_nested_mount_at_excluded_quota_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference, geoserver = make_sources(tmp_path)
+    request = create_request(
+        tmp_path,
+        reference=reference,
+        geoserver=geoserver,
+        with_evidence=False,
+    )
+    mount_ids = iter((100, 101))
+    monkeypatch.setattr(
+        recovery_module,
+        "_descriptor_mount_id",
+        lambda _descriptor: next(mount_ids),
+    )
+
+    with pytest.raises(
+        DisasterRecoverySafetyError,
+        match="cannot be mount points",
+    ):
+        create_backup(request, now=NOW)
+
+
+def test_schema_v6_includes_but_does_not_require_empty_legacy_placeholder(
     tmp_path: Path,
 ) -> None:
     reference, geoserver = make_sources(tmp_path)
@@ -1285,7 +1410,9 @@ def test_schema_v5_includes_but_does_not_require_empty_legacy_placeholder(
     )
     geoserver_tree = manifest["trees"]["geoserver_data"]
 
-    assert geoserver_tree["excluded_paths"] == []
+    assert geoserver_tree["excluded_paths"] == [
+        "gwc/diskquota_page_store_hsql"
+    ]
     assert any(
         entry["path"] == "gwc-cache" and entry["kind"] == "directory"
         for entry in geoserver_tree["entries"]
@@ -2045,7 +2172,7 @@ def test_restore_apply_extracts_only_to_new_drill_path_and_empty_database(
     assert "d.deptype IN ('a', 'i')" in preflight_sql
 
 
-def test_schema_v5_backup_restore_backup_round_trip_needs_no_gwc_placeholder(
+def test_schema_v6_backup_restore_backup_recreates_no_stale_quota_store(
     tmp_path: Path,
 ) -> None:
     backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
@@ -2060,6 +2187,9 @@ def test_schema_v5_backup_restore_backup_round_trip_needs_no_gwc_placeholder(
     restored_reference = restore.destination / "reference_artifacts"
     restored_geoserver = restore.destination / "geoserver_data"
     assert not (restored_geoserver / "gwc-cache").exists()
+    assert not (
+        restored_geoserver / "gwc" / "diskquota_page_store_hsql"
+    ).exists()
 
     second_backup = tmp_path / f"{BACKUP_PREFIX}round-trip"
     second_evidence = evidence_file(
@@ -2087,8 +2217,10 @@ def test_schema_v5_backup_restore_backup_round_trip_needs_no_gwc_placeholder(
     )
 
     assert report["verified"] is True
-    assert manifest["schema_version"] == 5
-    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == []
+    assert manifest["schema_version"] == 6
+    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == [
+        "gwc/diskquota_page_store_hsql"
+    ]
 
 
 def test_subprocess_runner_passes_verified_descriptor_without_leaking_marker(

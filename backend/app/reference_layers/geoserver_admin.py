@@ -133,7 +133,20 @@ class GeoWebCacheDiskQuota:
     quota_units: Literal["MiB", "GiB", "TiB"]
     cleanup_frequency: int
     cleanup_units: Literal["SECONDS", "MINUTES", "HOURS", "DAYS"]
+    max_concurrent_cleanups: int
     expiration_policy: Literal["LRU", "LFU"]
+
+
+@dataclass(frozen=True)
+class GeoWebCacheQuotaHealth:
+    healthy: bool
+    monitor_enabled: bool
+    monitor_running: bool
+    scheduled_cleanup_active: bool
+    provider_error: bool
+    store_class: str | None
+    dialect_class: str | None
+    global_used_bytes: int | None
 
 
 @dataclass(frozen=True)
@@ -342,15 +355,27 @@ class GeoServerAdminClient:
     def read_geowebcache_disk_quota(self) -> GeoWebCacheDiskQuota:
         """Read the fixed GeoWebCache global disk-quota configuration."""
 
-        payload = self._get_json(
-            "/diskquota.json",
+        # GeoServer 3.0.0 / GeoWebCache 2.0.0 returns an XML body even from
+        # ``diskquota.json`` while advertising application/json.  The fixed
+        # XML representation is therefore the only response accepted here.
+        payload = self._get_xml(
+            "/diskquota.xml",
             request_root=self._gwc_rest_root,
         )
-        if payload is None:
-            raise GeoServerAdminResponseError(
-                "GeoWebCache disk quota configuration is missing"
-            )
         return _parse_geowebcache_disk_quota(payload)
+
+    def read_geowebcache_quota_health(self) -> GeoWebCacheQuotaHealth:
+        """Read the version-pinned extension's real monitor/store health."""
+
+        payload = self._get_json(
+            "/siur/gwc-quota-health",
+            request_root=self._rest_root,
+        )
+        if payload is None:  # pragma: no cover - GET does not allow 404.
+            raise GeoServerAdminResponseError(
+                "GeoWebCache quota health resource is missing"
+            )
+        return _parse_geowebcache_quota_health(payload)
 
     def read_geowebcache_file_blob_stores(
         self,
@@ -420,6 +445,7 @@ class GeoServerAdminClient:
             f"/blobstores/{_segment(expected.id)}.xml",
             _serialize_geowebcache_file_blob_store(expected),
             request_root=self._gwc_rest_root,
+            expected_status=201 if current is None else 200,
         )
         after = self.read_geowebcache_file_blob_stores()
         current = _validate_geowebcache_tile_blob_store_set(
@@ -432,48 +458,6 @@ class GeoServerAdminClient:
                 "GeoWebCache tile blob store is missing after configuration"
             )
         return current
-
-    def configure_geowebcache_disk_quota(
-        self,
-        *,
-        quota_gib: int,
-        cleanup_seconds: int,
-        expiration_policy: Literal["LRU", "LFU"],
-    ) -> GeoWebCacheDiskQuota:
-        """Apply and re-read a bounded global quota, failing on any mismatch."""
-
-        quota = _validate_geowebcache_quota_gib(quota_gib)
-        cleanup = _validate_geowebcache_cleanup_seconds(cleanup_seconds)
-        policy = _validate_geowebcache_policy(expiration_policy)
-        self._put_json(
-            "/diskquota.json",
-            {
-                "gwcQuotaConfiguration": {
-                    "enabled": True,
-                    "cacheCleanUpFrequency": cleanup,
-                    "cacheCleanUpUnits": "SECONDS",
-                    "globalExpirationPolicyName": policy,
-                    "globalQuota": {
-                        "value": str(quota),
-                        "units": "GiB",
-                    },
-                }
-            },
-            request_root=self._gwc_rest_root,
-        )
-        actual = self.read_geowebcache_disk_quota()
-        expected_bytes = quota * 1024**3
-        if (
-            not actual.enabled
-            or actual.quota_bytes != expected_bytes
-            or actual.cleanup_frequency != cleanup
-            or actual.cleanup_units != "SECONDS"
-            or actual.expiration_policy != policy
-        ):
-            raise GeoServerAdminConflictError(
-                "GeoWebCache disk quota differs after configuration"
-            )
-        return actual
 
     def ensure_workspace(self) -> PublicationResult:
         name = self._workspace
@@ -1196,6 +1180,7 @@ class GeoServerAdminClient:
         body: bytes,
         *,
         request_root: str,
+        expected_status: Literal[200, 201] = 200,
     ) -> None:
         if not body or len(body) > MAX_XML_BYTES:
             raise InvalidGeoServerPublicationError(
@@ -1207,7 +1192,7 @@ class GeoServerAdminClient:
             body=body,
             content_type=XML_CONTENT_TYPE,
             accept=XML_CONTENT_TYPE,
-            expected_statuses=frozenset({200}),
+            expected_statuses=frozenset({expected_status}),
             max_response_bytes=MAX_ERROR_BYTES,
             request_root=request_root,
         )
@@ -1329,34 +1314,6 @@ def _validate_secret(value: SecretStr, label: str) -> str:
             f"invalid local GeoServer {label}"
         )
     return secret
-
-
-def _validate_geowebcache_quota_gib(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1024:
-        raise InvalidGeoServerPublicationError(
-            "GeoWebCache quota must be between 1 and 1024 GiB"
-        )
-    return value
-
-
-def _validate_geowebcache_cleanup_seconds(value: int) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 1 <= value <= 86_400
-    ):
-        raise InvalidGeoServerPublicationError(
-            "GeoWebCache cleanup interval must be between 1 and 86400 seconds"
-        )
-    return value
-
-
-def _validate_geowebcache_policy(value: str) -> Literal["LRU", "LFU"]:
-    if value not in {"LRU", "LFU"}:
-        raise InvalidGeoServerPublicationError(
-            "GeoWebCache expiration policy must be LRU or LFU"
-        )
-    return value
 
 
 def expected_geowebcache_tile_blob_store(
@@ -1675,73 +1632,183 @@ def _canonical_absolute_posix_directory(value: str) -> bool:
     )
 
 
-def _parse_geowebcache_disk_quota(
-    payload: Mapping[str, Any],
-) -> GeoWebCacheDiskQuota:
-    configuration = payload.get("gwcQuotaConfiguration")
-    if not isinstance(configuration, Mapping):
-        raise GeoServerAdminResponseError(
-            "invalid GeoWebCache disk quota response"
-        )
-    enabled = configuration.get("enabled")
-    cleanup_frequency = configuration.get("cacheCleanUpFrequency")
-    cleanup_units = configuration.get("cacheCleanUpUnits")
-    expiration_policy = configuration.get("globalExpirationPolicyName")
-    global_quota = configuration.get("globalQuota")
+def _parse_geowebcache_disk_quota(payload: bytes) -> GeoWebCacheDiskQuota:
+    """Parse the real GeoServer 3.0.0/GWC 2.0.0 XML representation.
+
+    That release does not serialize the documented alias and value/unit shape
+    through REST. It emits the concrete class name and a byte-valued Quota.
+    Accepting only the observed, version-pinned shape prevents the misleading
+    ``diskquota.json`` content type from weakening the startup gate.
+    """
+
+    error = "invalid GeoWebCache disk quota response"
+    root = _parse_geowebcache_xml(payload)
     if (
-        not isinstance(enabled, bool)
-        or isinstance(cleanup_frequency, bool)
-        or not isinstance(cleanup_frequency, int)
-        or not 1 <= cleanup_frequency <= 86_400
+        root.tag != "org.geowebcache.diskquota.DiskQuotaConfig"
+        or root.attrib
+        or not _xml_whitespace(root.text)
+        or not _xml_whitespace(root.tail)
+    ):
+        raise GeoServerAdminResponseError(error)
+    children = list(root)
+    if [child.tag for child in children] != [
+        "enabled",
+        "cacheCleanUpFrequency",
+        "cacheCleanUpUnits",
+        "maxConcurrentCleanUps",
+        "globalExpirationPolicyName",
+        "globalQuota",
+    ]:
+        raise GeoServerAdminResponseError(error)
+    enabled_text = _xml_scalar(children[0], error=error)
+    cleanup_text = _xml_scalar(children[1], error=error)
+    cleanup_units = _xml_scalar(children[2], error=error)
+    cleanups_text = _xml_scalar(children[3], error=error)
+    expiration_policy = _xml_scalar(children[4], error=error)
+    quota = children[5]
+    if (
+        quota.attrib
+        or not _xml_whitespace(quota.text)
+        or not _xml_whitespace(quota.tail)
+        or [child.tag for child in quota] != ["id", "bytes"]
+    ):
+        raise GeoServerAdminResponseError(error)
+    quota_id = _xml_scalar(quota[0], error=error)
+    quota_bytes_text = _xml_scalar(quota[1], error=error)
+    if (
+        enabled_text not in {"true", "false"}
         or cleanup_units not in {"SECONDS", "MINUTES", "HOURS", "DAYS"}
         or expiration_policy not in {"LRU", "LFU"}
-        or not isinstance(global_quota, Mapping)
+        or quota_id != "0"
     ):
-        raise GeoServerAdminResponseError(
-            "invalid GeoWebCache disk quota response"
-        )
-    units = global_quota.get("units")
-    raw_value = global_quota.get("value")
-    if (
-        units not in {"MiB", "GiB", "TiB"}
-        or isinstance(raw_value, bool)
-        or not isinstance(raw_value, (int, str))
+        raise GeoServerAdminResponseError(error)
+    cleanup_frequency = _strict_positive_decimal(
+        cleanup_text,
+        maximum=86_400,
+        error=error,
+    )
+    max_concurrent_cleanups = _strict_positive_decimal(
+        cleanups_text,
+        maximum=64,
+        error=error,
+    )
+    quota_bytes = _strict_positive_decimal(
+        quota_bytes_text,
+        maximum=1024**5,
+        error=error,
+    )
+    for units, unit_bytes in (
+        ("TiB", 1024**4),
+        ("GiB", 1024**3),
+        ("MiB", 1024**2),
     ):
-        raise GeoServerAdminResponseError(
-            "invalid GeoWebCache disk quota response"
-        )
-    try:
-        quota_value = int(raw_value)
-    except ValueError as error:
-        raise GeoServerAdminResponseError(
-            "invalid GeoWebCache disk quota response"
-        ) from error
-    if (
-        quota_value < 1
-        or str(quota_value) != str(raw_value).strip()
-        or quota_value > 1024**2
-    ):
-        raise GeoServerAdminResponseError(
-            "invalid GeoWebCache disk quota response"
-        )
-    unit_bytes = {
-        "MiB": 1024**2,
-        "GiB": 1024**3,
-        "TiB": 1024**4,
-    }[units]
-    quota_bytes = quota_value * unit_bytes
-    if quota_bytes > 1024**5:
-        raise GeoServerAdminResponseError(
-            "invalid GeoWebCache disk quota response"
-        )
+        if quota_bytes % unit_bytes == 0:
+            quota_value = quota_bytes // unit_bytes
+            quota_units: Literal["MiB", "GiB", "TiB"] = units
+            break
+    else:
+        raise GeoServerAdminResponseError(error)
     return GeoWebCacheDiskQuota(
-        enabled=enabled,
+        enabled=enabled_text == "true",
         quota_bytes=quota_bytes,
         quota_value=quota_value,
-        quota_units=units,
+        quota_units=quota_units,
         cleanup_frequency=cleanup_frequency,
         cleanup_units=cleanup_units,
+        max_concurrent_cleanups=max_concurrent_cleanups,
         expiration_policy=expiration_policy,
+    )
+
+
+def _strict_positive_decimal(
+    value: str,
+    *,
+    maximum: int,
+    error: str,
+) -> int:
+    if (
+        not value.isascii()
+        or not value.isdecimal()
+        or value.startswith("0")
+    ):
+        raise GeoServerAdminResponseError(error)
+    parsed = int(value)
+    if not 1 <= parsed <= maximum or str(parsed) != value:
+        raise GeoServerAdminResponseError(error)
+    return parsed
+
+
+def _parse_geowebcache_quota_health(
+    payload: Mapping[str, Any],
+) -> GeoWebCacheQuotaHealth:
+    error = "invalid GeoWebCache quota health response"
+    expected_keys = {
+        "schema_version",
+        "healthy",
+        "monitor_enabled",
+        "monitor_running",
+        "scheduled_cleanup_active",
+        "provider_error",
+        "store_class",
+        "dialect_class",
+        "global_used_bytes",
+    }
+    schema_version = payload.get("schema_version")
+    if (
+        set(payload) != expected_keys
+        or type(schema_version) is not int
+        or schema_version != 1
+    ):
+        raise GeoServerAdminResponseError(error)
+    boolean_keys = (
+        "healthy",
+        "monitor_enabled",
+        "monitor_running",
+        "scheduled_cleanup_active",
+        "provider_error",
+    )
+    if any(not isinstance(payload.get(key), bool) for key in boolean_keys):
+        raise GeoServerAdminResponseError(error)
+    store_class = payload.get("store_class")
+    dialect_class = payload.get("dialect_class")
+    raw_used = payload.get("global_used_bytes")
+    if (
+        store_class is not None
+        and (
+            not isinstance(store_class, str)
+            or re.fullmatch(r"[A-Za-z0-9_.$]{1,256}", store_class) is None
+        )
+    ):
+        raise GeoServerAdminResponseError(error)
+    if (
+        dialect_class is not None
+        and (
+            not isinstance(dialect_class, str)
+            or re.fullmatch(r"[A-Za-z0-9_.$]{1,256}", dialect_class) is None
+        )
+    ):
+        raise GeoServerAdminResponseError(error)
+    if raw_used is None:
+        used = None
+    elif (
+        not isinstance(raw_used, str)
+        or not raw_used.isascii()
+        or not raw_used.isdecimal()
+        or (raw_used.startswith("0") and raw_used != "0")
+        or len(raw_used) > 40
+    ):
+        raise GeoServerAdminResponseError(error)
+    else:
+        used = int(raw_used)
+    return GeoWebCacheQuotaHealth(
+        healthy=payload["healthy"],
+        monitor_enabled=payload["monitor_enabled"],
+        monitor_running=payload["monitor_running"],
+        scheduled_cleanup_active=payload["scheduled_cleanup_active"],
+        provider_error=payload["provider_error"],
+        store_class=store_class,
+        dialect_class=dialect_class,
+        global_used_bytes=used,
     )
 
 

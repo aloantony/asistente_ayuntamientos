@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Derived from Apache Tomcat's server.xml as shipped by geoserver/docker.
+  SIUR's versioned Tomcat override. The only HTTP connector is deliberately
+  bound to numeric loopback inside the namespace shared with gwc-gateway.
+-->
+<Server address="127.0.0.1" port="8005" shutdown="SHUTDOWN">
+  <Listener className="org.apache.catalina.startup.VersionLoggerListener" />
+  <Listener className="org.apache.catalina.core.AprLifecycleListener"
+            SSLEngine="on" />
+  <Listener className="org.apache.catalina.core.JreMemoryLeakPreventionListener" />
+  <Listener className="org.apache.catalina.mbeans.GlobalResourcesLifecycleListener" />
+  <Listener className="org.apache.catalina.core.ThreadLocalLeakPreventionListener" />
+
+  <GlobalNamingResources>
+    <Resource name="UserDatabase"
+              auth="Container"
+              type="org.apache.catalina.UserDatabase"
+              description="User database that can be updated and saved"
+              factory="org.apache.catalina.users.MemoryUserDatabaseFactory"
+              pathname="conf/tomcat-users.xml" />
+  </GlobalNamingResources>
+
+  <Service name="Catalina">
+    <Connector
+      address="127.0.0.1"
+      port="8080"
+      protocol="HTTP/1.1"
+      connectionTimeout="20000"
+      redirectPort="8443"
+      maxParameterCount="1000"
+      allowTrace="false"
+      xpoweredBy="false"
+    />
+
+    <Engine name="Catalina" defaultHost="localhost">
+      <Realm className="org.apache.catalina.realm.LockOutRealm">
+        <Realm className="org.apache.catalina.realm.UserDatabaseRealm"
+               resourceName="UserDatabase" />
+      </Realm>
+
+      <Host name="localhost"
+            appBase="webapps"
+            unpackWARs="true"
+            autoDeploy="false"
+            deployOnStartup="false">
+        <Valve className="org.apache.catalina.valves.AccessLogValve"
+               directory="logs"
+               prefix="localhost_access_log"
+               suffix=".txt"
+               pattern="%h %l %u %t &quot;%r&quot; %s %b" />
+        <Context antiResourceLocking="false"
+                 override="true"
+                 docBase="geoserver"
+                 privileged="true"
+                 path="/geoserver" />
+      </Host>
+    </Engine>
+  </Service>
+</Server>
