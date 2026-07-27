@@ -38,6 +38,11 @@ proxy y **no** autorizan ni bloquean el espejo local. Por eso un servicio puede
 seguir con catálogo `pending` y estar autorizado para el espejo cuando todas
 sus fuentes tienen revisiones explícitas válidas.
 
+Con `--layer-id`, esa comprobación se limita a las fuentes habilitadas de la
+capa seleccionada: una fuente sin revisar de otra capa del mismo servicio no
+la bloquea. Cada fuente conserva su propio detalle de autorización y cualquier
+fuente habilitada sin una revisión vigente mantiene su capa bloqueada.
+
 El informe declara `legacy_wms_evidence_required=false` para hacer visible esta
 separación. Este comando no crea ni aprueba evidencia legal.
 

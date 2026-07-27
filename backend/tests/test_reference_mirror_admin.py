@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 import io
 import os
@@ -8,6 +9,7 @@ from sqlalchemy import func, select
 
 from app.core.config import Settings
 from app.reference_layers.blob_store import ReferenceBlobStore
+from app.reference_layers.catalog import apply_catalog_definition
 from app.reference_layers.mirror_admin import (
     MirrorAdminInputError,
     _parser,
@@ -17,18 +19,24 @@ from app.reference_layers.mirror_admin import (
     staging_gc,
 )
 from app.reference_layers.mirror_lifecycle import (
+    apply_mirror_bootstrap_plan,
+    build_mirror_bootstrap_plan,
     deactivate_delivery,
 )
 from app.reference_layers.models import (
     ReferenceDeliveryPromotion,
+    ReferenceLayer,
     ReferenceLayerDeliveryState,
+    ReferenceLayerSource,
     ReferenceService,
 )
 from test_reference_mirror_lifecycle import (
+    _definition,
     _promote_cross_snapshot_versions,
     _seed_bootstrap,
 )
 from support_reference_mirror_authorization import (
+    authorize_mirror_source,
     ensure_authorized_mirror_source,
 )
 
@@ -115,6 +123,146 @@ def test_operational_status_uses_explicit_local_mirror_authorization(
     assert authorization["enabled_source_count"] == 1
     assert report["retention"]["published_blob_gc_enabled"] is False
     assert report["retention"]["protected_delivery_version_count"] == 2
+
+
+def test_layer_status_ignores_unauthorized_sibling_layers_on_same_service(
+    db,
+) -> None:
+    provider_key = "mirror-admin-layer-authorization-scope"
+    base = _definition(provider_key=provider_key)
+    selected_definition = replace(
+        base.layers[0],
+        source_key="layer:selected",
+        title="Selected planning zones",
+        remote_name="planning:selected",
+    )
+    sibling_definition = replace(
+        base.layers[0],
+        source_key="layer:sibling",
+        title="Sibling planning zones",
+        remote_name="planning:sibling",
+    )
+    definition = replace(
+        base,
+        raw_catalog={"revision": "shared-service-two-layers"},
+        layers=(selected_definition, sibling_definition),
+    )
+    apply_catalog_definition(db, definition)
+    apply_mirror_bootstrap_plan(
+        db,
+        build_mirror_bootstrap_plan(db, provider_key=provider_key),
+    )
+    selected_layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == provider_key,
+            ReferenceLayer.source_key == "layer:selected",
+        )
+    )
+    sibling_layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == provider_key,
+            ReferenceLayer.source_key == "layer:sibling",
+        )
+    )
+    assert selected_layer is not None
+    assert sibling_layer is not None
+    selected_sources = list(
+        db.scalars(
+            select(ReferenceLayerSource)
+            .where(ReferenceLayerSource.layer_id == selected_layer.id)
+            .order_by(ReferenceLayerSource.id)
+        )
+    )
+    selected_source = next(
+        source
+        for source in selected_sources
+        if source.target_kind == "vector"
+    )
+    for source in selected_sources:
+        source.enabled = source.id == selected_source.id
+        source.is_primary = False
+    db.flush()
+    selected_source.is_primary = True
+    db.commit()
+    authorize_mirror_source(db, selected_source)
+    assert db.scalar(
+        select(func.count(ReferenceLayerSource.id)).where(
+            ReferenceLayerSource.layer_id == sibling_layer.id,
+            ReferenceLayerSource.enabled.is_(True),
+        )
+    )
+
+    report = operational_status(
+        db,
+        provider_key=provider_key,
+        layer_id=selected_layer.id,
+    )
+
+    authorization = report["layers"][0]["mirror_authorization"]
+    assert authorization["authorization_scope"] == "layer_enabled_sources"
+    assert authorization["mirror_authorized"] is True
+    assert authorization["blocking_reasons"] == []
+    assert authorization["reviewed_source_ids"] == [selected_source.id]
+    assert authorization["reviewed_source_count"] == 1
+    assert authorization["enabled_source_count"] == 1
+    assert report["summary"]["mirror_authorization_missing_count"] == 0
+    assert (
+        report["summary"]["mirror_authorization_missing_service_count"]
+        == 0
+    )
+    assert report["summary"]["mirror_authorization_missing_source_count"] == 0
+    source_rows = {
+        row["source_id"]: row for row in report["layers"][0]["sources"]
+    }
+    assert source_rows[selected_source.id]["mirror_authorization"][
+        "authorization_scope"
+    ] == "source"
+    assert source_rows[selected_source.id]["mirror_authorization"][
+        "mirror_authorized"
+    ] is True
+
+
+def test_layer_status_requires_authorization_for_every_enabled_source(
+    db,
+) -> None:
+    _, layer, _, sources, _ = _seed_bootstrap(
+        db,
+        provider_key="mirror-admin-source-authorization-scope",
+    )
+    reviewed_source = next(source for source in sources if source.is_primary)
+    authorize_mirror_source(db, reviewed_source)
+    enabled_sources = [source for source in sources if source.enabled]
+    assert len(enabled_sources) > 1
+
+    report = operational_status(
+        db,
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+    )
+
+    authorization = report["layers"][0]["mirror_authorization"]
+    assert authorization["mirror_authorized"] is False
+    assert authorization["blocking_reasons"] == [
+        "mirror_authorization_missing"
+    ]
+    assert authorization["reviewed_source_count"] == 1
+    assert authorization["enabled_source_count"] == len(enabled_sources)
+    assert report["summary"]["mirror_authorization_missing_count"] == 1
+    assert (
+        report["summary"]["mirror_authorization_missing_source_count"]
+        == len(enabled_sources) - 1
+    )
+    source_authorizations = {
+        row["source_id"]: row["mirror_authorization"]
+        for row in report["layers"][0]["sources"]
+        if row["enabled"]
+    }
+    assert source_authorizations[reviewed_source.id]["mirror_authorized"] is True
+    assert all(
+        item["blocking_reasons"] == ["mirror_authorization_missing"]
+        for source_id, item in source_authorizations.items()
+        if source_id != reviewed_source.id
+    )
 
 
 def test_rollback_dry_run_is_generation_fenced_and_never_appends_event(
