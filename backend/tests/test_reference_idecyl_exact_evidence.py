@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import replace
 import hashlib
-from importlib.resources import files
 import json
+from dataclasses import replace
+from importlib.resources import files
 from typing import Any
 
 import pytest
@@ -18,7 +17,6 @@ from app.reference_layers.idecyl_exact_evidence import (
     BASE_MANIFEST_RESOURCE,
     BASE_MANIFEST_SHA256,
     EVIDENCE_SCHEMA,
-    IDECyLExactEvidenceError,
     LEGACY_MANIFEST_RESOURCE,
     LEGACY_MANIFEST_SHA256,
     MANIFEST_RESOURCE,
@@ -29,6 +27,7 @@ from app.reference_layers.idecyl_exact_evidence import (
     RECORDS_SHA256,
     WFS_SNAPSHOT_MANIFEST_RESOURCE,
     WFS_SNAPSHOT_MANIFEST_SHA256,
+    IDECyLExactEvidenceError,
     _load_evidence_package,
     idecyl_exact_source_inventory,
     reviewed_idecyl_exact_source,
@@ -36,11 +35,15 @@ from app.reference_layers.idecyl_exact_evidence import (
 from app.reference_layers.idecyl_local_style_evidence import (
     idecyl_local_style_inventory,
 )
-from app.reference_layers.source_content_parity import (
-    configured_parity_spec,
+from app.reference_layers.idecyl_population_nitrate_style_evidence import (
+    idecyl_nitrate_style_inventory,
+    idecyl_population_style_exclusion,
 )
 from app.reference_layers.reviewed_archive_integrity import (
     configured_reviewed_archive_integrity,
+)
+from app.reference_layers.source_content_parity import (
+    configured_parity_spec,
 )
 from app.reference_layers.source_discovery import (
     SourceDiscoveryError,
@@ -48,7 +51,6 @@ from app.reference_layers.source_discovery import (
     acquisition_candidates,
     candidate_definition,
 )
-
 
 EXPECTED_REMOTE_NAMES = {
     "telefonia_movil_cyl_cobertura_carreteras",
@@ -121,7 +123,7 @@ WFS_CANDIDATE_IDS = {
     281,
 }
 COMPLETE_ARCHIVE_STYLE_IDS = {98, 137, 151, 197, 213, 225, 230}
-PARTIAL_ARCHIVE_STYLE_IDS = {268}
+MIXED_EXACT_ADAPTED_STYLE_IDS = {268}
 
 
 def _resource_body(resource_path: str) -> bytes:
@@ -187,9 +189,7 @@ def _layer(
             for item in reviewed_styles
         )
         style_name = next(
-            item.catalog_style_source_key
-            for item in reviewed_styles
-            if item.is_default
+            item.catalog_style_source_key for item in reviewed_styles if item.is_default
         )
     else:
         styles = ()
@@ -224,25 +224,37 @@ def _layer_with_reviewed_archive_styles(
         reviewed.catalog_remote_name,
         with_cami_style=reviewed.audit_layer_id == 86,
         boundary_layer_id=(
-            reviewed.audit_layer_id
-            if reviewed.audit_layer_id in {223, 234}
-            else None
+            reviewed.audit_layer_id if reviewed.audit_layer_id in {223, 234} else None
         ),
     )
     style_evidence = reviewed.evidence.get("archive_style_evidence")
-    if not isinstance(style_evidence, dict):
+    if reviewed.audit_layer_id == 237:
+        catalog_styles = idecyl_population_style_exclusion()["catalog_styles"]
+    elif isinstance(style_evidence, dict):
+        catalog_styles = style_evidence["catalog_styles"]
+    else:
         return base
-    catalog_styles = style_evidence["catalog_styles"]
-    default = next(
-        item for item in catalog_styles if item["is_default"] is True
+    nitrate_titles = {
+        item.catalog_style_source_key: item.style_title
+        for item in idecyl_nitrate_style_inventory()
+    }
+    nitrate_titles["coad_cyl_nitrat_aguas_subterr_2021"] = (
+        "Recintos municipales 2021 paleta color"
     )
+    default = next(item for item in catalog_styles if item["is_default"] is True)
     return replace(
         base,
         style_name=default["catalog_style_source_key"],
         styles=tuple(
             ReferenceLayerStyleDefinition(
                 source_key=item["catalog_style_source_key"],
-                title=item["remote_name"],
+                title=item.get(
+                    "title",
+                    nitrate_titles.get(
+                        item["catalog_style_source_key"],
+                        item["remote_name"],
+                    ),
+                ),
                 remote_name=item["remote_name"],
                 sort_order=index,
                 is_default=item["is_default"],
@@ -293,21 +305,13 @@ def test_classification_covers_all_31_layers_fail_closed() -> None:
     inventory = idecyl_exact_source_inventory()
 
     assert len(inventory) == 31
-    assert {item.catalog_remote_name for item in inventory} == (
-        EXPECTED_REMOTE_NAMES
+    assert {item.catalog_remote_name for item in inventory} == (EXPECTED_REMOTE_NAMES)
+    assert sum(item.local_service_status == "candidate" for item in inventory) == 29
+    assert sum(item.local_service_status == "restricted" for item in inventory) == 2
+    assert (
+        sum(item.local_service_status == "permission_pending" for item in inventory)
+        == 0
     )
-    assert sum(
-        item.local_service_status == "candidate"
-        for item in inventory
-    ) == 29
-    assert sum(
-        item.local_service_status == "restricted"
-        for item in inventory
-    ) == 2
-    assert sum(
-        item.local_service_status == "permission_pending"
-        for item in inventory
-    ) == 0
     assert {
         item.audit_layer_id
         for item in inventory
@@ -317,10 +321,7 @@ def test_classification_covers_all_31_layers_fail_closed() -> None:
 
 
 def test_sigpac_uses_exact_https_directories_but_remains_license_restricted() -> None:
-    inventory = {
-        item.audit_layer_id: item
-        for item in idecyl_exact_source_inventory()
-    }
+    inventory = {item.audit_layer_id: item for item in idecyl_exact_source_inventory()}
 
     for layer_id, year in ((123, "2024"), (166, "2022")):
         reviewed = inventory[layer_id]
@@ -334,12 +335,10 @@ def test_sigpac_uses_exact_https_directories_but_remains_license_restricted() ->
             "local_service_requires_persisted_human_review",
         )
         assert distribution["root_directory_url"] == (
-            "https://ftp.itacyl.es/cartografia/05_SIGPAC/"
-            f"{year}_ETRS89/"
+            "https://ftp.itacyl.es/cartografia/05_SIGPAC/" f"{year}_ETRS89/"
         )
         assert distribution["province_directory_url"] == (
-            distribution["root_directory_url"]
-            + "Parcelario_SIGPAC_CyL_Provincias/"
+            distribution["root_directory_url"] + "Parcelario_SIGPAC_CyL_Provincias/"
         )
         assert distribution["archive_names"] == [
             "AVILA.zip",
@@ -375,9 +374,7 @@ def test_wms_metadata_bindings_preserve_exact_mismatch_and_missing() -> None:
 
 def test_layer_39_keeps_its_exact_https_geopackage_candidate() -> None:
     reviewed = next(
-        item
-        for item in idecyl_exact_source_inventory()
-        if item.audit_layer_id == 39
+        item for item in idecyl_exact_source_inventory() if item.audit_layer_id == 39
     )
 
     candidates = acquisition_candidates(
@@ -400,13 +397,10 @@ def test_layer_39_keeps_its_exact_https_geopackage_candidate() -> None:
     assert candidate.config["archive_member"].endswith(".gpkg")
     assert candidate.config["input_layer"] == reviewed.catalog_remote_name
     assert len(candidate.config["archive_styles"]) == 3
-    assert {
-        item["remote_name"] for item in candidate.config["archive_styles"]
-    } == set(TELECOM_STYLES)
-    assert all(
-        len(item["sha256"]) == 64
-        for item in candidate.config["archive_styles"]
+    assert {item["remote_name"] for item in candidate.config["archive_styles"]} == set(
+        TELECOM_STYLES
     )
+    assert all(len(item["sha256"]) == 64 for item in candidate.config["archive_styles"])
     assert all(
         set(item)
         == {
@@ -424,10 +418,7 @@ def test_layer_39_keeps_its_exact_https_geopackage_candidate() -> None:
 
 
 def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
-    inventory = {
-        item.audit_layer_id: item
-        for item in idecyl_exact_source_inventory()
-    }
+    inventory = {item.audit_layer_id: item for item in idecyl_exact_source_inventory()}
     definitions: set[str] = set()
 
     for layer_id in sorted(REVIEWABLE_ARCHIVE_IDS):
@@ -442,24 +433,22 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         assert candidate.protocol == "download"
         assert candidate.target_kind == "vector"
         assert candidate.sync_strategy == "conditional_get"
-        assert candidate.endpoint_url.startswith(
-            "https://opendata.jcyl.es/"
-        )
+        assert candidate.endpoint_url.startswith("https://opendata.jcyl.es/")
         assert candidate.remote_name == reviewed.catalog_remote_name
         assert candidate.config["archive_member"]
         assert candidate.config["input_layer"]
-        if layer_id in COMPLETE_ARCHIVE_STYLE_IDS:
+        if layer_id in MIXED_EXACT_ADAPTED_STYLE_IDS:
             assert len(candidate.config["archive_styles"]) == 1
-            assert len(
-                candidate.config["archive_style_archive_sha256"]
-            ) == 64
+            assert len(candidate.config["reviewed_local_styles"]) == 15
+            assert len(candidate.config["archive_style_catalog"]) == 16
+            assert "archive_style_archive_sha256" not in candidate.config
+        elif layer_id in COMPLETE_ARCHIVE_STYLE_IDS:
+            assert len(candidate.config["archive_styles"]) == 1
+            assert len(candidate.config["archive_style_archive_sha256"]) == 64
             assert "archive_style_catalog" not in candidate.config
         else:
             assert "archive_styles" not in candidate.config
-            assert (
-                "archive_style_archive_sha256"
-                not in candidate.config
-            )
+            assert "archive_style_archive_sha256" not in candidate.config
         assert "source_content_parity" not in candidate.config
         if layer_id == 86:
             assert candidate.config["reviewed_local_style"] == {
@@ -470,28 +459,32 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
                     "9cdde3badf9b6bd3af2425431680685"
                     "b75a6a97fd552b4be1e292a8e7cfef79d"
                 ),
-                "catalog_style_source_key": (
-                    "cami_cyl_cuadricula_default"
-                ),
+                "catalog_style_source_key": ("cami_cyl_cuadricula_default"),
                 "remote_name": "cami_cyl_cuadricula_default",
                 "is_default": True,
             }
         elif layer_id in {223, 234}:
-            assert len(
-                candidate.config["reviewed_local_styles"]
-            ) == 6
-            assert sum(
-                style["is_default"]
-                for style in candidate.config[
-                    "reviewed_local_styles"
-                ]
-            ) == 1
+            assert len(candidate.config["reviewed_local_styles"]) == 6
+            assert (
+                sum(
+                    style["is_default"]
+                    for style in candidate.config["reviewed_local_styles"]
+                )
+                == 1
+            )
+        elif layer_id in MIXED_EXACT_ADAPTED_STYLE_IDS:
+            assert "reviewed_local_style" not in candidate.config
+            assert len(candidate.config["reviewed_local_styles"]) == 15
         else:
             assert "reviewed_local_style" not in candidate.config
             assert "reviewed_local_styles" not in candidate.config
-        integrity = configured_reviewed_archive_integrity(
-            candidate.config
-        )
+        if layer_id == 237:
+            exclusion = candidate.config["reviewed_local_style_exclusion"]
+            assert exclusion["local_service_eligible"] is False
+            assert exclusion["catalog_style_count"] == 6
+        else:
+            assert "reviewed_local_style_exclusion" not in candidate.config
+        integrity = configured_reviewed_archive_integrity(candidate.config)
         assert integrity is not None
         semantic, spec_sha256 = integrity
         assert len(spec_sha256) == 64
@@ -506,25 +499,23 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         definitions.add(candidate.definition_sha256)
 
     assert len(definitions) == 18
-    assert inventory[105].candidate_config["data_format"] == (
-        "shapefile-zip"
-    )
+    assert inventory[105].candidate_config["data_format"] == ("shapefile-zip")
     assert all(
-        inventory[layer_id].candidate_config["data_format"]
-        == "geopackage-zip"
+        inventory[layer_id].candidate_config["data_format"] == "geopackage-zip"
         for layer_id in REVIEWABLE_ARCHIVE_IDS - {105}
     )
     assert (
-        inventory[268].evidence["archive_style_evidence"][
-            "style_coverage"
-        ]["complete"]
+        inventory[268].evidence["archive_style_evidence"]["style_coverage"]["complete"]
         is False
     )
-    assert len(
-        inventory[268].evidence["archive_style_evidence"][
-            "style_coverage"
-        ]["missing_catalog_style_source_keys"]
-    ) == 15
+    assert (
+        len(
+            inventory[268].evidence["archive_style_evidence"]["style_coverage"][
+                "missing_catalog_style_source_keys"
+            ]
+        )
+        == 15
+    )
 
 
 @pytest.mark.parametrize(
@@ -535,9 +526,7 @@ def test_layer_86_local_style_catalog_identity_fails_closed(
     mutation: str,
 ) -> None:
     reviewed = next(
-        item
-        for item in idecyl_exact_source_inventory()
-        if item.audit_layer_id == 86
+        item for item in idecyl_exact_source_inventory() if item.audit_layer_id == 86
     )
     valid = _layer(
         reviewed.catalog_layer_source_key,
@@ -564,16 +553,11 @@ def test_layer_86_local_style_catalog_identity_fails_closed(
             layer,
         )
 
-    assert captured.value.code == (
-        "reviewed_idecyl_local_style_identity_invalid"
-    )
+    assert captured.value.code == ("reviewed_idecyl_local_style_identity_invalid")
 
 
 def test_all_10_wfs_sources_build_exact_convergent_candidates() -> None:
-    inventory = {
-        item.audit_layer_id: item
-        for item in idecyl_exact_source_inventory()
-    }
+    inventory = {item.audit_layer_id: item for item in idecyl_exact_source_inventory()}
     definitions: set[str] = set()
 
     for layer_id in sorted(WFS_CANDIDATE_IDS):
@@ -591,19 +575,13 @@ def test_all_10_wfs_sources_build_exact_convergent_candidates() -> None:
         assert candidate.protocol == "wfs"
         assert candidate.target_kind == "vector"
         assert candidate.sync_strategy == "full_snapshot"
-        assert candidate.endpoint_url.startswith(
-            "https://idecyl.jcyl.es/geoserver/"
-        )
+        assert candidate.endpoint_url.startswith("https://idecyl.jcyl.es/geoserver/")
         assert candidate.endpoint_url.endswith("/wfs")
         assert ":" in candidate.remote_name
         assert candidate.config["discovery"] == "wfs_capabilities"
         assert candidate.config["reviewed_equivalence"] == reviewed.evidence
-        assert candidate.config["style_endpoint_url"] == (
-            reviewed.catalog_endpoint_url
-        )
-        assert candidate.config["style_layer_name"] == (
-            reviewed.catalog_remote_name
-        )
+        assert candidate.config["style_endpoint_url"] == (reviewed.catalog_endpoint_url)
+        assert candidate.config["style_layer_name"] == (reviewed.catalog_remote_name)
         assert candidate.config["styles"] == []
         assert candidate.definition_sha256 == _canonical_sha256(
             candidate_definition(candidate)
@@ -641,20 +619,16 @@ def test_wfs_candidates_project_hash_bound_non_authorizing_license() -> None:
             "local_service_requires_persisted_human_review",
         )
         assert reviewed.profile == (
-            f"idecyl-{reviewed.catalog_remote_name}"
-            "-wfs-snapshot-20260727-v4"
+            f"idecyl-{reviewed.catalog_remote_name}" "-wfs-snapshot-20260727-v4"
         )
         license_evidence = reviewed.evidence["license_evidence"]
         assert license_evidence == {
-            "authorization_effect": (
-                "none_without_persisted_human_mirror_review"
-            ),
+            "authorization_effect": ("none_without_persisted_human_mirror_review"),
             "authorization_granted": False,
             "commercial_license_required_if_commercial": True,
             "license_name": "LICENCIA-IGCYL-NC",
             "license_url": (
-                "https://ftp.itacyl.es/cartografia/"
-                "LICENCIA-IGCYL-NC-2012.pdf"
+                "https://ftp.itacyl.es/cartografia/" "LICENCIA-IGCYL-NC-2012.pdf"
             ),
             "local_download_authorized": False,
             "local_service_authorized": False,
@@ -664,16 +638,18 @@ def test_wfs_candidates_project_hash_bound_non_authorizing_license() -> None:
         assert reviewed.evidence["authorization_effect"] == (
             "none_without_persisted_human_mirror_review"
         )
-        assert reviewed.evidence["wfs_snapshot_evidence"]["license_gate"][
-            "authorization_granted"
-        ] is False
+        assert (
+            reviewed.evidence["wfs_snapshot_evidence"]["license_gate"][
+                "authorization_granted"
+            ]
+            is False
+        )
 
 
-def test_reviewable_archives_require_acceptance_attribution_and_conditional_license() -> None:
-    inventory = {
-        item.audit_layer_id: item
-        for item in idecyl_exact_source_inventory()
-    }
+def test_reviewable_archives_require_acceptance_attribution_and_conditional_license() -> (
+    None
+):
+    inventory = {item.audit_layer_id: item for item in idecyl_exact_source_inventory()}
 
     for layer_id in REVIEWABLE_ARCHIVE_IDS:
         reviewed = inventory[layer_id]
@@ -688,12 +664,7 @@ def test_reviewable_archives_require_acceptance_attribution_and_conditional_lice
         )
         assert license_evidence["license_name"] == "IGCYL-NC"
         assert license_evidence["recipient_acceptance_required"] is True
-        assert (
-            license_evidence[
-                "commercial_license_required_if_commercial"
-            ]
-            is True
-        )
+        assert license_evidence["commercial_license_required_if_commercial"] is True
         assert license_evidence["required_attribution"] == (
             "© Junta de Castilla y León"
         )
@@ -753,9 +724,7 @@ def test_known_remote_name_cannot_bypass_classification_by_changing_key() -> Non
 
 def test_candidate_identity_or_style_drift_fails_closed() -> None:
     reviewed = next(
-        item
-        for item in idecyl_exact_source_inventory()
-        if item.audit_layer_id == 39
+        item for item in idecyl_exact_source_inventory() if item.audit_layer_id == 39
     )
     valid = _layer(
         reviewed.catalog_layer_source_key,
@@ -775,17 +744,13 @@ def test_candidate_identity_or_style_drift_fails_closed() -> None:
             _service(reviewed.catalog_endpoint_url),
             replace(valid, styles=valid.styles[:-1]),
         )
-    assert (
-        changed_styles.value.code
-        == "reviewed_idecyl_style_identity_invalid"
-    )
+    assert changed_styles.value.code == "reviewed_idecyl_style_identity_invalid"
 
     changed_default = tuple(
         replace(
             style,
             is_default=(
-                style.remote_name
-                == "telefonia_movil_cyl_cobertura_carreteras_4g_cnmc"
+                style.remote_name == "telefonia_movil_cyl_cobertura_carreteras_4g_cnmc"
             ),
         )
         for style in valid.styles
@@ -795,10 +760,7 @@ def test_candidate_identity_or_style_drift_fails_closed() -> None:
             _service(reviewed.catalog_endpoint_url),
             replace(valid, styles=changed_default),
         )
-    assert (
-        default_drift.value.code
-        == "reviewed_idecyl_style_identity_invalid"
-    )
+    assert default_drift.value.code == "reviewed_idecyl_style_identity_invalid"
 
 
 def _exact_archive_styles() -> list[dict[str, Any]]:
@@ -854,19 +816,20 @@ def _layer_with_exact_archive_styles() -> ReferenceLayerDefinition:
 def test_exact_archive_styles_bind_every_catalog_identity_and_default() -> None:
     raw_styles = _exact_archive_styles()
 
-    assert _idecyl_archive_style_config(
-        _layer_with_exact_archive_styles(),
-        raw_styles,
-    ) == raw_styles
+    assert (
+        _idecyl_archive_style_config(
+            _layer_with_exact_archive_styles(),
+            raw_styles,
+        )
+        == raw_styles
+    )
 
 
 @pytest.mark.parametrize(
     "mutate",
     [
         lambda styles: styles.pop(),
-        lambda styles: styles[0].update(
-            {"catalog_style_source_key": "wrong"}
-        ),
+        lambda styles: styles[0].update({"catalog_style_source_key": "wrong"}),
         lambda styles: styles[0].update({"is_default": False}),
         lambda styles: styles[1].update(
             {"archive_member": styles[0]["archive_member"]}
@@ -887,10 +850,7 @@ def test_exact_archive_styles_reject_partial_or_invented_mappings(
             raw_styles,
         )
 
-    assert (
-        captured.value.code
-        == "reviewed_idecyl_style_identity_invalid"
-    )
+    assert captured.value.code == "reviewed_idecyl_style_identity_invalid"
 
 
 @pytest.mark.parametrize(
@@ -919,9 +879,7 @@ def test_v4_manifest_is_canonical_and_explicitly_non_authorizing() -> None:
     parsed = json.loads(body)
 
     assert body == _canonical_json_bytes(parsed)
-    assert parsed["schema"] == (
-        "siur-idecyl-local-service-classification/v4"
-    )
+    assert parsed["schema"] == ("siur-idecyl-local-service-classification/v4")
     assert len(parsed["wfs_candidate_sources"]) == 10
     assert parsed["capture"]["authorization_granted"] is False
     assert parsed["capture"]["local_download_authorized"] is False
@@ -931,9 +889,10 @@ def test_v4_manifest_is_canonical_and_explicitly_non_authorizing() -> None:
         "restricted_count": 2,
         "restricted_layer_ids": [123, 166],
     }
-    assert parsed["capture"]["license_evidence"][
-        "required_attribution"
-    ] == "© Junta de Castilla y León"
+    assert (
+        parsed["capture"]["license_evidence"]["required_attribution"]
+        == "© Junta de Castilla y León"
+    )
 
 
 @pytest.mark.parametrize("mutation", ["list", "config", "authorization"])
@@ -945,9 +904,9 @@ def test_recomputed_v4_digest_rejects_wfs_candidate_drift(
         parsed["wfs_candidate_sources"].pop()
         match = "candidate list or configuration changed"
     elif mutation == "config":
-        parsed["wfs_candidate_sources"][0]["candidate_config"][
-            "wfs_snapshot"
-        ]["mode"] = "paged"
+        parsed["wfs_candidate_sources"][0]["candidate_config"]["wfs_snapshot"][
+            "mode"
+        ] = "paged"
         match = "candidate list or configuration changed"
     else:
         parsed["capture"]["authorization_granted"] = True
@@ -1067,10 +1026,7 @@ def test_tampered_bound_inputs_are_rejected(
 
 
 def test_candidate_exposes_review_questions_without_authorizing_itself() -> None:
-    inventory = {
-        item.audit_layer_id: item
-        for item in idecyl_exact_source_inventory()
-    }
+    inventory = {item.audit_layer_id: item for item in idecyl_exact_source_inventory()}
     candidate = inventory[39]
     metadata = candidate.evidence["official_metadata"]
     forbidden = {
@@ -1091,16 +1047,12 @@ def test_candidate_exposes_review_questions_without_authorizing_itself() -> None
         == "none_without_persisted_human_mirror_review"
     )
     assert not forbidden.intersection(candidate.evidence)
-    assert "BDLJE" not in " ".join(
-        _walk_strings(inventory[105].evidence)
-    )
+    assert "BDLJE" not in " ".join(_walk_strings(inventory[105].evidence))
 
 
 def test_candidate_has_no_http_or_wfs_effective_configuration() -> None:
     reviewed = next(
-        item
-        for item in idecyl_exact_source_inventory()
-        if item.audit_layer_id == 39
+        item for item in idecyl_exact_source_inventory() if item.audit_layer_id == 39
     )
     candidate = acquisition_candidates(
         _service(reviewed.catalog_endpoint_url),
@@ -1119,21 +1071,17 @@ def test_candidate_has_no_http_or_wfs_effective_configuration() -> None:
 
 def test_candidate_parity_is_a_real_exact_spec() -> None:
     candidate = next(
-        item
-        for item in idecyl_exact_source_inventory()
-        if item.audit_layer_id == 39
+        item for item in idecyl_exact_source_inventory() if item.audit_layer_id == 39
     )
     configured = configured_parity_spec(candidate.candidate_config or {})
 
     assert configured is not None
     expected, digest = configured
     assert digest == (
-        "fb86dd729e3f679cc8899bf47f340f35"
-        "ced01ba6dea82daa6d12cb57ea6f56e8"
+        "fb86dd729e3f679cc8899bf47f340f35" "ced01ba6dea82daa6d12cb57ea6f56e8"
     )
     assert expected["archive_sha256"] == (
-        "a2ef017ba261e9acf35836a6110b019d"
-        "14529c5c8b893b176367be8d4bd2d80f"
+        "a2ef017ba261e9acf35836a6110b019d" "14529c5c8b893b176367be8d4bd2d80f"
     )
     assert expected["feature_count"] == 11_791
     assert expected["crs"] == "EPSG:25830"

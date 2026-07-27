@@ -9,11 +9,11 @@ actually present before a candidate can become a primary source.
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 import re
+from copy import deepcopy
+from dataclasses import asdict, dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -23,6 +23,8 @@ from app.reference_layers.catalog import (
 )
 from app.reference_layers.idecyl_exact_evidence import (
     EVIDENCE_SCHEMA as IDECYL_EXACT_EVIDENCE_SCHEMA,
+)
+from app.reference_layers.idecyl_exact_evidence import (
     IDECyLExactEvidenceError,
     is_idecyl_geoserver_catalog_endpoint,
     reviewed_idecyl_exact_source,
@@ -35,30 +37,42 @@ from app.reference_layers.idecyl_local_style_evidence import (
     reviewed_idecyl_local_style,
     reviewed_idecyl_local_styles_for_source,
 )
+from app.reference_layers.idecyl_population_nitrate_style_evidence import (
+    IDECyLPopulationNitrateStyleEvidenceError,
+    ReviewedIDECyLNitrateStyle,
+    idecyl_nitrate_expected_source_definition,
+    idecyl_population_expected_source_definition,
+    reviewed_idecyl_nitrate_styles,
+    reviewed_idecyl_nitrate_styles_for_source,
+    reviewed_idecyl_population_style_exclusion,
+    reviewed_idecyl_population_style_exclusion_for_source,
+)
 from app.reference_layers.mirror_coverage import (
     SIUR_LAYER_PREFIX,
     SIUR_TILE_BOUNDS,
-    SIUR_WMS_SUPERTILE_SIZE,
     SIUR_WMS_SUPERTILE_COVERAGE_PROFILES,
+    SIUR_WMS_SUPERTILE_SIZE,
     reviewed_tile_coverage,
     reviewed_tile_format,
-)
-from app.reference_layers.reviewed_style_evidence import (
-    ReviewedStyleEvidenceError,
-    reviewed_miteco_mvt_style_reference,
-)
-from app.reference_layers.reviewed_ortho_evidence import (
-    ReviewedIgnOrthoSubstitution,
-    ReviewedOrthoEvidenceError,
-    SOURCE_PRIORITY as REVIEWED_ORTHO_SOURCE_PRIORITY,
-    reviewed_ign_ortho_equivalence,
-    reviewed_ign_ortho_expected_source_definition,
-    reviewed_ign_ortho_substitution,
 )
 from app.reference_layers.reviewed_archive_styles import (
     EXACT_ARCHIVE_STYLE_KEYS,
     ReviewedArchiveStyleError,
     reviewed_archive_style_specs,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    SOURCE_PRIORITY as REVIEWED_ORTHO_SOURCE_PRIORITY,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    ReviewedIgnOrthoSubstitution,
+    ReviewedOrthoEvidenceError,
+    reviewed_ign_ortho_equivalence,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
+)
+from app.reference_layers.reviewed_style_evidence import (
+    ReviewedStyleEvidenceError,
+    reviewed_miteco_mvt_style_reference,
 )
 
 SourceProtocol = Literal[
@@ -152,6 +166,7 @@ class ReviewedLocalStyleRecipe:
         "catastro_parcels",
         "eurostat_grid",
         "flood_polygons",
+        "idecyl_nitrate_year",
         "idecyl_polygon_outline",
         "ines_raster",
     ]
@@ -296,9 +311,7 @@ _EUROSTAT_GRID_LOCAL_STYLES = [
         "outline_color": "#6d28d9",
     },
 ]
-_EUROSTAT_GRID_STYLE_SET_SCHEMA = (
-    "siur-reviewed-local-grid-style-set/v1"
-)
+_EUROSTAT_GRID_STYLE_SET_SCHEMA = "siur-reviewed-local-grid-style-set/v1"
 
 
 def _eurostat_grid_style_evidence(
@@ -312,9 +325,7 @@ def _eurostat_grid_style_evidence(
         "catalog_layer_name": catalog_remote_name,
         "styles": [
             {
-                "catalog_style_source_key": item[
-                    "catalog_style_source_key"
-                ],
+                "catalog_style_source_key": item["catalog_style_source_key"],
                 "remote_name": item["remote_name"],
                 "is_default": item["is_default"],
                 "outline_color": item["outline_color"],
@@ -334,9 +345,7 @@ def _eurostat_grid_style_evidence(
                 sort_keys=True,
             ).encode("utf-8")
         ).hexdigest(),
-        "catalog_default_style_source_key": (
-            "rejilla_eurostat_cyl_morado"
-        ),
+        "catalog_default_style_source_key": ("rejilla_eurostat_cyl_morado"),
         "catalog_style_count": 3,
     }
 
@@ -347,13 +356,9 @@ def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
         feature_count,
         identifier_sha256,
     ) in _EUROSTAT_GRID_PARITY.items():
-        catalog_remote_name = (
-            f"rejilla_eurostat_cyl_{resolution}x{resolution}"
-        )
+        catalog_remote_name = f"rejilla_eurostat_cyl_{resolution}x{resolution}"
         source_layer = f"grid_{resolution}km_surf"
-        profile = (
-            f"eurostat-gisco-grid-{resolution}km-cyl-local-styles-v1"
-        )
+        profile = f"eurostat-gisco-grid-{resolution}km-cyl-local-styles-v1"
         sources.append(
             _ReviewedDatasetSource(
                 profile=profile,
@@ -362,8 +367,7 @@ def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
                 protocol="download",
                 target_kind="vector",
                 endpoint_url=(
-                    "https://gisco-services.ec.europa.eu/grid/"
-                    f"{source_layer}.gpkg"
+                    "https://gisco-services.ec.europa.eu/grid/" f"{source_layer}.gpkg"
                 ),
                 remote_name=source_layer,
                 sync_strategy="full_snapshot",
@@ -393,9 +397,7 @@ def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
                         "source_crs": "EPSG:3035",
                         "mask_target_crs": "EPSG:3035",
                         "predicate": "intersects",
-                        "geometry_mode": (
-                            "preserve-whole-source-features"
-                        ),
+                        "geometry_mode": ("preserve-whole-source-features"),
                     },
                 },
                 equivalence={
@@ -415,10 +417,7 @@ def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
                     "expected_feature_count": feature_count,
                     "expected_identifier_sha256": identifier_sha256,
                     "expected_style_evidence": (
-                        _eurostat_grid_style_evidence(
-                            profile,
-                            catalog_remote_name
-                        )
+                        _eurostat_grid_style_evidence(profile, catalog_remote_name)
                     ),
                 },
             )
@@ -436,9 +435,7 @@ _INES_HISTORICAL_STYLE_REFERENCE = {
         "Efectos negativos sobre el Patrimonio Natural y la Biodiversidad "
         "relacionados con el Inventario Nacional de Erosión de Suelos"
     ),
-    "figure_title": (
-        "Figura 1. Erosión laminar y en regueros (niveles erosivos)"
-    ),
+    "figure_title": ("Figura 1. Erosión laminar y en regueros (niveles erosivos)"),
     "palette": [
         {"class_value": 1, "label": "0 - 5", "color": "#7b8257"},
         {"class_value": 2, "label": "5 - 10", "color": "#9bb068"},
@@ -625,8 +622,7 @@ _REVIEWED_DATASET_SOURCES = {
         _ReviewedDatasetSource(
             profile="miteco-ines-potential-cyl-geotiff-download-v1",
             catalog_endpoint_url=(
-                "https://wms.mapama.gob.es/sig/Biodiversidad/"
-                "INESErosionPotencial"
+                "https://wms.mapama.gob.es/sig/Biodiversidad/" "INESErosionPotencial"
             ),
             catalog_remote_name="NZ.HazardArea",
             protocol="download",
@@ -763,16 +759,12 @@ _REVIEWED_LOCAL_STYLE_IDENTITIES = {
     },
     "miteco-ines-potential-cyl-geotiff-download-v1": {
         "style_kind": "ines_raster",
-        "catalog_style_source_key": (
-            "biodiversidad_ines_erosionpotencial"
-        ),
+        "catalog_style_source_key": ("biodiversidad_ines_erosionpotencial"),
         "remote_style_name": "Biodiversidad_INES_ErosionPotencial",
     },
     "miteco-ines-laminar-cyl-geotiff-download-v1": {
         "style_kind": "ines_raster",
-        "catalog_style_source_key": (
-            "biodiversidad_ines_erosionlaminar"
-        ),
+        "catalog_style_source_key": ("biodiversidad_ines_erosionlaminar"),
         "remote_style_name": "Biodiversidad_INES_ErosionLaminar",
     },
 }
@@ -791,9 +783,7 @@ def _eurostat_grid_local_style_identities(
             "profile": profile,
             "catalog_layer_name": reviewed.catalog_remote_name,
             "selected_layer_name": selected_layer_name,
-            "catalog_style_source_key": item[
-                "catalog_style_source_key"
-            ],
+            "catalog_style_source_key": item["catalog_style_source_key"],
             "remote_style_name": item["remote_name"],
             "is_default": item["is_default"],
             "fill_opacity": 0,
@@ -804,9 +794,7 @@ def _eurostat_grid_local_style_identities(
         result.append(
             {
                 "style_kind": "eurostat_grid",
-                "catalog_style_source_key": item[
-                    "catalog_style_source_key"
-                ],
+                "catalog_style_source_key": item["catalog_style_source_key"],
                 "remote_style_name": item["remote_name"],
                 "selected_layer_name": selected_layer_name,
                 "outline_color": item["outline_color"],
@@ -879,8 +867,7 @@ _BULK_WMS_GUARDS = {
         _BulkWMSGuard(
             profile="miteco-ines-potential-no-bulk-wms-v1",
             catalog_endpoint_url=(
-                "https://wms.mapama.gob.es/sig/Biodiversidad/"
-                "INESErosionPotencial"
+                "https://wms.mapama.gob.es/sig/Biodiversidad/" "INESErosionPotencial"
             ),
             terms_url=_MITECO_WMS_TERMS,
         ),
@@ -1000,18 +987,12 @@ def acquisition_candidates(
                         "schema": reviewed_idecyl.evidence["schema"],
                         "audit_layer_id": reviewed_idecyl.audit_layer_id,
                         "local_service_status": status,
-                        "reason_codes": list(
-                            reviewed_idecyl.reason_codes
-                        ),
+                        "reason_codes": list(reviewed_idecyl.reason_codes),
                         "metadata_binding": deepcopy(
-                            reviewed_idecyl.evidence[
-                                "metadata_binding"
-                            ]
+                            reviewed_idecyl.evidence["metadata_binding"]
                         ),
                         "authorization_effect": (
-                            reviewed_idecyl.evidence[
-                                "authorization_effect"
-                            ]
+                            reviewed_idecyl.evidence["authorization_effect"]
                         ),
                     },
                 )
@@ -1034,6 +1015,52 @@ def acquisition_candidates(
                     "reviewed IDECyL candidate is incomplete",
                     code="reviewed_idecyl_evidence_invalid",
                 )
+            try:
+                population_exclusion = (
+                    reviewed_idecyl_population_style_exclusion_for_source(
+                        reviewed_idecyl
+                    )
+                )
+                nitrate_styles = reviewed_idecyl_nitrate_styles_for_source(
+                    reviewed_idecyl
+                )
+            except IDECyLPopulationNitrateStyleEvidenceError as error:
+                raise SourceDiscoveryError(
+                    "reviewed IDECyL population/nitrate style evidence " "is invalid",
+                    code="reviewed_idecyl_local_style_evidence_invalid",
+                ) from error
+            if population_exclusion is not None:
+                definition = _idecyl_population_exclusion_source_definition(
+                    layer,
+                    population_exclusion,
+                )
+                return (
+                    _candidate(
+                        protocol=definition["protocol"],
+                        target_kind=definition["target_kind"],
+                        endpoint_url=definition["endpoint_url"],
+                        remote_name=definition["remote_name"],
+                        sync_strategy=definition["sync_strategy"],
+                        priority=definition["priority"],
+                        config=definition["config"],
+                    ),
+                )
+            if nitrate_styles:
+                definition = _idecyl_nitrate_source_definition(
+                    layer,
+                    nitrate_styles,
+                )
+                return (
+                    _candidate(
+                        protocol=definition["protocol"],
+                        target_kind=definition["target_kind"],
+                        endpoint_url=definition["endpoint_url"],
+                        remote_name=definition["remote_name"],
+                        sync_strategy=definition["sync_strategy"],
+                        priority=definition["priority"],
+                        config=definition["config"],
+                    ),
+                )
             config = deepcopy(reviewed_idecyl.candidate_config)
             if "archive_styles" in config:
                 reviewed_catalog_styles = config.pop(
@@ -1046,36 +1073,28 @@ def acquisition_candidates(
                     reviewed_catalog_styles=reviewed_catalog_styles,
                 )
             try:
-                local_styles = reviewed_idecyl_local_styles_for_source(
-                    reviewed_idecyl
-                )
+                local_styles = reviewed_idecyl_local_styles_for_source(reviewed_idecyl)
             except IDECyLLocalStyleEvidenceError as error:
                 raise SourceDiscoveryError(
                     "reviewed IDECyL local-style evidence is invalid",
                     code="reviewed_idecyl_local_style_evidence_invalid",
                 ) from error
             if len(local_styles) == 1:
-                config["reviewed_local_style"] = (
-                    _idecyl_local_style_config(layer, local_styles)[0]
-                )
+                config["reviewed_local_style"] = _idecyl_local_style_config(
+                    layer, local_styles
+                )[0]
             elif local_styles:
-                config["reviewed_local_styles"] = (
-                    _idecyl_local_style_config(layer, local_styles)
+                config["reviewed_local_styles"] = _idecyl_local_style_config(
+                    layer, local_styles
                 )
             if reviewed_idecyl.protocol == "wfs":
                 config.update(_geoserver_style_config(endpoint, layer))
-            config["reviewed_equivalence"] = deepcopy(
-                reviewed_idecyl.evidence
-            )
+            config["reviewed_equivalence"] = deepcopy(reviewed_idecyl.evidence)
             selected_protocol: SourceProtocol = (
-                "wfs"
-                if reviewed_idecyl.protocol == "wfs"
-                else "download"
+                "wfs" if reviewed_idecyl.protocol == "wfs" else "download"
             )
             selected_sync_strategy: SyncStrategy = (
-                "full_snapshot"
-                if selected_protocol == "wfs"
-                else "conditional_get"
+                "full_snapshot" if selected_protocol == "wfs" else "conditional_get"
             )
             return (
                 _candidate(
@@ -1312,14 +1331,11 @@ def _idecyl_archive_style_config(
             code="reviewed_idecyl_style_identity_invalid",
         )
     catalog_styles = [
-        style
-        for style in layer.styles
-        if style.status in {"active", "degraded"}
+        style for style in layer.styles if style.status in {"active", "degraded"}
     ]
     if (
         not catalog_styles
-        or len({style.source_key for style in catalog_styles})
-        != len(catalog_styles)
+        or len({style.source_key for style in catalog_styles}) != len(catalog_styles)
         or len(
             {
                 style.remote_name
@@ -1339,14 +1355,8 @@ def _idecyl_archive_style_config(
         for item in raw_styles
     }
     if key_sets == {_LEGACY_IDECYL_ARCHIVE_STYLE_EVIDENCE_KEYS}:
-        expected_default = _LEGACY_IDECYL_ARCHIVE_DEFAULTS.get(
-            layer.remote_name or ""
-        )
-        defaults = [
-            style.remote_name
-            for style in catalog_styles
-            if style.is_default
-        ]
+        expected_default = _LEGACY_IDECYL_ARCHIVE_DEFAULTS.get(layer.remote_name or "")
+        defaults = [style.remote_name for style in catalog_styles if style.is_default]
         reviewed_by_remote = {
             item["remote_name"]: item
             for item in raw_styles
@@ -1357,10 +1367,7 @@ def _idecyl_archive_style_config(
             or len(reviewed_by_remote) != len(raw_styles)
             or expected_default is None
             or defaults != [expected_default]
-            or {
-                style.remote_name
-                for style in catalog_styles
-            }
+            or {style.remote_name for style in catalog_styles}
             != set(reviewed_by_remote)
         ):
             raise SourceDiscoveryError(
@@ -1399,9 +1406,7 @@ def _idecyl_archive_style_config(
             for item in result
         }
         if reviewed_catalog_styles is None:
-            catalog_inventory_matches = (
-                reviewed_identities == expected_identities
-            )
+            catalog_inventory_matches = reviewed_identities == expected_identities
         else:
             if not isinstance(reviewed_catalog_styles, list):
                 catalog_inventory_matches = False
@@ -1422,10 +1427,8 @@ def _idecyl_archive_style_config(
                     }
                 }
                 catalog_inventory_matches = (
-                    len(reviewed_catalog_identities)
-                    == len(reviewed_catalog_styles)
-                    and reviewed_catalog_identities
-                    == expected_identities
+                    len(reviewed_catalog_identities) == len(reviewed_catalog_styles)
+                    and reviewed_catalog_identities == expected_identities
                     and reviewed_identities == expected_identities
                 )
         if not catalog_inventory_matches:
@@ -1464,11 +1467,7 @@ def _idecyl_local_style_config(
         (idecyl_local_style_config(item) for item in reviewed),
         key=lambda item: item["catalog_style_source_key"],
     )
-    styles = [
-        style
-        for style in layer.styles
-        if style.status in {"active", "degraded"}
-    ]
+    styles = [style for style in layer.styles if style.status in {"active", "degraded"}]
     reviewed_identities = {
         (
             item.catalog_style_source_key,
@@ -1487,11 +1486,7 @@ def _idecyl_local_style_config(
         )
         for style in styles
     }
-    defaults = [
-        item.catalog_style_source_key
-        for item in reviewed
-        if item.is_default
-    ]
+    defaults = [item.catalog_style_source_key for item in reviewed if item.is_default]
     if (
         not reviewed
         or len(layer.styles) != len(reviewed)
@@ -1506,6 +1501,114 @@ def _idecyl_local_style_config(
             code="reviewed_idecyl_local_style_identity_invalid",
         )
     return expected
+
+
+def _idecyl_nitrate_source_definition(
+    layer: ReferenceLayerDefinition,
+    reviewed: tuple[ReviewedIDECyLNitrateStyle, ...],
+) -> dict[str, Any]:
+    """Bind fifteen adapted years plus the one exact archive style."""
+
+    if len(reviewed) != 15:
+        raise SourceDiscoveryError(
+            "reviewed IDECyL nitrate styles are incomplete",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    definition = idecyl_nitrate_expected_source_definition(reviewed[0])
+    catalog = definition["config"].get("archive_style_catalog")
+    if not isinstance(catalog, list):
+        raise SourceDiscoveryError(
+            "reviewed IDECyL nitrate catalog is missing",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    expected = {
+        (
+            item["catalog_style_source_key"],
+            item["remote_name"],
+            item["is_default"],
+        )
+        for item in catalog
+    }
+    actual_styles = [
+        style for style in layer.styles if style.status in {"active", "degraded"}
+    ]
+    actual = {
+        (style.source_key, style.remote_name, style.is_default)
+        for style in actual_styles
+    }
+    expected_titles = {
+        item.catalog_style_source_key: item.style_title for item in reviewed
+    }
+    expected_titles["coad_cyl_nitrat_aguas_subterr_2021"] = (
+        "Recintos municipales 2021 paleta color"
+    )
+    if (
+        len(layer.styles) != 16
+        or len(actual_styles) != 16
+        or len(actual) != 16
+        or actual != expected
+        or {style.source_key: style.title for style in actual_styles} != expected_titles
+        or layer.style_name != "coad_cyl_nitrat_aguas_subterr_2021"
+    ):
+        raise SourceDiscoveryError(
+            "catalog IDECyL nitrate styles differ from reviewed evidence",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    return definition
+
+
+def _idecyl_population_exclusion_source_definition(
+    layer: ReferenceLayerDefinition,
+    exclusion: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the catalog styles which lack safe local render evidence."""
+
+    definition = idecyl_population_expected_source_definition(exclusion)
+    catalog = exclusion.get("catalog_styles")
+    if not isinstance(catalog, list):
+        raise SourceDiscoveryError(
+            "reviewed IDECyL population exclusion catalog is missing",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    expected = {
+        (
+            item["catalog_style_source_key"],
+            item["remote_name"],
+            item["title"],
+            item["is_default"],
+        )
+        for item in catalog
+    }
+    actual_styles = [
+        style for style in layer.styles if style.status in {"active", "degraded"}
+    ]
+    actual = {
+        (
+            style.source_key,
+            style.remote_name,
+            style.title,
+            style.is_default,
+        )
+        for style in actual_styles
+    }
+    default = next(
+        item["catalog_style_source_key"]
+        for item in catalog
+        if item["is_default"] is True
+    )
+    if (
+        exclusion.get("local_service_eligible") is not False
+        or len(layer.styles) != len(catalog)
+        or len(actual_styles) != len(catalog)
+        or len(actual) != len(catalog)
+        or actual != expected
+        or layer.style_name != default
+    ):
+        raise SourceDiscoveryError(
+            "catalog IDECyL population styles differ from their exclusion",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    return definition
 
 
 def _reviewed_dataset_source(
@@ -1574,16 +1677,12 @@ def _reviewed_ortho_substitution_config(
             "format": reviewed.image_format,
             "style_name": reviewed.style_name,
             "coverage_required": True,
-            "reviewed_equivalence": reviewed_ign_ortho_equivalence(
-                reviewed
-            ),
+            "reviewed_equivalence": reviewed_ign_ortho_equivalence(reviewed),
         }
     )
     expected = reviewed_ign_ortho_expected_source_definition(reviewed)
     if config != expected["config"]:
-        raise SourceDiscoveryError(
-            "reviewed IGN ortho source definition is not exact"
-        )
+        raise SourceDiscoveryError("reviewed IGN ortho source definition is not exact")
     return config
 
 
@@ -1593,12 +1692,9 @@ def _reviewed_dataset_source_config(
     reviewed: _ReviewedDatasetSource,
 ) -> dict[str, Any]:
     config = deepcopy(reviewed.config)
-    expected_style_evidence = reviewed.equivalence.get(
-        "expected_style_evidence"
-    )
-    if (
-        expected_style_evidence is not None
-        and not isinstance(expected_style_evidence, dict)
+    expected_style_evidence = reviewed.equivalence.get("expected_style_evidence")
+    if expected_style_evidence is not None and not isinstance(
+        expected_style_evidence, dict
     ):
         raise SourceDiscoveryError(
             "reviewed dataset style evidence is invalid",
@@ -1606,8 +1702,7 @@ def _reviewed_dataset_source_config(
         )
     if (
         isinstance(expected_style_evidence, dict)
-        and expected_style_evidence.get("schema")
-        == _EUROSTAT_GRID_STYLE_SET_SCHEMA
+        and expected_style_evidence.get("schema") == _EUROSTAT_GRID_STYLE_SET_SCHEMA
     ):
         catalog_styles = sorted(
             (
@@ -1623,17 +1718,13 @@ def _reviewed_dataset_source_config(
         )
         expected_catalog_styles = [
             {
-                "catalog_style_source_key": item[
-                    "catalog_style_source_key"
-                ],
+                "catalog_style_source_key": item["catalog_style_source_key"],
                 "remote_name": item["remote_name"],
                 "is_default": item["is_default"],
             }
             for item in _EUROSTAT_GRID_LOCAL_STYLES
         ]
-        expected_catalog_styles.sort(
-            key=lambda item: item["catalog_style_source_key"]
-        )
+        expected_catalog_styles.sort(key=lambda item: item["catalog_style_source_key"])
         if (
             catalog_endpoint != reviewed.catalog_endpoint_url
             or layer.remote_name != reviewed.catalog_remote_name
@@ -1659,13 +1750,10 @@ def _reviewed_dataset_source_config(
         )
     if (
         isinstance(expected_style_evidence, dict)
-        and expected_style_evidence.get("schema")
-        != _EUROSTAT_GRID_STYLE_SET_SCHEMA
+        and expected_style_evidence.get("schema") != _EUROSTAT_GRID_STYLE_SET_SCHEMA
     ):
         observed_expected = deepcopy(expected_style_evidence)
-        observed_expected["style_parity_status"] = style_evidence[
-            "style_parity_status"
-        ]
+        observed_expected["style_parity_status"] = style_evidence["style_parity_status"]
         if observed_expected != style_evidence:
             raise SourceDiscoveryError(
                 "reviewed dataset style identities no longer match the catalog",
@@ -1721,9 +1809,7 @@ def reviewed_cross_origin_style_source(
     reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
     if reviewed is None:
         return False
-    expected_style_evidence = reviewed.equivalence.get(
-        "expected_style_evidence"
-    )
+    expected_style_evidence = reviewed.equivalence.get("expected_style_evidence")
     if not isinstance(expected_style_evidence, dict):
         return False
     expected_equivalence = _reviewed_dataset_equivalence(
@@ -1774,9 +1860,7 @@ def _reviewed_style_evidence(
             else layer.style_name
         ),
         "original_wms_style_name": (
-            default["remote_name"]
-            if default is not None
-            else layer.style_name
+            default["remote_name"] if default is not None else layer.style_name
         ),
         "catalog_styles": styles,
     }
@@ -1786,10 +1870,7 @@ def _bulk_wms_guard(
     endpoint: str,
     layer: ReferenceLayerDefinition,
 ) -> _BulkWMSGuard | None:
-    if (
-        layer.renderer != "raster_tile"
-        or not layer.remote_name
-    ):
+    if layer.renderer != "raster_tile" or not layer.remote_name:
         return None
     return _BULK_WMS_GUARDS.get(endpoint)
 
@@ -1916,15 +1997,11 @@ def _reviewed_local_style_expected_equivalence(
             "style_parity_status": "local_style_adaptation_required",
             "original_wms_endpoint_url": reviewed.catalog_endpoint_url,
             "original_wms_layer_name": reviewed.catalog_remote_name,
-            "catalog_default_style_source_key": (
-                identity["catalog_style_source_key"]
-            ),
+            "catalog_default_style_source_key": (identity["catalog_style_source_key"]),
             "original_wms_style_name": identity["remote_style_name"],
             "catalog_styles": [
                 {
-                    "catalog_style_source_key": (
-                        identity["catalog_style_source_key"]
-                    ),
+                    "catalog_style_source_key": (identity["catalog_style_source_key"]),
                     "remote_name": identity["remote_style_name"],
                     "is_default": True,
                 }
@@ -1955,19 +2032,13 @@ def _reviewed_local_style_reference(
             "label_color": "#000000",
         }
     if identity["style_kind"] == "flood_polygons":
-        style_reference = deepcopy(
-            reviewed.equivalence["official_style_reference"]
-        )
-        style_reference["parity_claim"] = (
-            "official_mvt_style_adapted_to_sld_not_exact"
-        )
+        style_reference = deepcopy(reviewed.equivalence["official_style_reference"])
+        style_reference["parity_claim"] = "official_mvt_style_adapted_to_sld_not_exact"
         return style_reference
     if identity["style_kind"] == "eurostat_grid":
         return {
             "source_kind": "siur-owned-deterministic-style",
-            "style_identity_sha256": identity[
-                "style_identity_sha256"
-            ],
+            "style_identity_sha256": identity["style_identity_sha256"],
             "adaptation_status": "adaptation_required",
             "parity_claim": "siur_local_adaptation_not_exact",
             "fill_opacity": 0,
@@ -2001,17 +2072,42 @@ def reviewed_local_style_profile_identity(
 ) -> tuple[str, str, str, str, str, str] | None:
     """Return the immutable style identity for an allowlisted recipe."""
 
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        matching = [
+            item
+            for item in nitrate
+            if catalog_style_source_key is None
+            or item.catalog_style_source_key == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        item = matching[0]
+        definition = idecyl_nitrate_expected_source_definition(item)
+        reviewed_equivalence = definition["config"]["reviewed_equivalence"]
+        return (
+            item.style_kind,
+            item.catalog_style_source_key,
+            item.remote_style_name,
+            item.catalog_remote_name,
+            item.selected_layer_name,
+            hashlib.sha256(
+                json.dumps(
+                    reviewed_equivalence,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
     idecyl = reviewed_idecyl_local_style(
         profile,
         catalog_style_source_key,
     )
     if idecyl is not None:
-        definition = idecyl_local_style_expected_source_definition(
-            idecyl
-        )
-        reviewed_equivalence = definition["config"][
-            "reviewed_equivalence"
-        ]
+        definition = idecyl_local_style_expected_source_definition(idecyl)
+        reviewed_equivalence = definition["config"]["reviewed_equivalence"]
         return (
             "idecyl_polygon_outline",
             idecyl.catalog_style_source_key,
@@ -2040,8 +2136,7 @@ def reviewed_local_style_profile_identity(
         matching = [
             item
             for item in identities
-            if item["catalog_style_source_key"]
-            == catalog_style_source_key
+            if item["catalog_style_source_key"] == catalog_style_source_key
         ]
         if len(matching) != 1:
             return None
@@ -2074,6 +2169,17 @@ def reviewed_local_style_profile_reference(
 ) -> dict[str, Any] | None:
     """Return the exact official reference accepted for persisted evidence."""
 
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        matching = [
+            item
+            for item in nitrate
+            if catalog_style_source_key is None
+            or item.catalog_style_source_key == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        return deepcopy(matching[0].evidence)
     idecyl = reviewed_idecyl_local_style(
         profile,
         catalog_style_source_key,
@@ -2092,8 +2198,7 @@ def reviewed_local_style_profile_reference(
         matching = [
             item
             for item in identities
-            if item["catalog_style_source_key"]
-            == catalog_style_source_key
+            if item["catalog_style_source_key"] == catalog_style_source_key
         ]
         if len(matching) != 1:
             return None
@@ -2107,14 +2212,33 @@ def reviewed_local_style_expected_source_definition(
 ) -> tuple[dict[str, Any], str] | None:
     """Return the exact full source definition for an IDECyL adaptation."""
 
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        matching = [
+            item
+            for item in nitrate
+            if item.catalog_style_source_key == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        definition = idecyl_nitrate_expected_source_definition(matching[0])
+        digest = hashlib.sha256(
+            json.dumps(
+                definition,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return deepcopy(definition), digest
     reviewed = reviewed_idecyl_local_style(
         profile,
         catalog_style_source_key,
     )
     if (
         reviewed is None
-        or catalog_style_source_key
-        != reviewed.catalog_style_source_key
+        or catalog_style_source_key != reviewed.catalog_style_source_key
     ):
         return None
     definition = idecyl_local_style_expected_source_definition(reviewed)
@@ -2192,8 +2316,7 @@ def reviewed_local_style_recipes(
         or candidate.priority != expected_candidate.priority
         or candidate.config != expected_candidate.config
         or candidate.source_key != expected_candidate.source_key
-        or candidate.definition_sha256
-        != expected_candidate.definition_sha256
+        or candidate.definition_sha256 != expected_candidate.definition_sha256
     ):
         raise SourceDiscoveryError(
             "reviewed local style evidence does not match its allowlisted source",
@@ -2214,9 +2337,7 @@ def reviewed_local_style_recipes(
             schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
             profile=profile,
             style_kind=identity["style_kind"],
-            catalog_style_source_key=identity[
-                "catalog_style_source_key"
-            ],
+            catalog_style_source_key=identity["catalog_style_source_key"],
             remote_style_name=identity["remote_style_name"],
             catalog_layer_name=reviewed.catalog_remote_name,
             selected_layer_name=identity.get(
@@ -2244,6 +2365,72 @@ def _reviewed_idecyl_local_style_recipes(
             "reviewed IDECyL local-style profile is invalid",
             code="reviewed_local_style_invalid",
         )
+    population_exclusion = reviewed_idecyl_population_style_exclusion(profile)
+    if population_exclusion is not None:
+        expected_definition = idecyl_population_expected_source_definition(
+            population_exclusion
+        )
+        expected = _candidate(
+            protocol=expected_definition["protocol"],
+            target_kind=expected_definition["target_kind"],
+            endpoint_url=expected_definition["endpoint_url"],
+            remote_name=expected_definition["remote_name"],
+            sync_strategy=expected_definition["sync_strategy"],
+            priority=expected_definition["priority"],
+            config=deepcopy(expected_definition["config"]),
+        )
+        if candidate != expected:
+            raise SourceDiscoveryError(
+                "reviewed IDECyL population exclusion changed",
+                code="reviewed_local_style_invalid",
+            )
+        return ()
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        expected_definition = idecyl_nitrate_expected_source_definition(nitrate[0])
+        expected = _candidate(
+            protocol=expected_definition["protocol"],
+            target_kind=expected_definition["target_kind"],
+            endpoint_url=expected_definition["endpoint_url"],
+            remote_name=expected_definition["remote_name"],
+            sync_strategy=expected_definition["sync_strategy"],
+            priority=expected_definition["priority"],
+            config=deepcopy(expected_definition["config"]),
+        )
+        if candidate != expected:
+            raise SourceDiscoveryError(
+                "reviewed IDECyL nitrate styles do not match their source",
+                code="reviewed_local_style_invalid",
+            )
+        reviewed_equivalence = expected_definition["config"]["reviewed_equivalence"]
+        reviewed_equivalence_sha256 = hashlib.sha256(
+            json.dumps(
+                reviewed_equivalence,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return tuple(
+            ReviewedLocalStyleRecipe(
+                schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
+                profile=item.profile,
+                style_kind="idecyl_nitrate_year",
+                catalog_style_source_key=(item.catalog_style_source_key),
+                remote_style_name=item.remote_style_name,
+                catalog_layer_name=item.catalog_remote_name,
+                selected_layer_name=item.selected_layer_name,
+                reviewed_equivalence=deepcopy(reviewed_equivalence),
+                reviewed_equivalence_sha256=(reviewed_equivalence_sha256),
+                style_reference=deepcopy(item.evidence),
+                audit_layer_id=item.audit_layer_id,
+                catalog_style_is_default=item.is_default,
+                source_definition=candidate_definition(expected),
+                source_definition_sha256=expected.definition_sha256,
+            )
+            for item in nitrate
+        )
     identity = raw_equivalence.get("catalog_identity")
     if not isinstance(identity, dict):
         raise SourceDiscoveryError(
@@ -2252,20 +2439,13 @@ def _reviewed_idecyl_local_style_recipes(
         )
     try:
         exact_source = reviewed_idecyl_exact_source(
-            catalog_layer_source_key=str(
-                identity.get("catalog_layer_source_key", "")
-            ),
-            catalog_endpoint_url=str(
-                identity.get("catalog_endpoint_url", "")
-            ),
-            catalog_remote_name=str(
-                identity.get("catalog_remote_name", "")
-            ),
+            catalog_layer_source_key=str(identity.get("catalog_layer_source_key", "")),
+            catalog_endpoint_url=str(identity.get("catalog_endpoint_url", "")),
+            catalog_remote_name=str(identity.get("catalog_remote_name", "")),
         )
         reviewed_items = (
             reviewed_idecyl_local_styles_for_source(exact_source)
-            if exact_source is not None
-            and exact_source.profile == profile
+            if exact_source is not None and exact_source.profile == profile
             else ()
         )
     except (
@@ -2295,9 +2475,7 @@ def _reviewed_idecyl_local_style_recipes(
             "reviewed IDECyL local style does not match its source definition",
             code="reviewed_local_style_invalid",
         )
-    reviewed_equivalence = expected_definition["config"][
-        "reviewed_equivalence"
-    ]
+    reviewed_equivalence = expected_definition["config"]["reviewed_equivalence"]
     reviewed_equivalence_sha256 = hashlib.sha256(
         json.dumps(
             reviewed_equivalence,
@@ -2312,16 +2490,12 @@ def _reviewed_idecyl_local_style_recipes(
             schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
             profile=reviewed.profile,
             style_kind="idecyl_polygon_outline",
-            catalog_style_source_key=(
-                reviewed.catalog_style_source_key
-            ),
+            catalog_style_source_key=(reviewed.catalog_style_source_key),
             remote_style_name=reviewed.remote_style_name,
             catalog_layer_name=reviewed.catalog_remote_name,
             selected_layer_name=reviewed.selected_layer_name,
             reviewed_equivalence=deepcopy(reviewed_equivalence),
-            reviewed_equivalence_sha256=(
-                reviewed_equivalence_sha256
-            ),
+            reviewed_equivalence_sha256=(reviewed_equivalence_sha256),
             style_reference=deepcopy(reviewed.evidence),
             audit_layer_id=reviewed.audit_layer_id,
             catalog_style_is_default=reviewed.is_default,
