@@ -28,6 +28,12 @@ DEFAULT_CHUNK_BYTES = 1024 * 1024
 DEFAULT_MAX_BLOB_BYTES = 20 * 1024 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 STAGING_NAME_RE = re.compile(r"^[0-9a-f]{32}\.part$")
+STAGING_LEASE_NAME_RE = re.compile(
+    r"^(?P<lease>[0-9a-f]{32})\.lease$"
+)
+LEASED_STAGING_NAME_RE = re.compile(
+    r"^(?P<lease>[0-9a-f]{32})-[0-9a-f]{32}\.part$"
+)
 BLOB_KEY_RE = re.compile(
     r"^blobs/sha256/(?P<prefix>[0-9a-f]{2})/(?P<digest>[0-9a-f]{64})$"
 )
@@ -226,6 +232,15 @@ class ReferenceBlobStore:
                 raise ValueError("max_bytes cannot exceed the store maximum")
             limit = requested
         return ReferenceStagingWriter(self, max_bytes=limit)
+
+    def staging_batch(self) -> "ReferenceStagingBatch":
+        """Lease a group of sealed staging files with one file descriptor."""
+
+        if self.read_only:
+            raise ReferenceBlobStoreError("blob store is read-only")
+        if self._lock_fd is None:
+            raise ReferenceBlobStoreError("blob store is closed")
+        return ReferenceStagingBatch(self)
 
     def put_stream(
         self,
@@ -515,10 +530,30 @@ class ReferenceBlobStore:
                     "could not open staging directory"
                 ) from error
             try:
-                for name in os.listdir(directory_fd):
-                    if STAGING_NAME_RE.fullmatch(name) is None:
+                names = os.listdir(directory_fd)
+                lease_names: list[str] = []
+                for name in names:
+                    if STAGING_LEASE_NAME_RE.fullmatch(name) is not None:
+                        lease_names.append(name)
+                        continue
+                    leased_match = LEASED_STAGING_NAME_RE.fullmatch(name)
+                    if (
+                        STAGING_NAME_RE.fullmatch(name) is None
+                        and leased_match is None
+                    ):
                         skipped_count += 1
                         continue
+                    if leased_match is not None:
+                        lease_name = (
+                            f"{leased_match.group('lease')}.lease"
+                        )
+                        lease_state = self._staging_lease_state(
+                            directory_fd,
+                            lease_name,
+                        )
+                        if lease_state in {"locked", "unsafe"}:
+                            skipped_count += 1
+                            continue
                     file_flags = os.O_RDONLY
                     if hasattr(os, "O_CLOEXEC"):
                         file_flags |= os.O_CLOEXEC
@@ -575,6 +610,75 @@ class ReferenceBlobStore:
                         ) from error
                     finally:
                         os.close(candidate_fd)
+                for lease_name in lease_names:
+                    lease_flags = os.O_RDONLY
+                    if hasattr(os, "O_CLOEXEC"):
+                        lease_flags |= os.O_CLOEXEC
+                    if hasattr(os, "O_NOFOLLOW"):
+                        lease_flags |= os.O_NOFOLLOW
+                    if hasattr(os, "O_NONBLOCK"):
+                        lease_flags |= os.O_NONBLOCK
+                    try:
+                        lease_fd = os.open(
+                            lease_name,
+                            lease_flags,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError:
+                        skipped_count += 1
+                        continue
+                    try:
+                        try:
+                            fcntl.flock(
+                                lease_fd,
+                                fcntl.LOCK_EX | fcntl.LOCK_NB,
+                            )
+                        except BlockingIOError:
+                            skipped_count += 1
+                            continue
+                        lease = os.fstat(lease_fd)
+                        lease_id = lease_name.removesuffix(".lease")
+                        remaining_names = os.listdir(directory_fd)
+                        has_pages = any(
+                            item.startswith(f"{lease_id}-")
+                            and LEASED_STAGING_NAME_RE.fullmatch(item)
+                            is not None
+                            for item in remaining_names
+                        )
+                        if (
+                            not stat.S_ISREG(lease.st_mode)
+                            or lease.st_mtime > cutoff
+                            or has_pages
+                        ):
+                            skipped_count += 1
+                            continue
+                        current = os.stat(
+                            lease_name,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            not stat.S_ISREG(current.st_mode)
+                            or current.st_dev != lease.st_dev
+                            or current.st_ino != lease.st_ino
+                        ):
+                            skipped_count += 1
+                            continue
+                        if delete:
+                            os.unlink(
+                                lease_name,
+                                dir_fd=directory_fd,
+                            )
+                        eligible_count += 1
+                        eligible_bytes += lease.st_size
+                    except FileNotFoundError:
+                        skipped_count += 1
+                    except OSError as error:
+                        raise ReferenceBlobStoreError(
+                            "could not clean a staging lease"
+                        ) from error
+                    finally:
+                        os.close(lease_fd)
                 if delete and eligible_count:
                     os.fsync(directory_fd)
             finally:
@@ -585,6 +689,42 @@ class ReferenceBlobStore:
             eligible_bytes=eligible_bytes,
             skipped_count=skipped_count,
         )
+
+    def _staging_lease_state(
+        self,
+        directory_fd: int,
+        lease_name: str,
+    ) -> str:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        try:
+            lease_fd = os.open(
+                lease_name,
+                flags,
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            return "missing"
+        except OSError:
+            return "unsafe"
+        try:
+            if not stat.S_ISREG(os.fstat(lease_fd).st_mode):
+                return "unsafe"
+            try:
+                fcntl.flock(
+                    lease_fd,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except BlockingIOError:
+                return "locked"
+            return "unlocked"
+        finally:
+            os.close(lease_fd)
 
     @contextmanager
     def _shared_lock(self) -> Iterator[None]:
@@ -801,17 +941,156 @@ class ReferenceBlobStore:
             raise ReferenceBlobStoreError("could not fsync storage directory") from error
 
 
+class ReferenceStagingBatch:
+    """One lease protecting many sealed staging files from concurrent GC."""
+
+    def __init__(self, store: ReferenceBlobStore) -> None:
+        self._store = store
+        self._lease_id = uuid4().hex
+        self._lease_path = (
+            store._staging_dir / f"{self._lease_id}.lease"
+        )
+        self._paths: set[Path] = set()
+        self._active = False
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = -1
+        try:
+            descriptor = os.open(self._lease_path, flags, 0o600)
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(
+                descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+            os.fsync(descriptor)
+            self._fd = descriptor
+            self._active = True
+            store._fsync_directory(store._staging_dir)
+        except (OSError, ReferenceBlobStoreError) as error:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            try:
+                self._lease_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if isinstance(error, ReferenceBlobStoreError):
+                raise
+            raise ReferenceBlobStoreError(
+                "could not create staging batch lease"
+            ) from error
+
+    @property
+    def lease_path(self) -> Path:
+        return self._lease_path
+
+    def stage(
+        self,
+        *,
+        max_bytes: int | None = None,
+    ) -> "ReferenceStagingWriter":
+        self._require_active()
+        if self._store._lock_fd is None:
+            raise ReferenceBlobStoreError("blob store is closed")
+        limit = self._store.max_blob_bytes
+        if max_bytes is not None:
+            requested = _positive_integer(max_bytes, "max_bytes")
+            if requested > self._store.max_blob_bytes:
+                raise ValueError(
+                    "max_bytes cannot exceed the store maximum"
+                )
+            limit = requested
+        return ReferenceStagingWriter(
+            self._store,
+            max_bytes=limit,
+            batch=self,
+        )
+
+    def close(self) -> None:
+        if not self._active:
+            return
+        failures = False
+        for path in self._paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                failures = True
+        try:
+            current = self._lease_path.lstat()
+            lease = os.fstat(self._fd)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or self._lease_path.is_symlink()
+                or current.st_dev != lease.st_dev
+                or current.st_ino != lease.st_ino
+            ):
+                failures = True
+            else:
+                self._lease_path.unlink()
+        except FileNotFoundError:
+            failures = True
+        except OSError:
+            failures = True
+        descriptor = self._fd
+        self._fd = -1
+        self._active = False
+        try:
+            os.close(descriptor)
+        except OSError:
+            failures = True
+        try:
+            self._store._fsync_directory(self._store._staging_dir)
+        except ReferenceBlobStoreError:
+            failures = True
+        if failures:
+            raise ReferenceBlobStoreError(
+                "staging batch cleanup could not be verified"
+            )
+
+    def _track(self, path: Path) -> None:
+        self._require_active()
+        self._paths.add(path)
+
+    def _require_active(self) -> None:
+        if not self._active or getattr(self, "_fd", -1) < 0:
+            raise ReferenceBlobStoreError(
+                "staging batch lease is closed"
+            )
+
+    def __enter__(self) -> "ReferenceStagingBatch":
+        self._require_active()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
 class ReferenceStagingWriter:
     """One private staging artifact with bounded streaming writes."""
 
-    def __init__(self, store: ReferenceBlobStore, *, max_bytes: int) -> None:
+    def __init__(
+        self,
+        store: ReferenceBlobStore,
+        *,
+        max_bytes: int,
+        batch: ReferenceStagingBatch | None = None,
+    ) -> None:
         self._store = store
         self._max_bytes = max_bytes
         self._size_bytes = 0
         self._digest = hashlib.sha256()
         self._finished = False
         self._committed: StoredReferenceBlob | None = None
-        self._path = store._staging_dir / f"{uuid4().hex}.part"
+        self._batch = batch
+        prefix = f"{batch._lease_id}-" if batch is not None else ""
+        self._path = (
+            store._staging_dir / f"{prefix}{uuid4().hex}.part"
+        )
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
@@ -823,7 +1102,9 @@ class ReferenceStagingWriter:
             os.fchmod(descriptor, 0o600)
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fd = descriptor
-        except OSError as error:
+            if batch is not None:
+                batch._track(self._path)
+        except (OSError, ReferenceBlobStoreError) as error:
             if descriptor >= 0:
                 try:
                     os.close(descriptor)
@@ -833,7 +1114,11 @@ class ReferenceStagingWriter:
                 self._path.unlink(missing_ok=True)
             except OSError:
                 pass
-            raise ReferenceBlobStoreError("could not create staging artifact") from error
+            if isinstance(error, ReferenceBlobStoreError):
+                raise
+            raise ReferenceBlobStoreError(
+                "could not create staging artifact"
+            ) from error
 
     @property
     def size_bytes(self) -> int:
@@ -883,6 +1168,46 @@ class ReferenceStagingWriter:
         self._digest.update(payload)
         self._size_bytes += len(payload)
         return len(payload)
+
+    def seal(self) -> Path:
+        """Close a complete staging file without publishing it to the CAS.
+
+        The caller may validate other inputs before adopting the sealed file
+        with :meth:`ReferenceBlobStore.commit_staged_file`.  Until then it
+        remains protected by its staging-batch lease and covered by staging
+        cleanup after that lease is released by a crash.
+        """
+
+        self._require_open()
+        if self._batch is None:
+            self._abort_after_error()
+            raise ReferenceBlobStoreError(
+                "sealing requires an active staging batch lease"
+            )
+        self._batch._require_active()
+        if self._size_bytes == 0:
+            self._abort_after_error()
+            raise ReferenceBlobEmptyError("reference artifact is empty")
+        try:
+            os.fchmod(self._fd, 0o600)
+            os.fsync(self._fd)
+        except OSError as error:
+            self._abort_after_error()
+            raise ReferenceBlobStoreError(
+                "could not seal staging artifact"
+            ) from error
+
+        descriptor = self._fd
+        self._fd = -1
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            self._finished = True
+            raise ReferenceBlobStoreError(
+                "could not close sealed staging artifact"
+            ) from error
+        self._finished = True
+        return self._path
 
     def commit(
         self,

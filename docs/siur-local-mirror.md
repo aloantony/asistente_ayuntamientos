@@ -118,25 +118,40 @@ periódicamente una comprobación completa para detectar servidores que no
 mantienen correctamente esos metadatos.
 
 Una fuente WFS que no anuncie `PagingIsTransactionSafe=true` no puede usar la
-paginación heredada. Su configuración revisada debe declarar uno de dos
-contratos. `wfs_snapshot.mode=single_response` descarga la colección completa
-sin `count`, `startIndex` ni `sortBy`, elimina identificadores y metadatos
-volátiles y ordena localmente el multiconjunto por contenido canónico; así se
-preservan incluso entidades idénticas sin inventar una clave remota.
+paginación heredada ni siquiera cuando su primera respuesta parezca completa:
+un límite oculto del servidor puede hacer coincidir el total declarado y lo
+devuelto. Su configuración revisada debe declarar uno de dos contratos.
+`wfs_snapshot.mode=single_response` descarga la colección completa sin `count`,
+`startIndex` ni `sortBy`, elimina identificadores y metadatos volátiles y ordena
+localmente el multiconjunto por contenido canónico; así se preservan incluso
+entidades idénticas sin inventar una clave remota.
 `wfs_snapshot.mode=paged` exige además `identity_properties`, construye con
 ellas un `sortBy` ascendente y comprueba identidad única y orden estrictamente
 creciente entre páginas.
 
 Ambos modos obtienen antes el total mediante un `GetFeature` independiente con
-`resultType=hits&count=1`, leen dos veces la colección completa y comparan el
+`resultType=hits`. En WFS 2 se añade `count=1` y se exigen
+`numberMatched` y `numberReturned=0`; en WFS 1.0/1.1 no se envía
+`maxFeatures`, se acepta `numberOfFeatures` y se comprueba que la colección no
+contenga miembros. Después leen dos veces la colección completa y comparan el
 conteo, la secuencia o multiconjunto de identidades y el SHA-256 canónico de
-todo el contenido. El total y los bytes observados se acotan de forma acumulada
-incluyendo la segunda pasada. Los identificadores efímeros del servidor se
-sustituyen por identificadores locales deterministas. Una página duplicada, una
-mutación, una clave ausente, un total divergente o dos pasadas que no convergen
-aborta la adquisición sin crear un manifiesto promocionable. Este control
-técnico no concede derechos de descarga, conservación ni servicio: siguen
-siendo obligatorias las revisiones y autorizaciones persistidas.
+todo el contenido.
+
+`max_total_bytes` actúa como dos límites independientes con el mismo valor. El
+primero acota la suma de todas las respuestas remotas de la adquisición:
+capabilities, consultas `hits`, ambas pasadas, estilos y recursos de estilo. El
+segundo acota todos los artefactos retenidos, incluido el manifiesto; por tanto
+no se confunden tráfico observado y ocupación persistida. Las páginas canónicas
+de la primera pasada permanecen selladas en `staging` bajo una única lease de
+lote y solo entran en el CAS después de converger. La lease hace que un GC
+concurrente omita todas las páginas sin mantener un descriptor por página; un
+aborto las elimina y una caída libera la lease para que las recoja el GC de
+staging. Los identificadores efímeros del servidor se sustituyen por
+identificadores locales deterministas. Una página duplicada, una mutación, una
+clave ausente, un total divergente o dos pasadas que no convergen aborta la
+adquisición sin crear un manifiesto promocionable. Este control técnico no
+concede derechos de descarga, conservación ni servicio: siguen siendo
+obligatorias las revisiones y autorizaciones persistidas.
 
 ## Almacenamiento y ciclo de vida
 
