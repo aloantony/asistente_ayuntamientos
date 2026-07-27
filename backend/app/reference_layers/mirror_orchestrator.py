@@ -1697,6 +1697,7 @@ def materialize_vector_delivery(
         "geopackage": "GPKG",
         "gpkg": "GPKG",
         "geopackage-zip": "GPKGZIP",
+        "shapefile-zip": "SHAPEFILEZIP",
         "inspire-cadastral-parcel-gml-zip": "GMLZIP",
     }.get(data_format)
     if len(datasets) > 1 and input_driver is None:
@@ -1715,7 +1716,8 @@ def materialize_vector_delivery(
             _optional_archive_member(
                 context.source,
                 item,
-                required=data_format == "geopackage-zip",
+                required=data_format
+                in {"geopackage-zip", "shapefile-zip"},
             ),
         )
         for item in datasets

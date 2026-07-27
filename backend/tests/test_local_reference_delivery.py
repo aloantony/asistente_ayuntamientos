@@ -969,6 +969,77 @@ def test_configured_source_without_promotion_never_falls_back_remote(db) -> None
     assert availability.delivery_blocker == "local_not_ready"
 
 
+def test_unreviewed_enabled_source_exposes_authorization_blocker(db) -> None:
+    definition = _catalog_definition()
+    apply_catalog_definition(db, definition)
+    layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == definition.provider_key,
+            ReferenceLayer.source_key == "layer",
+        )
+    )
+    styles = list(
+        db.scalars(
+            select(ReferenceLayerStyle)
+            .where(ReferenceLayerStyle.layer_id == layer.id)
+            .order_by(ReferenceLayerStyle.id)
+        )
+    )
+    source = ReferenceLayerSource(
+        provider_key=layer.provider_key,
+        layer_id=layer.id,
+        source_key="source:reviewable-archive",
+        protocol="download",
+        target_kind="vector",
+        endpoint_url="https://opendata.jcyl.es/reviewable.zip",
+        remote_name="reviewable",
+        sync_strategy="conditional_get",
+        config_json={
+            "media_type": "application/x-zip-compressed",
+            "data_format": "geopackage-zip",
+        },
+        definition_sha256="0" * 64,
+        enabled=True,
+        is_primary=True,
+    )
+    db.add(source)
+    db.flush()
+    source.definition_sha256 = canonical_json_sha256(
+        {
+            "protocol": source.protocol,
+            "target_kind": source.target_kind,
+            "endpoint_url": source.endpoint_url,
+            "remote_name": source.remote_name,
+            "sync_strategy": source.sync_strategy,
+            "priority": source.priority,
+            "config": source.config_json,
+        }
+    )
+    db.commit()
+
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+    availability = catalog_local_delivery_availability(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        styles=styles,
+    )[layer.id]
+
+    assert raised.value.blocker == "mirror_authorization_missing"
+    assert availability is not None
+    assert availability.delivery_available is False
+    assert (
+        availability.delivery_blocker
+        == "mirror_authorization_missing"
+    )
+
+
 def test_disabled_local_sources_are_authoritative(db) -> None:
     layer, styles, source, _, _, _ = seed_local_delivery(db)
     state = db.get(

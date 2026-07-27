@@ -3,13 +3,14 @@
 The original v1 audit recorded possible acquisition routes.  It did not prove
 that those routes could be retained and served locally.  This module treats
 that file only as an immutable catalog identity inventory and applies the
-superseding v2 technical classification:
+superseding v3 technical classification:
 
-* 30 exact identities are restricted, including two SIGPAC identities with a
+* 12 exact identities remain restricted, including two SIGPAC identities with a
   deterministic official HTTPS distribution that still require IGCYL-NC
   review; and
-* 1 exact identity may produce a technical download candidate, still subject
-  to the repository's separately persisted human mirror authorization.
+* 19 exact identities may produce technical download candidates, while every
+  download and local service remains subject to separately persisted human
+  mirror authorization.
 """
 
 from __future__ import annotations
@@ -25,6 +26,10 @@ from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+from app.reference_layers.reviewed_archive_integrity import (
+    ReviewedArchiveIntegrityError,
+    configured_reviewed_archive_integrity,
+)
 from app.reference_layers.source_content_parity import (
     PARITY_SPEC_SCHEMA,
     SourceContentParityError,
@@ -32,13 +37,20 @@ from app.reference_layers.source_content_parity import (
 )
 
 
-EVIDENCE_SCHEMA = "siur-idecyl-local-service-evidence/v2"
-MANIFEST_SCHEMA = "siur-idecyl-local-service-classification/v2"
+EVIDENCE_SCHEMA = "siur-idecyl-local-service-evidence/v3"
+MANIFEST_SCHEMA = "siur-idecyl-local-service-classification/v3"
 LEGACY_MANIFEST_SCHEMA = "siur-idecyl-exact-evidence-manifest/v1"
-MANIFEST_RESOURCE = "evidence/idecyl_exact/decision-manifest-v2.json"
+MANIFEST_RESOURCE = "evidence/idecyl_exact/decision-manifest-v3.json"
+PREVIOUS_MANIFEST_RESOURCE = (
+    "evidence/idecyl_exact/decision-manifest-v2.json"
+)
 LEGACY_MANIFEST_RESOURCE = "evidence/idecyl_exact/manifest-v1.json"
 RECORDS_RESOURCE = "evidence/idecyl_exact/records-20260727.xml"
 MANIFEST_SHA256 = (
+    "201deb9372cc1201bf1645ec8249cdf9"
+    "fdac69784915d71492a0db7b36a01eb5"
+)
+PREVIOUS_MANIFEST_SHA256 = (
     "3b642924170117914ef23b10da606aad"
     "c7476674d60fee39eace25457642c948"
 )
@@ -55,6 +67,7 @@ SOURCE_SNAPSHOT_SHA256 = (
     "4d752bf519a55705d5c562ecf5180a56"
 )
 MAX_MANIFEST_BYTES = 256 * 1024
+MAX_PREVIOUS_MANIFEST_BYTES = 256 * 1024
 MAX_LEGACY_MANIFEST_BYTES = 256 * 1024
 MAX_RECORDS_BYTES = 2 * 1024 * 1024
 
@@ -64,6 +77,28 @@ _REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,500}$", re.ASCII)
 _PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,254}$", re.ASCII)
 _WORKSPACE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.ASCII)
 _CANDIDATE_LAYER_ID = 39
+_REVIEWABLE_ARCHIVE_LAYER_IDS = frozenset(
+    {
+        65,
+        66,
+        86,
+        98,
+        105,
+        137,
+        151,
+        197,
+        213,
+        223,
+        225,
+        230,
+        232,
+        234,
+        237,
+        268,
+        279,
+        296,
+    }
+)
 _SIGPAC_LAYER_YEARS = {
     123: "2024",
     166: "2022",
@@ -128,6 +163,34 @@ _CANDIDATE_PARITY_SPEC_SHA256 = (
     "ced01ba6dea82daa6d12cb57ea6f56e8"
 )
 _AUTHORIZATION_EFFECT = "none_without_persisted_human_mirror_review"
+_IGCYL_NC_LICENSE_SHA256_BY_CRC32 = {
+    "39a70ae3": (
+        "e29e4917c93192afeae57ea66e18ac3"
+        "cdcaf0664651d76b1aaa253ba36c1d96d"
+    ),
+    "f0b4f4e6": (
+        "dce2515c6a09b198c7c94aeea62f5f6"
+        "08b079dc3e2fba5636488dcb7045260ff"
+    ),
+    "b660cf14": (
+        "5d77e43b5c34d710c0cb68e45ee2f38"
+        "a6992ec48f5b6f038853fbcbfd2e06968"
+    ),
+}
+_IGCYL_NC_REVIEW_REQUIREMENTS = [
+    (
+        "Confirmar que cada destinatario acepta expresamente la licencia "
+        "IGCYL-NC antes de acceder al servicio local."
+    ),
+    (
+        "Confirmar que la entrega local muestra de forma visible "
+        "«© Junta de Castilla y León»."
+    ),
+    (
+        "Confirmar que el uso es no comercial o aportar la licencia "
+        "comercial específica de la Junta de Castilla y León."
+    ),
+]
 
 LocalServiceStatus = Literal[
     "candidate",
@@ -232,6 +295,10 @@ def _committed_evidence_package() -> _EvidencePackage:
     return _load_evidence_package(
         _resource_body(MANIFEST_RESOURCE, MAX_MANIFEST_BYTES),
         _resource_body(
+            PREVIOUS_MANIFEST_RESOURCE,
+            MAX_PREVIOUS_MANIFEST_BYTES,
+        ),
+        _resource_body(
             LEGACY_MANIFEST_RESOURCE,
             MAX_LEGACY_MANIFEST_BYTES,
         ),
@@ -242,6 +309,7 @@ def _committed_evidence_package() -> _EvidencePackage:
 
 def _load_evidence_package(
     manifest_body: bytes,
+    previous_manifest_body: bytes,
     legacy_manifest_body: bytes,
     records_body: bytes,
     *,
@@ -250,12 +318,21 @@ def _load_evidence_package(
     """Validate exact bytes and semantic links before exposing a candidate."""
 
     _bounded_bytes(manifest_body, MAX_MANIFEST_BYTES)
+    _bounded_bytes(
+        previous_manifest_body,
+        MAX_PREVIOUS_MANIFEST_BYTES,
+    )
     _bounded_bytes(legacy_manifest_body, MAX_LEGACY_MANIFEST_BYTES)
     _bounded_bytes(records_body, MAX_RECORDS_BYTES)
     _exact_digest(
         manifest_body,
         expected_manifest_sha256,
         "IDECyL classification manifest",
+    )
+    _exact_digest(
+        previous_manifest_body,
+        PREVIOUS_MANIFEST_SHA256,
+        "IDECyL previous classification manifest",
     )
     _exact_digest(
         legacy_manifest_body,
@@ -276,6 +353,7 @@ def _load_evidence_package(
         "technical_classifications",
         "candidate_source",
         "restricted_https_distributions",
+        "reviewable_archive_sources",
     } or manifest.get("schema") != MANIFEST_SCHEMA:
         raise IDECyLExactEvidenceError(
             "IDECyL classification manifest shape is invalid"
@@ -290,6 +368,10 @@ def _load_evidence_package(
         manifest.get("candidate_source"),
         legacy_sources,
         legacy_records,
+    )
+    reviewable_archives = _reviewable_archive_sources(
+        manifest.get("reviewable_archive_sources"),
+        legacy_sources,
     )
     restricted_distributions = _restricted_https_distributions(
         manifest.get("restricted_https_distributions"),
@@ -308,8 +390,11 @@ def _load_evidence_package(
     ):
         layer_id = legacy_source["audit_layer_id"]
         classification = classifications[layer_id]
-        is_candidate = layer_id == _CANDIDATE_LAYER_ID
-        selected = candidate if is_candidate else None
+        selected = (
+            candidate
+            if layer_id == _CANDIDATE_LAYER_ID
+            else reviewable_archives.get(layer_id)
+        )
         restricted_distribution = restricted_distributions.get(layer_id)
         profile = (
             selected["profile"]
@@ -349,6 +434,12 @@ def _load_evidence_package(
             "evidence_binding": {
                 "classification_manifest_resource": MANIFEST_RESOURCE,
                 "classification_manifest_sha256": expected_manifest_sha256,
+                "previous_classification_manifest_resource": (
+                    PREVIOUS_MANIFEST_RESOURCE
+                ),
+                "previous_classification_manifest_sha256": (
+                    PREVIOUS_MANIFEST_SHA256
+                ),
                 "legacy_inventory_resource": LEGACY_MANIFEST_RESOURCE,
                 "legacy_inventory_sha256": LEGACY_MANIFEST_SHA256,
                 "metadata_records_resource": RECORDS_RESOURCE,
@@ -379,27 +470,36 @@ def _load_evidence_package(
             )
         candidate_config: dict[str, Any] | None = None
         if selected is not None:
-            evidence["official_metadata"] = deepcopy(
-                selected["official_metadata"]
-            )
-            evidence["direct_distribution"] = deepcopy(
-                selected["direct_distribution"]
-            )
+            if layer_id == _CANDIDATE_LAYER_ID:
+                evidence["official_metadata"] = deepcopy(
+                    selected["official_metadata"]
+                )
+                evidence["direct_distribution"] = deepcopy(
+                    selected["direct_distribution"]
+                )
+            else:
+                evidence["audit_capture"] = deepcopy(
+                    selected["audit_capture"]
+                )
+                evidence["license_evidence"] = deepcopy(
+                    selected["license_evidence"]
+                )
             evidence["review_requirements"] = deepcopy(
                 selected["review_requirements"]
             )
-            candidate_config = {
-                key: deepcopy(selected[key])
-                for key in (
-                    "data_format",
-                    "media_type",
-                    "archive_member",
-                    "input_layer",
-                    "archive_max_uncompressed_bytes",
-                    "archive_styles",
-                    "source_content_parity",
-                )
-            }
+            candidate_config = {}
+            for key in (
+                "data_format",
+                "media_type",
+                "archive_member",
+                "input_layer",
+                "archive_max_uncompressed_bytes",
+                "archive_styles",
+                "source_content_parity",
+                "reviewed_archive_integrity",
+            ):
+                if key in selected:
+                    candidate_config[key] = deepcopy(selected[key])
         source = ReviewedIDECyLExactSource(
             profile=profile,
             audit_layer_id=layer_id,
@@ -549,6 +649,7 @@ def _capture(value: Any) -> dict[str, Any]:
         "captured_at",
         "legacy_inventory",
         "metadata_records",
+        "supersedes_classification",
         "wms_capabilities",
         "wfs_capabilities",
     }:
@@ -559,6 +660,12 @@ def _capture(value: Any) -> dict[str, Any]:
         raise IDECyLExactEvidenceError(
             "IDECyL classification capture time is invalid"
         )
+    _resource_binding(
+        value["supersedes_classification"],
+        resource=PREVIOUS_MANIFEST_RESOURCE,
+        digest=PREVIOUS_MANIFEST_SHA256,
+        source_snapshot=False,
+    )
     _resource_binding(
         value["legacy_inventory"],
         resource=LEGACY_MANIFEST_RESOURCE,
@@ -731,6 +838,16 @@ def _expected_classification(
                 "general_open_data_terms_linked",
             ],
         )
+    if layer_id in _REVIEWABLE_ARCHIVE_LAYER_IDS:
+        return (
+            "candidate",
+            [
+                "igcyl_nc_recipient_acceptance_requires_review",
+                "igcyl_nc_visible_attribution_requires_review",
+                "igcyl_nc_commercial_license_required_if_commercial",
+                "local_service_requires_persisted_human_review",
+            ],
+        )
     if layer_id in _SIGPAC_LAYER_YEARS:
         return (
             "restricted",
@@ -747,12 +864,8 @@ def _expected_classification(
                 "wfs_paging_not_transaction_safe",
             ],
         )
-    return (
-        "restricted",
-        [
-            "archive_contains_igcyl_nc_license",
-            "public_local_service_not_permitted",
-        ],
+    raise IDECyLExactEvidenceError(
+        "IDECyL classification has no reviewed technical route"
     )
 
 
@@ -1029,6 +1142,327 @@ def _candidate_source(
             "IDECyL evidence fabricates a human authorization"
         )
     return value
+
+
+def _reviewable_archive_sources(
+    value: Any,
+    legacy_sources: dict[int, dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Validate the 18 live ZIP routes without treating baseline bytes as fixed."""
+
+    if (
+        not isinstance(value, list)
+        or len(value) != len(_REVIEWABLE_ARCHIVE_LAYER_IDS)
+    ):
+        raise IDECyLExactEvidenceError(
+            "IDECyL reviewable archive sources are incomplete"
+        )
+    keys = {
+        "audit_layer_id",
+        "profile",
+        "selected_protocol",
+        "selected_target_kind",
+        "selected_endpoint_url",
+        "selected_remote_name",
+        "selected_sync_strategy",
+        "data_format",
+        "media_type",
+        "archive_member",
+        "input_layer",
+        "archive_max_uncompressed_bytes",
+        "reviewed_archive_integrity",
+        "audit_capture",
+        "license_evidence",
+        "review_requirements",
+        "authorization_effect",
+    }
+    result: dict[int, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict) or set(item) != keys:
+            raise IDECyLExactEvidenceError(
+                "IDECyL reviewable archive source shape is invalid"
+            )
+        layer_id = item.get("audit_layer_id")
+        if (
+            isinstance(layer_id, bool)
+            or not isinstance(layer_id, int)
+            or layer_id not in _REVIEWABLE_ARCHIVE_LAYER_IDS
+            or layer_id in result
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL reviewable archive identity is invalid"
+            )
+        legacy = legacy_sources[layer_id]
+        proposed = legacy.get("audit_proposed_acquisition")
+        profile = item.get("profile")
+        member = item.get("archive_member")
+        input_layer = item.get("input_layer")
+        data_format = item.get("data_format")
+        maximum = item.get("archive_max_uncompressed_bytes")
+        if (
+            not isinstance(proposed, dict)
+            or proposed.get("kind") != "download_archive"
+            or item.get("selected_endpoint_url") != proposed.get("url")
+            or item.get("selected_remote_name")
+            != legacy["catalog_remote_name"]
+            or item.get("selected_protocol") != "download"
+            or item.get("selected_target_kind") != "vector"
+            or item.get("selected_sync_strategy") != "conditional_get"
+            or item.get("media_type")
+            != "application/x-zip-compressed"
+            or not isinstance(profile, str)
+            or _PROFILE_RE.fullmatch(profile) is None
+            or not profile.endswith("-archive-20260727-v3")
+            or not isinstance(member, str)
+            or not member
+            or len(member) > 4_096
+            or "/" in member
+            or "\\" in member
+            or not isinstance(input_layer, str)
+            or _REMOTE_NAME_RE.fullmatch(input_layer) is None
+            or isinstance(maximum, bool)
+            or not isinstance(maximum, int)
+            or not 64 * 1024 * 1024
+            <= maximum
+            <= 4 * 1024 * 1024 * 1024
+            or (
+                layer_id == 105
+                and (
+                    data_format != "shapefile-zip"
+                    or not member.casefold().endswith(".shp")
+                )
+            )
+            or (
+                layer_id != 105
+                and (
+                    data_format != "geopackage-zip"
+                    or not member.casefold().endswith(".gpkg")
+                )
+            )
+            or item.get("review_requirements")
+            != _IGCYL_NC_REVIEW_REQUIREMENTS
+            or item.get("authorization_effect") != _AUTHORIZATION_EFFECT
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL reviewable archive source changed"
+            )
+        _https_url(item["selected_endpoint_url"], allow_query=False)
+        try:
+            configured = configured_reviewed_archive_integrity(
+                {
+                    "reviewed_archive_integrity": item[
+                        "reviewed_archive_integrity"
+                    ]
+                }
+            )
+        except ReviewedArchiveIntegrityError as error:
+            raise IDECyLExactEvidenceError(
+                "IDECyL reviewed archive integrity is invalid"
+            ) from error
+        if configured is None:
+            raise IDECyLExactEvidenceError(
+                "IDECyL reviewed archive integrity is missing"
+            )
+        semantic = configured[0]
+        constraints = semantic["archive_constraints"]
+        response_constraints = semantic["response_constraints"]
+        required_members = sorted([member, "Licencia-IGCYL.txt"])
+        if data_format == "shapefile-zip":
+            shapefile_base = member[:-4]
+            required_members = sorted(
+                [
+                    "Licencia-IGCYL.txt",
+                    *[
+                        f"{shapefile_base}{suffix}"
+                        for suffix in (
+                            ".dbf",
+                            ".prj",
+                            ".shp",
+                            ".shx",
+                        )
+                    ],
+                ]
+            )
+        if (
+            constraints["max_uncompressed_bytes"] != maximum
+            or constraints["required_members"]
+            != required_members
+            or constraints["license_member"] != "Licencia-IGCYL.txt"
+            or constraints["license_sha256_allowlist"]
+            != sorted(set(_IGCYL_NC_LICENSE_SHA256_BY_CRC32.values()))
+            or response_constraints["content_type"]
+            != item["media_type"]
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL reviewed archive bounds changed"
+            )
+        baseline_entries, baseline_response = _archive_audit_capture(
+            item.get("audit_capture"),
+        )
+        entry_by_name = {
+            entry["name"]: entry for entry in baseline_entries
+        }
+        if (
+            member not in entry_by_name
+            or "Licencia-IGCYL.txt" not in entry_by_name
+            or len(baseline_entries) > constraints["max_entries"]
+            or sum(
+                entry["uncompressed_bytes"]
+                for entry in baseline_entries
+            )
+            > maximum
+            or baseline_response["content_length"]
+            > response_constraints["max_content_length"]
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL archive baseline exceeds its live bounds"
+            )
+        license_evidence = item.get("license_evidence")
+        license_entry = entry_by_name["Licencia-IGCYL.txt"]
+        if (
+            not isinstance(license_evidence, dict)
+            or set(license_evidence)
+            != {
+                "license_name",
+                "license_url",
+                "archive_member",
+                "crc32",
+                "uncompressed_bytes",
+                "sha256",
+                "required_attribution",
+                "recipient_acceptance_required",
+                "commercial_license_required_if_commercial",
+            }
+            or license_evidence.get("license_name") != "IGCYL-NC"
+            or license_evidence.get("license_url")
+            != _IGCYL_NC_LICENSE_URL
+            or license_evidence.get("archive_member")
+            != "Licencia-IGCYL.txt"
+            or license_evidence.get("crc32")
+            != license_entry["crc32"]
+            or license_evidence.get("uncompressed_bytes")
+            != license_entry["uncompressed_bytes"]
+            or license_evidence.get("sha256")
+            != _IGCYL_NC_LICENSE_SHA256_BY_CRC32.get(
+                license_entry["crc32"]
+            )
+            or license_evidence.get("required_attribution")
+            != "© Junta de Castilla y León"
+            or license_evidence.get("recipient_acceptance_required")
+            is not True
+            or license_evidence.get(
+                "commercial_license_required_if_commercial"
+            )
+            is not True
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL archive license evidence changed"
+            )
+        _https_url(license_evidence["license_url"], allow_query=False)
+        if _contains_forbidden_authorization(item):
+            raise IDECyLExactEvidenceError(
+                "IDECyL evidence fabricates a human authorization"
+            )
+        result[layer_id] = item
+    if list(result) != sorted(_REVIEWABLE_ARCHIVE_LAYER_IDS):
+        raise IDECyLExactEvidenceError(
+            "IDECyL reviewable archives are not canonical"
+        )
+    return result
+
+
+def _archive_audit_capture(
+    value: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(value, dict) or set(value) != {
+        "verified_on",
+        "headers_sha256",
+        "tail_sha256",
+        "tail_range_start",
+        "tail_length",
+        "capture_kind",
+        "accept_ranges",
+        "baseline_response",
+        "baseline_entries",
+    }:
+        raise IDECyLExactEvidenceError(
+            "IDECyL archive audit capture is invalid"
+        )
+    response = value.get("baseline_response")
+    entries = value.get("baseline_entries")
+    if (
+        value.get("verified_on") != "2026-07-27"
+        or _SHA256_RE.fullmatch(str(value.get("headers_sha256"))) is None
+        or _SHA256_RE.fullmatch(str(value.get("tail_sha256"))) is None
+        or value.get("accept_ranges") is not True
+        or not isinstance(response, dict)
+        or set(response)
+        != {"content_length", "content_type", "etag", "last_modified"}
+        or response.get("content_type")
+        != "application/x-zip-compressed"
+        or isinstance(response.get("content_length"), bool)
+        or not isinstance(response.get("content_length"), int)
+        or response["content_length"] < 22
+        or not isinstance(response.get("etag"), str)
+        or not response["etag"]
+        or not isinstance(response.get("last_modified"), str)
+        or not response["last_modified"]
+        or isinstance(value.get("tail_range_start"), bool)
+        or not isinstance(value.get("tail_range_start"), int)
+        or value["tail_range_start"] < 0
+        or isinstance(value.get("tail_length"), bool)
+        or not isinstance(value.get("tail_length"), int)
+        or value["tail_length"] < 22
+        or value["tail_range_start"] + value["tail_length"]
+        != response["content_length"]
+        or value.get("capture_kind")
+        not in {"complete_archive", "http_range_suffix"}
+        or (
+            (value["tail_range_start"] == 0)
+            != (value["capture_kind"] == "complete_archive")
+        )
+        or not isinstance(entries, list)
+        or not 2 <= len(entries) <= 4_096
+    ):
+        raise IDECyLExactEvidenceError(
+            "IDECyL archive audit capture changed"
+        )
+    names: set[str] = set()
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or set(entry)
+            != {
+                "name",
+                "crc32",
+                "compressed_bytes",
+                "uncompressed_bytes",
+                "compression",
+            }
+            or not isinstance(entry.get("name"), str)
+            or not entry["name"]
+            or "/" in entry["name"]
+            or "\\" in entry["name"]
+            or entry["name"].casefold() in names
+            or re.fullmatch(
+                r"[0-9a-f]{8}",
+                str(entry.get("crc32")),
+                re.ASCII,
+            )
+            is None
+            or any(
+                isinstance(entry.get(key), bool)
+                or not isinstance(entry.get(key), int)
+                or entry[key] < 0
+                for key in ("compressed_bytes", "uncompressed_bytes")
+            )
+            or entry.get("compression") not in {"stored", "deflate"}
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL archive baseline entry is invalid"
+            )
+        names.add(entry["name"].casefold())
+    return entries, response
 
 
 def _contains_forbidden_authorization(value: Any) -> bool:

@@ -70,6 +70,7 @@ _ALLOWED_VECTOR_DRIVERS = {
     "GPKG": ".gpkg",
     "GPKGZIP": ".zip",
     "GMLZIP": ".zip",
+    "SHAPEFILEZIP": ".zip",
 }
 _VECTOR_DATA_SCHEMA = "reference_data"
 _VECTOR_STAGING_SCHEMA = "reference_data_staging"
@@ -1487,6 +1488,7 @@ def _vector_import_command(
     gdal_driver = {
         "GMLZIP": "GML",
         "GPKGZIP": "GPKG",
+        "SHAPEFILEZIP": "ESRI Shapefile",
     }.get(driver, driver)
     source_argument = _vector_source_argument(
         snapshot,
@@ -2570,6 +2572,13 @@ def _validate_vector_signature(
         except GeoPackageArchiveError as error:
             raise GeoIngestError(str(error)) from error
         return
+    if driver == "SHAPEFILEZIP":
+        _reviewed_shapefile_member(
+            path,
+            archive_member=archive_member,
+            input_layer=input_layer,
+        )
+        return
     if archive_member is not None:
         raise GeoIngestError(
             "vector archive member is incompatible with its driver"
@@ -2668,10 +2677,92 @@ def _vector_source_argument(
             )
         except GeoPackageArchiveError as error:
             raise GeoIngestError(str(error)) from error
+    if driver == "SHAPEFILEZIP":
+        member = _reviewed_shapefile_member(
+            path,
+            archive_member=archive_member,
+            input_layer=None,
+        )
+        return f"/vsizip/{path.as_posix()}/{member}"
     if driver != "GMLZIP":
         return str(path)
     member = _cadastral_gml_member(path)
     return f"/vsizip/{path.as_posix()}/{member}"
+
+
+def _reviewed_shapefile_member(
+    path: Path,
+    *,
+    archive_member: str | None,
+    input_layer: str | None,
+) -> str:
+    if (
+        not isinstance(archive_member, str)
+        or not archive_member.casefold().endswith(".shp")
+        or (
+            input_layer is not None
+            and input_layer != PurePosixPath(archive_member).stem
+        )
+    ):
+        raise GeoIngestError(
+            "Shapefile ZIP lacks its reviewed member or layer"
+        )
+    expected = PurePosixPath(archive_member)
+    if (
+        expected.is_absolute()
+        or "\\" in archive_member
+        or any(part in {"", ".", ".."} for part in expected.parts)
+    ):
+        raise GeoIngestError("Shapefile ZIP member is unsafe")
+    required = {
+        str(expected.with_suffix(suffix)).casefold()
+        for suffix in (".shp", ".shx", ".dbf", ".prj")
+    }
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if not entries or len(entries) > 100_000:
+                raise GeoIngestError(
+                    "Shapefile ZIP entry count is invalid"
+                )
+            names: set[str] = set()
+            for entry in entries:
+                name = entry.filename
+                pure = PurePosixPath(name)
+                unix_mode = (entry.external_attr >> 16) & 0o170000
+                if (
+                    not name
+                    or "\\" in name
+                    or pure.is_absolute()
+                    or any(
+                        part in {"", ".", ".."}
+                        for part in pure.parts
+                    )
+                    or entry.flag_bits & 0x1
+                    or unix_mode == 0o120000
+                    or name.casefold() in names
+                ):
+                    raise GeoIngestError(
+                        "Shapefile ZIP contains an unsafe entry"
+                    )
+                if not entry.is_dir():
+                    names.add(name.casefold())
+            if not required.issubset(names):
+                raise GeoIngestError(
+                    "Shapefile ZIP lacks its reviewed SHP/SHX/DBF/PRJ set"
+                )
+    except GeoIngestError:
+        raise
+    except (
+        OSError,
+        RuntimeError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+    ) as error:
+        raise GeoIngestError(
+            "Shapefile ZIP could not be inspected safely"
+        ) from error
+    return archive_member
 
 
 def _cadastral_gml_member(path: Path) -> str:

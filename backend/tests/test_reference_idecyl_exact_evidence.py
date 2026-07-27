@@ -21,6 +21,8 @@ from app.reference_layers.idecyl_exact_evidence import (
     LEGACY_MANIFEST_SHA256,
     MANIFEST_RESOURCE,
     MANIFEST_SHA256,
+    PREVIOUS_MANIFEST_RESOURCE,
+    PREVIOUS_MANIFEST_SHA256,
     RECORDS_RESOURCE,
     RECORDS_SHA256,
     _load_evidence_package,
@@ -29,6 +31,9 @@ from app.reference_layers.idecyl_exact_evidence import (
 )
 from app.reference_layers.source_content_parity import (
     configured_parity_spec,
+)
+from app.reference_layers.reviewed_archive_integrity import (
+    configured_reviewed_archive_integrity,
 )
 from app.reference_layers.source_discovery import (
     SourceDiscoveryError,
@@ -75,6 +80,26 @@ TELECOM_STYLES = (
     "telefonia_movil_cyl_cobertura_carreteras_4g_cnmc",
     "telefonia_movil_cyl_cobertura_carreteras_5g_cnmc_mj",
 )
+REVIEWABLE_ARCHIVE_IDS = {
+    65,
+    66,
+    86,
+    98,
+    105,
+    137,
+    151,
+    197,
+    213,
+    223,
+    225,
+    230,
+    232,
+    234,
+    237,
+    268,
+    279,
+    296,
+}
 
 
 def _resource_body(resource_path: str) -> bytes:
@@ -170,11 +195,11 @@ def test_classification_covers_all_31_layers_fail_closed() -> None:
     assert sum(
         item.local_service_status == "candidate"
         for item in inventory
-    ) == 1
+    ) == 19
     assert sum(
         item.local_service_status == "restricted"
         for item in inventory
-    ) == 30
+    ) == 12
     assert sum(
         item.local_service_status == "permission_pending"
         for item in inventory
@@ -183,7 +208,7 @@ def test_classification_covers_all_31_layers_fail_closed() -> None:
         item.audit_layer_id
         for item in inventory
         if item.local_service_status == "candidate"
-    } == {39}
+    } == {39, *REVIEWABLE_ARCHIVE_IDS}
     assert all(item.evidence["schema"] == EVIDENCE_SCHEMA for item in inventory)
 
 
@@ -244,7 +269,7 @@ def test_wms_metadata_bindings_preserve_exact_mismatch_and_missing() -> None:
     assert by_status["missing"] == {65, 66}
 
 
-def test_only_layer_39_builds_the_exact_https_geopackage_candidate() -> None:
+def test_layer_39_keeps_its_exact_https_geopackage_candidate() -> None:
     reviewed = next(
         item
         for item in idecyl_exact_source_inventory()
@@ -284,13 +309,105 @@ def test_only_layer_39_builds_the_exact_https_geopackage_candidate() -> None:
     )
 
 
-def test_the_other_30_exact_identities_cannot_generate_a_candidate() -> None:
+def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
+    inventory = {
+        item.audit_layer_id: item
+        for item in idecyl_exact_source_inventory()
+    }
+    definitions: set[str] = set()
+
+    for layer_id in sorted(REVIEWABLE_ARCHIVE_IDS):
+        reviewed = inventory[layer_id]
+        candidates = acquisition_candidates(
+            _service(reviewed.catalog_endpoint_url),
+            _layer(
+                reviewed.catalog_layer_source_key,
+                reviewed.catalog_remote_name,
+            ),
+        )
+
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate.protocol == "download"
+        assert candidate.target_kind == "vector"
+        assert candidate.sync_strategy == "conditional_get"
+        assert candidate.endpoint_url.startswith(
+            "https://opendata.jcyl.es/"
+        )
+        assert candidate.remote_name == reviewed.catalog_remote_name
+        assert candidate.config["archive_member"]
+        assert candidate.config["input_layer"]
+        assert "archive_styles" not in candidate.config
+        assert "source_content_parity" not in candidate.config
+        integrity = configured_reviewed_archive_integrity(
+            candidate.config
+        )
+        assert integrity is not None
+        semantic, spec_sha256 = integrity
+        assert len(spec_sha256) == 64
+        assert (
+            semantic["archive_constraints"]["max_uncompressed_bytes"]
+            == candidate.config["archive_max_uncompressed_bytes"]
+        )
+        assert candidate.config["reviewed_equivalence"] == reviewed.evidence
+        assert candidate.definition_sha256 == _canonical_sha256(
+            candidate_definition(candidate)
+        )
+        definitions.add(candidate.definition_sha256)
+
+    assert len(definitions) == 18
+    assert inventory[105].candidate_config["data_format"] == (
+        "shapefile-zip"
+    )
+    assert all(
+        inventory[layer_id].candidate_config["data_format"]
+        == "geopackage-zip"
+        for layer_id in REVIEWABLE_ARCHIVE_IDS - {105}
+    )
+
+
+def test_reviewable_archives_require_acceptance_attribution_and_conditional_license() -> None:
+    inventory = {
+        item.audit_layer_id: item
+        for item in idecyl_exact_source_inventory()
+    }
+
+    for layer_id in REVIEWABLE_ARCHIVE_IDS:
+        reviewed = inventory[layer_id]
+        license_evidence = reviewed.evidence["license_evidence"]
+        capture = reviewed.evidence["audit_capture"]
+
+        assert reviewed.reason_codes == (
+            "igcyl_nc_recipient_acceptance_requires_review",
+            "igcyl_nc_visible_attribution_requires_review",
+            "igcyl_nc_commercial_license_required_if_commercial",
+            "local_service_requires_persisted_human_review",
+        )
+        assert license_evidence["license_name"] == "IGCYL-NC"
+        assert license_evidence["recipient_acceptance_required"] is True
+        assert (
+            license_evidence[
+                "commercial_license_required_if_commercial"
+            ]
+            is True
+        )
+        assert license_evidence["required_attribution"] == (
+            "© Junta de Castilla y León"
+        )
+        assert capture["baseline_response"]["etag"]
+        assert capture["baseline_entries"]
+        assert reviewed.evidence["authorization_effect"] == (
+            "none_without_persisted_human_mirror_review"
+        )
+
+
+def test_the_other_12_exact_identities_cannot_generate_a_candidate() -> None:
     blocked = [
         item
         for item in idecyl_exact_source_inventory()
-        if item.audit_layer_id != 39
+        if item.local_service_status != "candidate"
     ]
-    assert len(blocked) == 30
+    assert len(blocked) == 12
 
     for reviewed in blocked:
         with pytest.raises(SourceDiscoveryError) as captured:
@@ -365,6 +482,7 @@ def test_candidate_identity_or_style_drift_fails_closed() -> None:
     ("resource_path", "expected"),
     [
         (MANIFEST_RESOURCE, MANIFEST_SHA256),
+        (PREVIOUS_MANIFEST_RESOURCE, PREVIOUS_MANIFEST_SHA256),
         (LEGACY_MANIFEST_RESOURCE, LEGACY_MANIFEST_SHA256),
         (RECORDS_RESOURCE, RECORDS_SHA256),
     ],
@@ -378,6 +496,7 @@ def test_committed_evidence_bytes_are_exact(
 
 def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
     manifest = _resource_body(MANIFEST_RESOURCE)
+    previous = _resource_body(PREVIOUS_MANIFEST_RESOURCE)
     legacy = _resource_body(LEGACY_MANIFEST_RESOURCE)
     records = _resource_body(RECORDS_RESOURCE)
     tampered = manifest.replace(b'"candidate"', b'"restricted"', 1)
@@ -389,6 +508,7 @@ def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
     ):
         _load_evidence_package(
             tampered,
+            previous,
             legacy,
             records,
             expected_manifest_sha256=MANIFEST_SHA256,
@@ -400,6 +520,7 @@ def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
     ):
         _load_evidence_package(
             tampered,
+            previous,
             legacy,
             records,
             expected_manifest_sha256=hashlib.sha256(tampered).hexdigest(),
@@ -409,6 +530,10 @@ def test_tampered_manifest_is_rejected_before_it_can_build_a_source() -> None:
 @pytest.mark.parametrize(
     ("resource_name", "match"),
     [
+        (
+            "previous",
+            "previous classification manifest failed its local digest",
+        ),
         ("legacy", "legacy inventory failed its local digest"),
         ("records", "metadata records failed its local digest"),
     ],
@@ -418,9 +543,12 @@ def test_tampered_bound_inputs_are_rejected(
     match: str,
 ) -> None:
     manifest = _resource_body(MANIFEST_RESOURCE)
+    previous = _resource_body(PREVIOUS_MANIFEST_RESOURCE)
     legacy = _resource_body(LEGACY_MANIFEST_RESOURCE)
     records = _resource_body(RECORDS_RESOURCE)
-    if resource_name == "legacy":
+    if resource_name == "previous":
+        previous = previous.replace(b'"restricted"', b'"candidate"', 1)
+    elif resource_name == "legacy":
         legacy = legacy.replace(b"telefonia_movil", b"telefonia_Xovil", 1)
     else:
         records = records.replace(
@@ -432,6 +560,7 @@ def test_tampered_bound_inputs_are_rejected(
     with pytest.raises(IDECyLExactEvidenceError, match=match):
         _load_evidence_package(
             manifest,
+            previous,
             legacy,
             records,
             expected_manifest_sha256=MANIFEST_SHA256,
