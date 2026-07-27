@@ -689,6 +689,7 @@ def test_vector_materialization_uses_only_derived_geopackage_input(
             ),
             derived_blob.sha256,
             "grid_100km_cyl",
+            None,
         )
     ]
     assert supervisor.pulses == 2

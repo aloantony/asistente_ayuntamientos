@@ -1620,6 +1620,7 @@ def materialize_vector_delivery(
         "flatgeobuf": "FlatGeobuf",
         "geopackage": "GPKG",
         "gpkg": "GPKG",
+        "geopackage-zip": "GPKGZIP",
         "inspire-cadastral-parcel-gml-zip": "GMLZIP",
     }.get(data_format)
     if len(datasets) > 1 and input_driver is None:
@@ -1635,6 +1636,11 @@ def materialize_vector_delivery(
             store.resolve_blob(item.storage_key),
             item.sha256,
             _optional_input_layer(context.source, item),
+            _optional_archive_member(
+                context.source,
+                item,
+                required=data_format == "geopackage-zip",
+            ),
         )
         for item in datasets
     ]
@@ -1656,6 +1662,8 @@ def materialize_vector_delivery(
                 layer_id=context.source.layer_id,
                 run_id=context.run.id,
                 input_layer=inputs[0][2],
+                input_driver=input_driver,
+                archive_member=inputs[0][3],
                 minimum_features=1,
                 timeout_seconds=timeout_seconds,
             )
@@ -3020,6 +3028,29 @@ def _optional_input_layer(
     if value is None:
         value = source.config_json.get("input_layer")
     return value if isinstance(value, str) and value else None
+
+
+def _optional_archive_member(
+    source: ReferenceLayerSource,
+    artifact: PersistedRunArtifact,
+    *,
+    required: bool,
+) -> str | None:
+    persisted = artifact.metadata_json.get("archive_member")
+    configured = source.config_json.get("archive_member")
+    if persisted is None and configured is None and not required:
+        return None
+    if (
+        not isinstance(persisted, str)
+        or not persisted
+        or not isinstance(configured, str)
+        or persisted != configured
+    ):
+        raise MirrorOrchestrationError(
+            "vector archive member differs from its reviewed source",
+            code="vector_archive_member_invalid",
+        )
+    return persisted
 
 
 def _input_artifact_ids(

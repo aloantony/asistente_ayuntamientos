@@ -62,6 +62,11 @@ from app.reference_layers.models import (
 from app.reference_layers.style_parity import (
     IMPLICIT_DEFAULT_STYLE_KEY,
 )
+from app.reference_layers.source_content_parity import (
+    SourceContentParityError,
+    build_promotion_parity_gate,
+    configured_parity_spec,
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _CRS_RE = re.compile(r"^EPSG:[1-9][0-9]{2,6}$", re.ASCII)
@@ -331,6 +336,35 @@ def create_delivery_version(
             raise DeliveryBuildError(
                 "prepared provenance artifact identity is invalid"
             )
+        source_content_parity_gate: dict[str, Any] | None = None
+        try:
+            parity_spec = configured_parity_spec(source.config_json)
+            if parity_spec is not None:
+                input_rows = [
+                    item
+                    for item in artifact_rows
+                    if (item.id, "input") in artifact_links
+                ]
+                if len(input_rows) != 1:
+                    raise SourceContentParityError(
+                        "source-content parity requires one input artifact"
+                    )
+                input_row = input_rows[0]
+                source_content_parity_gate = (
+                    build_promotion_parity_gate(
+                        config=source.config_json,
+                        source_definition_sha256=source.definition_sha256,
+                        input_artifact_id=input_row.id,
+                        input_artifact_sha256=input_row.sha256,
+                        input_artifact_metadata=input_row.metadata_json,
+                        delivery_kind=prepared.delivery_kind,
+                        feature_count=prepared.feature_count,
+                    )
+                )
+        except SourceContentParityError as error:
+            raise DeliveryBuildError(
+                "source-content parity rejected delivery version creation"
+            ) from error
         plan, plan_items = require_complete_delivery_style_plan(
             db,
             source=source,
@@ -421,6 +455,10 @@ def create_delivery_version(
         )
         stored_validation = deepcopy(prepared.validation_json)
         stored_validation["continuity_gate"] = continuity
+        if source_content_parity_gate is not None:
+            stored_validation["source_content_parity_gate"] = (
+                source_content_parity_gate
+            )
         stored_validation["style_parity_gate"] = {
             "schema_version": "reference-delivery-style-parity-gate/v1",
             "passed": True,
@@ -993,9 +1031,12 @@ def _validate_prepared(prepared: PreparedDelivery) -> dict[str, Any]:
         or prepared.validation_json.get("passed") is not True
     ):
         raise DeliveryBuildError("prepared delivery did not pass validation")
-    if "continuity_gate" in prepared.validation_json:
+    if {
+        "continuity_gate",
+        "source_content_parity_gate",
+    } & set(prepared.validation_json):
         raise DeliveryBuildError(
-            "prepared delivery cannot provide its own continuity evidence"
+            "prepared delivery cannot provide its own promotion gates"
         )
     _semantic_schema_sha256(
         prepared.delivery_kind,

@@ -44,12 +44,14 @@ from app.reference_layers.models import (
     ReferenceDeliveryStyleParity,
     ReferenceDeliveryStyleResource,
     ReferenceDeliveryVersion,
+    ReferenceDeliveryVersionArtifact,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
     ReferenceLayerSource,
     ReferenceService,
     ReferenceStyleParityPlan,
     ReferenceStyleParityPlanItem,
+    ReferenceSourceArtifact,
     ReferenceSyncRun,
 )
 from app.reference_layers.source_audit import (
@@ -62,6 +64,11 @@ from app.reference_layers.source_discovery import (
 )
 from app.reference_layers.style_update_watcher import (
     require_official_style_promotion_allowed,
+)
+from app.reference_layers.source_content_parity import (
+    SourceContentParityError,
+    configured_parity_spec,
+    valid_promotion_parity_gate,
 )
 
 AUTO_SOURCE_PREFIX = "auto:"
@@ -1193,6 +1200,11 @@ def promote_delivery_version(
         )
         _validate_current_version_catalog(db, version)
         metadata_asset = _validate_version_ready(db, version)
+        _validate_version_source_content_parity(
+            db,
+            version=version,
+            source=source,
+        )
         from_version_id = (
             state.active_version_id
             if state is not None and state.status == "active"
@@ -2213,6 +2225,11 @@ def _validate_stored_version_servability(
         run=run,
     )
     metadata_asset = _validate_version_ready(db, version)
+    _validate_version_source_content_parity(
+        db,
+        version=version,
+        source=source,
+    )
     return source, metadata_asset
 
 
@@ -2234,6 +2251,69 @@ def _validate_version_mirror_authorization(
         raise MirrorPromotionConflict(
             f"mirror authorization rejected delivery transition: {error.code}"
         ) from error
+
+
+def _validate_version_source_content_parity(
+    db: Session,
+    *,
+    version: ReferenceDeliveryVersion,
+    source: ReferenceLayerSource,
+) -> None:
+    gate = (
+        version.validation_json.get("source_content_parity_gate")
+        if isinstance(version.validation_json, dict)
+        else None
+    )
+    try:
+        configured = configured_parity_spec(source.config_json)
+    except SourceContentParityError as error:
+        raise MirrorPromotionConflict(
+            "delivery source-content parity configuration is invalid"
+        ) from error
+    if configured is None:
+        if gate is not None:
+            raise MirrorPromotionConflict(
+                "delivery has an unexpected source-content parity gate"
+            )
+        return
+    rows = db.execute(
+        select(
+            ReferenceDeliveryVersionArtifact,
+            ReferenceSourceArtifact,
+        )
+        .join(
+            ReferenceSourceArtifact,
+            and_(
+                ReferenceSourceArtifact.source_id
+                == ReferenceDeliveryVersionArtifact.source_id,
+                ReferenceSourceArtifact.id
+                == ReferenceDeliveryVersionArtifact.artifact_id,
+            ),
+        )
+        .where(
+            ReferenceDeliveryVersionArtifact.source_id == source.id,
+            ReferenceDeliveryVersionArtifact.version_id == version.id,
+            ReferenceDeliveryVersionArtifact.role == "input",
+        )
+    ).all()
+    if len(rows) != 1:
+        raise MirrorPromotionConflict(
+            "delivery source-content parity input is ambiguous"
+        )
+    link, artifact = rows[0]
+    if not valid_promotion_parity_gate(
+        config=source.config_json,
+        gate=gate,
+        source_definition_sha256=source.definition_sha256,
+        input_artifact_id=link.artifact_id,
+        input_artifact_sha256=artifact.sha256,
+        input_artifact_metadata=artifact.metadata_json,
+        delivery_kind=version.delivery_kind,
+        feature_count=version.feature_count,
+    ):
+        raise MirrorPromotionConflict(
+            "delivery source-content parity gate is invalid"
+        )
 
 
 def _locked_current_layer_catalog(
