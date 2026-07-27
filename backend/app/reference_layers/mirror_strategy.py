@@ -98,6 +98,15 @@ class AppliedMirrorStrategyPlan:
     blocked_count: int
 
 
+@dataclass(frozen=True)
+class MirrorStrategyPlanStatus:
+    expected_plan_sha256: str
+    generation: int
+    row_count: int
+    complete: bool
+    matches_plan: bool
+
+
 def canonical_sha256(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -362,6 +371,97 @@ def current_mirror_strategies(
             "current mirror strategy generation is incomplete"
         )
     return {row.layer_id: row for row in rows}
+
+
+def mirror_strategy_plan_status(
+    db: Session,
+    plan: MirrorStrategyPlan,
+) -> MirrorStrategyPlanStatus:
+    """Compare the latest complete generation with the current code plan."""
+
+    layers_by_source_key = {
+        item.source_key: item
+        for item in db.scalars(
+            select(ReferenceLayer)
+            .where(
+                ReferenceLayer.provider_key == plan.provider_key,
+                ReferenceLayer.last_seen_snapshot_id == plan.snapshot_id,
+                ReferenceLayer.node_type == "layer",
+            )
+            .order_by(ReferenceLayer.id)
+        )
+    }
+    _validate_plan_assignments(plan, layers_by_source_key)
+    latest_generation = int(
+        db.scalar(
+            select(func.max(ReferenceLayerMirrorStrategy.generation)).where(
+                ReferenceLayerMirrorStrategy.provider_key
+                == plan.provider_key,
+                ReferenceLayerMirrorStrategy.catalog_snapshot_id
+                == plan.snapshot_id,
+            )
+        )
+        or 0
+    )
+    rows = (
+        list(
+            db.scalars(
+                select(ReferenceLayerMirrorStrategy)
+                .where(
+                    ReferenceLayerMirrorStrategy.provider_key
+                    == plan.provider_key,
+                    ReferenceLayerMirrorStrategy.catalog_snapshot_id
+                    == plan.snapshot_id,
+                    ReferenceLayerMirrorStrategy.generation
+                    == latest_generation,
+                )
+                .order_by(ReferenceLayerMirrorStrategy.layer_id)
+            )
+        )
+        if latest_generation
+        else []
+    )
+    complete = bool(rows) and _generation_is_complete(
+        db,
+        provider_key=plan.provider_key,
+        snapshot_id=plan.snapshot_id,
+        rows=rows,
+    )
+    source_ids_by_key = {
+        (item.layer_id, item.source_key): item.id
+        for item in db.scalars(
+            select(ReferenceLayerSource).where(
+                ReferenceLayerSource.provider_key == plan.provider_key,
+            )
+        )
+    }
+    source_ids = {
+        item.layer_id: (
+            source_ids_by_key.get((item.layer_id, item.source_key))
+            if item.source_key is not None
+            else None
+        )
+        for item in plan.assignments
+    }
+    evidence_sha256_by_layer = {
+        item.layer_id: canonical_sha256(item.evidence)
+        for item in plan.assignments
+    }
+    matches_plan = complete and _generation_matches_plan(
+        db,
+        rows=rows,
+        plan=plan,
+        layers_by_source_key=layers_by_source_key,
+        source_ids=source_ids,
+        evidence_sha256_by_layer=evidence_sha256_by_layer,
+    )
+    return MirrorStrategyPlanStatus(
+        expected_plan_sha256=plan.plan_sha256,
+        generation=latest_generation,
+        row_count=len(rows),
+        complete=complete,
+        matches_plan=matches_plan,
+    )
 
 
 def _validate_plan_assignments(
@@ -887,10 +987,12 @@ __all__ = [
     "AppliedMirrorStrategyPlan",
     "MirrorStrategyError",
     "MirrorStrategyPlan",
+    "MirrorStrategyPlanStatus",
     "STRATEGIES",
     "StrategyAssignment",
     "apply_mirror_strategy_plan",
     "build_mirror_strategy_plan",
     "canonical_sha256",
     "current_mirror_strategies",
+    "mirror_strategy_plan_status",
 ]
