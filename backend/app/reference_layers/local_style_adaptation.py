@@ -11,11 +11,13 @@ from typing import Any, cast
 from xml.etree import ElementTree
 
 from app.reference_layers.source_discovery import (
+    ReviewedLocalStyleRecipe,
     SourceCandidate,
     SourceDiscoveryError,
     reviewed_local_style_profile_identity,
     reviewed_local_style_profile_reference,
     reviewed_local_style_recipe,
+    reviewed_local_style_recipes,
 )
 
 
@@ -74,7 +76,7 @@ def generate_reviewed_local_style(
     *,
     dataset_metadata: Mapping[str, Any] | None = None,
 ) -> AuthoredLocalStyle | None:
-    """Build one closed SLD only when source discovery proves the allowlist."""
+    """Build the one SLD defined by an existing singular style profile."""
 
     try:
         reviewed = reviewed_local_style_recipe(candidate)
@@ -85,9 +87,48 @@ def generate_reviewed_local_style(
         ) from error
     if reviewed is None:
         return None
+    return _generate_reviewed_local_style(
+        reviewed,
+        dataset_metadata=dataset_metadata,
+    )
 
+
+def generate_reviewed_local_styles(
+    candidate: SourceCandidate,
+    *,
+    dataset_metadata: Mapping[str, Any] | None = None,
+) -> tuple[AuthoredLocalStyle, ...]:
+    """Build every deterministic SLD bound to one reviewed source."""
+
+    try:
+        reviewed = reviewed_local_style_recipes(candidate)
+    except SourceDiscoveryError as error:
+        raise LocalStyleAdaptationError(
+            "reviewed local style source evidence is invalid",
+            code=error.code,
+        ) from error
+    return tuple(
+        _generate_reviewed_local_style(
+            item,
+            dataset_metadata=dataset_metadata,
+        )
+        for item in reviewed
+    )
+
+
+def _generate_reviewed_local_style(
+    reviewed: ReviewedLocalStyleRecipe,
+    *,
+    dataset_metadata: Mapping[str, Any] | None,
+) -> AuthoredLocalStyle:
     if reviewed.style_kind == "catastro_parcels":
         recipe = _catastro_recipe(reviewed.style_reference)
+    elif reviewed.style_kind == "eurostat_grid":
+        recipe = _eurostat_grid_recipe(
+            reviewed.profile,
+            reviewed.catalog_style_source_key,
+            reviewed.style_reference,
+        )
     elif reviewed.style_kind == "flood_polygons":
         recipe = _flood_recipe(
             reviewed.profile,
@@ -253,9 +294,16 @@ def validate_zero_resource_local_adaptation(
         "resource_count",
     }
     profile = evidence.get("profile")
+    catalog_style_source_key = evidence.get(
+        "catalog_style_source_key"
+    )
     identity = (
-        reviewed_local_style_profile_identity(profile)
+        reviewed_local_style_profile_identity(
+            profile,
+            catalog_style_source_key,
+        )
         if isinstance(profile, str)
+        and isinstance(catalog_style_source_key, str)
         else None
     )
     if (
@@ -291,7 +339,10 @@ def validate_zero_resource_local_adaptation(
         not isinstance(recipe, Mapping)
         or evidence.get("recipe_sha256") != canonical_json_sha256(recipe)
         or recipe.get("source_reference")
-        != reviewed_local_style_profile_reference(profile)
+        != reviewed_local_style_profile_reference(
+            profile,
+            catalog_style_source_key,
+        )
     ):
         raise LocalStyleAdaptationError(
             "authored local style recipe hash is invalid",
@@ -413,6 +464,52 @@ def _catastro_recipe(reference: Mapping[str, Any]) -> dict[str, Any]:
         "adaptation_status": "adapted",
         "exact_style_claim": False,
         "source_reference": expected,
+    }
+
+
+def _eurostat_grid_recipe(
+    profile: str,
+    catalog_style_source_key: str,
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = reviewed_local_style_profile_reference(
+        profile,
+        catalog_style_source_key,
+    )
+    if (
+        expected is None
+        or dict(reference) != expected
+        or reference.get("source_kind")
+        != "siur-owned-deterministic-style"
+        or reference.get("adaptation_status")
+        != "adaptation_required"
+        or reference.get("parity_claim")
+        != "siur_local_adaptation_not_exact"
+        or reference.get("fill_opacity") != 0
+        or reference.get("outline_color")
+        not in {"#6d28d9", "#ffffff", "#e6007e"}
+        or reference.get("outline_width") != 1
+        or reference.get("max_scale_denominator") != 4_000_000
+        or not isinstance(reference.get("style_identity_sha256"), str)
+        or _SHA256_RE.fullmatch(reference["style_identity_sha256"])
+        is None
+    ):
+        raise LocalStyleAdaptationError(
+            "Eurostat grid local style reference is invalid",
+            code="local_style_recipe_invalid",
+        )
+    return {
+        "schema": "siur-local-style-symbolizer/v1",
+        "symbolizer": "polygon",
+        "catalog_style_source_key": catalog_style_source_key,
+        "fill_color": "#ffffff",
+        "fill_opacity": 0,
+        "outline_color": reference["outline_color"],
+        "outline_width": 1,
+        "max_scale_denominator": 4_000_000,
+        "adaptation_status": "adapted",
+        "exact_style_claim": False,
+        "source_reference": dict(expected),
     }
 
 
@@ -585,6 +682,20 @@ def _validate_recipe(
 ) -> None:
     if style_kind == "catastro_parcels":
         rebuilt = _catastro_recipe(recipe.get("source_reference", {}))
+    elif style_kind == "eurostat_grid":
+        catalog_style_source_key = recipe.get(
+            "catalog_style_source_key"
+        )
+        if not isinstance(catalog_style_source_key, str):
+            raise LocalStyleAdaptationError(
+                "Eurostat grid recipe identity is invalid",
+                code="local_style_evidence_invalid",
+            )
+        rebuilt = _eurostat_grid_recipe(
+            profile,
+            catalog_style_source_key,
+            recipe.get("source_reference", {}),
+        )
     elif style_kind == "flood_polygons":
         rebuilt = _flood_recipe(
             profile,
@@ -660,6 +771,20 @@ def _render_recipe_sld(
             outline_width=str(recipe["outline_width"]),
             label_field=cast(str, recipe["label_field"]),
         )
+    if style_kind == "eurostat_grid":
+        return _vector_sld(
+            layer_name=layer_name,
+            style_name=style_name,
+            title="Rejilla Eurostat — adaptación local SIUR",
+            fill_color=cast(str, recipe["fill_color"]),
+            fill_opacity=str(recipe["fill_opacity"]),
+            outline_color=cast(str, recipe["outline_color"]),
+            outline_width=str(recipe["outline_width"]),
+            label_field=None,
+            max_scale_denominator=str(
+                recipe["max_scale_denominator"]
+            ),
+        )
     if style_kind == "flood_polygons":
         return _vector_sld(
             layer_name=layer_name,
@@ -701,12 +826,18 @@ def _vector_sld(
     outline_color: str,
     outline_width: str,
     label_field: str | None,
+    max_scale_denominator: str | None = None,
 ) -> bytes:
     root, rule = _sld_document(
         layer_name=layer_name,
         style_name=style_name,
         title=title,
     )
+    if max_scale_denominator is not None:
+        ElementTree.SubElement(
+            rule,
+            _q(SLD_NAMESPACE, "MaxScaleDenominator"),
+        ).text = max_scale_denominator
     polygon = ElementTree.SubElement(
         rule,
         _q(SLD_NAMESPACE, "PolygonSymbolizer"),
@@ -891,6 +1022,21 @@ def _validate_generated_sld(
         if symbolizers != ["PolygonSymbolizer", "TextSymbolizer"]:
             raise LocalStyleAdaptationError(
                 "Catastro SLD symbolizers are incomplete",
+                code="local_style_sld_invalid",
+            )
+    elif style_kind == "eurostat_grid":
+        maximums = [
+            (element.text or "").strip()
+            for element in root.iter()
+            if element.tag
+            == _q(SLD_NAMESPACE, "MaxScaleDenominator")
+        ]
+        if (
+            symbolizers != ["PolygonSymbolizer"]
+            or maximums != ["4000000"]
+        ):
+            raise LocalStyleAdaptationError(
+                "Eurostat grid SLD symbolizer is incomplete",
                 code="local_style_sld_invalid",
             )
     elif style_kind == "flood_polygons":

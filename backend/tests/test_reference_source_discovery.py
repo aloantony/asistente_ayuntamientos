@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from app.reference_layers.source_discovery import (
     acquisition_candidates,
     candidate_definition,
     reviewed_cross_origin_style_source,
+    reviewed_local_style_recipes,
 )
 from app.reference_layers.mirror_coverage import (
     SIUR_TILE_BOUNDS,
@@ -388,44 +390,37 @@ def test_reviewed_catastro_layer_uses_cyl_atom_download_not_wms_tiles() -> None:
         "resolution",
         "expected_count",
         "expected_identifier_sha256",
-        "expected_style_sha256",
     ),
     [
         (
             "100",
             19,
             "3b275f7d129ece404f5d30945cfaa01106ac4bf4ae342bc4410a754fc53724e8",
-            "d3cb61a8a2cdff30a7cb756e90ed34165a86d398a1fe7a56bc14e052336ecca8",
         ),
         (
             "50",
             59,
             "31dc8e9032f005208e73fe9c0953a8705baa939f073daf173d407fb90245ed29",
-            "08616c3298860350c7493d206841c1c89a51db21d4e259f956b8cf705896985e",
         ),
         (
             "20",
             295,
             "2fec8c573394fb627dca042d857e3add71d49c09914c4769270950b2e80a0e87",
-            "88cc3325e6714c99ea8a4d278ec4d06660f54e71b19579bc6a1fba544b6ce563",
         ),
         (
             "5",
             4_046,
             "3a1d8be941eca72ebc415920cfcd023a7e40ed6468b42510a68ba40627e996bf",
-            "ad798dbc48fc6f9d8e33c756225a796b556e068f7042bdc8eb8dac7e698e96ea",
         ),
         (
             "2",
             24_323,
             "834260837e2ad9b0bcd186175e23ba143faa7e41718afca9017f331ef3435a5f",
-            "6d7006192433e64ba98a108c3e2d84da4fa6f850dd5ddf7d5063a50952907dff",
         ),
         (
             "1",
             95_818,
             "5f7ec0b6a6fc773ead27954380eb54aa63a6ba874ce8e71c7a349333acd7266c",
-            "aa5bc932ff75bfa82a2d07766461b7f7c7bc98bae4334c312344a59b7c5c5031",
         ),
     ],
 )
@@ -433,7 +428,6 @@ def test_reviewed_eurostat_grids_use_exact_geometry_only_derivation(
     resolution: str,
     expected_count: int,
     expected_identifier_sha256: str,
-    expected_style_sha256: str,
 ) -> None:
     remote_name = f"rejilla_eurostat_cyl_{resolution}x{resolution}"
     styles = (
@@ -493,26 +487,49 @@ def test_reviewed_eurostat_grids_use_exact_geometry_only_derivation(
     assert transform["mask_identity_sha256"] == (
         "7512d51bbe505f72390c3402c9e7c28132563efb907a174bb2b0c4c5908b8bd3"
     )
-    assert selected.config["style_bundle_sha256"] == (
-        expected_style_sha256
-    )
+    assert {
+        "style_endpoint_url",
+        "style_layer_name",
+        "style_bundle_sha256",
+        "styles",
+    }.isdisjoint(selected.config)
     equivalence = selected.config["reviewed_equivalence"]
     assert equivalence["population_fields_excluded"] is True
     assert equivalence["raw_source_retained"] is False
     assert equivalence["transient_source_processing"] is True
     assert equivalence["whole_source_features_preserved"] is True
     assert equivalence["style_evidence"]["style_parity_status"] == (
-        "exact_original_sld_required"
+        "local_style_adaptation_required"
     )
-    assert reviewed_cross_origin_style_source(selected) is True
+    assert equivalence["style_evidence"]["catalog_style_count"] == 3
+    assert len(
+        equivalence["style_evidence"][
+            "local_style_set_identity_sha256"
+        ]
+    ) == 64
+    assert "catalog_endpoint_url" not in equivalence
+    assert "https://idecyl.jcyl.es" not in json.dumps(
+        selected.config,
+        sort_keys=True,
+    )
+    assert reviewed_cross_origin_style_source(selected) is False
+    assert len(reviewed_local_style_recipes(selected)) == 3
     tampered = replace(
         selected,
         config={
             **selected.config,
-            "style_bundle_sha256": "0" * 64,
+            "reviewed_equivalence": {
+                **equivalence,
+                "style_evidence": {
+                    **equivalence["style_evidence"],
+                    "local_style_set_identity_sha256": "0" * 64,
+                },
+            },
         },
     )
-    assert reviewed_cross_origin_style_source(tampered) is False
+    with pytest.raises(SourceDiscoveryError) as captured:
+        reviewed_local_style_recipes(tampered)
+    assert captured.value.code == "reviewed_local_style_invalid"
 
 
 @pytest.mark.parametrize(

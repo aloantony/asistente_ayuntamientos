@@ -2100,7 +2100,121 @@ def test_strict_staging_does_not_suppress_body_failure(tmp_path):
         assert list((strict_store.root / "staging").iterdir()) == []
 
 
-def test_reviewed_eurostat_grid_rechecks_changed_style_after_dataset_304(
+def test_reviewed_eurostat_grid_authors_all_styles_without_idecyl_network(
+    store,
+    limits,
+    monkeypatch,
+    tmp_path,
+):
+    selected = reviewed_eurostat_grid_candidate()
+    transform = selected.config["vector_transform"]
+    source_payload = minimal_geopackage_payload(
+        tmp_path / "eurostat-grid.gpkg"
+    )
+    mask_payload = b'{"type":"FeatureCollection","features":[]}'
+    mask_identity = MaskIdentity(
+        sha256=transform["mask_identity_sha256"],
+        feature_id="1124753",
+        properties={"codnut2": "ES41"},
+        coordinate_pairs=5,
+    )
+    derived_blob = store.put_stream(io.BytesIO(b"derived-grid" * 100))
+    monkeypatch.setattr(
+        acquisition_module,
+        "validate_reviewed_mask",
+        lambda *_args: mask_identity,
+    )
+    monkeypatch.setattr(
+        acquisition_module,
+        "derive_masked_geopackage_files",
+        lambda *_args, **_kwargs: MaskedGeoPackageResult(
+            blob=derived_blob,
+            feature_count=transform["expected_feature_count"],
+            identifier_sha256=transform[
+                "expected_identifier_sha256"
+            ],
+            validation={
+                "schema": "reference-masked-geopackage-derivation/v1",
+                "passed": True,
+            },
+        ),
+    )
+
+    def handler(url, etag, modified):
+        assert etag is None
+        assert modified is None
+        if url == selected.endpoint_url:
+            return Response(
+                source_payload,
+                "application/geopackage+sqlite3",
+            )
+        if url == transform["mask_url"]:
+            return Response(mask_payload, "application/json")
+        pytest.fail(f"unexpected grid acquisition URL: {url}")
+
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+        transient_root=tmp_path / "transient",
+    ).acquire(selected)
+
+    assert [item["url"] for item in transport.calls] == [
+        selected.endpoint_url,
+        transform["mask_url"],
+    ]
+    assert [policy.allowed_origins for policy in transport.policies] == [
+        ("https://gisco-services.ec.europa.eu",),
+        ("https://api-features.ign.es",),
+    ]
+    styles = [
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style" and item.role == "style"
+    ]
+    packages = [
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style_package"
+    ]
+    assert len(styles) == len(packages) == 3
+    expected_colors = {
+        "rejilla_eurostat_cyl_blanco": "#ffffff",
+        "rejilla_eurostat_cyl_fucsia": "#e6007e",
+        "rejilla_eurostat_cyl_morado": "#6d28d9",
+    }
+    for style in styles:
+        source_key = style.metadata["catalog_style_source_key"]
+        with store.open_blob(style.blob.storage_key) as stream:
+            document = ElementTree.fromstring(stream.read())
+        css = {
+            element.attrib["name"]: (element.text or "")
+            for element in document.iter()
+            if element.tag.endswith("CssParameter")
+        }
+        assert css["fill-opacity"] == "0"
+        assert css["stroke"] == expected_colors[source_key]
+        assert css["stroke-width"] == "1"
+        maximum = next(
+            element
+            for element in document.iter()
+            if element.tag.endswith("MaxScaleDenominator")
+        )
+        assert maximum.text == "4000000"
+        evidence = style.metadata["authored_local_evidence"]
+        assert evidence["parity_kind"] == "adapted"
+        assert evidence["exact_style_claim"] is False
+        assert style.source_url is None
+        assert style.final_url is None
+    assert result.stats["style_count"] == 3
+    manifest_styles = read_json_artifact(store, result, "manifest")[
+        "materialization"
+    ]["style_artifact_sha256"]
+    assert set(manifest_styles) == set(expected_colors)
+
+
+def test_reviewed_eurostat_grid_304_uses_only_gisco_and_ign_origins(
     store,
     limits,
     monkeypatch,
@@ -2126,14 +2240,6 @@ def test_reviewed_eurostat_grid_rechecks_changed_style_after_dataset_304(
             "a dataset 304 must not run the expensive derivation"
         ),
     )
-    style_names = tuple(
-        item["remote_name"] for item in selected.config["styles"]
-    )
-    changed_style = sld_payload(
-        *style_names,
-        layer_name=selected.config["style_layer_name"],
-    )
-
     def handler(url, etag, _modified):
         if url == selected.endpoint_url:
             assert etag == '"source-v1"'
@@ -2144,39 +2250,37 @@ def test_reviewed_eurostat_grid_rechecks_changed_style_after_dataset_304(
         if url == transform["mask_url"]:
             assert etag is None
             return Response(b"{}", "application/json")
-        query = parse_qs(urlsplit(url).query)
-        assert query["request"] == ["GetStyles"]
-        assert query["layers"] == [
-            selected.config["style_layer_name"]
-        ]
-        return Response(
-            changed_style,
-            "application/vnd.ogc.sld+xml",
-        )
+        pytest.fail(f"unexpected grid acquisition URL: {url}")
 
-    with pytest.raises(AcquisitionValidationError) as error:
-            ReferenceAcquisitionPipeline(
-                store,
-                limits=limits,
-                downloader_factory=FakeTransport(handler),
-                transient_root=tmp_path / "transient",
-            ).acquire(
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+        transient_root=tmp_path / "transient",
+    ).acquire(
             selected,
             conditional=ConditionalRequest(
                 source_url=selected.endpoint_url,
                 etag='"source-v1"',
             ),
-        )
+    )
 
-    assert error.value.code == "reviewed_style_changed"
-    changed_digest = hashlib.sha256(changed_style).hexdigest()
-    assert (
-        store.root
-        / "blobs"
-        / "sha256"
-        / changed_digest[:2]
-        / changed_digest
-    ).exists() is False
+    assert result.not_modified is True
+    assert [item["url"] for item in transport.calls] == [
+        selected.endpoint_url,
+        transform["mask_url"],
+    ]
+    assert [policy.allowed_origins for policy in transport.policies] == [
+        ("https://gisco-services.ec.europa.eu",),
+        ("https://api-features.ign.es",),
+    ]
+    assert all(
+        parse_qs(urlsplit(call["url"]).query).get("request")
+        != ["GetStyles"]
+        for call in transport.calls
+    )
+    assert result.stats["style_count"] == 0
 
 
 def test_conditional_headers_are_not_reused_for_a_different_url(store, limits):

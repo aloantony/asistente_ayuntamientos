@@ -47,7 +47,7 @@ from app.reference_layers.geopackage_archive import (
 )
 from app.reference_layers.local_style_adaptation import (
     LocalStyleAdaptationError,
-    generate_reviewed_local_style,
+    generate_reviewed_local_styles,
     local_style_package_metadata,
 )
 from app.reference_layers.masked_geopackage import (
@@ -1275,7 +1275,7 @@ class ReferenceAcquisitionPipeline:
         *,
         dataset_artifacts: list[AcquiredArtifact],
     ) -> list[AcquiredArtifact]:
-        """Author a closed local SLD for an exact reviewed direct dataset."""
+        """Author every closed SLD for an exact reviewed direct dataset."""
 
         vat_artifacts = [
             item
@@ -1294,7 +1294,7 @@ class ReferenceAcquisitionPipeline:
             vat_artifacts[0].metadata if vat_artifacts else None
         )
         try:
-            authored = generate_reviewed_local_style(
+            authored_styles = generate_reviewed_local_styles(
                 candidate,
                 dataset_metadata=dataset_metadata,
             )
@@ -1303,68 +1303,78 @@ class ReferenceAcquisitionPipeline:
                 "reviewed local style could not be authored safely",
                 code=error.code,
             ) from error
-        if authored is None:
+        if not authored_styles:
             return []
 
-        parsed = _parse_style_bundle(
-            authored.document,
-            layer_name=candidate.remote_name,
-            style_names=(
-                cast(str, authored.metadata["remote_name"]),
-            ),
-        )
-        if (
-            parsed.sld_version != "1.0.0"
-            or parsed.resource_hrefs
-            != ((authored.metadata["remote_name"], ()),)
-            or len(parsed.standalone_slds) != 1
-        ):
-            raise AcquisitionValidationError(
-                "authored local style did not pass closed SLD validation",
-                code="local_style_sld_invalid",
-            )
         maximum = min(
             self.limits.max_probe_bytes,
             self.store.max_blob_bytes,
             self.limits.max_total_bytes,
         )
-        style_blob = self.store.put_stream(
-            io.BytesIO(authored.document),
-            max_bytes=maximum,
-        )
-        if style_blob.sha256 != authored.sld_sha256:
-            raise AcquisitionValidationError(
-                "authored local style digest changed during storage",
-                code="local_style_integrity",
+        result: list[AcquiredArtifact] = []
+        for authored in authored_styles:
+            style_name = cast(str, authored.metadata["remote_name"])
+            layer_name = cast(
+                str,
+                authored.metadata["style_layer_name"],
             )
-        style = AcquiredArtifact(
-            artifact_kind="style",
-            role="style",
-            media_type="application/vnd.ogc.sld+xml",
-            blob=style_blob,
-            source_version=parsed.sld_version,
-            metadata=authored.metadata,
-        )
-        package_blob = _store_style_package(
-            self.store,
-            sld=authored.document,
-            resources=(),
-            max_bytes=min(
-                self.limits.max_page_bytes,
-                self.store.max_blob_bytes,
+            parsed = _parse_style_bundle(
+                authored.document,
+                layer_name=layer_name,
+                style_names=(style_name,),
+            )
+            if (
+                parsed.sld_version != "1.0.0"
+                or parsed.resource_hrefs != ((style_name, ()),)
+                or len(parsed.standalone_slds) != 1
+            ):
+                raise AcquisitionValidationError(
+                    "authored local style did not pass closed SLD validation",
+                    code="local_style_sld_invalid",
+                )
+            style_blob = self.store.put_stream(
+                io.BytesIO(authored.document),
+                max_bytes=maximum,
+            )
+            if style_blob.sha256 != authored.sld_sha256:
+                raise AcquisitionValidationError(
+                    "authored local style digest changed during storage",
+                    code="local_style_integrity",
+                )
+            result.append(
+                AcquiredArtifact(
+                    artifact_kind="style",
+                    role="style",
+                    media_type="application/vnd.ogc.sld+xml",
+                    blob=style_blob,
+                    source_version=parsed.sld_version,
+                    metadata=authored.metadata,
+                )
+            )
+            package_blob = _store_style_package(
+                self.store,
+                sld=authored.document,
+                resources=(),
+                max_bytes=min(
+                    self.limits.max_page_bytes,
+                    self.store.max_blob_bytes,
+                    self.limits.max_total_bytes,
+                ),
+            )
+            result.append(
+                AcquiredArtifact(
+                    artifact_kind="style_package",
+                    role="style_package",
+                    media_type="application/zip",
+                    blob=package_blob,
+                    source_version=parsed.sld_version,
+                    metadata=local_style_package_metadata(authored),
+                )
+            )
+            _enforce_total_bytes(
+                result,
                 self.limits.max_total_bytes,
-            ),
-        )
-        package = AcquiredArtifact(
-            artifact_kind="style_package",
-            role="style_package",
-            media_type="application/zip",
-            blob=package_blob,
-            source_version=parsed.sld_version,
-            metadata=local_style_package_metadata(authored),
-        )
-        result = [style, package]
-        _enforce_total_bytes(result, self.limits.max_total_bytes)
+            )
         return result
 
     def _finish(
