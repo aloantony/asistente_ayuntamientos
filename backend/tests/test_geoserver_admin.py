@@ -25,6 +25,7 @@ from app.reference_layers.geoserver_admin import (
     GeoServerLayerSmokeError,
     InvalidGeoServerPublicationError,
     UnsafeGeoServerAdminConfigurationError,
+    style_smoke_zoom_candidates,
 )
 
 ADMIN_PASSWORD = "admin-password-that-must-not-leak"
@@ -35,7 +36,12 @@ RASTER_STORAGE_KEY = (
 )
 
 
-def make_png(width: int, height: int) -> bytes:
+def make_png(
+    width: int,
+    height: int,
+    *,
+    rgba: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
         return (
@@ -46,7 +52,11 @@ def make_png(width: int, height: int) -> bytes:
         )
 
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    rows = b"".join(b"\x00" + b"\x00" * (width * 4) for _ in range(height))
+    pixel = bytes(rgba)
+    rows = b"".join(
+        b"\x00" + pixel * width
+        for _ in range(height)
+    )
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", ihdr)
@@ -1847,6 +1857,206 @@ def test_layer_smoke_checks_catalog_then_renders_local_png() -> None:
     assert parameters["LAYERS"] == ["siur:planning_v_012345"]
     assert parameters["STYLES"] == ["siur:planning_style_v_012345"]
     assert "Authorization" not in requests[1][3]
+
+
+def test_style_smoke_zoom_respects_eurostat_max_scale_and_real_bounds() -> None:
+    sld = VALID_SLD.replace(
+        b"<Rule>",
+        b"<Rule><MaxScaleDenominator>4000000</MaxScaleDenominator>",
+    )
+
+    zooms = style_smoke_zoom_candidates(
+        bounds={"west": -7.1, "south": 40.0, "east": -1.6, "north": 43.3},
+        payload=sld,
+        asset_kind="style_sld",
+    )
+
+    assert zooms == (8, 9, 10)
+
+
+def test_layer_smoke_searches_real_bounds_until_coverage_is_visible() -> None:
+    transparent = make_png(256, 256)
+    visible = make_png(256, 256, rgba=(109, 40, 217, 255))
+    client, factory = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            FakeResponse(transparent, content_type="image/png"),
+            FakeResponse(visible, content_type="image/png"),
+        ]
+    )
+    pulses = []
+
+    result = client.smoke_layer(
+        layer_name="planning_v_012345",
+        style_name="planning_style_v_012345",
+        bounds={"west": -7.1, "south": 40.0, "east": -1.6, "north": 43.3},
+        zoom_candidates=(8,),
+        coverage_required=True,
+        progress_callback=lambda: pulses.append("pulse"),
+        expected_style_colors=("#6d28d9",),
+    )
+
+    assert result.z == 8
+    assert 122 <= result.x <= 126
+    assert 93 <= result.y <= 96
+    assert result.visible_pixel_count == 256 * 256
+    assert result.coverage_required is True
+    assert result.attempted_tile_count == 2
+    assert result.matched_style_color == "#6d28d9"
+    assert pulses == ["pulse", "pulse"]
+    map_requests = all_requests(factory)[1:]
+    assert len(map_requests) == 2
+    assert all(
+        parse_qs(urlsplit(request[1]).query)["REQUEST"] == ["GetMap"]
+        for request in map_requests
+    )
+
+
+def test_layer_smoke_rejects_transparent_required_coverage() -> None:
+    transparent = make_png(256, 256)
+    # At z8 these Castilla y León bounds cover exactly twenty tiles.  The
+    # smoke exhausts all of them instead of accepting the first empty PNG.
+    client, factory = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            *[
+                FakeResponse(transparent, content_type="image/png")
+                for _ in range(20)
+            ],
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerLayerSmokeError,
+        match="did not render required coverage and style",
+    ):
+        client.smoke_layer(
+            layer_name="planning_v_012345",
+            style_name="planning_style_v_012345",
+            bounds={
+                "west": -7.1,
+                "south": 40.0,
+                "east": -1.6,
+                "north": 43.3,
+            },
+            zoom_candidates=(8,),
+            coverage_required=True,
+        )
+
+    assert len(all_requests(factory)) == 21
+
+
+def test_layer_smoke_has_one_global_tile_budget_across_zooms() -> None:
+    transparent = make_png(256, 256)
+    client, factory = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            *[
+                FakeResponse(transparent, content_type="image/png")
+                for _ in range(64)
+            ],
+        ]
+    )
+    pulses = []
+
+    with pytest.raises(GeoServerLayerSmokeError):
+        client.smoke_layer(
+            layer_name="planning_v_012345",
+            style_name=None,
+            bounds={
+                "west": -180.0,
+                "south": -85.0,
+                "east": 180.0,
+                "north": 85.0,
+            },
+            zoom_candidates=(8, 9, 10),
+            coverage_required=True,
+            progress_callback=lambda: pulses.append("pulse"),
+        )
+
+    assert len(all_requests(factory)) == 65
+    assert len(pulses) == 64
+
+
+def test_layer_smoke_rejects_visible_pixels_from_the_wrong_grid_style() -> None:
+    purple = make_png(256, 256, rgba=(109, 40, 217, 255))
+    client, _factory = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            FakeResponse(purple, content_type="image/png"),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerLayerSmokeError,
+        match="did not render required coverage and style",
+    ):
+        client.smoke_layer(
+            layer_name="planning_v_012345",
+            style_name="planning_style_v_012345",
+            coverage_required=True,
+            expected_style_colors=("#e6007e",),
+        )
+
+
+def test_layer_smoke_allows_declared_optional_empty_coverage() -> None:
+    transparent = make_png(256, 256)
+    client, _factory = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            FakeResponse(transparent, content_type="image/png"),
+        ]
+    )
+
+    result = client.smoke_layer(
+        layer_name="planning_v_012345",
+        style_name=None,
+        bounds={"west": -7.1, "south": 40.0, "east": -1.6, "north": 43.3},
+        zoom_candidates=(8,),
+        coverage_required=False,
+    )
+
+    assert result.visible_pixel_count == 0
+    assert result.coverage_required is False
+    assert result.attempted_tile_count == 1
+
+
+def test_layer_smoke_fully_decodes_png_instead_of_trusting_ihdr() -> None:
+    truncated_after_valid_header = make_png(
+        256,
+        256,
+        rgba=(109, 40, 217, 255),
+    )[:64]
+    client, _factory = make_client(
+        [
+            json_response(
+                {"layer": {"name": "planning_v_012345", "enabled": True}}
+            ),
+            FakeResponse(
+                truncated_after_valid_header,
+                content_type="image/png",
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerLayerSmokeError,
+        match="could not be decoded",
+    ):
+        client.smoke_layer(
+            layer_name="planning_v_012345",
+            style_name=None,
+        )
 
 
 def test_layer_smoke_validates_map_legend_and_empty_identify_on_loopback() -> None:

@@ -1,11 +1,13 @@
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 from pathlib import Path
 import struct
 from types import SimpleNamespace
+import zipfile
 import zlib
 
 import pytest
@@ -717,35 +719,78 @@ def test_dataset_materialization_marker_fails_closed() -> None:
     assert error.value.code == "vector_page_order_invalid"
 
 
-def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
+def test_geoserver_publication_smokes_three_adapted_grid_styles_and_audits(
     tmp_path,
 ) -> None:
     store = ReferenceBlobStore(Path(tmp_path, "smoke-store"))
-    first = store.put_stream(io.BytesIO(b"<sld>first</sld>"))
-    second = store.put_stream(io.BytesIO(b"<sld>second</sld>"))
+    style_names = (
+        "style_morado_v_012345",
+        "style_blanco_v_012345",
+        "style_fucsia_v_012345",
+    )
+    style_colors = ("#6d28d9", "#ffffff", "#e6007e")
+    packages = []
+    for style_name, color in zip(style_names, style_colors, strict=True):
+        sld = f"""<?xml version="1.0" encoding="UTF-8"?>
+<StyledLayerDescriptor version="1.0.0"
+  xmlns="http://www.opengis.net/sld">
+  <NamedLayer><Name>planning</Name><UserStyle><FeatureTypeStyle>
+    <Rule><MaxScaleDenominator>4000000</MaxScaleDenominator>
+      <PolygonSymbolizer><Fill>
+        <CssParameter name="fill-opacity">0</CssParameter>
+      </Fill><Stroke>
+        <CssParameter name="stroke">{color}</CssParameter>
+      </Stroke></PolygonSymbolizer>
+    </Rule>
+  </FeatureTypeStyle></UserStyle></NamedLayer>
+</StyledLayerDescriptor>""".encode()
+        package_buffer = io.BytesIO()
+        with zipfile.ZipFile(
+            package_buffer,
+            "w",
+            compression=zipfile.ZIP_STORED,
+        ) as archive:
+            archive.writestr("style.sld", sld)
+        package = package_buffer.getvalue()
+        blob = store.put_stream(io.BytesIO(package))
+        packages.append(
+            (
+                style_name,
+                blob,
+                hashlib.sha256(sld).hexdigest(),
+                package,
+            )
+        )
     plan = GeoServerPublicationPlan(
         delivery_kind="vector",
         layer_name="planning_v_012345",
         title="Planning",
         primary_storage_key="reference_data.planning_v_012345",
         declared_srs="EPSG:3857",
+        smoke_bounds={
+            "west": -7.1,
+            "south": 40.0,
+            "east": -1.6,
+            "north": 43.3,
+        },
+        coverage_required=True,
         table_name="planning_v_012345",
         store_name=None,
-        styles=(
-            StylePublication(1, "style_one_v_012345", first.storage_key, first.sha256),
+        styles=tuple(
             StylePublication(
-                2,
-                "style_two_v_012345",
-                second.storage_key,
-                second.sha256,
+                index,
+                style_name,
+                blob.storage_key,
+                blob.sha256,
                 asset_kind="style_package",
-                expected_sld_sha256="d" * 64,
-            ),
+                expected_sld_sha256=sld_sha256,
+            )
+            for index, (style_name, blob, sld_sha256, _package) in enumerate(
+                packages,
+                start=1,
+            )
         ),
-        smoke_style_names=(
-            "style_one_v_012345",
-            "style_two_v_012345",
-        ),
+        smoke_style_names=style_names,
         legend_available=True,
         identify_available=True,
     )
@@ -774,15 +819,20 @@ def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
         def smoke_layer(self, **kwargs):
             self.smokes.append(kwargs)
             style = kwargs["style_name"]
+            [expected_color] = kwargs["expected_style_colors"]
+            if "zoom_candidates" in kwargs:
+                z, x, y = kwargs["zoom_candidates"][0], 125, 95
+            else:
+                z, x, y = kwargs["z"], kwargs["x"], kwargs["y"]
             return LayerSmokeResult(
                 layer_name=kwargs["layer_name"],
                 style_name=style,
                 image_sha256="a" * 64,
                 image_bytes=100,
                 image_content_type="image/png",
-                z=kwargs["z"],
-                x=kwargs["x"],
-                y=kwargs["y"],
+                z=z,
+                x=x,
+                y=y,
                 legend_sha256="b" * 64,
                 legend_bytes=50,
                 legend_content_type="image/png",
@@ -792,6 +842,11 @@ def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
                 identify_feature_count=0,
                 pixel_x=kwargs["pixel_x"],
                 pixel_y=kwargs["pixel_y"],
+                visible_pixel_count=42,
+                coverage_required=kwargs["coverage_required"],
+                attempted_tile_count=1,
+                expected_style_colors=(expected_color,),
+                matched_style_color=expected_color,
             )
 
     client = Client()
@@ -805,23 +860,51 @@ def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
     finally:
         store.close()
 
-    assert len(client.smokes) == 2
+    assert len(client.smokes) == 3
     assert all(item["legend_available"] is True for item in client.smokes)
     assert all(item["identify_available"] is True for item in client.smokes)
-    assert all((item["z"], item["x"], item["y"]) == (0, 0, 0) for item in client.smokes)
+    assert client.smokes[0]["bounds"] == plan.smoke_bounds
+    assert client.smokes[0]["zoom_candidates"] == (8, 9, 10)
+    assert all(
+        (item["z"], item["x"], item["y"]) == (8, 125, 95)
+        for item in client.smokes[1:]
+    )
+    assert all(
+        item["coverage_required"] is True
+        for item in client.smokes
+    )
+    assert [
+        item["expected_style_colors"] for item in client.smokes
+    ] == [
+        ("#6d28d9",),
+        ("#ffffff",),
+        ("#e6007e",),
+    ]
     assert all(
         (item["pixel_x"], item["pixel_y"]) == (128, 128)
         for item in client.smokes
     )
     assert client.package_publications == [
         {
-            "style_name": "style_two_v_012345",
-            "package": b"<sld>second</sld>",
-            "expected_sld_sha256": "d" * 64,
+            "style_name": style_name,
+            "package": package,
+            "expected_sld_sha256": sld_sha256,
         }
+        for style_name, _blob, sld_sha256, package in packages
     ]
     assert evidence["transport"] == "numeric_loopback_http"
-    assert len(evidence["style_checks"]) == 2
+    assert evidence["coverage_required"] is True
+    assert len(evidence["style_checks"]) == 3
+    assert [
+        item["style_name"] for item in evidence["style_checks"]
+    ] == list(style_names)
+    assert all(
+        item["map"]["visible_pixel_count"] == 42
+        and item["map"]["coverage_required"] is True
+        and item["map"]["matched_style_color"]
+        == item["map"]["expected_style_colors"][0]
+        for item in evidence["style_checks"]
+    )
     assert evidence["style_checks"][0]["identify"]["feature_count"] == 0
 
 
