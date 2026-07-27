@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from app.reference_layers.idecyl_exact_evidence import (
+    idecyl_exact_source_inventory,
+)
 from app.reference_layers.idecyl_local_style_evidence import (
     AUTHORIZATION_EFFECT,
     GENERATOR_VERSION,
@@ -17,6 +20,7 @@ from app.reference_layers.idecyl_local_style_evidence import (
     canonical_json_sha256,
     idecyl_local_style_expected_source_definition,
     idecyl_local_style_inventory,
+    reviewed_idecyl_local_style_exclusion_for_source,
     reviewed_idecyl_local_styles,
     _load_evidence_package,
     _resource_body,
@@ -258,6 +262,56 @@ def test_manifest_is_canonical_hash_bound_non_authorizing_and_excludes_279() -> 
             ],
         }
     ]
+
+
+def test_incomplete_style_sources_expose_hash_bound_fallback_evidence() -> None:
+    sources = {
+        item.audit_layer_id: item
+        for item in idecyl_exact_source_inventory()
+    }
+
+    for layer_id in (66, 232, 296):
+        exclusion = reviewed_idecyl_local_style_exclusion_for_source(
+            sources[layer_id]
+        )
+        assert exclusion is not None
+        assert exclusion["audit_layer_id"] == layer_id
+        assert exclusion["complete_vector_style_parity"] is False
+        assert exclusion["reason_codes"] == [
+            "complete_local_archive_unavailable"
+        ]
+        assert exclusion["catalog_style_source_keys"] == []
+        assert exclusion["evidence_binding"] == {
+            "manifest_resource": PREVIOUS_MANIFEST_RESOURCE,
+            "manifest_sha256": PREVIOUS_MANIFEST_SHA256,
+        }
+
+    boundary = reviewed_idecyl_local_style_exclusion_for_source(
+        sources[279]
+    )
+    assert boundary is not None
+    assert boundary["reason_codes"] == [
+        "catalog_thematic_palette_evidence_incomplete_for_full_parity"
+    ]
+    assert boundary["catalog_style_source_keys"] == [
+        "lineas_limite_municipales_ambito",
+        "lineas_limite_municipales_azul",
+        "lineas_limite_municipales_estadolegal",
+        "lineas_limite_municipales_precision",
+    ]
+    assert boundary["unresolved_style_source_keys"] == [
+        "lineas_limite_municipales_ambito",
+        "lineas_limite_municipales_estadolegal",
+        "lineas_limite_municipales_precision",
+    ]
+    assert boundary["evidence_binding"] == {
+        "manifest_resource": MANIFEST_RESOURCE,
+        "manifest_sha256": MANIFEST_SHA256,
+    }
+    assert (
+        reviewed_idecyl_local_style_exclusion_for_source(sources[86])
+        is None
+    )
 
 
 def _rehash_source(source: dict[str, object]) -> None:

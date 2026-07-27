@@ -55,6 +55,17 @@ from app.reference_layers.local_metadata_contract import (
 from app.reference_layers.idecyl_exact_evidence import (
     idecyl_exact_source_inventory,
 )
+from app.reference_layers.idecyl_local_style_evidence import (
+    idecyl_local_style_inventory,
+    reviewed_idecyl_local_style_exclusion_for_source,
+)
+from app.reference_layers.idecyl_population_nitrate_style_evidence import (
+    idecyl_nitrate_style_inventory,
+    idecyl_population_style_exclusion,
+)
+from app.reference_layers.idecyl_style_exclusion_evidence import (
+    idecyl_style_exclusion_inventory,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -75,6 +86,14 @@ from app.reference_layers.models import (
     ReferenceSyncRunArtifact,
 )
 from app.reference_layers.source_probes import SourceProbe
+from app.reference_layers.source_audit import (
+    _layer_definition as persisted_layer_definition,
+    _service_definition as persisted_service_definition,
+)
+from app.reference_layers.source_discovery import (
+    SourceDiscoveryError,
+    acquisition_candidates,
+)
 from app.reference_layers.reviewed_ortho_evidence import (
     CATALOG_ENDPOINT_URL,
     reviewed_ign_ortho_expected_source_definition,
@@ -415,6 +434,30 @@ def _idecyl_candidate_definition(
         and item.protocol == protocol
     ]
     assert len(reviewed) == expected_count
+    exact_style_exclusions = {
+        item.audit_layer_id: item
+        for item in idecyl_style_exclusion_inventory()
+    }
+    local_style_catalog = {
+        layer_id: tuple(
+            style
+            for style in idecyl_local_style_inventory()
+            if style.audit_layer_id == layer_id
+        )
+        for layer_id in {86, 223, 234, 279}
+    }
+    catalog_default_styles = {
+        66: "eclipse_2026_zonas_no_recomendadas_rojo",
+        232: "vegetacion_cyl_rednatura2000_verde",
+        296: "gesfor_cyl_rodal_linea_oliva",
+    }
+    nitrate_style_titles = {
+        item.catalog_style_source_key: item.style_title
+        for item in idecyl_nitrate_style_inventory()
+    }
+    nitrate_style_titles["coad_cyl_nitrat_aguas_subterr_2021"] = (
+        "Recintos municipales 2021 paleta color"
+    )
 
     def catalog_styles(item):
         if item.audit_layer_id == 86:
@@ -431,10 +474,56 @@ def _idecyl_candidate_definition(
                     ),
                 ),
             )
-        evidence = item.evidence.get("archive_style_evidence")
-        if not isinstance(evidence, dict):
-            return None, ()
-        styles = evidence["catalog_styles"]
+        if item.audit_layer_id in exact_style_exclusions:
+            styles = exact_style_exclusions[
+                item.audit_layer_id
+            ].required_catalog_styles
+        elif item.audit_layer_id == 237:
+            styles = idecyl_population_style_exclusion()["catalog_styles"]
+        elif item.audit_layer_id == 279:
+            exclusion = (
+                reviewed_idecyl_local_style_exclusion_for_source(item)
+            )
+            assert exclusion is not None
+            styles = tuple(
+                {
+                    "catalog_style_source_key": source_key,
+                    "remote_name": source_key,
+                    "title": source_key,
+                    "is_default": source_key
+                    == "lineas_limite_municipales_azul",
+                }
+                for source_key in exclusion[
+                    "catalog_style_source_keys"
+                ]
+            )
+        elif item.audit_layer_id in catalog_default_styles:
+            source_key = catalog_default_styles[item.audit_layer_id]
+            styles = (
+                {
+                    "catalog_style_source_key": source_key,
+                    "remote_name": source_key,
+                    "title": source_key,
+                    "is_default": True,
+                },
+            )
+        elif item.audit_layer_id in local_style_catalog:
+            styles = tuple(
+                {
+                    "catalog_style_source_key": (
+                        style.catalog_style_source_key
+                    ),
+                    "remote_name": style.remote_style_name,
+                    "title": style.style_title,
+                    "is_default": style.is_default,
+                }
+                for style in local_style_catalog[item.audit_layer_id]
+            )
+        else:
+            evidence = item.evidence.get("archive_style_evidence")
+            if not isinstance(evidence, dict):
+                return None, ()
+            styles = evidence["catalog_styles"]
         default = next(
             style for style in styles if style["is_default"] is True
         )
@@ -443,7 +532,13 @@ def _idecyl_candidate_definition(
             tuple(
                 ReferenceLayerStyleDefinition(
                     source_key=style["catalog_style_source_key"],
-                    title=style["remote_name"],
+                    title=style.get(
+                        "title",
+                        nitrate_style_titles.get(
+                            style["catalog_style_source_key"],
+                            style["remote_name"],
+                        ),
+                    ),
                     remote_name=style["remote_name"],
                     sort_order=index,
                     is_default=style["is_default"],
@@ -1113,8 +1208,35 @@ def test_bootstrap_is_dry_run_idempotent_and_preserves_manual_sources(db) -> Non
 def test_18_idecyl_archives_persist_enabled_but_cannot_queue_without_review(
     db,
 ) -> None:
+    baked_wms_ids = {65, 66, 105, 232, 237, 279, 296}
+    reviewed = {
+        item.catalog_layer_source_key: item.audit_layer_id
+        for item in idecyl_exact_source_inventory()
+        if item.audit_layer_id != 39
+        and item.local_service_status == "candidate"
+        and item.protocol == "download"
+    }
     definition = _idecyl_reviewable_archive_definition()
     apply_catalog_definition(db, definition)
+    persisted_layers = list(
+        db.scalars(
+            select(ReferenceLayer).where(
+                ReferenceLayer.provider_key == definition.provider_key
+            )
+        )
+    )
+    for persisted_layer in persisted_layers:
+        audit_layer_id = reviewed[persisted_layer.source_key]
+        try:
+            candidates = acquisition_candidates(
+                persisted_service_definition(persisted_layer.service),
+                persisted_layer_definition(persisted_layer),
+            )
+        except SourceDiscoveryError as error:
+            raise AssertionError(
+                f"IDECyL {audit_layer_id}: {error.code}: {error}"
+            ) from error
+        assert len(candidates) == 1, audit_layer_id
     plan = build_mirror_bootstrap_plan(
         db,
         provider_key=definition.provider_key,
@@ -1135,11 +1257,22 @@ def test_18_idecyl_archives_persist_enabled_but_cannot_queue_without_review(
         )
     )
     assert len(sources) == 18
+    layer_source_keys = {
+        layer.id: layer.source_key
+        for layer in db.scalars(
+            select(ReferenceLayer).where(
+                ReferenceLayer.provider_key == definition.provider_key
+            )
+        )
+    }
+    sources_by_audit_id = {
+        reviewed[layer_source_keys[source.layer_id]]: source
+        for source in sources
+    }
+    assert set(sources_by_audit_id) == set(reviewed.values())
     assert all(
         source.enabled
         and source.is_primary
-        and source.protocol == "download"
-        and source.target_kind == "vector"
         and source.definition_sha256
         == _canonical_sha256(
             {
@@ -1153,6 +1286,19 @@ def test_18_idecyl_archives_persist_enabled_but_cannot_queue_without_review(
             }
         )
         for source in sources
+    )
+    assert all(
+        sources_by_audit_id[layer_id].protocol == "wms_tiles"
+        and sources_by_audit_id[layer_id].target_kind == "tiles"
+        and sources_by_audit_id[layer_id].sync_strategy == "tile_seed"
+        for layer_id in baked_wms_ids
+    )
+    assert all(
+        sources_by_audit_id[layer_id].protocol == "download"
+        and sources_by_audit_id[layer_id].target_kind == "vector"
+        and sources_by_audit_id[layer_id].sync_strategy
+        == "conditional_get"
+        for layer_id in set(sources_by_audit_id) - baked_wms_ids
     )
     due = NOW - timedelta(seconds=1)
     for source in sources:
@@ -1186,7 +1332,13 @@ def test_18_idecyl_archives_persist_enabled_but_cannot_queue_without_review(
     )
     assert len(strategies) == 18
     assert all(
-        strategy.strategy == "vector"
+        strategy.strategy
+        == (
+            "tiles"
+            if reviewed[layer_source_keys[strategy.layer_id]]
+            in baked_wms_ids
+            else "vector"
+        )
         and strategy.generation == 1
         for strategy in strategies
     )

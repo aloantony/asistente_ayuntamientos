@@ -29,6 +29,7 @@ from app.reference_layers.idecyl_population_nitrate_style_evidence import (
     idecyl_nitrate_expected_source_definition,
     idecyl_nitrate_style_inventory,
     idecyl_population_style_exclusion,
+    idecyl_population_style_exclusion_config,
 )
 from app.reference_layers.local_style_adaptation import (
     LocalStyleAdaptationError,
@@ -190,10 +191,49 @@ def test_population_remains_an_explicit_hash_bound_exclusion() -> None:
     )
 
     candidate, _, _ = _catalog_candidate(237)
+    assert candidate.protocol == "wms_tiles"
+    assert candidate.target_kind == "tiles"
+    assert candidate.sync_strategy == "tile_seed"
     assert "archive_styles" not in candidate.config
     assert "reviewed_local_style" not in candidate.config
     assert "reviewed_local_styles" not in candidate.config
-    assert candidate.config["reviewed_local_style_exclusion"] == {
+    assert "reviewed_local_style_exclusion" not in candidate.config
+    fallback = candidate.config["reviewed_baked_wms_fallback"]
+    assert fallback["schema"] == (
+        "siur-reviewed-idecyl-baked-wms-fallback/v1"
+    )
+    assert fallback["audit_layer_id"] == 237
+    assert fallback["profile"] == (
+        "idecyl-nucleos-cyl-poblaciones-archive-20260727-v3"
+    )
+    assert fallback["complete_vector_style_parity"] is False
+    assert fallback["catalog_styles"] == [
+        {
+            "catalog_style_source_key": item[
+                "catalog_style_source_key"
+            ],
+            "remote_name": item["remote_name"],
+            "is_default": item["is_default"],
+        }
+        for item in exclusion["catalog_styles"]
+    ]
+    assert fallback["exclusion_evidence"] == {
+        "kind": "population_style_exclusion",
+        "manifest_resource": MANIFEST_RESOURCE,
+        "manifest_sha256": MANIFEST_SHA256,
+        "evidence_identity_sha256": (
+            "2468c24e3589efc6a755c7d15202a078"
+            "602a412fe6f89dba37716e8fec903466"
+        ),
+    }
+    assert fallback["reason_codes"] == exclusion["reason_codes"]
+    assert reviewed_local_style_recipes(candidate) == ()
+
+
+def test_population_vector_exclusion_config_remains_hash_bound() -> None:
+    exclusion = idecyl_population_style_exclusion()
+
+    assert idecyl_population_style_exclusion_config(exclusion) == {
         "schema": "siur-reviewed-idecyl-local-style-exclusion/v1",
         "audit_layer_id": 237,
         "profile": (
@@ -207,7 +247,6 @@ def test_population_remains_an_explicit_hash_bound_exclusion() -> None:
         "catalog_style_count": 6,
         "reason_codes": exclusion["reason_codes"],
     }
-    assert reviewed_local_style_recipes(candidate) == ()
 
 
 def test_nitrate_candidate_combines_one_exact_and_fifteen_adapted_styles() -> None:
@@ -497,8 +536,8 @@ def test_nitrate_rejects_catalog_default_or_candidate_tampering() -> None:
     assert source_error.value.code == "reviewed_local_style_invalid"
 
 
-def test_population_exclusion_rejects_catalog_or_candidate_tampering() -> None:
-    candidate, service, layer = _catalog_candidate(237)
+def test_population_exclusion_rejects_catalog_tampering() -> None:
+    _candidate, service, layer = _catalog_candidate(237)
     styles = list(layer.styles)
     styles[0] = replace(styles[0], title="Changed title")
 
@@ -510,18 +549,6 @@ def test_population_exclusion_rejects_catalog_or_candidate_tampering() -> None:
     assert catalog_error.value.code == (
         "reviewed_idecyl_local_style_identity_invalid"
     )
-
-    tampered = replace(
-        candidate,
-        config={
-            key: value
-            for key, value in candidate.config.items()
-            if key != "reviewed_local_style_exclusion"
-        },
-    )
-    with pytest.raises(SourceDiscoveryError) as source_error:
-        reviewed_local_style_recipes(tampered)
-    assert source_error.value.code == "reviewed_local_style_invalid"
 
 
 def test_all_nitrate_styles_share_one_full_source_definition() -> None:

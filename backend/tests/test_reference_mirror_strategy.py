@@ -14,8 +14,21 @@ from app.reference_layers import mirror_strategy
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
     ReferenceLayerDefinition,
+    ReferenceLayerStyleDefinition,
     ReferenceServiceDefinition,
     apply_catalog_definition,
+)
+from app.reference_layers.idecyl_exact_evidence import (
+    idecyl_exact_source_inventory,
+)
+from app.reference_layers.idecyl_local_style_evidence import (
+    reviewed_idecyl_local_style_exclusion_for_source,
+)
+from app.reference_layers.idecyl_population_nitrate_style_evidence import (
+    idecyl_population_style_exclusion,
+)
+from app.reference_layers.idecyl_style_exclusion_evidence import (
+    idecyl_style_exclusion_inventory,
 )
 from app.reference_layers.mirror_lifecycle import (
     apply_mirror_bootstrap_plan,
@@ -90,6 +103,131 @@ def test_source_discovery_blocker_evidence_is_preserved(
     assert assignment.reason_code == "official_download_unavailable"
     assert assignment.evidence["wms_tiles_eligible"] is False
     assert assignment.evidence["wms_guard"] == "bulk_wms_prohibited"
+
+
+def test_incomplete_idecyl_styles_select_primary_baked_tile_strategy(
+    monkeypatch,
+) -> None:
+    sources = {
+        item.audit_layer_id: item
+        for item in idecyl_exact_source_inventory()
+    }
+    exact_exclusions = {
+        item.audit_layer_id: item
+        for item in idecyl_style_exclusion_inventory()
+    }
+    catalog_default_styles = {
+        66: "eclipse_2026_zonas_no_recomendadas_rojo",
+        232: "vegetacion_cyl_rednatura2000_verde",
+        296: "gesfor_cyl_rodal_linea_oliva",
+    }
+
+    for layer_id in (65, 66, 105, 232, 237, 279, 296):
+        source = sources[layer_id]
+        if layer_id in exact_exclusions:
+            style_evidence = exact_exclusions[
+                layer_id
+            ].required_catalog_styles
+        elif layer_id == 237:
+            style_evidence = idecyl_population_style_exclusion()[
+                "catalog_styles"
+            ]
+        elif layer_id == 279:
+            exclusion = (
+                reviewed_idecyl_local_style_exclusion_for_source(source)
+            )
+            assert exclusion is not None
+            style_evidence = tuple(
+                {
+                    "catalog_style_source_key": key,
+                    "remote_name": key,
+                    "title": key,
+                    "is_default": key
+                    == "lineas_limite_municipales_azul",
+                }
+                for key in exclusion["catalog_style_source_keys"]
+            )
+        elif layer_id in catalog_default_styles:
+            source_key = catalog_default_styles[layer_id]
+            style_evidence = (
+                {
+                    "catalog_style_source_key": source_key,
+                    "remote_name": source_key,
+                    "title": source_key,
+                    "is_default": True,
+                },
+            )
+        else:
+            style_evidence = ()
+        styles = tuple(
+            ReferenceLayerStyleDefinition(
+                source_key=item["catalog_style_source_key"],
+                remote_name=item["remote_name"],
+                title=item["title"],
+                is_default=item["is_default"],
+            )
+            for item in style_evidence
+        )
+        service_definition = ReferenceServiceDefinition(
+            source_key=f"service:{layer_id}",
+            title="IDECyL",
+            upstream_protocol="wms",
+            base_url=source.catalog_endpoint_url,
+            default_format="image/png",
+        )
+        layer_definition = ReferenceLayerDefinition(
+            source_key=source.catalog_layer_source_key,
+            node_type="layer",
+            title=source.catalog_remote_name,
+            service_key=service_definition.source_key,
+            remote_name=source.catalog_remote_name,
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="mirror",
+            bounds={
+                "west": -7.1,
+                "south": 40.0,
+                "east": -1.7,
+                "north": 43.3,
+            },
+            min_zoom=6,
+            max_zoom=18,
+            style_name=next(
+                (
+                    item.remote_name
+                    for item in styles
+                    if item.is_default
+                ),
+                "",
+            ),
+            styles=styles,
+        )
+        catalog_layer = _layer(
+            source.catalog_layer_source_key,
+            layer_id=layer_id,
+        )
+        monkeypatch.setattr(
+            mirror_strategy,
+            "_service_definition",
+            lambda _service, definition=service_definition: definition,
+        )
+        monkeypatch.setattr(
+            mirror_strategy,
+            "_layer_definition",
+            lambda _layer, definition=layer_definition: definition,
+        )
+
+        assignment = mirror_strategy._derive_assignment(
+            catalog_layer,
+            object(),
+            {catalog_layer.source_key: catalog_layer},
+        )
+
+        assert assignment.strategy == "tiles"
+        assert assignment.reason_code == "candidate_selected"
+        assert assignment.evidence["protocol"] == "wms_tiles"
+        assert assignment.evidence["target_kind"] == "tiles"
+        assert assignment.evidence["priority"] == 5
 
 
 def test_composition_cycle_is_blocked_without_aborting_other_layers() -> None:
