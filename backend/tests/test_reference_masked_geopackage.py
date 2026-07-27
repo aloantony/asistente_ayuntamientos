@@ -146,6 +146,14 @@ def _write_core_tables(
             m TINYINT NOT NULL,
             PRIMARY KEY (table_name, column_name)
         );
+        CREATE TABLE gpkg_extensions (
+            table_name TEXT,
+            column_name TEXT,
+            extension_name TEXT NOT NULL,
+            definition TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            UNIQUE (table_name, column_name, extension_name)
+        );
         INSERT INTO gpkg_spatial_ref_sys VALUES (
             'ETRS89-extended / LAEA Europe',
             3035,
@@ -171,6 +179,8 @@ def _write_source(path: Path) -> None:
                 Y_LLC MEDIUMINT,
                 TOT_P_2021 REAL
             );
+            CREATE VIRTUAL TABLE rtree_grid_100km_surf_geom
+            USING rtree(id, minx, maxx, miny, maxy);
             INSERT INTO gpkg_contents VALUES (
                 'grid_100km_surf',
                 'features',
@@ -191,9 +201,17 @@ def _write_source(path: Path) -> None:
                 0,
                 0
             );
+            INSERT INTO gpkg_extensions VALUES (
+                'grid_100km_surf',
+                'geom',
+                'gpkg_rtree_index',
+                'http://www.geopackage.org/spec/#extension_rtree',
+                'write-only'
+            );
             """
         )
         for index, identifier in enumerate(CELL_IDS, start=1):
+            y_coordinate = 2_000_000 + index * 100_000
             connection.execute(
                 "INSERT INTO grid_100km_surf VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -201,8 +219,19 @@ def _write_source(path: Path) -> None:
                     b"source-geometry",
                     identifier,
                     2_800_000,
-                    2_000_000 + index * 100_000,
+                    y_coordinate,
                     999.0,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO rtree_grid_100km_surf_geom "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    index,
+                    2_800_000,
+                    2_900_000,
+                    y_coordinate,
+                    y_coordinate + 100_000,
                 ),
             )
 
@@ -420,6 +449,86 @@ def test_transform_config_cannot_select_population_fields() -> None:
     assert error.value.code == "masked_geopackage_config_invalid"
 
 
+@pytest.mark.parametrize(
+    ("resolution_km", "cell_size_meters"),
+    (
+        (1, 1_000),
+        (2, 2_000),
+        (5, 5_000),
+        (20, 20_000),
+        (50, 50_000),
+        (100, 100_000),
+    ),
+)
+def test_selection_sql_uses_resolution_specific_rtree(
+    resolution_km: int,
+    cell_size_meters: int,
+) -> None:
+    document = _mask_document()
+    config = _spec_config(document)
+    source_layer = f"grid_{resolution_km}km_surf"
+    config["vector_transform"].update(
+        {
+            "source_layer": source_layer,
+            "output_layer": f"{source_layer}_cyl",
+            "cell_size_meters": cell_size_meters,
+        }
+    )
+    spec = parse_masked_geopackage_spec(config)
+    assert spec is not None
+
+    sql = masked_geopackage_module._selection_sql(
+        spec,
+        source_geometry="geom",
+        mask_geometry="geom",
+        source_spatial_index=f"rtree_{source_layer}_geom",
+    )
+
+    assert f'"rtree_{source_layer}_geom"' in sql
+    assert "source.ROWID IN" in sql
+    assert sql.index("source.ROWID IN") < sql.index("ST_Intersects")
+
+
+def test_selection_sql_query_plan_uses_rtree_without_source_scan(
+    tmp_path: Path,
+) -> None:
+    document = _mask_document()
+    spec = parse_masked_geopackage_spec(_spec_config(document))
+    assert spec is not None
+    source_path = tmp_path / "source.gpkg"
+    _write_source(source_path)
+    _add_mask_layer(source_path)
+    sql = masked_geopackage_module._selection_sql(
+        spec,
+        source_geometry="geom",
+        mask_geometry="geom",
+        source_spatial_index="rtree_grid_100km_surf_geom",
+    )
+
+    with sqlite3.connect(source_path) as connection:
+        for name in ("ST_MinX", "ST_MaxX", "ST_MinY", "ST_MaxY"):
+            connection.create_function(name, 1, lambda _geometry: 0.0)
+        connection.create_function(
+            "ST_Intersects",
+            2,
+            lambda _left, _right: 1,
+        )
+        plan = [
+            row[3]
+            for row in connection.execute(
+                f"EXPLAIN QUERY PLAN {sql}"
+            )
+        ]
+
+    assert any("VIRTUAL TABLE INDEX" in step for step in plan)
+    assert any("D1B0D3B2" in step for step in plan)
+    assert any(
+        "SEARCH source USING INTEGER PRIMARY KEY" in step
+        for step in plan
+    )
+    assert not any("SCAN source" in step for step in plan)
+
+
 def test_derivation_rejects_spoofed_epsg_3035_definition(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +583,56 @@ def test_derivation_rejects_spoofed_epsg_3035_definition(
     )
 
 
+def test_derivation_requires_complete_source_spatial_index(
+    tmp_path: Path,
+) -> None:
+    document = _mask_document()
+    spec = parse_masked_geopackage_spec(_spec_config(document))
+    assert spec is not None
+    source_path = tmp_path / "source.gpkg"
+    _write_source(source_path)
+    with sqlite3.connect(source_path) as connection:
+        connection.execute(
+            "DELETE FROM rtree_grid_100km_surf_geom WHERE id = 2"
+        )
+        connection.commit()
+    mask_body = json.dumps(document).encode("utf-8")
+    mask_path = tmp_path / "mask.json"
+    mask_path.write_bytes(mask_body)
+    mask_identity = validate_reviewed_mask(
+        mask_path,
+        len(mask_body),
+        spec,
+    )
+
+    with (
+        ReferenceBlobStore(tmp_path / "store") as store,
+        ReferenceBlobStore(tmp_path / "workspace") as workspace,
+    ):
+        source_blob = store.put_stream(
+            io.BytesIO(source_path.read_bytes())
+        )
+        mask_blob = store.put_stream(io.BytesIO(mask_body))
+        with pytest.raises(MaskedGeoPackageError) as error:
+            derive_masked_geopackage(
+                store,
+                workspace_store=workspace,
+                source_blob=source_blob,
+                mask_blob=mask_blob,
+                mask_identity=mask_identity,
+                spec=spec,
+                max_output_bytes=1024 * 1024,
+                timeout_seconds=30,
+                runner=lambda *_args: pytest.fail(
+                    "an incomplete source RTree must fail before GDAL"
+                ),
+            )
+
+    assert error.value.code == (
+        "masked_geopackage_spatial_index_invalid"
+    )
+
+
 def test_derivation_preserves_whole_cells_and_excludes_population(
     tmp_path: Path,
 ) -> None:
@@ -516,8 +675,12 @@ def test_derivation_preserves_whole_cells_and_excludes_population(
         if "-update" in argv:
             _add_mask_layer(Path(argv[-2]))
         else:
-            assert "ST_Intersects" in argv[argv.index("-sql") + 1]
-            assert "TOT_P_2021" not in argv[argv.index("-sql") + 1]
+            selection_sql = argv[argv.index("-sql") + 1]
+            assert "ST_Intersects" in selection_sql
+            assert '"rtree_grid_100km_surf_geom"' in selection_sql
+            assert "source.ROWID IN" in selection_sql
+            assert "ST_MinX" in selection_sql
+            assert "TOT_P_2021" not in selection_sql
             assert argv[argv.index("-a_srs") + 1] == "EPSG:3035"
             output_runs += 1
             _write_output(
@@ -581,6 +744,12 @@ def test_derivation_preserves_whole_cells_and_excludes_population(
         )
         assert result.validation["canonical_grid_geometry"] is True
         assert result.validation["identifier_coordinate_binding"] is True
+        assert result.validation["source_spatial_index"] == (
+            "rtree_grid_100km_surf_geom"
+        )
+        assert result.validation["algorithm"].endswith(
+            "deterministic-gpkg/v2"
+        )
         assert repeated.blob.sha256 == result.blob.sha256
         assert store.resolve_blob(result.blob.storage_key).is_file()
         assert list((store.root / "staging").iterdir()) == []

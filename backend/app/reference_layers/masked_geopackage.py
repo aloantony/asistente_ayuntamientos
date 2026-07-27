@@ -35,8 +35,9 @@ TRANSFORM_SCHEMA = "reference-masked-geopackage/v1"
 MASK_IDENTITY_SCHEMA = "ign-administrative-mask-geometry/v1"
 DERIVATION_SCHEMA = "reference-masked-geopackage-derivation/v1"
 DERIVATION_ALGORITHM = (
-    "gdal-sqlite-st-intersects-preserve-whole-source-features-"
-    "deterministic-gpkg/v1"
+    "gdal-sqlite-gpkg-rtree-prefilter-st-intersects-"
+    "preserve-whole-source-features-"
+    "deterministic-gpkg/v2"
 )
 _DETERMINISTIC_LAST_CHANGE = "1970-01-01T00:00:00.000Z"
 _OGR2OGR = "/usr/bin/ogr2ogr"
@@ -490,6 +491,11 @@ def derive_masked_geopackage_files(
                 spec.source_layer,
                 expected_srs_id=3035,
             )
+            source_spatial_index = _require_geopackage_spatial_index(
+                source_copy,
+                layer_name=spec.source_layer,
+                geometry_name=source_geometry,
+            )
             _require_feature_layer_absent(source_copy, _MASK_LAYER)
             environment = strict_geo_command_environment(
                 cpl_tmpdir=private,
@@ -526,6 +532,7 @@ def derive_masked_geopackage_files(
                 spec,
                 source_geometry=source_geometry,
                 mask_geometry=mask_geometry,
+                source_spatial_index=source_spatial_index,
             )
             runner(
                 [
@@ -603,6 +610,7 @@ def derive_masked_geopackage_files(
         "output_sha256": blob.sha256,
         "output_size_bytes": blob.size_bytes,
         "normalized_last_change": _DETERMINISTIC_LAST_CHANGE,
+        "source_spatial_index": source_spatial_index,
         **inspection,
         **geometry_validation,
     }
@@ -997,6 +1005,63 @@ def _require_feature_layer_absent(path: Path, layer_name: str) -> None:
         )
 
 
+def _require_geopackage_spatial_index(
+    path: Path,
+    *,
+    layer_name: str,
+    geometry_name: str,
+) -> str:
+    """Require a complete persisted GeoPackage RTree before a large mask."""
+
+    spatial_index = f"rtree_{layer_name}_{geometry_name}"
+    quoted_layer = _quote_identifier(layer_name)
+    quoted_index = _quote_identifier(spatial_index)
+    uri = path.resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
+    try:
+        with sqlite3.connect(uri, uri=True, timeout=2) as connection:
+            extension = connection.execute(
+                "SELECT 1 FROM gpkg_extensions "
+                "WHERE table_name = ? AND column_name = ? "
+                "AND extension_name = 'gpkg_rtree_index'",
+                (layer_name, geometry_name),
+            ).fetchone()
+            index_table = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = ? "
+                "AND sql LIKE 'CREATE VIRTUAL TABLE%USING rtree%'",
+                (spatial_index,),
+            ).fetchone()
+            source_count = connection.execute(
+                f"SELECT COUNT(*) FROM {quoted_layer}"
+            ).fetchone()
+            index_count = connection.execute(
+                f"SELECT COUNT(*) FROM {quoted_index}"
+            ).fetchone()
+            integrity = connection.execute(
+                "SELECT rtreecheck(?)",
+                (spatial_index,),
+            ).fetchone()
+    except (OSError, sqlite3.Error) as error:
+        raise MaskedGeoPackageError(
+            "source GeoPackage spatial index cannot be verified",
+            code="masked_geopackage_spatial_index_invalid",
+        ) from error
+    if (
+        extension != (1,)
+        or index_table != (1,)
+        or source_count is None
+        or not isinstance(source_count[0], int)
+        or source_count[0] < 1
+        or index_count != source_count
+        or integrity != ("ok",)
+    ):
+        raise MaskedGeoPackageError(
+            "source GeoPackage spatial index is missing or incomplete",
+            code="masked_geopackage_spatial_index_invalid",
+        )
+    return spatial_index
+
+
 def _require_exact_feature_count(
     path: Path,
     layer_name: str,
@@ -1020,6 +1085,7 @@ def _selection_sql(
     *,
     source_geometry: str,
     mask_geometry: str,
+    source_spatial_index: str,
 ) -> str:
     selected = ", ".join(
         f"source.{_quote_identifier(field)}" for field in spec.selected_fields
@@ -1029,7 +1095,14 @@ def _selection_sql(
         f"source.{_quote_identifier(source_geometry)} AS geom "
         f"FROM {_quote_identifier(spec.source_layer)} AS source, "
         f"{_quote_identifier(_MASK_LAYER)} AS mask "
-        f"WHERE ST_Intersects("
+        "WHERE source.ROWID IN ("
+        f"SELECT spatial.id FROM {_quote_identifier(source_spatial_index)} "
+        "AS spatial WHERE "
+        f"spatial.maxx >= ST_MinX(mask.{_quote_identifier(mask_geometry)}) "
+        f"AND spatial.minx <= ST_MaxX(mask.{_quote_identifier(mask_geometry)}) "
+        f"AND spatial.maxy >= ST_MinY(mask.{_quote_identifier(mask_geometry)}) "
+        f"AND spatial.miny <= ST_MaxY(mask.{_quote_identifier(mask_geometry)})"
+        ") AND ST_Intersects("
         f"source.{_quote_identifier(source_geometry)}, "
         f"mask.{_quote_identifier(mask_geometry)}) "
         f"ORDER BY source.{_quote_identifier(spec.identifier_field)}"
