@@ -160,6 +160,7 @@ class ReferenceBlobStore:
 
         self._thread_lock = threading.RLock()
         self._lock_fd: int | None = None
+        self._lock_path = self.root / ".reference-blob-store.lock"
         if self.read_only:
             self._staging_dir = self.root / "staging"
             return
@@ -178,7 +179,7 @@ class ReferenceBlobStore:
             if hasattr(os, "O_NOFOLLOW"):
                 lock_flags |= os.O_NOFOLLOW
             lock_fd = os.open(
-                self.root / ".reference-blob-store.lock",
+                self._lock_path,
                 lock_flags,
                 0o600,
             )
@@ -275,10 +276,21 @@ class ReferenceBlobStore:
         """Measure quota and filesystem headroom without reserving or writing."""
 
         if self.read_only:
-            return self._capacity_snapshot()
+            lock_fd = self._open_existing_lock_file()
+            try:
+                with self._store_lock(
+                    fcntl.LOCK_SH,
+                    lock_fd=lock_fd,
+                ):
+                    return self._capacity_snapshot()
+            finally:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
         if self._lock_fd is None:
             raise ReferenceBlobStoreError("blob store is closed")
-        with self._exclusive_lock():
+        with self._shared_lock():
             return self._capacity_snapshot()
 
     def commit_staged_file(
@@ -575,22 +587,84 @@ class ReferenceBlobStore:
         )
 
     @contextmanager
+    def _shared_lock(self) -> Iterator[None]:
+        with self._store_lock(fcntl.LOCK_SH):
+            yield
+
+    @contextmanager
     def _exclusive_lock(self) -> Iterator[None]:
+        with self._store_lock(fcntl.LOCK_EX):
+            yield
+
+    @contextmanager
+    def _store_lock(
+        self,
+        operation: int,
+        *,
+        lock_fd: int | None = None,
+    ) -> Iterator[None]:
         with self._thread_lock:
-            lock_fd = self._lock_fd
-            if lock_fd is None:
+            effective_fd = self._lock_fd if lock_fd is None else lock_fd
+            if effective_fd is None:
                 raise ReferenceBlobStoreError("blob store is closed")
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                fcntl.flock(effective_fd, operation)
             except OSError as error:
                 raise ReferenceBlobStoreError("blob store lock failed") from error
             try:
+                self._require_current_lock_file(effective_fd)
                 yield
+                self._require_current_lock_file(effective_fd)
             finally:
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    fcntl.flock(effective_fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
+
+    def _open_existing_lock_file(self) -> int:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        lock_fd = -1
+        try:
+            lock_fd = os.open(self._lock_path, flags)
+            self._require_current_lock_file(lock_fd)
+            return lock_fd
+        except (OSError, ReferenceBlobStoreError) as error:
+            if lock_fd >= 0:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+            if isinstance(error, ReferenceBlobStoreError):
+                raise
+            raise ReferenceBlobStoreError(
+                "existing blob store lock is unavailable"
+            ) from error
+
+    def _require_current_lock_file(self, lock_fd: int) -> None:
+        try:
+            descriptor = os.fstat(lock_fd)
+            named = self._lock_path.lstat()
+        except OSError as error:
+            raise ReferenceBlobStoreError(
+                "existing blob store lock is unavailable"
+            ) from error
+        if (
+            not stat.S_ISREG(descriptor.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or self._lock_path.is_symlink()
+            or descriptor.st_dev != named.st_dev
+            or descriptor.st_ino != named.st_ino
+            or descriptor.st_nlink != 1
+            or named.st_nlink != 1
+            or descriptor.st_mode & 0o077
+        ):
+            raise ReferenceBlobStoreError(
+                "existing blob store lock is unsafe"
+            )
 
     def _ensure_write_capacity(self, additional_bytes: int) -> None:
         if self.quota_bytes is not None:

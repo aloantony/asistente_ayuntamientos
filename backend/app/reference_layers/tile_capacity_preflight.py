@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 from io import BytesIO
+import json
 import re
 from typing import Any, Protocol
 
@@ -94,6 +95,19 @@ class TileDocumentVariant:
     style_remote_name: str | None
     is_default: bool
     document: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TileCapacityPreflightFence:
+    """Exact current state that every sample and capacity result describes."""
+
+    catalog_snapshot_id: int
+    catalog_definition_sha256: str
+    strategy_count: int
+    style_count: int
+    authorization_review_count: int
+    selection_sha256: str
+    state_sha256: str
 
 
 class DownloaderFactory(Protocol):
@@ -279,9 +293,21 @@ def aggregate_tile_capacity_preflight(
         snapshot=snapshot,
         layer_ids=[layer.id for _strategy, _source, layer in selected],
     )
-
-    # Exactly one point-in-time snapshot is shared by every projection.
-    capacity = store.inspect_capacity()
+    fence = _capture_preflight_fence(
+        db,
+        snapshot=snapshot,
+        layer_id=layer_id,
+        source_id=source_id,
+        source_key=source_key,
+    )
+    if fence.selection_sha256 != _model_selection_sha256(
+        snapshot,
+        selected,
+        styles_by_layer,
+    ):
+        raise TileCapacityPreflightInputError(
+            "current tile strategy set changed before sampling"
+        )
     rows: list[dict[str, Any]] = []
     errors = Counter[str]()
     authorized_error_count = 0
@@ -356,14 +382,38 @@ def aggregate_tile_capacity_preflight(
             authorized_error_count += 1
         rows.append(row)
 
+    # Reject catalog/source/authorization races before measuring capacity.
+    _require_preflight_fence_current(
+        db,
+        expected=fence,
+        snapshot=snapshot,
+        layer_id=layer_id,
+        source_id=source_id,
+        source_key=source_key,
+    )
+    # This is the sole quota/free-space measurement.  It runs after all
+    # sampling under the shared CAS lock, so the two values describe one
+    # writer-free instant rather than the beginning of a potentially long run.
+    capacity = store.inspect_capacity()
+    # Cover a catalog change while the filesystem walk held the CAS lock.
+    _require_preflight_fence_current(
+        db,
+        expected=fence,
+        snapshot=snapshot,
+        layer_id=layer_id,
+        source_id=source_id,
+        source_key=source_key,
+    )
     summary = _summary(
         rows,
         capacity=capacity,
         errors=errors,
         authorized_error_count=authorized_error_count,
     )
+    ready = summary["ready_for_bulk_seed"] is True
     return {
-        "ok": True,
+        "ok": ready,
+        "report_generated": True,
         "schema_version": SCHEMA_VERSION,
         "mode": "dry-run",
         "applied": False,
@@ -381,22 +431,27 @@ def aggregate_tile_capacity_preflight(
             "max_archive_bytes": max_archive_bytes,
             "max_tile_count_per_archive": max_tile_count,
         },
+        "state_fence": {
+            "strategy_count": fence.strategy_count,
+            "style_count": fence.style_count,
+            "authorization_review_count": (
+                fence.authorization_review_count
+            ),
+            "selection_sha256": fence.selection_sha256,
+            "state_sha256": fence.state_sha256,
+        },
         "summary": summary,
         "sources": rows,
     }
 
 
 def tile_capacity_preflight_exit_code(report: dict[str, Any]) -> int:
-    """Return non-zero only for authorized failures or aggregate deficit."""
+    """Return zero only for a complete, ready, internally coherent gate."""
 
     summary = report.get("summary")
-    if not isinstance(summary, dict):
+    if not isinstance(summary, dict) or report.get("ok") is not True:
         return 1
-    if summary.get("authorized_error_count", 0) > 0:
-        return 1
-    if summary.get("capacity_exceeded") is True:
-        return 1
-    return 0
+    return 0 if summary.get("ready_for_bulk_seed") is True else 1
 
 
 def _current_snapshot(
@@ -506,6 +561,381 @@ def _styles_by_layer(
     ):
         result[style.layer_id].append(style)
     return {key: tuple(value) for key, value in result.items()}
+
+
+def _capture_preflight_fence(
+    db: Session,
+    *,
+    snapshot: ReferenceCatalogSnapshot,
+    layer_id: int | None,
+    source_id: int | None,
+    source_key: str | None,
+) -> TileCapacityPreflightFence:
+    snapshot_rows = db.execute(
+        select(
+            ReferenceCatalogSnapshot.id.label("catalog_snapshot_id"),
+            ReferenceCatalogSnapshot.definition_sha256.label(
+                "catalog_definition_sha256"
+            ),
+            ReferenceCatalogSnapshot.normalized_definition_json.label(
+                "normalized_definition_json"
+            ),
+        ).where(
+            ReferenceCatalogSnapshot.provider_key == snapshot.provider_key,
+            ReferenceCatalogSnapshot.is_current.is_(True),
+            ReferenceCatalogSnapshot.status == "applied",
+        )
+    ).mappings().all()
+    if len(snapshot_rows) != 1:
+        raise TileCapacityPreflightInputError(
+            "current applied catalog changed during preflight"
+        )
+    snapshot_row = snapshot_rows[0]
+    try:
+        catalog_definition_sha256 = (
+            canonical_normalized_definition_sha256(
+                snapshot_row["normalized_definition_json"]
+            )
+        )
+    except (TypeError, ValueError):
+        catalog_definition_sha256 = None
+    if (
+        snapshot_row["catalog_snapshot_id"] != snapshot.id
+        or snapshot_row["catalog_definition_sha256"]
+        != snapshot.definition_sha256
+        or catalog_definition_sha256 != snapshot.definition_sha256
+    ):
+        raise TileCapacityPreflightInputError(
+            "current applied catalog changed during preflight"
+        )
+
+    query = (
+        select(
+            ReferenceLayerMirrorStrategy.id.label("strategy_id"),
+            ReferenceLayerMirrorStrategy.provider_key.label("provider_key"),
+            ReferenceLayerMirrorStrategy.layer_id.label("layer_id"),
+            ReferenceLayerMirrorStrategy.catalog_snapshot_id.label(
+                "catalog_snapshot_id"
+            ),
+            ReferenceLayerMirrorStrategy.catalog_definition_sha256.label(
+                "strategy_catalog_definition_sha256"
+            ),
+            ReferenceLayerMirrorStrategy.strategy.label("strategy"),
+            ReferenceLayerMirrorStrategy.source_id.label(
+                "strategy_source_id"
+            ),
+            ReferenceLayerMirrorStrategy.strategy_reason_code.label(
+                "strategy_reason_code"
+            ),
+            ReferenceLayerMirrorStrategy.strategy_reason.label(
+                "strategy_reason"
+            ),
+            ReferenceLayerMirrorStrategy.evidence_json.label(
+                "strategy_evidence_json"
+            ),
+            ReferenceLayerMirrorStrategy.evidence_sha256.label(
+                "strategy_evidence_sha256"
+            ),
+            ReferenceLayerMirrorStrategy.generation.label(
+                "strategy_generation"
+            ),
+            ReferenceLayerSource.id.label("source_id"),
+            ReferenceLayerSource.provider_key.label("source_provider_key"),
+            ReferenceLayerSource.layer_id.label("source_layer_id"),
+            ReferenceLayerSource.source_key.label("source_key"),
+            ReferenceLayerSource.protocol.label("source_protocol"),
+            ReferenceLayerSource.target_kind.label("source_target_kind"),
+            ReferenceLayerSource.endpoint_url.label("source_endpoint_url"),
+            ReferenceLayerSource.remote_name.label("source_remote_name"),
+            ReferenceLayerSource.source_format.label("source_format"),
+            ReferenceLayerSource.sync_strategy.label(
+                "source_sync_strategy"
+            ),
+            ReferenceLayerSource.config_json.label("source_config_json"),
+            ReferenceLayerSource.definition_sha256.label(
+                "source_definition_sha256"
+            ),
+            ReferenceLayerSource.enabled.label("source_enabled"),
+            ReferenceLayerSource.is_primary.label("source_is_primary"),
+            ReferenceLayerSource.priority.label("source_priority"),
+            ReferenceLayer.id.label("joined_layer_id"),
+            ReferenceLayer.provider_key.label("layer_provider_key"),
+            ReferenceLayer.last_seen_snapshot_id.label(
+                "layer_last_seen_snapshot_id"
+            ),
+            ReferenceLayer.source_key.label("layer_source_key"),
+            ReferenceLayer.node_type.label("layer_node_type"),
+            ReferenceLayer.status.label("layer_status"),
+        )
+        .join(
+            ReferenceLayerSource,
+            ReferenceLayerSource.id
+            == ReferenceLayerMirrorStrategy.source_id,
+        )
+        .join(
+            ReferenceLayer,
+            (ReferenceLayer.id == ReferenceLayerMirrorStrategy.layer_id)
+            & (
+                ReferenceLayer.provider_key
+                == ReferenceLayerMirrorStrategy.provider_key
+            ),
+        )
+        .where(
+            ReferenceLayerMirrorStrategy.provider_key
+            == snapshot.provider_key,
+            ReferenceLayerMirrorStrategy.catalog_snapshot_id == snapshot.id,
+            ReferenceLayerMirrorStrategy.strategy == "tiles",
+        )
+        .order_by(
+            ReferenceLayerMirrorStrategy.layer_id,
+            ReferenceLayerSource.id,
+        )
+    )
+    if layer_id is not None:
+        query = query.where(
+            ReferenceLayerMirrorStrategy.layer_id == layer_id
+        )
+    if source_id is not None:
+        query = query.where(ReferenceLayerSource.id == source_id)
+    if source_key is not None:
+        query = query.where(ReferenceLayerSource.source_key == source_key)
+    strategy_records = [dict(row) for row in db.execute(query).mappings()]
+    if not strategy_records:
+        raise TileCapacityPreflightInputError(
+            "current tile strategy set changed during preflight"
+        )
+    layer_ids = sorted(
+        {int(record["joined_layer_id"]) for record in strategy_records}
+    )
+    source_ids = sorted(
+        {int(record["source_id"]) for record in strategy_records}
+    )
+
+    style_records = [
+        dict(row)
+        for row in db.execute(
+            select(
+                ReferenceLayerStyle.id.label("style_id"),
+                ReferenceLayerStyle.provider_key.label(
+                    "style_provider_key"
+                ),
+                ReferenceLayerStyle.layer_id.label("style_layer_id"),
+                ReferenceLayerStyle.last_seen_snapshot_id.label(
+                    "style_last_seen_snapshot_id"
+                ),
+                ReferenceLayerStyle.source_key.label("style_source_key"),
+                ReferenceLayerStyle.remote_name.label("style_remote_name"),
+                ReferenceLayerStyle.sort_order.label("style_sort_order"),
+                ReferenceLayerStyle.is_default.label("style_is_default"),
+                ReferenceLayerStyle.status.label("style_status"),
+            )
+            .where(
+                ReferenceLayerStyle.provider_key == snapshot.provider_key,
+                ReferenceLayerStyle.last_seen_snapshot_id == snapshot.id,
+                ReferenceLayerStyle.layer_id.in_(layer_ids),
+                ReferenceLayerStyle.status.in_(("active", "degraded")),
+            )
+            .order_by(
+                ReferenceLayerStyle.layer_id,
+                ReferenceLayerStyle.sort_order,
+                ReferenceLayerStyle.id,
+            )
+        ).mappings()
+    ]
+    authorization_records = [
+        dict(row)
+        for row in db.execute(
+            select(
+                ReferenceMirrorAuthorizationReview.id.label("review_id"),
+                ReferenceMirrorAuthorizationReview.source_id.label(
+                    "review_source_id"
+                ),
+                ReferenceMirrorAuthorizationReview.source_definition_sha256.label(
+                    "review_source_definition_sha256"
+                ),
+                ReferenceMirrorAuthorizationReview.review_sha256.label(
+                    "review_sha256"
+                ),
+                ReferenceMirrorAuthorizationReview.document_sha256.label(
+                    "review_document_sha256"
+                ),
+                ReferenceMirrorAuthorizationReview.decision.label(
+                    "review_decision"
+                ),
+                ReferenceMirrorAuthorizationReview.canonical_origin.label(
+                    "review_canonical_origin"
+                ),
+                ReferenceMirrorAuthorizationReview.allowed_origins_json.label(
+                    "review_allowed_origins"
+                ),
+                ReferenceMirrorAuthorizationReview.allow_metadata_probe.label(
+                    "review_allow_metadata_probe"
+                ),
+                ReferenceMirrorAuthorizationReview.allow_dataset_download.label(
+                    "review_allow_dataset_download"
+                ),
+                ReferenceMirrorAuthorizationReview.allow_local_storage.label(
+                    "review_allow_local_storage"
+                ),
+                ReferenceMirrorAuthorizationReview.allow_local_service.label(
+                    "review_allow_local_service"
+                ),
+                ReferenceMirrorAuthorizationReview.allow_bulk_tile_seed.label(
+                    "review_allow_bulk_tile_seed"
+                ),
+                ReferenceMirrorAuthorizationReview.supersedes_review_id.label(
+                    "review_supersedes_id"
+                ),
+                ReferenceMirrorAuthorizationReview.supersedes_review_sha256.label(
+                    "review_supersedes_sha256"
+                ),
+            )
+            .where(
+                ReferenceMirrorAuthorizationReview.source_id.in_(source_ids)
+            )
+            .order_by(
+                ReferenceMirrorAuthorizationReview.source_id,
+                ReferenceMirrorAuthorizationReview.reviewed_at,
+                ReferenceMirrorAuthorizationReview.id,
+            )
+        ).mappings()
+    ]
+    selection = {
+        "catalog_snapshot_id": snapshot.id,
+        "catalog_definition_sha256": snapshot.definition_sha256,
+        "strategies": strategy_records,
+        "styles": style_records,
+    }
+    selection_sha256 = _canonical_state_sha256(selection)
+    state_sha256 = _canonical_state_sha256(
+        {
+            **selection,
+            "authorization_reviews": authorization_records,
+        }
+    )
+    return TileCapacityPreflightFence(
+        catalog_snapshot_id=snapshot.id,
+        catalog_definition_sha256=snapshot.definition_sha256,
+        strategy_count=len(strategy_records),
+        style_count=len(style_records),
+        authorization_review_count=len(authorization_records),
+        selection_sha256=selection_sha256,
+        state_sha256=state_sha256,
+    )
+
+
+def _model_selection_sha256(
+    snapshot: ReferenceCatalogSnapshot,
+    selected: Sequence[
+        tuple[
+            ReferenceLayerMirrorStrategy,
+            ReferenceLayerSource,
+            ReferenceLayer,
+        ]
+    ],
+    styles_by_layer: dict[int, tuple[ReferenceLayerStyle, ...]],
+) -> str:
+    strategies = [
+        {
+            "strategy_id": strategy.id,
+            "provider_key": strategy.provider_key,
+            "layer_id": strategy.layer_id,
+            "catalog_snapshot_id": strategy.catalog_snapshot_id,
+            "strategy_catalog_definition_sha256": (
+                strategy.catalog_definition_sha256
+            ),
+            "strategy": strategy.strategy,
+            "strategy_source_id": strategy.source_id,
+            "strategy_reason_code": strategy.strategy_reason_code,
+            "strategy_reason": strategy.strategy_reason,
+            "strategy_evidence_json": strategy.evidence_json,
+            "strategy_evidence_sha256": strategy.evidence_sha256,
+            "strategy_generation": strategy.generation,
+            "source_id": source.id,
+            "source_provider_key": source.provider_key,
+            "source_layer_id": source.layer_id,
+            "source_key": source.source_key,
+            "source_protocol": source.protocol,
+            "source_target_kind": source.target_kind,
+            "source_endpoint_url": source.endpoint_url,
+            "source_remote_name": source.remote_name,
+            "source_format": source.source_format,
+            "source_sync_strategy": source.sync_strategy,
+            "source_config_json": source.config_json,
+            "source_definition_sha256": source.definition_sha256,
+            "source_enabled": source.enabled,
+            "source_is_primary": source.is_primary,
+            "source_priority": source.priority,
+            "joined_layer_id": layer.id,
+            "layer_provider_key": layer.provider_key,
+            "layer_last_seen_snapshot_id": layer.last_seen_snapshot_id,
+            "layer_source_key": layer.source_key,
+            "layer_node_type": layer.node_type,
+            "layer_status": layer.status,
+        }
+        for strategy, source, layer in selected
+    ]
+    styles = [
+        {
+            "style_id": style.id,
+            "style_provider_key": style.provider_key,
+            "style_layer_id": style.layer_id,
+            "style_last_seen_snapshot_id": style.last_seen_snapshot_id,
+            "style_source_key": style.source_key,
+            "style_remote_name": style.remote_name,
+            "style_sort_order": style.sort_order,
+            "style_is_default": style.is_default,
+            "style_status": style.status,
+        }
+        for layer_key in sorted(styles_by_layer)
+        for style in styles_by_layer[layer_key]
+    ]
+    return _canonical_state_sha256(
+        {
+            "catalog_snapshot_id": snapshot.id,
+            "catalog_definition_sha256": snapshot.definition_sha256,
+            "strategies": strategies,
+            "styles": styles,
+        }
+    )
+
+
+def _require_preflight_fence_current(
+    db: Session,
+    *,
+    expected: TileCapacityPreflightFence,
+    snapshot: ReferenceCatalogSnapshot,
+    layer_id: int | None,
+    source_id: int | None,
+    source_key: str | None,
+) -> None:
+    current = _capture_preflight_fence(
+        db,
+        snapshot=snapshot,
+        layer_id=layer_id,
+        source_id=source_id,
+        source_key=source_key,
+    )
+    if current != expected:
+        raise TileCapacityPreflightInputError(
+            "catalog, source, style or authorization changed during preflight"
+        )
+
+
+def _canonical_state_sha256(value: object) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError) as error:
+        raise TileCapacityPreflightInputError(
+            "current tile strategy evidence is not canonical JSON"
+        ) from error
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _tile_document_variants(
