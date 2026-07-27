@@ -42,6 +42,7 @@ from app.reference_layers.mirror_authorization import (
     require_current_source_authorization,
 )
 from app.reference_layers.mirror_lifecycle import (
+    DeliveryPhysicalTransitionVerifier,
     DeliveryTransitionPreview,
     ManualSyncEnqueueResult,
     MirrorLifecycleError,
@@ -54,6 +55,9 @@ from app.reference_layers.mirror_lifecycle import (
     reactivate_delivery,
     rollback_delivery_version,
     stored_promotion_hash_is_valid,
+)
+from app.reference_layers.transition_servability import (
+    verify_delivery_transition_servability,
 )
 from app.reference_layers.mirror_status import catalog_mirror_statuses
 from app.reference_layers.models import (
@@ -826,6 +830,7 @@ def execute_transition(
     actor_user_id: int,
     reason: str,
     apply: bool,
+    physical_verifier: DeliveryPhysicalTransitionVerifier | None = None,
 ) -> dict[str, Any]:
     """Validate actor identity and delegate the transition to lifecycle."""
 
@@ -843,6 +848,18 @@ def execute_transition(
                     store,
                     transition_db,
                     version,
+                )
+            )
+        ),
+        "physical_verifier": (
+            physical_verifier
+            or (
+                lambda transition_db, version: (
+                    verify_delivery_transition_servability(
+                        store,
+                        transition_db,
+                        version,
+                    )
                 )
             )
         ),
@@ -1192,6 +1209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         min_free_bytes=(
                             settings.reference_storage_min_free_bytes
                         ),
+                        read_only=True,
                     ) as store:
                         result = execute_transition(
                             db,

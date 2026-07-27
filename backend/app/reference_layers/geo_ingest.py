@@ -2396,6 +2396,130 @@ def _recover_vector_ingest_result(
     )
 
 
+def verify_vector_delivery_table(
+    db: Session,
+    *,
+    storage_key: str,
+    content_sha256: str,
+    validation_json: Mapping[str, Any],
+    expected_feature_count: int | None,
+) -> VectorIngestResult:
+    """Revalidate an immutable PostGIS delivery in the caller's transaction.
+
+    The complete statistics query retains PostgreSQL's access-share relation
+    lock until the surrounding rollback/reactivation transaction ends.  A
+    concurrent DROP or ALTER therefore cannot race the database transition.
+    """
+
+    if (
+        not isinstance(storage_key, str)
+        or not storage_key.startswith(f"{_VECTOR_DATA_SCHEMA}.")
+    ):
+        raise GeoIngestError("vector delivery storage key is invalid")
+    table_name = storage_key.removeprefix(f"{_VECTOR_DATA_SCHEMA}.")
+    if (
+        _VERSIONED_VECTOR_TABLE_RE.fullmatch(table_name) is None
+        or _SHA256_RE.fullmatch(content_sha256) is None
+        or not isinstance(validation_json, Mapping)
+        or (
+            expected_feature_count is not None
+            and (
+                isinstance(expected_feature_count, bool)
+                or not isinstance(expected_feature_count, int)
+                or expected_feature_count < 0
+            )
+        )
+    ):
+        raise GeoIngestError("vector delivery identity is invalid")
+    relation = db.execute(
+        text(
+            """
+            SELECT relation.relkind, relation.relpersistence
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = :schema_name
+              AND relation.relname = :table_name
+            """
+        ),
+        {
+            "schema_name": _VECTOR_DATA_SCHEMA,
+            "table_name": table_name,
+        },
+    ).one_or_none()
+    if relation is None or tuple(relation) != ("r", "p"):
+        raise GeoIngestError(
+            "immutable vector delivery table is absent or not a table"
+        )
+    if not _table_has_immutable_guards(db, table_name):
+        raise GeoIngestError(
+            "immutable vector delivery table has lost its mutation guards"
+        )
+    attestation = _load_vector_table_attestation(db, table_name)
+    stored_validation = attestation["validation"]
+    expected_base_keys = {
+        "schema_version",
+        "passed",
+        "kind",
+        "checks",
+    }
+    if (
+        set(stored_validation) != expected_base_keys
+        or any(
+            validation_json.get(key) != stored_validation[key]
+            for key in expected_base_keys
+        )
+        or attestation.get("table") != storage_key
+        or attestation.get("content_sha256") != content_sha256
+    ):
+        raise GeoIngestError(
+            "immutable vector delivery evidence differs from its version"
+        )
+    checks = stored_validation.get("checks")
+    manifest = checks.get("input_manifest") if isinstance(checks, dict) else None
+    manifest_sha256 = (
+        checks.get("input_manifest_sha256")
+        if isinstance(checks, dict)
+        else None
+    )
+    minimum_features = (
+        checks.get("minimum_features")
+        if isinstance(checks, dict)
+        else None
+    )
+    if (
+        not isinstance(manifest, list)
+        or not all(isinstance(item, Mapping) for item in manifest)
+        or not isinstance(manifest_sha256, str)
+        or _SHA256_RE.fullmatch(manifest_sha256) is None
+        or isinstance(minimum_features, bool)
+        or not isinstance(minimum_features, int)
+        or minimum_features < 0
+    ):
+        raise GeoIngestError(
+            "immutable vector delivery validation is incomplete"
+        )
+    result = _recover_vector_ingest_result(
+        db,
+        table_name=table_name,
+        storage_key=storage_key,
+        manifest=manifest,
+        manifest_sha256=manifest_sha256,
+        minimum_features=minimum_features,
+    )
+    if (
+        result.content_sha256 != content_sha256
+        or (
+            expected_feature_count is not None
+            and result.feature_count != expected_feature_count
+        )
+    ):
+        raise GeoIngestError(
+            "immutable vector delivery content no longer matches its version"
+        )
+    return result
+
+
 def _raster_driver(input_driver: str | None, source_path: Path) -> tuple[str, str]:
     if input_driver is not None:
         if not isinstance(input_driver, str):

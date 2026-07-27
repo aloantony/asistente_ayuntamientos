@@ -24,6 +24,7 @@ from app.reference_layers.catalog import (
     apply_catalog_definition,
 )
 from app.reference_layers.mirror_lifecycle import (
+    DeliveryPhysicalTransitionVerification,
     MirrorLeaseLostError,
     MirrorLifecycleError,
     MirrorPlanChangedError,
@@ -101,6 +102,52 @@ def _transition_verifier(store):
             version,
         )
     )
+
+
+def _physical_transition_verifier(db, version):
+    assets = tuple(
+        db.scalars(
+            select(ReferenceDeliveryAsset)
+            .where(ReferenceDeliveryAsset.version_id == version.id)
+            .order_by(ReferenceDeliveryAsset.id)
+        )
+    )
+    [primary] = [item for item in assets if item.is_primary]
+    filesystem_ids = tuple(
+        item.id
+        for item in assets
+        if item.storage_backend == "filesystem"
+    )
+    if version.delivery_kind == "tiles":
+        renderer = "tile_archive"
+        render_transport = "local_tile_archive"
+        resource_name = None
+        style_names = ()
+        tile_ids = tuple(
+            item.id for item in assets if item.asset_kind == "tile_archive"
+        )
+    else:
+        renderer = "geoserver"
+        render_transport = "direct_geoserver_wms"
+        resource_name = primary.metadata_json["layer_name"]
+        styles = set(primary.metadata_json["styles"].values())
+        style_names = tuple(sorted(styles)) if styles else (None,)
+        tile_ids = ()
+    return DeliveryPhysicalTransitionVerification(
+        version_id=version.id,
+        primary_asset_id=primary.id,
+        primary_sha256=primary.sha256,
+        renderer=renderer,
+        render_transport=render_transport,
+        resource_name=resource_name,
+        verified_filesystem_asset_ids=filesystem_ids,
+        rendered_style_names=style_names,
+        rendered_tile_asset_ids=tile_ids,
+    )
+
+
+def _missing_physical_transition_verifier(_db, _version):
+    raise FileNotFoundError("published physical delivery is absent")
 
 
 @pytest.mark.parametrize(
@@ -519,9 +566,24 @@ def _create_version(
                 None if storage_backend == "postgres" else 1024
             ),
             metadata_json=(
-                {"catalog_style_source_key": style.source_key}
+                {
+                    "renderer": "tile_archive",
+                    "catalog_style_source_key": style.source_key,
+                }
                 if source.target_kind == "tiles"
-                else {}
+                else {
+                    "renderer": "geoserver",
+                    "layer_name": (
+                        f"siur_layer_{source.layer_id}_v_"
+                        f"{content_sha256[:12]}"
+                    ),
+                    "default_style_name": "siur_style_default_v1",
+                    "styles": {
+                        str(style.id): "siur_style_default_v1",
+                    },
+                    "identify_available": source.target_kind == "vector",
+                    "legend_available": True,
+                }
             ),
         )
     ]
@@ -1920,6 +1982,7 @@ def test_rollback_rehashes_frozen_metadata_before_transition(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=4),
         )
 
@@ -1969,6 +2032,7 @@ def test_reactivation_rehashes_frozen_metadata_before_transition(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=5),
         )
 
@@ -1979,6 +2043,86 @@ def test_reactivation_rehashes_frozen_metadata_before_transition(
     assert state.status == "disabled"
     assert state.generation == deactivated.generation
     assert state.active_version_id is None
+
+
+@pytest.mark.parametrize("action", ("rollback", "reactivate"))
+def test_recovery_transition_is_atomic_when_physical_delivery_is_absent(
+    db,
+    metadata_store,
+    action,
+) -> None:
+    layer, _, _, version_v1, version_v2 = (
+        _promote_cross_snapshot_versions(db, metadata_store)
+    )
+    expected_generation = 2
+    expected_status = "active"
+    expected_active_version_id = version_v2.id
+    if action == "reactivate":
+        deactivated = deactivate_delivery(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            expected_generation=2,
+            reason="prepare physical recovery regression",
+            now=NOW + timedelta(seconds=4),
+        )
+        expected_generation = deactivated.generation
+        expected_status = "disabled"
+        expected_active_version_id = None
+    promotion_count = db.scalar(
+        select(func.count(ReferenceDeliveryPromotion.id)).where(
+            ReferenceDeliveryPromotion.provider_key
+            == layer.provider_key,
+            ReferenceDeliveryPromotion.layer_id == layer.id,
+        )
+    )
+    transition = (
+        rollback_delivery_version
+        if action == "rollback"
+        else reactivate_delivery
+    )
+
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="failed physical transition verification",
+    ):
+        transition(
+            db,
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            to_version_id=version_v1.id,
+            expected_generation=expected_generation,
+            reason="physical recovery must fail closed",
+            metadata_verifier=_transition_verifier(metadata_store),
+            physical_verifier=_missing_physical_transition_verifier,
+            now=NOW + timedelta(seconds=5),
+        )
+
+    state = db.get(
+        ReferenceLayerDeliveryState,
+        (layer.provider_key, layer.id),
+    )
+    assert state.status == expected_status
+    assert state.generation == expected_generation
+    assert state.active_version_id == expected_active_version_id
+    if action == "reactivate":
+        assert all(
+            not source.enabled and not source.is_primary
+            for source in db.scalars(
+                select(ReferenceLayerSource).where(
+                    ReferenceLayerSource.provider_key
+                    == layer.provider_key,
+                    ReferenceLayerSource.layer_id == layer.id,
+                )
+            )
+        )
+    assert db.scalar(
+        select(func.count(ReferenceDeliveryPromotion.id)).where(
+            ReferenceDeliveryPromotion.provider_key
+            == layer.provider_key,
+            ReferenceDeliveryPromotion.layer_id == layer.id,
+        )
+    ) == promotion_count
 
 
 def test_legacy_version_without_metadata_cannot_rollback_or_reactivate(
@@ -2068,6 +2212,7 @@ def test_legacy_version_without_metadata_cannot_rollback_or_reactivate(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=4),
         )
 
@@ -2093,6 +2238,7 @@ def test_legacy_version_without_metadata_cannot_rollback_or_reactivate(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=6),
         )
 
@@ -2198,6 +2344,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=4),
         )
     state = db.get(
@@ -2227,6 +2374,7 @@ def test_promotion_rollback_and_deactivation_are_generation_fenced_hash_chain(
         expected_generation=2,
         reason="rollback after smoke-test regression",
         metadata_verifier=_transition_verifier(metadata_store),
+        physical_verifier=_physical_transition_verifier,
         now=NOW + timedelta(seconds=6),
     )
     assert rollback.generation == 3
@@ -2333,6 +2481,7 @@ def test_rollback_is_blocked_after_current_mirror_authorization_revocation(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=4),
         )
 
@@ -2442,6 +2591,7 @@ def test_deactivation_stops_scheduling_and_requires_explicit_reactivation(
         expected_generation=deactivated.generation,
         reason="operator explicitly restored the last known good version",
         metadata_verifier=_transition_verifier(metadata_store),
+        physical_verifier=_physical_transition_verifier,
         now=NOW + timedelta(seconds=5),
     )
     assert reactivated.action == "reactivate"
@@ -2530,6 +2680,7 @@ def test_rollback_revalidates_the_original_run_and_current_source(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=5),
         )
 
@@ -2556,6 +2707,7 @@ def test_rollback_can_select_a_valid_version_from_a_previous_catalog_snapshot(
         expected_generation=2,
         reason="catalog v2 renderer regression",
         metadata_verifier=_transition_verifier(metadata_store),
+        physical_verifier=_physical_transition_verifier,
         now=NOW + timedelta(seconds=4),
     )
 
@@ -2614,6 +2766,7 @@ def test_cross_snapshot_rollback_fails_closed_for_corrupt_frozen_evidence(
             metadata_verifier=_transition_verifier(
                 metadata_store
             ),
+            physical_verifier=_physical_transition_verifier,
             now=NOW + timedelta(seconds=4),
         )
 

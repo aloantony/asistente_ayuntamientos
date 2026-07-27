@@ -23,6 +23,7 @@ from app.reference_layers.geo_ingest import (
     ingest_vector_artifacts,
     inspect_tile_archive,
     run_geo_command,
+    verify_vector_delivery_table,
     versioned_vector_table_name,
 )
 from app.reference_layers.geoserver_admin import VERSIONED_NAME
@@ -363,6 +364,15 @@ def test_vector_ingest_validates_table_and_installs_guards(db, tmp_path) -> None
     assert result.crs == "EPSG:3857"
     assert result.storage_key == f"reference_data.{table_name}"
     assert result.validation_json["passed"] is True
+    verified = verify_vector_delivery_table(
+        db,
+        storage_key=result.storage_key,
+        content_sha256=result.content_sha256,
+        validation_json=result.validation_json,
+        expected_feature_count=result.feature_count,
+    )
+    assert verified.content_sha256 == result.content_sha256
+    assert verified.feature_count == result.feature_count
     with pytest.raises(DBAPIError, match="immutable reference data table"):
         with db.begin_nested():
             db.execute(
@@ -371,6 +381,34 @@ def test_vector_ingest_validates_table_and_installs_guards(db, tmp_path) -> None
                     "(source_fid, geom) VALUES (2, NULL)"
                 )
             )
+
+
+def test_vector_delivery_verification_fails_closed_when_relation_is_absent(
+    db,
+) -> None:
+    table_name = versioned_vector_table_name(
+        provider_key="siur",
+        layer_id=812,
+        run_id=913,
+        input_sha256="f" * 64,
+    )
+
+    with pytest.raises(
+        GeoIngestError,
+        match="absent or not a table",
+    ):
+        verify_vector_delivery_table(
+            db,
+            storage_key=f"reference_data.{table_name}",
+            content_sha256="e" * 64,
+            validation_json={
+                "schema_version": "reference-delivery-validation/v1",
+                "passed": True,
+                "kind": "vector",
+                "checks": {},
+            },
+            expected_feature_count=1,
+        )
 
 
 def test_vector_ingest_accepts_revalidated_geopackage(
