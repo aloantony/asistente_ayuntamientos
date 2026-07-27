@@ -38,6 +38,14 @@ from app.reference_layers.reviewed_style_evidence import (
     ReviewedStyleEvidenceError,
     reviewed_miteco_mvt_style_reference,
 )
+from app.reference_layers.reviewed_ortho_evidence import (
+    ReviewedIgnOrthoSubstitution,
+    ReviewedOrthoEvidenceError,
+    SOURCE_PRIORITY as REVIEWED_ORTHO_SOURCE_PRIORITY,
+    reviewed_ign_ortho_equivalence,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
+)
 
 SourceProtocol = Literal[
     "wfs",
@@ -76,6 +84,7 @@ _REVIEWED_NATIVE_WMS_SCHEMA = "siur-reviewed-native-wms-equivalence/v1"
 _REVIEWED_NATIVE_WMS_PRIORITY = 40
 _REVIEWED_DATASET_SOURCE_SCHEMA = "siur-reviewed-dataset-source/v1"
 _REVIEWED_DATASET_SOURCE_PRIORITY = 5
+_REVIEWED_ORTHO_SUBSTITUTION_PRIORITY = REVIEWED_ORTHO_SOURCE_PRIORITY
 _BULK_WMS_GUARD_SCHEMA = "siur-bulk-wms-guard/v1"
 _REVIEWED_LOCAL_STYLE_SCHEMA = "siur-reviewed-local-style-recipe/v1"
 
@@ -837,6 +846,31 @@ def acquisition_candidates(
     protocol = service.upstream_protocol.lower()
     candidates: list[SourceCandidate] = []
 
+    reviewed_ortho = _reviewed_ortho_substitution(endpoint, layer)
+    if reviewed_ortho is not None:
+        if not reviewed_ortho.promotion_eligible:
+            # The committed profile still records the rejected IGN layer so
+            # operators and the UI can explain the gap.  It deliberately does
+            # not become a source candidate: bootstrap therefore removes any
+            # prior automatic ITACyL source instead of selecting a mapping
+            # whose reviewed source has no declared Castilla y León coverage.
+            return ()
+        return (
+            _candidate(
+                protocol="wms_tiles",
+                target_kind="tiles",
+                endpoint_url=reviewed_ortho.selected_endpoint_url,
+                remote_name=reviewed_ortho.selected_layer,
+                sync_strategy="tile_seed",
+                priority=_REVIEWED_ORTHO_SUBSTITUTION_PRIORITY,
+                config=_reviewed_ortho_substitution_config(
+                    service,
+                    layer,
+                    reviewed_ortho,
+                ),
+            ),
+        )
+
     if protocol == "wms" and is_idecyl_geoserver_catalog_endpoint(endpoint):
         try:
             reviewed_idecyl = reviewed_idecyl_exact_source(
@@ -918,7 +952,6 @@ def acquisition_candidates(
                     config=config,
                 ),
             )
-
     reviewed_dataset = _reviewed_dataset_source(endpoint, layer)
     if reviewed_dataset is not None:
         return (
@@ -1200,6 +1233,71 @@ def _reviewed_dataset_source(
     ):
         return None
     return _REVIEWED_DATASET_SOURCES.get((endpoint, layer.remote_name))
+
+
+def _reviewed_ortho_substitution(
+    endpoint: str,
+    layer: ReferenceLayerDefinition,
+) -> ReviewedIgnOrthoSubstitution | None:
+    if (
+        not layer.source_key.startswith(SIUR_LAYER_PREFIX)
+        or layer.role != "overlay"
+        or layer.renderer != "raster_tile"
+        or not layer.remote_name
+    ):
+        return None
+    try:
+        return reviewed_ign_ortho_substitution(endpoint, layer.remote_name)
+    except ReviewedOrthoEvidenceError as error:
+        raise SourceDiscoveryError(
+            "reviewed IGN ortho evidence is invalid",
+            code="reviewed_ortho_evidence_invalid",
+        ) from error
+
+
+def _reviewed_ortho_substitution_config(
+    service: ReferenceServiceDefinition,
+    layer: ReferenceLayerDefinition,
+    reviewed: ReviewedIgnOrthoSubstitution,
+) -> dict[str, Any]:
+    config = _tile_config(service, layer)
+    expected_operations = {
+        "bounds": dict(SIUR_TILE_BOUNDS),
+        "min_zoom": 0,
+        "max_zoom": 15,
+        "coverage_profile": "siur-castilla-y-leon-ortho-native-z15-v1",
+        "wms_supertile_size": SIUR_WMS_SUPERTILE_SIZE,
+        "max_tile_count": 2_000_000,
+    }
+    actual_operations = {
+        "bounds": reviewed.bounds,
+        "min_zoom": reviewed.min_zoom,
+        "max_zoom": reviewed.max_zoom,
+        "coverage_profile": reviewed.coverage_profile,
+        "wms_supertile_size": reviewed.wms_supertile_size,
+        "max_tile_count": reviewed.max_tile_count,
+    }
+    if actual_operations != expected_operations:
+        raise SourceDiscoveryError(
+            "reviewed IGN ortho operational profile is not allowed"
+        )
+    config.update(
+        {
+            **expected_operations,
+            "format": reviewed.image_format,
+            "style_name": reviewed.style_name,
+            "coverage_required": True,
+            "reviewed_equivalence": reviewed_ign_ortho_equivalence(
+                reviewed
+            ),
+        }
+    )
+    expected = reviewed_ign_ortho_expected_source_definition(reviewed)
+    if config != expected["config"]:
+        raise SourceDiscoveryError(
+            "reviewed IGN ortho source definition is not exact"
+        )
+    return config
 
 
 def _reviewed_dataset_source_config(

@@ -32,6 +32,10 @@ from app.reference_layers.models import (
     ReferenceService,
     ReferenceSyncRun,
 )
+from app.reference_layers.reviewed_ortho_evidence import (
+    ReviewedOrthoEvidenceError,
+    require_reviewed_ign_ortho_acquisition_allowed,
+)
 
 
 SCHEMA_VERSION = "siur-mirror-authorization-v1"
@@ -1211,6 +1215,14 @@ def _validate_evidence_for_source(
         raise MirrorAuthorizationDocumentError(
             "stored source definition hash is invalid"
         )
+    try:
+        require_reviewed_ign_ortho_acquisition_allowed(
+            _stored_source_definition(source)
+        )
+    except ReviewedOrthoEvidenceError as error:
+        raise MirrorAuthorizationDocumentError(
+            "reviewed ortho source is not eligible for local acquisition"
+        ) from error
     _validate_urls_within_origins(
         (
             source.endpoint_url,
@@ -1267,6 +1279,15 @@ def _require_permissions(
     source: ReferenceLayerSource,
     acquisition: bool,
 ) -> None:
+    try:
+        require_reviewed_ign_ortho_acquisition_allowed(
+            _stored_source_definition(source)
+        )
+    except ReviewedOrthoEvidenceError as error:
+        raise MirrorAuthorizationError(
+            "reviewed ortho source is not eligible for local acquisition",
+            code="reviewed_ortho_substitution_blocked",
+        ) from error
     if (
         review.decision != "approved"
         or not review.allow_local_storage

@@ -2,6 +2,9 @@
 
 Estado de contraste: 2026-07-26.
 
+La evaluación técnica específica de las ortofotos históricas se conserva en
+[`siur-ign-pnoa-historico-review.md`](siur-ign-pnoa-historico-review.md).
+
 Este documento conserva la evidencia operativa usada para preparar las
 revisiones del espejo. No concede permisos, no sustituye una revisión humana y
 no permite aplicar automáticamente ninguna autorización. Las condiciones

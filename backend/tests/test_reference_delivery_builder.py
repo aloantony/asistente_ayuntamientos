@@ -41,6 +41,8 @@ from app.reference_layers.delivery_builder import (
     local_metadata_asset_descriptor,
 )
 from app.reference_layers.local_metadata import (
+    LocalMetadataError,
+    _source_metadata_projection,
     attach_local_metadata_asset,
     catalog_local_metadata_availability,
     resolve_local_metadata,
@@ -72,6 +74,11 @@ from app.reference_layers.models import (
     ReferenceSourceArtifact,
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
 )
 from app.reference_layers.style_parity import persist_style_parity_plan
 from app.reference_layers.wms_delivery import (
@@ -954,7 +961,6 @@ def test_local_metadata_endpoint_is_authenticated_local_and_exact(
         "allowed_origins",
     ):
         assert f'"{internal_key}"' not in serialized
-
     catalog = client.get(
         "/reference-layers/catalog"
         f"?provider_key={delivery.source.provider_key}"
@@ -967,6 +973,61 @@ def test_local_metadata_endpoint_is_authenticated_local_and_exact(
         if layer["id"] == delivery.layer.id
     )
     assert catalog_layer["metadata_available"] is True
+
+
+def test_local_metadata_projects_visible_degraded_ortho_without_urls() -> None:
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2023",
+    )
+    assert reviewed is not None
+    definition = reviewed_ign_ortho_expected_source_definition(reviewed)
+
+    source = _source_metadata_projection(
+        source=SimpleNamespace(
+            id=41,
+            source_key="auto:wms_tiles:" + "a" * 32,
+        ),
+        run_definition=definition,
+        source_definition_sha256="b" * 64,
+    )
+
+    assert source["protocol"] == "wms_tiles"
+    assert source["target_kind"] == "tiles"
+    assert source["source_format"] == "image/jpeg"
+    substitution = source["ortho_substitution"]
+    assert substitution["selected_layer"] == "PNOA2023"
+    assert substitution["equivalence_status"] == "substitute_degraded"
+    assert substitution["declared_coverage"] == "full"
+    assert substitution["promotion_eligible"] is True
+    assert substitution["comparison_basis"] == (
+        "catalog_and_selected_capabilities_require_degraded_delivery"
+    )
+    assert len(substitution["catalog_capabilities_sha256"]) == 64
+    serialized = json.dumps(source, sort_keys=True)
+    assert "capabilities_url" not in serialized
+    assert "license_url" not in serialized
+    assert "endpoint_url" not in serialized
+
+
+def test_local_metadata_rejects_blocked_reviewed_ortho() -> None:
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2021",
+    )
+    assert reviewed is not None
+
+    with pytest.raises(LocalMetadataError):
+        _source_metadata_projection(
+            source=SimpleNamespace(
+                id=42,
+                source_key="auto:wms_tiles:" + "c" * 32,
+            ),
+            run_definition=(
+                reviewed_ign_ortho_expected_source_definition(reviewed)
+            ),
+            source_definition_sha256="d" * 64,
+        )
 
 
 def test_semantic_catalog_refresh_preserves_frozen_map_and_metadata(

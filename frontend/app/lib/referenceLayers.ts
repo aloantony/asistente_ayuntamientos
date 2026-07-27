@@ -57,6 +57,15 @@ export type ReferenceLayer = {
   available_style_ids: number[];
   legend_available: boolean;
   metadata_available: boolean;
+  source_substitution_status:
+    | "exact"
+    | "substitute_degraded"
+    | "blocked"
+    | "invalid"
+    | null;
+  source_substitution_notice: string | null;
+  source_substitution_selected_layer: string | null;
+  source_substitution_profile: string | null;
   mirror_status:
     | "not_applicable"
     | "legacy"
