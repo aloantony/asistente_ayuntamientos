@@ -278,6 +278,170 @@ def test_vector_ingest_validates_table_and_installs_guards(db, tmp_path) -> None
             )
 
 
+def test_vector_ingest_accepts_revalidated_geopackage(
+    db,
+    tmp_path,
+) -> None:
+    source = Path(tmp_path, "grid_100km_surf.gpkg")
+    with sqlite3.connect(source) as connection:
+        connection.executescript(
+            """
+            PRAGMA application_id = 1196444487;
+            CREATE TABLE gpkg_spatial_ref_sys (
+                srs_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL PRIMARY KEY,
+                organization TEXT NOT NULL,
+                organization_coordsys_id INTEGER NOT NULL,
+                definition TEXT NOT NULL,
+                description TEXT
+            );
+            CREATE TABLE gpkg_contents (
+                table_name TEXT NOT NULL PRIMARY KEY,
+                data_type TEXT NOT NULL,
+                identifier TEXT,
+                description TEXT DEFAULT '',
+                last_change DATETIME NOT NULL,
+                min_x DOUBLE,
+                min_y DOUBLE,
+                max_x DOUBLE,
+                max_y DOUBLE,
+                srs_id INTEGER
+            );
+            CREATE TABLE gpkg_geometry_columns (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                geometry_type_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL,
+                z TINYINT NOT NULL,
+                m TINYINT NOT NULL,
+                PRIMARY KEY (table_name, column_name)
+            );
+            CREATE TABLE grid_100km_surf (
+                fid INTEGER PRIMARY KEY,
+                geom BLOB
+            );
+            INSERT INTO gpkg_spatial_ref_sys VALUES (
+                'ETRS89-extended / LAEA Europe',
+                3035,
+                'EPSG',
+                3035,
+                'EPSG:3035',
+                ''
+            );
+            INSERT INTO gpkg_contents VALUES (
+                'grid_100km_surf',
+                'features',
+                'grid_100km_surf',
+                '',
+                '2025-07-03T00:00:00.000Z',
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                3035
+            );
+            INSERT INTO gpkg_geometry_columns VALUES (
+                'grid_100km_surf',
+                'geom',
+                'POLYGON',
+                3035,
+                0,
+                0
+            );
+            """
+        )
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    def runner(argv, environment, timeout):
+        del environment, timeout
+        assert argv[1:3] == ["-if", "GPKG"]
+        assert argv[-1] == "grid_100km_surf"
+        snapshot = Path(argv[-2])
+        assert snapshot != source
+        assert snapshot.read_bytes() == source.read_bytes()
+        staging_table = argv[argv.index("-nln") + 1].split(".", 1)[1]
+        db.execute(
+            text(
+                f"""
+                CREATE TABLE reference_data_staging.{staging_table} (
+                    source_fid bigserial PRIMARY KEY,
+                    geom geometry(MultiPolygon, 3857)
+                )
+                """
+            )
+        )
+        db.execute(
+            text(
+                f"""
+                INSERT INTO reference_data_staging.{staging_table} (geom)
+                VALUES (ST_Multi(ST_GeomFromText(
+                    'POLYGON((0 0,1000 0,1000 1000,0 1000,0 0))',
+                    3857
+                )))
+                """
+            )
+        )
+        return GeoCommandResult(b"", b"")
+
+    result = ingest_vector_artifact(
+        db,
+        database=GeoDatabaseTarget.from_url(
+            "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+        ),
+        source_path=source,
+        input_sha256=source_sha256,
+        provider_key="siur",
+        layer_id=100,
+        run_id=101,
+        input_layer="grid_100km_surf",
+        runner=runner,
+    )
+
+    assert result.feature_count == 1
+    assert result.validation_json["checks"]["input_manifest"] == [
+        {
+            "ordinal": 0,
+            "input_sha256": source_sha256,
+            "input_driver": "GPKG",
+            "input_layer": "grid_100km_surf",
+            "size_bytes": source.stat().st_size,
+        }
+    ]
+
+
+def test_vector_ingest_rejects_spoofed_geopackage_before_gdal(
+    db,
+    tmp_path,
+) -> None:
+    source = Path(tmp_path, "spoofed.gpkg")
+    source.write_bytes(b"SQLite format 3\x00" + b"\x00" * 256)
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    calls = 0
+
+    def runner(*_args):
+        nonlocal calls
+        calls += 1
+        return GeoCommandResult(b"", b"")
+
+    with pytest.raises(
+        GeoIngestError,
+        match="GeoPackage could not be inspected",
+    ):
+        ingest_vector_artifact(
+            db,
+            database=GeoDatabaseTarget.from_url(
+                "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+            ),
+            source_path=source,
+            input_sha256=source_sha256,
+            provider_key="siur",
+            layer_id=102,
+            run_id=103,
+            runner=runner,
+        )
+    assert calls == 0
+
+
 def test_rejected_vector_import_drops_only_its_unpublished_table(db, tmp_path) -> None:
     source = Path(tmp_path, "source.geojson")
     source.write_bytes(b"{}")

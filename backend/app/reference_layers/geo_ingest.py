@@ -61,6 +61,7 @@ _ALLOWED_BINARIES = {
 _ALLOWED_VECTOR_DRIVERS = {
     "GeoJSON": ".geojson",
     "FlatGeobuf": ".fgb",
+    "GPKG": ".gpkg",
     "GMLZIP": ".zip",
 }
 _VECTOR_DATA_SCHEMA = "reference_data"
@@ -2341,6 +2342,9 @@ def _validate_vector_signature(path: Path, driver: str) -> None:
     if driver == "GMLZIP":
         _cadastral_gml_member(path)
         return
+    if driver == "GPKG":
+        _validate_vector_geopackage(path)
+        return
     try:
         with path.open("rb") as source:
             prefix = source.read(4096)
@@ -2356,6 +2360,65 @@ def _validate_vector_signature(path: Path, driver: str) -> None:
             raise GeoIngestError("vector snapshot does not match FlatGeobuf")
     else:  # pragma: no cover - guarded by _vector_driver
         raise GeoIngestError("vector input driver is not allowlisted")
+
+
+def _validate_vector_geopackage(path: Path) -> None:
+    try:
+        if path.stat().st_size < 100:
+            raise GeoIngestError("vector GeoPackage is too small")
+        with path.open("rb") as source:
+            if source.read(16) != b"SQLite format 3\x00":
+                raise GeoIngestError(
+                    "vector snapshot does not match GeoPackage"
+                )
+        uri = path.resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
+        with sqlite3.connect(uri, uri=True, timeout=1) as connection:
+            if connection.execute("PRAGMA application_id").fetchone() != (
+                0x47504B47,
+            ):
+                raise GeoIngestError(
+                    "vector snapshot has no GeoPackage application id"
+                )
+            if connection.execute("PRAGMA quick_check(1)").fetchone() != (
+                "ok",
+            ):
+                raise GeoIngestError(
+                    "vector GeoPackage integrity check failed"
+                )
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND "
+                    "name IN ('gpkg_spatial_ref_sys', 'gpkg_contents', "
+                    "'gpkg_geometry_columns')"
+                )
+            }
+            if tables != {
+                "gpkg_spatial_ref_sys",
+                "gpkg_contents",
+                "gpkg_geometry_columns",
+            }:
+                raise GeoIngestError(
+                    "vector GeoPackage metadata is incomplete"
+                )
+            feature_tables = connection.execute(
+                "SELECT contents.table_name "
+                "FROM gpkg_contents AS contents "
+                "JOIN gpkg_geometry_columns AS geometry "
+                "ON geometry.table_name = contents.table_name "
+                "WHERE contents.data_type = 'features' "
+                "ORDER BY contents.table_name"
+            ).fetchall()
+            if not feature_tables:
+                raise GeoIngestError(
+                    "vector GeoPackage has no feature layers"
+                )
+    except GeoIngestError:
+        raise
+    except (OSError, sqlite3.Error) as error:
+        raise GeoIngestError(
+            "vector GeoPackage could not be inspected"
+        ) from error
 
 
 def _vector_source_argument(path: Path, driver: str) -> str:
