@@ -348,6 +348,61 @@ def reviewed_idecyl_cami_candidate() -> SourceCandidate:
     return selected[0]
 
 
+def reviewed_idecyl_boundary_candidate(
+    layer_id: int,
+) -> SourceCandidate:
+    reviewed = next(
+        item
+        for item in idecyl_exact_source_inventory()
+        if item.audit_layer_id == layer_id
+    )
+    reviewed_styles = [
+        item
+        for item in idecyl_local_style_inventory()
+        if item.audit_layer_id == layer_id
+    ]
+    service = ReferenceServiceDefinition(
+        source_key="service:idecyl-limites",
+        title="IDECyL límites",
+        upstream_protocol="wms",
+        base_url=reviewed.catalog_endpoint_url,
+        default_format="image/png",
+    )
+    layer = ReferenceLayerDefinition(
+        source_key=reviewed.catalog_layer_source_key,
+        node_type="layer",
+        title=reviewed.catalog_remote_name,
+        service_key=service.source_key,
+        remote_name=reviewed.catalog_remote_name,
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        bounds={
+            "west": -7.6,
+            "south": 39.9,
+            "east": -1.3,
+            "north": 43.4,
+        },
+        style_name=next(
+            item.catalog_style_source_key
+            for item in reviewed_styles
+            if item.is_default
+        ),
+        styles=tuple(
+            ReferenceLayerStyleDefinition(
+                source_key=item.catalog_style_source_key,
+                title=item.style_title,
+                remote_name=item.remote_style_name,
+                is_default=item.is_default,
+            )
+            for item in reviewed_styles
+        ),
+    )
+    selected = acquisition_candidates(service, layer)
+    assert len(selected) == 1
+    return selected[0]
+
+
 def json_response(value, **kwargs) -> Response:
     return Response(
         body=json.dumps(value, separators=(",", ":")).encode(),
@@ -4743,6 +4798,77 @@ def test_reviewed_idecyl_geopackage_authors_style_from_inspection(
     assert package.metadata["package_members"] == [
         {"path": "style.sld", "sha256": style.blob.sha256}
     ]
+
+
+@pytest.mark.parametrize("layer_id", [223, 234])
+def test_reviewed_idecyl_boundary_pipeline_authors_all_catalog_styles(
+    store,
+    limits,
+    layer_id: int,
+) -> None:
+    reviewed_styles = [
+        item
+        for item in idecyl_local_style_inventory()
+        if item.audit_layer_id == layer_id
+    ]
+    inspection = reviewed_styles[0].evidence["dataset_inspection"]
+    dataset_blob = store.put_stream(
+        io.BytesIO(b"validated boundary GeoPackage placeholder"),
+        max_bytes=limits.max_dataset_bytes,
+    )
+    dataset = AcquiredArtifact(
+        artifact_kind="dataset",
+        role="primary",
+        media_type="application/zip",
+        blob=dataset_blob,
+        metadata={
+            "input_layer": inspection["feature_layer"],
+            "geopackage_inspection": {
+                "schema_version": inspection["inspection_schema"],
+                "archive_member": inspection["archive_member"],
+                "feature_layer": inspection["feature_layer"],
+                "feature_layers": inspection["feature_layers"],
+                "geometry_column": inspection["geometry_column"],
+                "geometry_type": inspection["geometry_type"],
+                "crs": inspection["srs"],
+                "data_schema": inspection["data_schema"],
+                "data_schema_sha256": inspection[
+                    "data_schema_sha256"
+                ],
+            },
+        },
+    )
+
+    artifacts = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+    )._author_reviewed_local_style(
+        reviewed_idecyl_boundary_candidate(layer_id),
+        dataset_artifacts=[dataset],
+    )
+
+    styles = [
+        item for item in artifacts if item.artifact_kind == "style"
+    ]
+    packages = [
+        item
+        for item in artifacts
+        if item.artifact_kind == "style_package"
+    ]
+    assert len(styles) == len(packages) == 6
+    assert {
+        item.metadata["catalog_style_source_key"] for item in styles
+    } == {
+        item.catalog_style_source_key for item in reviewed_styles
+    }
+    assert {
+        item.metadata["authored_local_evidence"]["parity_kind"]
+        for item in styles
+    } == {"adapted"}
+    assert {
+        item.metadata["authored_local_evidence"]["exact_style_claim"]
+        for item in styles
+    } == {False}
 
 
 def test_reviewed_ines_download_authors_colormap_from_validated_vat(

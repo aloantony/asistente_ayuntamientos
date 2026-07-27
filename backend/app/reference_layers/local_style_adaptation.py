@@ -215,7 +215,10 @@ def _generate_reviewed_local_style(
     if idecyl_adaptation:
         if (
             reviewed.audit_layer_id is None
-            or reviewed.catalog_style_is_default is not True
+            or not isinstance(
+                reviewed.catalog_style_is_default,
+                bool,
+            )
             or reviewed.source_definition is None
             or reviewed.source_definition_sha256 is None
         ):
@@ -681,19 +684,37 @@ def _idecyl_polygon_outline_recipe(
     if (
         not isinstance(expected_dataset, Mapping)
         or not isinstance(visual, Mapping)
-        or expected.get("audit_layer_id") != 86
         or expected.get("parity_kind") != "adapted"
         or expected.get("exact_style_claim") is not False
-        or visual.get("schema")
-        != "siur-idecyl-simple-vector-style/v1"
-        or visual.get("symbolizer") != "polygon"
-        or visual.get("fill_color") != "#ffffff"
-        or visual.get("fill_opacity") != 0
-        or visual.get("outline_color") != "#000000"
-        or visual.get("outline_width") != 1
     ):
         raise LocalStyleAdaptationError(
             "IDECyL local visual recipe is invalid",
+            code="local_style_recipe_invalid",
+        )
+    audit_layer_id = expected.get("audit_layer_id")
+    if audit_layer_id == 86:
+        if (
+            visual.get("schema")
+            != "siur-idecyl-simple-vector-style/v1"
+            or visual.get("symbolizer") != "polygon"
+            or visual.get("fill_color") != "#ffffff"
+            or visual.get("fill_opacity") != 0
+            or visual.get("outline_color") != "#000000"
+            or visual.get("outline_width") != 1
+        ):
+            raise LocalStyleAdaptationError(
+                "IDECyL local visual recipe is invalid",
+                code="local_style_recipe_invalid",
+            )
+    elif audit_layer_id in {223, 234}:
+        _validate_idecyl_boundary_visual(
+            expected,
+            visual,
+            expected_dataset,
+        )
+    else:
+        raise LocalStyleAdaptationError(
+            "IDECyL local visual recipe is not allowlisted",
             code="local_style_recipe_invalid",
         )
     if not isinstance(dataset_metadata, Mapping):
@@ -749,9 +770,9 @@ def _idecyl_polygon_outline_recipe(
             "IDECyL GeoPackage schema or geometry changed",
             code="local_style_dataset_schema_changed",
         )
-    return {
+    recipe = {
         "schema": "siur-local-style-symbolizer/v1",
-        "symbolizer": "polygon",
+        "symbolizer": visual["symbolizer"],
         "fill_color": visual["fill_color"],
         "fill_opacity": visual["fill_opacity"],
         "outline_color": visual["outline_color"],
@@ -762,6 +783,117 @@ def _idecyl_polygon_outline_recipe(
         "exact_style_claim": False,
         "source_reference": deepcopy(expected),
     }
+    if audit_layer_id in {223, 234}:
+        catalog_style = expected.get("catalog_style")
+        if not isinstance(catalog_style, Mapping):
+            raise LocalStyleAdaptationError(
+                "IDECyL boundary catalog style is invalid",
+                code="local_style_recipe_invalid",
+            )
+        recipe["style_title"] = catalog_style["title"]
+        if visual["symbolizer"] == "polygon-and-label":
+            recipe.update(
+                {
+                    "font_family": visual["font_family"],
+                    "font_size": visual["font_size"],
+                    "halo_color": visual["halo_color"],
+                    "halo_radius": visual["halo_radius"],
+                    "label_color": visual["label_color"],
+                    "label_field": visual["label_field"],
+                }
+            )
+    return recipe
+
+
+def _validate_idecyl_boundary_visual(
+    expected: Mapping[str, Any],
+    visual: Mapping[str, Any],
+    expected_dataset: Mapping[str, Any],
+) -> None:
+    catalog_style = expected.get("catalog_style")
+    evidence_basis = visual.get("evidence_basis")
+    data_schema = expected_dataset.get("data_schema")
+    if (
+        not isinstance(catalog_style, Mapping)
+        or not isinstance(evidence_basis, Mapping)
+        or not isinstance(data_schema, list)
+        or visual.get("schema") != "siur-idecyl-boundary-style/v1"
+        or visual.get("symbolizer")
+        not in {"polygon", "polygon-and-label"}
+        or visual.get("fill_color") != "#ffffff"
+        or visual.get("fill_opacity") != 0
+        or visual.get("outline_color")
+        not in {"#000000", "#ffffff", "#ffff00", "#ff00ff"}
+        or visual.get("outline_width") not in {0.1, 1.1}
+        or evidence_basis.get("catalog_style_title")
+        != catalog_style.get("title")
+        or evidence_basis.get("geometry_type") != "MULTIPOLYGON"
+        or evidence_basis.get("upstream_capabilities_snapshot_sha256")
+        != (
+            "b43c4d7659d741ce1f5e871432d1fe9"
+            "612d49c438b171784b2f9f6a940388da4"
+        )
+        or evidence_basis.get("style_family_sld_snapshot_sha256")
+        != (
+            "1e15bc83a4efae060f177e227e954db"
+            "1b61dc7254f7809c54dcccb78fedb7288"
+        )
+    ):
+        raise LocalStyleAdaptationError(
+            "IDECyL boundary visual recipe is invalid",
+            code="local_style_recipe_invalid",
+        )
+    schema_names = {
+        item.get("name")
+        for item in data_schema
+        if isinstance(item, Mapping)
+    }
+    labelled = visual["symbolizer"] == "polygon-and-label"
+    expected_visual_keys = {
+        "evidence_basis",
+        "fill_color",
+        "fill_opacity",
+        "outline_color",
+        "outline_width",
+        "schema",
+        "symbolizer",
+    }
+    if labelled:
+        expected_visual_keys |= {
+            "font_family",
+            "font_size",
+            "halo_color",
+            "halo_radius",
+            "label_color",
+            "label_field",
+        }
+    if (
+        set(visual) != expected_visual_keys
+        or (
+            labelled
+            and (
+                visual.get("label_field") not in schema_names
+                or evidence_basis.get("label_field")
+                != visual.get("label_field")
+                or visual.get("font_family") != "DejaVu Sans"
+                or visual.get("font_size") != 10
+                or visual.get("halo_radius") != 1
+                or {
+                    visual.get("label_color"),
+                    visual.get("halo_color"),
+                }
+                != {"#000000", "#ffffff"}
+            )
+        )
+        or (
+            not labelled
+            and evidence_basis.get("label_field") is not None
+        )
+    ):
+        raise LocalStyleAdaptationError(
+            "IDECyL boundary label recipe is invalid",
+            code="local_style_recipe_invalid",
+        )
 
 
 def _ines_recipe(
@@ -1064,12 +1196,39 @@ def _render_recipe_sld(
         return _vector_sld(
             layer_name=layer_name,
             style_name=style_name,
-            title="Cuadrícula minera — adaptación local SIUR",
+            title=cast(
+                str,
+                recipe.get(
+                    "style_title",
+                    "Cuadrícula minera — adaptación local SIUR",
+                ),
+            ),
             fill_color=cast(str, recipe["fill_color"]),
             fill_opacity=str(recipe["fill_opacity"]),
             outline_color=cast(str, recipe["outline_color"]),
             outline_width=str(recipe["outline_width"]),
-            label_field=None,
+            label_field=cast(
+                str | None,
+                recipe.get("label_field"),
+            ),
+            font_family=cast(
+                str,
+                recipe.get("font_family", "DejaVu Sans"),
+            ),
+            font_size=str(recipe.get("font_size", 10)),
+            label_color=cast(
+                str,
+                recipe.get("label_color", "#000000"),
+            ),
+            halo_color=cast(
+                str | None,
+                recipe.get("halo_color"),
+            ),
+            halo_radius=(
+                str(recipe["halo_radius"])
+                if "halo_radius" in recipe
+                else None
+            ),
         )
     if style_kind == "ines_raster":
         return _raster_sld(
@@ -1102,6 +1261,11 @@ def _vector_sld(
     outline_width: str,
     label_field: str | None,
     max_scale_denominator: str | None = None,
+    font_family: str = "DejaVu Sans",
+    font_size: str = "10",
+    label_color: str = "#000000",
+    halo_color: str | None = None,
+    halo_radius: str | None = None,
 ) -> bytes:
     root, rule = _sld_document(
         layer_name=layer_name,
@@ -1134,15 +1298,29 @@ def _vector_sld(
             _q(OGC_NAMESPACE, "PropertyName"),
         ).text = label_field
         font = ElementTree.SubElement(text, _q(SLD_NAMESPACE, "Font"))
-        _css(font, "font-family", "DejaVu Sans")
-        _css(font, "font-size", "10")
+        _css(font, "font-family", font_family)
+        _css(font, "font-size", font_size)
         _css(font, "font-style", "normal")
         _css(font, "font-weight", "normal")
+        if halo_color is not None and halo_radius is not None:
+            halo = ElementTree.SubElement(
+                text,
+                _q(SLD_NAMESPACE, "Halo"),
+            )
+            ElementTree.SubElement(
+                halo,
+                _q(SLD_NAMESPACE, "Radius"),
+            ).text = halo_radius
+            halo_fill = ElementTree.SubElement(
+                halo,
+                _q(SLD_NAMESPACE, "Fill"),
+            )
+            _css(halo_fill, "fill", halo_color)
         label_fill = ElementTree.SubElement(
             text,
             _q(SLD_NAMESPACE, "Fill"),
         )
-        _css(label_fill, "fill", "#000000")
+        _css(label_fill, "fill", label_color)
     return _serialize(root)
 
 
@@ -1321,7 +1499,12 @@ def _validate_generated_sld(
                 code="local_style_sld_invalid",
             )
     elif style_kind == "idecyl_polygon_outline":
-        if symbolizers != ["PolygonSymbolizer"]:
+        expected_symbolizers = (
+            ["PolygonSymbolizer", "TextSymbolizer"]
+            if recipe.get("symbolizer") == "polygon-and-label"
+            else ["PolygonSymbolizer"]
+        )
+        if symbolizers != expected_symbolizers:
             raise LocalStyleAdaptationError(
                 "IDECyL SLD symbolizer is incomplete",
                 code="local_style_sld_invalid",

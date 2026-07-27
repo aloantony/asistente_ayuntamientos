@@ -33,6 +33,9 @@ from app.reference_layers.idecyl_exact_evidence import (
     idecyl_exact_source_inventory,
     reviewed_idecyl_exact_source,
 )
+from app.reference_layers.idecyl_local_style_evidence import (
+    idecyl_local_style_inventory,
+)
 from app.reference_layers.source_content_parity import (
     configured_parity_spec,
 )
@@ -144,6 +147,7 @@ def _layer(
     *,
     with_telecom_styles: bool = False,
     with_cami_style: bool = False,
+    boundary_layer_id: int | None = None,
 ) -> ReferenceLayerDefinition:
     if with_telecom_styles:
         styles = tuple(
@@ -166,6 +170,26 @@ def _layer(
                 remote_name=style_name,
                 is_default=True,
             ),
+        )
+    elif boundary_layer_id is not None:
+        reviewed_styles = [
+            item
+            for item in idecyl_local_style_inventory()
+            if item.audit_layer_id == boundary_layer_id
+        ]
+        styles = tuple(
+            ReferenceLayerStyleDefinition(
+                source_key=item.catalog_style_source_key,
+                title=item.style_title,
+                remote_name=item.remote_style_name,
+                is_default=item.is_default,
+            )
+            for item in reviewed_styles
+        )
+        style_name = next(
+            item.catalog_style_source_key
+            for item in reviewed_styles
+            if item.is_default
         )
     else:
         styles = ()
@@ -199,6 +223,11 @@ def _layer_with_reviewed_archive_styles(
         reviewed.catalog_layer_source_key,
         reviewed.catalog_remote_name,
         with_cami_style=reviewed.audit_layer_id == 86,
+        boundary_layer_id=(
+            reviewed.audit_layer_id
+            if reviewed.audit_layer_id in {223, 234}
+            else None
+        ),
     )
     style_evidence = reviewed.evidence.get("archive_style_evidence")
     if not isinstance(style_evidence, dict):
@@ -447,8 +476,19 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
                 "remote_name": "cami_cyl_cuadricula_default",
                 "is_default": True,
             }
+        elif layer_id in {223, 234}:
+            assert len(
+                candidate.config["reviewed_local_styles"]
+            ) == 6
+            assert sum(
+                style["is_default"]
+                for style in candidate.config[
+                    "reviewed_local_styles"
+                ]
+            ) == 1
         else:
             assert "reviewed_local_style" not in candidate.config
+            assert "reviewed_local_styles" not in candidate.config
         integrity = configured_reviewed_archive_integrity(
             candidate.config
         )

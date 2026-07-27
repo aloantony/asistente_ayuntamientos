@@ -28,6 +28,9 @@ from app.reference_layers.local_style_adaptation import (
 from app.reference_layers.idecyl_exact_evidence import (
     idecyl_exact_source_inventory,
 )
+from app.reference_layers.idecyl_local_style_evidence import (
+    idecyl_local_style_inventory,
+)
 from app.reference_layers.source_discovery import acquisition_candidates
 from app.reference_layers.style_parity import _RequiredStyle, _sld_item
 
@@ -246,6 +249,84 @@ def _idecyl_cami_dataset_metadata():
             "crs": "EPSG:25830",
             "data_schema": data_schema,
             "data_schema_sha256": canonical_json_sha256(data_schema),
+        },
+    }
+
+
+def _idecyl_boundary_candidate(layer_id: int):
+    reviewed_styles = [
+        item
+        for item in idecyl_local_style_inventory()
+        if item.audit_layer_id == layer_id
+    ]
+    assert len(reviewed_styles) == 6
+    reviewed = next(
+        item
+        for item in idecyl_exact_source_inventory()
+        if item.audit_layer_id == layer_id
+    )
+    service = ReferenceServiceDefinition(
+        source_key="service:idecyl-limites",
+        title="IDECyL límites",
+        upstream_protocol="wms",
+        base_url=reviewed.catalog_endpoint_url,
+        default_format="image/png",
+    )
+    default_style = next(
+        item.catalog_style_source_key
+        for item in reviewed_styles
+        if item.is_default
+    )
+    layer = ReferenceLayerDefinition(
+        source_key=reviewed.catalog_layer_source_key,
+        node_type="layer",
+        title=reviewed.catalog_remote_name,
+        service_key=service.source_key,
+        remote_name=reviewed.catalog_remote_name,
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        bounds={
+            "west": -7.6,
+            "south": 39.9,
+            "east": -1.3,
+            "north": 43.4,
+        },
+        style_name=default_style,
+        styles=tuple(
+            ReferenceLayerStyleDefinition(
+                source_key=item.catalog_style_source_key,
+                title=item.style_title,
+                remote_name=item.remote_style_name,
+                is_default=item.is_default,
+            )
+            for item in reviewed_styles
+        ),
+    )
+    selected = acquisition_candidates(service, layer)
+    assert len(selected) == 1
+    return selected[0]
+
+
+def _idecyl_boundary_dataset_metadata(layer_id: int):
+    reviewed = next(
+        item
+        for item in idecyl_local_style_inventory()
+        if item.audit_layer_id == layer_id
+    )
+    inspection = reviewed.evidence["dataset_inspection"]
+    return {
+        "input_layer": inspection["feature_layer"],
+        "geopackage_inspection": {
+            "schema_version": inspection["inspection_schema"],
+            "archive_member": inspection["archive_member"],
+            "feature_layer": inspection["feature_layer"],
+            "feature_layers": inspection["feature_layers"],
+            "geometry_column": inspection["geometry_column"],
+            "geometry_type": inspection["geometry_type"],
+            "crs": inspection["srs"],
+            "data_schema": deepcopy(inspection["data_schema"]),
+            "data_schema_sha256": inspection["data_schema_sha256"],
         },
     }
 
@@ -565,6 +646,205 @@ def test_idecyl_cami_persisted_evidence_rejects_rehashed_source_binding() -> Non
         )
 
     assert captured.value.code == "local_style_evidence_invalid"
+
+
+@pytest.mark.parametrize(
+    ("layer_id", "label_field", "default_style"),
+    [
+        (
+            223,
+            "n_auton",
+            "limites_autonomias_negro_etiquetado",
+        ),
+        (234, "n_prov", "limites_provincias_negro"),
+    ],
+)
+def test_idecyl_boundaries_author_all_six_hash_bound_catalog_styles(
+    layer_id: int,
+    label_field: str,
+    default_style: str,
+) -> None:
+    candidate = _idecyl_boundary_candidate(layer_id)
+    metadata = _idecyl_boundary_dataset_metadata(layer_id)
+
+    first = generate_reviewed_local_styles(
+        candidate,
+        dataset_metadata=metadata,
+    )
+    second = generate_reviewed_local_styles(
+        candidate,
+        dataset_metadata=deepcopy(metadata),
+    )
+
+    assert first == second
+    assert len(first) == 6
+    assert {
+        item.metadata["catalog_style_source_key"] for item in first
+    } == {
+        item["catalog_style_source_key"]
+        for item in candidate.config["reviewed_local_styles"]
+    }
+    assert sum(
+        item["is_default"]
+        for item in candidate.config["reviewed_local_styles"]
+    ) == 1
+    assert next(
+        item["catalog_style_source_key"]
+        for item in candidate.config["reviewed_local_styles"]
+        if item["is_default"]
+    ) == default_style
+
+    expected_colors = {
+        "amarillo": ("#ffff00", "1.1"),
+        "blanco": ("#ffffff", "0.1"),
+        "fucsia": ("#ff00ff", "1.1"),
+        "negro": ("#000000", "0.1"),
+    }
+    for authored in first:
+        style_key = authored.metadata["catalog_style_source_key"]
+        suffix = next(
+            name for name in expected_colors if name in style_key
+        )
+        root = ElementTree.fromstring(authored.document)
+        css = [
+            (element.attrib["name"], element.text or "")
+            for element in root.findall(".//sld:CssParameter", SLD)
+        ]
+        css_by_name: dict[str, list[str]] = {}
+        for name, value in css:
+            css_by_name.setdefault(name, []).append(value)
+        assert css_by_name["fill"][0] == "#ffffff"
+        assert css_by_name["fill-opacity"] == ["0"]
+        assert css_by_name["stroke"] == [
+            expected_colors[suffix][0]
+        ]
+        assert css_by_name["stroke-width"] == [
+            expected_colors[suffix][1]
+        ]
+        labels = root.findall(
+            ".//sld:Label/ogc:PropertyName",
+            {**SLD, **OGC},
+        )
+        if style_key.endswith("_etiquetado"):
+            assert [item.text for item in labels] == [label_field]
+            assert css_by_name["font-family"] == ["DejaVu Sans"]
+            assert css_by_name["font-size"] == ["10"]
+            assert root.find(".//sld:Halo", SLD) is not None
+            assert len(css_by_name["fill"]) == 3
+        else:
+            assert labels == []
+            assert root.find(".//sld:Halo", SLD) is None
+            assert css_by_name["fill"] == ["#ffffff"]
+        assert root.findall(".//sld:ExternalGraphic", SLD) == []
+        assert root.findall(".//sld:OnlineResource", SLD) == []
+        assert root.findall(".//sld:InlineContent", SLD) == []
+
+        evidence = authored.metadata["authored_local_evidence"]
+        assert evidence["audit_layer_id"] == layer_id
+        assert evidence["catalog_style_is_default"] is (
+            style_key == default_style
+        )
+        assert evidence["parity_kind"] == "adapted"
+        assert evidence["exact_style_claim"] is False
+        assert evidence["dataset_schema_sha256"] == evidence[
+            "recipe"
+        ]["dataset_schema_sha256"]
+        validate_zero_resource_local_adaptation(
+            style_metadata=authored.metadata,
+            package_metadata=local_style_package_metadata(authored),
+            sld_sha256=authored.sld_sha256,
+        )
+
+
+@pytest.mark.parametrize("layer_id", [223, 234])
+def test_idecyl_boundary_singular_api_rejects_six_style_profile(
+    layer_id: int,
+) -> None:
+    with pytest.raises(LocalStyleAdaptationError) as captured:
+        generate_reviewed_local_style(
+            _idecyl_boundary_candidate(layer_id),
+            dataset_metadata=_idecyl_boundary_dataset_metadata(
+                layer_id
+            ),
+        )
+
+    assert captured.value.code == "reviewed_local_style_ambiguous"
+
+
+@pytest.mark.parametrize("layer_id", [223, 234])
+@pytest.mark.parametrize(
+    "mutation",
+    ["geometry", "schema", "layer", "crs"],
+)
+def test_idecyl_boundaries_reject_changed_inspected_dataset(
+    layer_id: int,
+    mutation: str,
+) -> None:
+    metadata = _idecyl_boundary_dataset_metadata(layer_id)
+    if mutation == "geometry":
+        metadata["geopackage_inspection"]["geometry_type"] = "POLYGON"
+    elif mutation == "schema":
+        metadata["geopackage_inspection"]["data_schema"][2]["name"] = (
+            "changed"
+        )
+        metadata["geopackage_inspection"]["data_schema_sha256"] = (
+            canonical_json_sha256(
+                metadata["geopackage_inspection"]["data_schema"]
+            )
+        )
+    elif mutation == "layer":
+        metadata["input_layer"] = "changed"
+    else:
+        metadata["geopackage_inspection"]["crs"] = "EPSG:25830"
+
+    with pytest.raises(LocalStyleAdaptationError) as captured:
+        generate_reviewed_local_styles(
+            _idecyl_boundary_candidate(layer_id),
+            dataset_metadata=metadata,
+        )
+
+    assert captured.value.code == "local_style_dataset_schema_changed"
+
+
+@pytest.mark.parametrize("layer_id", [223, 234])
+def test_idecyl_boundary_adaptations_verify_full_style_parity(
+    layer_id: int,
+) -> None:
+    authored_styles = generate_reviewed_local_styles(
+        _idecyl_boundary_candidate(layer_id),
+        dataset_metadata=_idecyl_boundary_dataset_metadata(layer_id),
+    )
+    for index, authored in enumerate(authored_styles, start=1):
+        evidence = authored.metadata["authored_local_evidence"]
+        source_key = authored.metadata["catalog_style_source_key"]
+        item = _sld_item(
+            _RequiredStyle(
+                style_id=index,
+                source_key=source_key,
+                remote_name=authored.metadata["remote_name"],
+                is_default=evidence["catalog_style_is_default"],
+            ),
+            style_artifacts={
+                source_key: SimpleNamespace(
+                    artifact_id=index + 20,
+                    sha256=authored.sld_sha256,
+                    metadata_json=authored.metadata,
+                )
+            },
+            package_artifacts={
+                source_key: SimpleNamespace(
+                    artifact_id=index + 40,
+                    metadata_json=local_style_package_metadata(
+                        authored
+                    ),
+                )
+            },
+            resources_by_sha={},
+        )
+
+        assert item.verified is True
+        assert item.parity_kind == "adapted"
+        assert item.resources == ()
 
 
 def test_pluralization_preserves_existing_profile_hashes() -> None:
