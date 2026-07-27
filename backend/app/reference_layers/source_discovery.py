@@ -918,11 +918,9 @@ def acquisition_candidates(
     reviewed_ortho = _reviewed_ortho_substitution(endpoint, layer)
     if reviewed_ortho is not None:
         if not reviewed_ortho.promotion_eligible:
-            # The committed profile still records the rejected IGN layer so
-            # operators and the UI can explain the gap.  It deliberately does
-            # not become a source candidate: bootstrap therefore removes any
-            # prior automatic ITACyL source instead of selecting a mapping
-            # whose reviewed source has no declared Castilla y León coverage.
+            # A future reviewed mapping may still be recorded as ineligible
+            # so operators and the UI can explain it without creating a
+            # source candidate.
             return ()
         return (
             _candidate(

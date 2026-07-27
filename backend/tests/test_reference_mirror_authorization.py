@@ -234,7 +234,7 @@ def test_parser_rejects_invalid_permission_shapes(
         parse_mirror_authorization(json.dumps(value).encode())
 
 
-def test_authorization_cannot_override_reviewed_ortho_equivalence_block(db) -> None:
+def test_2021_degraded_ortho_still_requires_explicit_official_review(db) -> None:
     _, _, _, source = _seed_source(
         db,
         provider_key="auth-blocked-ortho",
@@ -256,17 +256,50 @@ def test_authorization_cannot_override_reviewed_ortho_equivalence_block(db) -> N
     source.source_format = definition["config"]["format"]
     source.definition_sha256 = canonical_json_sha256(definition)
     db.commit()
-    document = mirror_authorization_document(
+    wrong = mirror_authorization_document(
         db,
         source,
-        allowed_origins=["https://www.ign.es"],
+        allowed_origins=[
+            "https://www.ign.es",
+            "https://orto.wms.itacyl.es",
+        ],
     )
 
     with pytest.raises(
         MirrorAuthorizationDocumentError,
-        match="not eligible for local acquisition",
+        match="license or attribution",
     ):
-        plan_mirror_authorization_review(db, document)
+        plan_mirror_authorization_review(db, wrong)
+
+    correct_value = json.loads(
+        mirror_authorization_document(
+            db,
+            source,
+            allowed_origins=[
+                "https://www.ign.es",
+                "https://orto.wms.itacyl.es",
+            ],
+            attribution=reviewed.required_attribution,
+        )
+    )
+    correct_value["license"]["name"] = definition["config"][
+        "reviewed_equivalence"
+    ]["license_name"]
+    correct_value["license"]["url"] = definition["config"][
+        "reviewed_equivalence"
+    ]["license_url"]
+
+    plan = plan_mirror_authorization_review(
+        db,
+        json.dumps(correct_value).encode(),
+    )
+
+    assert plan.evidence.attribution == reviewed.required_attribution
+    assert db.scalar(
+        select(ReferenceMirrorAuthorizationReview).where(
+            ReferenceMirrorAuthorizationReview.source_id == source.id
+        )
+    ) is None
 
 
 def test_reviewed_ortho_requires_exact_official_product_attribution(db) -> None:

@@ -23,13 +23,18 @@ en fuentes locales.
 identidades contra las capacidades WMS/WFS y el contenido real de las
 distribuciones:
 
-- 28 quedan `restricted`: los WFS publican IGCYL-NC y paginación no
-  transaccional, o el ZIP incluye `Licencia-IGCYL.txt`;
-- 2 quedan `permission_pending`: solo se localizó un directorio HTTP y no hay
-  una distribución segura revisada;
+- 30 quedan `restricted`: los WFS publican IGCYL-NC y paginación no
+  transaccional, el ZIP incluye `Licencia-IGCYL.txt` o, para SIGPAC 2022 y
+  2024, existe una distribución HTTPS exacta por las nueve provincias que
+  sigue sujeta a IGCYL-NC y a revisión humana;
 - solo la capa 39 queda como `candidate`, mediante el ZIP GeoPackage HTTPS de
   datos abiertos. Su archivo, GeoPackage, esquema, recuento, CRS, límites,
   muestra y SLD se fijan por huellas exactas.
+
+Los índices raíz y provinciales de SIGPAC se fijan por SHA-256, junto con el
+conjunto ordenado de nueve ZIP. Esta evidencia corrige el falso bloqueo de
+transporte, pero no crea una fuente ejecutable ni concede descarga,
+conservación o servicio local.
 
 La candidata conserva una advertencia explícita: el registro oficial indica
 que los datos de cobertura se adquirieron mediante una suscripción externa a

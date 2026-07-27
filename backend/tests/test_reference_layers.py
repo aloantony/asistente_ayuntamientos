@@ -765,9 +765,12 @@ def test_catalog_exposes_reviewed_ortho_assessment_without_source_urls(
         "source_substitution_selected_layer"
     ] == "PNOA2010"
     assert by_title["Ortofoto_2021"]["source_substitution_status"] == (
-        "blocked"
+        "substitute_degraded"
     )
-    assert "no declara cobertura" in by_title["Ortofoto_2021"][
+    assert by_title["Ortofoto_2021"][
+        "source_substitution_selected_layer"
+    ] == "PNOA2020"
+    assert "anualidad distinta" in by_title["Ortofoto_2021"][
         "source_substitution_notice"
     ]
     assert "www.ign.es" not in response.text

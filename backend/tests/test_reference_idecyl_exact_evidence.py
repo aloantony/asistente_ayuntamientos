@@ -174,22 +174,60 @@ def test_classification_covers_all_31_layers_fail_closed() -> None:
     assert sum(
         item.local_service_status == "restricted"
         for item in inventory
-    ) == 28
+    ) == 30
     assert sum(
         item.local_service_status == "permission_pending"
         for item in inventory
-    ) == 2
+    ) == 0
     assert {
         item.audit_layer_id
         for item in inventory
         if item.local_service_status == "candidate"
     } == {39}
-    assert {
-        item.audit_layer_id
-        for item in inventory
-        if item.local_service_status == "permission_pending"
-    } == {123, 166}
     assert all(item.evidence["schema"] == EVIDENCE_SCHEMA for item in inventory)
+
+
+def test_sigpac_uses_exact_https_directories_but_remains_license_restricted() -> None:
+    inventory = {
+        item.audit_layer_id: item
+        for item in idecyl_exact_source_inventory()
+    }
+
+    for layer_id, year in ((123, "2024"), (166, "2022")):
+        reviewed = inventory[layer_id]
+        distribution = reviewed.evidence["official_https_distribution"]
+
+        assert reviewed.local_service_status == "restricted"
+        assert reviewed.protocol is None
+        assert reviewed.endpoint_url is None
+        assert reviewed.reason_codes == (
+            "https_directory_igcyl_nc_requires_recipient_acceptance",
+            "local_service_requires_persisted_human_review",
+        )
+        assert distribution["root_directory_url"] == (
+            "https://ftp.itacyl.es/cartografia/05_SIGPAC/"
+            f"{year}_ETRS89/"
+        )
+        assert distribution["province_directory_url"] == (
+            distribution["root_directory_url"]
+            + "Parcelario_SIGPAC_CyL_Provincias/"
+        )
+        assert distribution["archive_names"] == [
+            "AVILA.zip",
+            "BURGOS.zip",
+            "LEON.zip",
+            "PALENCIA.zip",
+            "SALAMANCA.zip",
+            "SEGOVIA.zip",
+            "SORIA.zip",
+            "VALLADOLID.zip",
+            "ZAMORA.zip",
+        ]
+        assert distribution["license_name"] == "LICENCIA-IGCYL-NC"
+        assert distribution["license_url"].startswith("https://")
+        assert distribution["authorization_effect"] == (
+            "none_without_persisted_human_mirror_review"
+        )
 
 
 def test_wms_metadata_bindings_preserve_exact_mismatch_and_missing() -> None:
@@ -264,12 +302,7 @@ def test_the_other_30_exact_identities_cannot_generate_a_candidate() -> None:
                 ),
             )
 
-        expected_code = (
-            "idecyl_permission_pending"
-            if reviewed.local_service_status == "permission_pending"
-            else "idecyl_local_service_restricted"
-        )
-        assert captured.value.code == expected_code
+        assert captured.value.code == "idecyl_local_service_restricted"
         assert captured.value.evidence["local_service_status"] != "candidate"
         assert "endpoint_url" not in captured.value.evidence
         assert not any(

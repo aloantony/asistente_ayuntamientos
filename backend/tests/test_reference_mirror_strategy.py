@@ -194,9 +194,9 @@ def test_reviewed_ortho_strategy_preserves_exact_and_degraded_evidence(
         (
             3,
             "Ortofoto_2021",
-            "blocked",
-            "blocked",
-            "reviewed_ortho_substitution_blocked",
+            "substitute_degraded",
+            "tiles",
+            "candidate_substitute_degraded",
         ),
     ):
         source_key = "layer:siur:" + str(layer_id) * 64
@@ -233,7 +233,7 @@ def test_reviewed_ortho_strategy_preserves_exact_and_degraded_evidence(
         else:
             assert assignment.source_key is None
         if status == "substitute_degraded":
-            assert "degradado" in substitution["public_notice"].casefold()
+            assert "degradad" in substitution["public_notice"].casefold()
             assert substitution["parity_policy"]["promotion"][
                 "immutable_degraded_classification"
             ] is True

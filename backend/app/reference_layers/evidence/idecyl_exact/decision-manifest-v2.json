@@ -232,12 +232,12 @@
     },
     {
       "audit_layer_id": 123,
-      "local_service_status": "permission_pending",
+      "local_service_status": "restricted",
       "metadata_binding": "exact",
       "published_metadata_fid": "spagobcyltemagrspac24rec",
       "reason_codes": [
-        "distribution_transport_not_https",
-        "no_reviewed_safe_distribution"
+        "https_directory_igcyl_nc_requires_recipient_acceptance",
+        "local_service_requires_persisted_human_review"
       ]
     },
     {
@@ -282,12 +282,12 @@
     },
     {
       "audit_layer_id": 166,
-      "local_service_status": "permission_pending",
+      "local_service_status": "restricted",
       "metadata_binding": "exact",
       "published_metadata_fid": "spagobcyltemagrspac22rec",
       "reason_codes": [
-        "distribution_transport_not_https",
-        "no_reviewed_safe_distribution"
+        "https_directory_igcyl_nc_requires_recipient_acceptance",
+        "local_service_requires_persisted_human_review"
       ]
     },
     {
@@ -449,6 +449,56 @@
         "archive_contains_igcyl_nc_license",
         "public_local_service_not_permitted"
       ]
+    }
+  ],
+  "restricted_https_distributions": [
+    {
+      "audit_layer_id": 123,
+      "profile": "idecyl-sigpac-2024-https-provinces-20260727-v2",
+      "verified_on": "2026-07-27",
+      "root_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2024_ETRS89/",
+      "province_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2024_ETRS89/Parcelario_SIGPAC_CyL_Provincias/",
+      "root_index_sha256": "28d5a28dee3dcee8cc1d21801d508ed959cbe212143664013e8acceb256655b4",
+      "province_index_sha256": "7a0cf5e12369b9bd6f6380220aa43a48fca910bc01d0c2967f87903455bd0479",
+      "archive_names": [
+        "AVILA.zip",
+        "BURGOS.zip",
+        "LEON.zip",
+        "PALENCIA.zip",
+        "SALAMANCA.zip",
+        "SEGOVIA.zip",
+        "SORIA.zip",
+        "VALLADOLID.zip",
+        "ZAMORA.zip"
+      ],
+      "selection_rule": "exact_nine_castilla_y_leon_province_archives_v1",
+      "license_name": "LICENCIA-IGCYL-NC",
+      "license_url": "https://ftp.itacyl.es/cartografia/LICENCIA-IGCYL-NC-2012.pdf",
+      "authorization_effect": "none_without_persisted_human_mirror_review"
+    },
+    {
+      "audit_layer_id": 166,
+      "profile": "idecyl-sigpac-2022-https-provinces-20260727-v2",
+      "verified_on": "2026-07-27",
+      "root_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2022_ETRS89/",
+      "province_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2022_ETRS89/Parcelario_SIGPAC_CyL_Provincias/",
+      "root_index_sha256": "6f7d6c29bf2c42660f17a75dcb0efb7b8321e5de69a60a8c7ebdb69fdeae7ebd",
+      "province_index_sha256": "4ef68079eb3f3dea123397398015b1f16afde5ad8bac9c9a1120b0cc0ca47f5b",
+      "archive_names": [
+        "AVILA.zip",
+        "BURGOS.zip",
+        "LEON.zip",
+        "PALENCIA.zip",
+        "SALAMANCA.zip",
+        "SEGOVIA.zip",
+        "SORIA.zip",
+        "VALLADOLID.zip",
+        "ZAMORA.zip"
+      ],
+      "selection_rule": "exact_nine_castilla_y_leon_province_archives_v1",
+      "license_name": "LICENCIA-IGCYL-NC",
+      "license_url": "https://ftp.itacyl.es/cartografia/LICENCIA-IGCYL-NC-2012.pdf",
+      "authorization_effect": "none_without_persisted_human_mirror_review"
     }
   ],
   "candidate_source": {
