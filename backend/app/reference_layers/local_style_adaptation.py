@@ -149,6 +149,13 @@ def _generate_reviewed_local_style(
             reviewed.style_reference,
             dataset_metadata,
         )
+    elif reviewed.style_kind == "idecyl_nitrate_year":
+        recipe = _idecyl_nitrate_year_recipe(
+            reviewed.profile,
+            reviewed.catalog_style_source_key,
+            reviewed.style_reference,
+            dataset_metadata,
+        )
     elif reviewed.style_kind == "ines_raster":
         recipe = _ines_recipe(
             reviewed.profile,
@@ -183,7 +190,8 @@ def _generate_reviewed_local_style(
     sld_sha256 = hashlib.sha256(document).hexdigest()
     recipe_sha256 = canonical_json_sha256(recipe)
     idecyl_adaptation = (
-        reviewed.style_kind == "idecyl_polygon_outline"
+        reviewed.style_kind
+        in {"idecyl_polygon_outline", "idecyl_nitrate_year"}
     )
     evidence = {
         "schema": (
@@ -215,7 +223,7 @@ def _generate_reviewed_local_style(
     if idecyl_adaptation:
         if (
             reviewed.audit_layer_id is None
-            or reviewed.catalog_style_is_default is not True
+            or not isinstance(reviewed.catalog_style_is_default, bool)
             or reviewed.source_definition is None
             or reviewed.source_definition_sha256 is None
         ):
@@ -764,6 +772,139 @@ def _idecyl_polygon_outline_recipe(
     }
 
 
+def _idecyl_nitrate_year_recipe(
+    profile: str,
+    catalog_style_source_key: str,
+    reference: Mapping[str, Any],
+    dataset_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    expected = reviewed_local_style_profile_reference(
+        profile,
+        catalog_style_source_key,
+    )
+    if expected is None or dict(reference) != expected:
+        raise LocalStyleAdaptationError(
+            "IDECyL nitrate style reference is invalid",
+            code="local_style_recipe_invalid",
+        )
+    catalog_style = expected.get("catalog_style")
+    temporal = expected.get("temporal_adaptation")
+    template = expected.get("style_template")
+    expected_dataset = expected.get("dataset_inspection")
+    if (
+        not isinstance(catalog_style, Mapping)
+        or not isinstance(temporal, Mapping)
+        or not isinstance(template, Mapping)
+        or not isinstance(expected_dataset, Mapping)
+        or expected.get("audit_layer_id") != 268
+        or expected.get("parity_kind") != "adapted"
+        or expected.get("exact_style_claim") is not False
+        or temporal.get("schema")
+        != "siur-idecyl-temporal-rule-semantic-adaptation/v1"
+        or temporal.get("source_property_name") != "v_nitr2021"
+        or temporal.get("target_property_name")
+        != catalog_style.get("property_name")
+        or temporal.get("classification_rule_semantics_preserved")
+        is not True
+        or temporal.get("property_name_is_only_rule_semantic_change")
+        is not True
+        or temporal.get("runtime_sld_version") != "1.0.0"
+        or temporal.get("catalog_style_identity_applied") is not True
+        or temporal.get("source_descriptions_omitted") is not True
+        or template.get("adaptation_contract")
+        != {
+            "catalog_style_identity_applied": True,
+            "classification_rule_semantics_preserved": True,
+            "property_name_is_only_rule_semantic_change": True,
+            "runtime_sld_version": "1.0.0",
+            "source_descriptions_omitted": True,
+            "source_sld_version": "1.1.0",
+        }
+        or template.get("template_property_name") != "v_nitr2021"
+        or template.get("archive_member_sha256")
+        != (
+            "ed4dff6410973ffd0e672a1a4216a7d"
+            "11dab2118bc3b0a6056b2d1cfc2b87c38"
+        )
+        or not isinstance(template.get("classification_rules"), list)
+        or len(template["classification_rules"]) != 5
+    ):
+        raise LocalStyleAdaptationError(
+            "IDECyL nitrate temporal recipe is invalid",
+            code="local_style_recipe_invalid",
+        )
+    if not isinstance(dataset_metadata, Mapping):
+        raise LocalStyleAdaptationError(
+            "IDECyL nitrate style requires inspected GeoPackage evidence",
+            code="local_style_dataset_schema_missing",
+        )
+    inspection = dataset_metadata.get("geopackage_inspection")
+    if not isinstance(inspection, Mapping):
+        raise LocalStyleAdaptationError(
+            "IDECyL nitrate style requires inspected GeoPackage evidence",
+            code="local_style_dataset_schema_missing",
+        )
+    data_schema = inspection.get("data_schema")
+    compatibility = {
+        "inspection_schema": inspection.get("schema_version"),
+        "archive_member": inspection.get("archive_member"),
+        "feature_layer": inspection.get("feature_layer"),
+        "feature_layers": inspection.get("feature_layers"),
+        "geometry_column": inspection.get("geometry_column"),
+        "geometry_type": inspection.get("geometry_type"),
+        "srs": inspection.get("crs"),
+        "data_schema": data_schema,
+        "data_schema_sha256": inspection.get("data_schema_sha256"),
+    }
+    expected_compatibility = {
+        "inspection_schema": expected_dataset.get("inspection_schema"),
+        "archive_member": expected_dataset.get("archive_member"),
+        "feature_layer": expected_dataset.get("feature_layer"),
+        "feature_layers": expected_dataset.get("feature_layers"),
+        "geometry_column": expected_dataset.get("geometry_column"),
+        "geometry_type": expected_dataset.get("geometry_type"),
+        "srs": expected_dataset.get("srs"),
+        "data_schema": expected_dataset.get("data_schema"),
+        "data_schema_sha256": expected_dataset.get(
+            "data_schema_sha256"
+        ),
+    }
+    property_name = catalog_style.get("property_name")
+    schema_names = {
+        item.get("name")
+        for item in data_schema
+        if isinstance(item, Mapping)
+    } if isinstance(data_schema, list) else set()
+    if (
+        compatibility != expected_compatibility
+        or dataset_metadata.get("input_layer")
+        != expected_dataset.get("feature_layer")
+        or canonical_json_sha256(data_schema)
+        != expected_dataset.get("data_schema_sha256")
+        or not isinstance(property_name, str)
+        or property_name not in schema_names
+    ):
+        raise LocalStyleAdaptationError(
+            "IDECyL nitrate GeoPackage schema or year field changed",
+            code="local_style_dataset_schema_changed",
+        )
+    return {
+        "schema": "siur-local-style-polygon-classification/v1",
+        "symbolizer": "polygon-classification",
+        "property_name": property_name,
+        "classification_rules": deepcopy(
+            template["classification_rules"]
+        ),
+        "semantic_adaptation": deepcopy(temporal),
+        "template_sld_sha256": template["archive_member_sha256"],
+        "dataset_inspection": compatibility,
+        "dataset_schema_sha256": canonical_json_sha256(compatibility),
+        "adaptation_status": "adapted",
+        "exact_style_claim": False,
+        "source_reference": deepcopy(expected),
+    }
+
+
 def _ines_recipe(
     profile: str,
     reference: Mapping[str, Any],
@@ -965,6 +1106,53 @@ def _validate_recipe(
                 },
             },
         )
+    elif style_kind == "idecyl_nitrate_year":
+        source_reference = recipe.get("source_reference")
+        inspection = recipe.get("dataset_inspection")
+        catalog_style = (
+            source_reference.get("catalog_style")
+            if isinstance(source_reference, Mapping)
+            else None
+        )
+        catalog_style_source_key = (
+            catalog_style.get("catalog_style_source_key")
+            if isinstance(catalog_style, Mapping)
+            else None
+        )
+        if (
+            not isinstance(source_reference, Mapping)
+            or not isinstance(inspection, Mapping)
+            or not isinstance(catalog_style_source_key, str)
+        ):
+            raise LocalStyleAdaptationError(
+                "persisted IDECyL nitrate recipe is invalid",
+                code="local_style_evidence_invalid",
+            )
+        rebuilt = _idecyl_nitrate_year_recipe(
+            profile,
+            catalog_style_source_key,
+            source_reference,
+            {
+                "input_layer": inspection.get("feature_layer"),
+                "geopackage_inspection": {
+                    "schema_version": inspection.get(
+                        "inspection_schema"
+                    ),
+                    "archive_member": inspection.get("archive_member"),
+                    "feature_layer": inspection.get("feature_layer"),
+                    "feature_layers": inspection.get("feature_layers"),
+                    "geometry_column": inspection.get(
+                        "geometry_column"
+                    ),
+                    "geometry_type": inspection.get("geometry_type"),
+                    "crs": inspection.get("srs"),
+                    "data_schema": inspection.get("data_schema"),
+                    "data_schema_sha256": inspection.get(
+                        "data_schema_sha256"
+                    ),
+                },
+            },
+        )
     elif style_kind == "ines_raster":
         _validate_persisted_ines_recipe(profile, recipe)
         return
@@ -1071,6 +1259,17 @@ def _render_recipe_sld(
             outline_width=str(recipe["outline_width"]),
             label_field=None,
         )
+    if style_kind == "idecyl_nitrate_year":
+        return _nitrate_sld(
+            layer_name=layer_name,
+            style_name=style_name,
+            title=(
+                f"Nitratos {recipe['property_name'][-4:]} "
+                "— adaptación local"
+            ),
+            property_name=cast(str, recipe["property_name"]),
+            rules=cast(list[dict[str, Any]], recipe["classification_rules"]),
+        )
     if style_kind == "ines_raster":
         return _raster_sld(
             layer_name=layer_name,
@@ -1144,6 +1343,155 @@ def _vector_sld(
         )
         _css(label_fill, "fill", "#000000")
     return _serialize(root)
+
+
+def _nitrate_sld(
+    *,
+    layer_name: str,
+    style_name: str,
+    title: str,
+    property_name: str,
+    rules: list[dict[str, Any]],
+) -> bytes:
+    root = ElementTree.Element(
+        _q(SLD_NAMESPACE, "StyledLayerDescriptor"),
+        {"version": "1.0.0"},
+    )
+    named_layer = ElementTree.SubElement(
+        root,
+        _q(SLD_NAMESPACE, "NamedLayer"),
+    )
+    ElementTree.SubElement(
+        named_layer,
+        _q(SLD_NAMESPACE, "Name"),
+    ).text = layer_name
+    user_style = ElementTree.SubElement(
+        named_layer,
+        _q(SLD_NAMESPACE, "UserStyle"),
+    )
+    ElementTree.SubElement(
+        user_style,
+        _q(SLD_NAMESPACE, "Name"),
+    ).text = style_name
+    ElementTree.SubElement(
+        user_style,
+        _q(SLD_NAMESPACE, "Title"),
+    ).text = title
+    feature_type = ElementTree.SubElement(
+        user_style,
+        _q(SLD_NAMESPACE, "FeatureTypeStyle"),
+    )
+    for item in rules:
+        rule = ElementTree.SubElement(
+            feature_type,
+            _q(SLD_NAMESPACE, "Rule"),
+        )
+        ElementTree.SubElement(
+            rule,
+            _q(SLD_NAMESPACE, "Name"),
+        ).text = str(item["name"])
+        filter_element = ElementTree.SubElement(
+            rule,
+            _q(OGC_NAMESPACE, "Filter"),
+        )
+        _nitrate_filter(
+            filter_element,
+            property_name=property_name,
+            spec=cast(dict[str, Any], item["filter"]),
+        )
+        polygon = ElementTree.SubElement(
+            rule,
+            _q(SLD_NAMESPACE, "PolygonSymbolizer"),
+        )
+        fill = ElementTree.SubElement(
+            polygon,
+            _q(SLD_NAMESPACE, "Fill"),
+        )
+        _css(fill, "fill", str(item["fill_color"]))
+        _css(fill, "fill-opacity", str(item["fill_opacity"]))
+        stroke = ElementTree.SubElement(
+            polygon,
+            _q(SLD_NAMESPACE, "Stroke"),
+        )
+        _css(stroke, "stroke", str(item["stroke_color"]))
+        _css(stroke, "stroke-width", str(item["stroke_width"]))
+        _css(stroke, "stroke-linejoin", str(item["stroke_linejoin"]))
+    return _serialize(root)
+
+
+def _nitrate_filter(
+    parent: ElementTree.Element,
+    *,
+    property_name: str,
+    spec: dict[str, Any],
+) -> None:
+    operator = spec.get("operator")
+    if operator == "is_null":
+        predicate = ElementTree.SubElement(
+            parent,
+            _q(OGC_NAMESPACE, "PropertyIsNull"),
+        )
+        ElementTree.SubElement(
+            predicate,
+            _q(OGC_NAMESPACE, "PropertyName"),
+        ).text = property_name
+        return
+    predicates = {
+        "greater_than": "PropertyIsGreaterThan",
+        "greater_than_or_equal": "PropertyIsGreaterThanOrEqualTo",
+        "less_than": "PropertyIsLessThan",
+    }
+    if operator == "range":
+        conjunction = ElementTree.SubElement(
+            parent,
+            _q(OGC_NAMESPACE, "And"),
+        )
+        _comparison(
+            conjunction,
+            tag=predicates[str(spec["lower_operator"])],
+            property_name=property_name,
+            literal=spec["lower"],
+        )
+        _comparison(
+            conjunction,
+            tag=predicates[str(spec["upper_operator"])],
+            property_name=property_name,
+            literal=spec["upper"],
+        )
+        return
+    if operator == "lower_bound":
+        _comparison(
+            parent,
+            tag=predicates[str(spec["lower_operator"])],
+            property_name=property_name,
+            literal=spec["lower"],
+        )
+        return
+    raise LocalStyleAdaptationError(
+        "IDECyL nitrate filter is invalid",
+        code="local_style_recipe_invalid",
+    )
+
+
+def _comparison(
+    parent: ElementTree.Element,
+    *,
+    tag: str,
+    property_name: str,
+    literal: Any,
+) -> None:
+    predicate = ElementTree.SubElement(
+        parent,
+        _q(OGC_NAMESPACE, tag),
+    )
+    ElementTree.SubElement(
+        predicate,
+        _q(OGC_NAMESPACE, "PropertyName"),
+    ).text = property_name
+    ElementTree.SubElement(
+        predicate,
+        _q(OGC_NAMESPACE, "Literal"),
+    ).text = str(literal)
 
 
 def _raster_sld(
@@ -1324,6 +1672,21 @@ def _validate_generated_sld(
         if symbolizers != ["PolygonSymbolizer"]:
             raise LocalStyleAdaptationError(
                 "IDECyL SLD symbolizer is incomplete",
+                code="local_style_sld_invalid",
+            )
+    elif style_kind == "idecyl_nitrate_year":
+        properties = [
+            (element.text or "").strip()
+            for element in root.iter()
+            if element.tag == _q(OGC_NAMESPACE, "PropertyName")
+        ]
+        if (
+            symbolizers != ["PolygonSymbolizer"] * 5
+            or len(properties) != 8
+            or set(properties) != {recipe["property_name"]}
+        ):
+            raise LocalStyleAdaptationError(
+                "IDECyL nitrate SLD rules are incomplete",
                 code="local_style_sld_invalid",
             )
     elif style_kind == "ines_raster":

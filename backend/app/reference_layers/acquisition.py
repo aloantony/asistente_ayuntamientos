@@ -3484,17 +3484,35 @@ class ReferenceAcquisitionPipeline:
                 ),
             },
         )
-        style_artifacts = self._acquire_reviewed_archive_styles(
+        archive_style_artifacts = self._acquire_reviewed_archive_styles(
             candidate,
             downloaded,
         )
-        if not style_artifacts:
+        authored_style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=[dataset],
+        )
+        if archive_style_artifacts or authored_style_artifacts:
+            style_artifacts = [
+                *archive_style_artifacts,
+                *authored_style_artifacts,
+            ]
+            style_keys = [
+                item.metadata.get("catalog_style_source_key")
+                for item in style_artifacts
+                if item.artifact_kind == "style"
+                and item.role == "style"
+            ]
+            if (
+                not style_keys
+                or not all(isinstance(item, str) for item in style_keys)
+                or len(style_keys) != len(set(style_keys))
+            ):
+                raise AcquisitionConfigurationError(
+                    "reviewed archive and authored styles overlap"
+                )
+        else:
             style_artifacts = self._acquire_styles(candidate)
-        if not style_artifacts:
-            style_artifacts = self._author_reviewed_local_style(
-                candidate,
-                dataset_artifacts=[dataset],
-            )
         artifacts = [dataset, *style_artifacts]
         materialization = {
             "kind": "direct-dataset",

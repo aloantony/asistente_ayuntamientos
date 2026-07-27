@@ -35,6 +35,16 @@ from app.reference_layers.idecyl_local_style_evidence import (
     reviewed_idecyl_local_style,
     reviewed_idecyl_local_style_for_source,
 )
+from app.reference_layers.idecyl_population_nitrate_style_evidence import (
+    IDECyLPopulationNitrateStyleEvidenceError,
+    ReviewedIDECyLNitrateStyle,
+    idecyl_nitrate_expected_source_definition,
+    idecyl_population_expected_source_definition,
+    reviewed_idecyl_nitrate_styles,
+    reviewed_idecyl_nitrate_styles_for_source,
+    reviewed_idecyl_population_style_exclusion,
+    reviewed_idecyl_population_style_exclusion_for_source,
+)
 from app.reference_layers.mirror_coverage import (
     SIUR_LAYER_PREFIX,
     SIUR_TILE_BOUNDS,
@@ -152,6 +162,7 @@ class ReviewedLocalStyleRecipe:
         "catastro_parcels",
         "eurostat_grid",
         "flood_polygons",
+        "idecyl_nitrate_year",
         "idecyl_polygon_outline",
         "ines_raster",
     ]
@@ -1034,6 +1045,57 @@ def acquisition_candidates(
                     "reviewed IDECyL candidate is incomplete",
                     code="reviewed_idecyl_evidence_invalid",
                 )
+            try:
+                population_exclusion = (
+                    reviewed_idecyl_population_style_exclusion_for_source(
+                        reviewed_idecyl
+                    )
+                )
+                nitrate_styles = (
+                    reviewed_idecyl_nitrate_styles_for_source(
+                        reviewed_idecyl
+                    )
+                )
+            except IDECyLPopulationNitrateStyleEvidenceError as error:
+                raise SourceDiscoveryError(
+                    "reviewed IDECyL population/nitrate style evidence "
+                    "is invalid",
+                    code="reviewed_idecyl_local_style_evidence_invalid",
+                ) from error
+            if population_exclusion is not None:
+                definition = (
+                    _idecyl_population_exclusion_source_definition(
+                        layer,
+                        population_exclusion,
+                    )
+                )
+                return (
+                    _candidate(
+                        protocol=definition["protocol"],
+                        target_kind=definition["target_kind"],
+                        endpoint_url=definition["endpoint_url"],
+                        remote_name=definition["remote_name"],
+                        sync_strategy=definition["sync_strategy"],
+                        priority=definition["priority"],
+                        config=definition["config"],
+                    ),
+                )
+            if nitrate_styles:
+                definition = _idecyl_nitrate_source_definition(
+                    layer,
+                    nitrate_styles,
+                )
+                return (
+                    _candidate(
+                        protocol=definition["protocol"],
+                        target_kind=definition["target_kind"],
+                        endpoint_url=definition["endpoint_url"],
+                        remote_name=definition["remote_name"],
+                        sync_strategy=definition["sync_strategy"],
+                        priority=definition["priority"],
+                        config=definition["config"],
+                    ),
+                )
             config = deepcopy(reviewed_idecyl.candidate_config)
             if "archive_styles" in config:
                 reviewed_catalog_styles = config.pop(
@@ -1476,6 +1538,124 @@ def _idecyl_local_style_config(
             code="reviewed_idecyl_local_style_identity_invalid",
         )
     return expected
+
+
+def _idecyl_nitrate_source_definition(
+    layer: ReferenceLayerDefinition,
+    reviewed: tuple[ReviewedIDECyLNitrateStyle, ...],
+) -> dict[str, Any]:
+    """Bind fifteen adapted years plus the one exact archive style."""
+
+    if len(reviewed) != 15:
+        raise SourceDiscoveryError(
+            "reviewed IDECyL nitrate styles are incomplete",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    definition = idecyl_nitrate_expected_source_definition(reviewed[0])
+    catalog = definition["config"].get("archive_style_catalog")
+    if not isinstance(catalog, list):
+        raise SourceDiscoveryError(
+            "reviewed IDECyL nitrate catalog is missing",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    expected = {
+        (
+            item["catalog_style_source_key"],
+            item["remote_name"],
+            item["is_default"],
+        )
+        for item in catalog
+    }
+    actual_styles = [
+        style
+        for style in layer.styles
+        if style.status in {"active", "degraded"}
+    ]
+    actual = {
+        (style.source_key, style.remote_name, style.is_default)
+        for style in actual_styles
+    }
+    expected_titles = {
+        item.catalog_style_source_key: item.style_title
+        for item in reviewed
+    }
+    expected_titles["coad_cyl_nitrat_aguas_subterr_2021"] = (
+        "Recintos municipales 2021 paleta color"
+    )
+    if (
+        len(layer.styles) != 16
+        or len(actual_styles) != 16
+        or len(actual) != 16
+        or actual != expected
+        or {
+            style.source_key: style.title
+            for style in actual_styles
+        }
+        != expected_titles
+        or layer.style_name
+        != "coad_cyl_nitrat_aguas_subterr_2021"
+    ):
+        raise SourceDiscoveryError(
+            "catalog IDECyL nitrate styles differ from reviewed evidence",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    return definition
+
+
+def _idecyl_population_exclusion_source_definition(
+    layer: ReferenceLayerDefinition,
+    exclusion: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the catalog styles which lack safe local render evidence."""
+
+    definition = idecyl_population_expected_source_definition(exclusion)
+    catalog = exclusion.get("catalog_styles")
+    if not isinstance(catalog, list):
+        raise SourceDiscoveryError(
+            "reviewed IDECyL population exclusion catalog is missing",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    expected = {
+        (
+            item["catalog_style_source_key"],
+            item["remote_name"],
+            item["title"],
+            item["is_default"],
+        )
+        for item in catalog
+    }
+    actual_styles = [
+        style
+        for style in layer.styles
+        if style.status in {"active", "degraded"}
+    ]
+    actual = {
+        (
+            style.source_key,
+            style.remote_name,
+            style.title,
+            style.is_default,
+        )
+        for style in actual_styles
+    }
+    default = next(
+        item["catalog_style_source_key"]
+        for item in catalog
+        if item["is_default"] is True
+    )
+    if (
+        exclusion.get("local_service_eligible") is not False
+        or len(layer.styles) != len(catalog)
+        or len(actual_styles) != len(catalog)
+        or len(actual) != len(catalog)
+        or actual != expected
+        or layer.style_name != default
+    ):
+        raise SourceDiscoveryError(
+            "catalog IDECyL population styles differ from their exclusion",
+            code="reviewed_idecyl_local_style_identity_invalid",
+        )
+    return definition
 
 
 def _reviewed_dataset_source(
@@ -1971,6 +2151,38 @@ def reviewed_local_style_profile_identity(
 ) -> tuple[str, str, str, str, str, str] | None:
     """Return the immutable style identity for an allowlisted recipe."""
 
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        matching = [
+            item
+            for item in nitrate
+            if catalog_style_source_key is None
+            or item.catalog_style_source_key
+            == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        item = matching[0]
+        definition = idecyl_nitrate_expected_source_definition(item)
+        reviewed_equivalence = definition["config"][
+            "reviewed_equivalence"
+        ]
+        return (
+            item.style_kind,
+            item.catalog_style_source_key,
+            item.remote_style_name,
+            item.catalog_remote_name,
+            item.selected_layer_name,
+            hashlib.sha256(
+                json.dumps(
+                    reviewed_equivalence,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
     idecyl = reviewed_idecyl_local_style(profile)
     if idecyl is not None:
         if (
@@ -2047,6 +2259,18 @@ def reviewed_local_style_profile_reference(
 ) -> dict[str, Any] | None:
     """Return the exact official reference accepted for persisted evidence."""
 
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        matching = [
+            item
+            for item in nitrate
+            if catalog_style_source_key is None
+            or item.catalog_style_source_key
+            == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        return deepcopy(matching[0].evidence)
     idecyl = reviewed_idecyl_local_style(profile)
     if idecyl is not None:
         if (
@@ -2083,6 +2307,26 @@ def reviewed_local_style_expected_source_definition(
 ) -> tuple[dict[str, Any], str] | None:
     """Return the exact full source definition for an IDECyL adaptation."""
 
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        matching = [
+            item
+            for item in nitrate
+            if item.catalog_style_source_key == catalog_style_source_key
+        ]
+        if len(matching) != 1:
+            return None
+        definition = idecyl_nitrate_expected_source_definition(matching[0])
+        digest = hashlib.sha256(
+            json.dumps(
+                definition,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return deepcopy(definition), digest
     reviewed = reviewed_idecyl_local_style(profile)
     if (
         reviewed is None
@@ -2216,6 +2460,84 @@ def _reviewed_idecyl_local_style_recipes(
         raise SourceDiscoveryError(
             "reviewed IDECyL local-style profile is invalid",
             code="reviewed_local_style_invalid",
+        )
+    population_exclusion = (
+        reviewed_idecyl_population_style_exclusion(profile)
+    )
+    if population_exclusion is not None:
+        expected_definition = (
+            idecyl_population_expected_source_definition(
+                population_exclusion
+            )
+        )
+        expected = _candidate(
+            protocol=expected_definition["protocol"],
+            target_kind=expected_definition["target_kind"],
+            endpoint_url=expected_definition["endpoint_url"],
+            remote_name=expected_definition["remote_name"],
+            sync_strategy=expected_definition["sync_strategy"],
+            priority=expected_definition["priority"],
+            config=deepcopy(expected_definition["config"]),
+        )
+        if candidate != expected:
+            raise SourceDiscoveryError(
+                "reviewed IDECyL population exclusion changed",
+                code="reviewed_local_style_invalid",
+            )
+        return ()
+    nitrate = reviewed_idecyl_nitrate_styles(profile)
+    if nitrate:
+        expected_definition = idecyl_nitrate_expected_source_definition(
+            nitrate[0]
+        )
+        expected = _candidate(
+            protocol=expected_definition["protocol"],
+            target_kind=expected_definition["target_kind"],
+            endpoint_url=expected_definition["endpoint_url"],
+            remote_name=expected_definition["remote_name"],
+            sync_strategy=expected_definition["sync_strategy"],
+            priority=expected_definition["priority"],
+            config=deepcopy(expected_definition["config"]),
+        )
+        if candidate != expected:
+            raise SourceDiscoveryError(
+                "reviewed IDECyL nitrate styles do not match their source",
+                code="reviewed_local_style_invalid",
+            )
+        reviewed_equivalence = expected_definition["config"][
+            "reviewed_equivalence"
+        ]
+        reviewed_equivalence_sha256 = hashlib.sha256(
+            json.dumps(
+                reviewed_equivalence,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return tuple(
+            ReviewedLocalStyleRecipe(
+                schema=_REVIEWED_LOCAL_STYLE_SCHEMA,
+                profile=item.profile,
+                style_kind="idecyl_nitrate_year",
+                catalog_style_source_key=(
+                    item.catalog_style_source_key
+                ),
+                remote_style_name=item.remote_style_name,
+                catalog_layer_name=item.catalog_remote_name,
+                selected_layer_name=item.selected_layer_name,
+                reviewed_equivalence=deepcopy(reviewed_equivalence),
+                reviewed_equivalence_sha256=(
+                    reviewed_equivalence_sha256
+                ),
+                style_reference=deepcopy(item.evidence),
+                audit_layer_id=item.audit_layer_id,
+                catalog_style_is_default=item.is_default,
+                source_definition=candidate_definition(expected),
+                source_definition_sha256=expected.definition_sha256,
+            )
+            for item in nitrate
         )
     reviewed = reviewed_idecyl_local_style(profile)
     if reviewed is None:

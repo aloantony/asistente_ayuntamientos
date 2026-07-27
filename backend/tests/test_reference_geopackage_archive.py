@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
+import io
 import json
 from pathlib import Path
 import sqlite3
@@ -19,6 +20,7 @@ from app.reference_layers.geopackage_archive import (
     inspect_geopackage_zip,
 )
 from app.reference_layers.acquisition import (
+    AcquiredArtifact,
     AcquisitionConfigurationError,
     AcquisitionLimits,
     AcquisitionValidationError,
@@ -489,6 +491,180 @@ def test_acquisition_persists_exact_archive_parity_and_sld(
         inspection["archive_sha256"]
     )
     assert acquired_style.metadata["parity_kind"] == "exact"
+
+
+def test_acquisition_combines_exact_archive_and_authored_local_styles(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _archive(tmp_path)
+    style = _sld()
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("reviewed.sld", style)
+    inspection = inspect_geopackage_zip(
+        path,
+        expected_member="dataset/reviewed.gpkg",
+        expected_layer="reviewed",
+        maximum_uncompressed_bytes=2 * 1024 * 1024,
+    )
+    config = {
+        "media_type": "application/zip",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        "archive_styles": [
+            {
+                "catalog_style_source_key": "reviewed_style",
+                "remote_name": "reviewed_style",
+                "archive_member": "reviewed.sld",
+                "sha256": hashlib.sha256(style).hexdigest(),
+            }
+        ],
+        **_parity_config(inspection),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    authored_blob = store.put_stream(
+        io.BytesIO(b"authored local style")
+    )
+
+    def authored(_self, _candidate, *, dataset_artifacts):
+        assert len(dataset_artifacts) == 1
+        return [
+            AcquiredArtifact(
+                artifact_kind="style",
+                role="style",
+                media_type="application/vnd.ogc.sld+xml",
+                blob=authored_blob,
+                metadata={
+                    "catalog_style_source_key": "historical_style",
+                    "remote_name": "historical_style",
+                    "parity_kind": "adapted",
+                },
+            )
+        ]
+
+    monkeypatch.setattr(
+        ReferenceAcquisitionPipeline,
+        "_author_reviewed_local_style",
+        authored,
+    )
+    try:
+        result = ReferenceAcquisitionPipeline(
+            store,
+            limits=AcquisitionLimits(
+                max_probe_bytes=256 * 1024,
+                max_page_bytes=512 * 1024,
+                max_dataset_bytes=2 * 1024 * 1024,
+                max_total_bytes=4 * 1024 * 1024,
+                page_size=100,
+                max_pages=2,
+                max_features=100,
+                timeout_seconds=10,
+                idle_timeout_seconds=2,
+            ),
+            downloader_factory=_Download(path.read_bytes()),
+        ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+    styles = [
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "style" and item.role == "style"
+    ]
+    assert {
+        item.metadata["catalog_style_source_key"] for item in styles
+    } == {"reviewed_style", "historical_style"}
+    assert {
+        item.metadata["parity_kind"] for item in styles
+    } == {"exact", "adapted"}
+
+
+def test_exact_style_member_allows_same_schema_dataset_updates_without_zip_pin(
+    tmp_path,
+) -> None:
+    original = _archive(tmp_path)
+    style = _sld_with_identity(
+        layer_name="reviewed",
+        style_name="reviewed_style",
+    )
+    with zipfile.ZipFile(original, "a") as archive:
+        archive.writestr("reviewed.sld", style)
+    archive_style = _exact_archive_style(
+        original,
+        member="reviewed.sld",
+    )
+    original_sha256 = hashlib.sha256(original.read_bytes()).hexdigest()
+
+    package = tmp_path / "source.gpkg"
+    with sqlite3.connect(package) as connection:
+        connection.execute(
+            "UPDATE reviewed SET label = ? WHERE id = 1",
+            ("updated-feature",),
+        )
+    updated = tmp_path / "updated.zip"
+    with zipfile.ZipFile(
+        updated,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.write(package, "dataset/reviewed.gpkg")
+        archive.writestr("README.txt", "updated official dataset")
+        archive.writestr("reviewed.sld", style)
+    updated_sha256 = hashlib.sha256(updated.read_bytes()).hexdigest()
+    assert updated_sha256 != original_sha256
+    license_body = b"updated official dataset"
+
+    config = {
+        "media_type": "application/x-zip-compressed",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        "archive_styles": [archive_style],
+        **_reviewed_archive_config(
+            required_members=[
+                "README.txt",
+                "dataset/reviewed.gpkg",
+            ],
+            license_member="README.txt",
+            license_sha256=hashlib.sha256(license_body).hexdigest(),
+        ),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        result = ReferenceAcquisitionPipeline(
+            store,
+            limits=AcquisitionLimits(
+                max_probe_bytes=256 * 1024,
+                max_page_bytes=512 * 1024,
+                max_dataset_bytes=2 * 1024 * 1024,
+                max_total_bytes=4 * 1024 * 1024,
+                page_size=100,
+                max_pages=2,
+                max_features=100,
+                timeout_seconds=10,
+                idle_timeout_seconds=2,
+            ),
+            downloader_factory=_Download(
+                updated.read_bytes(),
+                content_type="application/x-zip-compressed",
+                last_modified="Mon, 27 Jul 2026 09:00:00 GMT",
+            ),
+        ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+    dataset = next(item for item in result.artifacts if item.role == "input")
+    acquired_style = next(
+        item for item in result.artifacts if item.role == "style"
+    )
+    assert dataset.blob.sha256 == updated_sha256
+    assert acquired_style.metadata["archive_member_sha256"] == (
+        archive_style["sha256"]
+    )
+    assert acquired_style.metadata["parent_sha256"] == updated_sha256
 
 
 def test_acquisition_binds_enriched_archive_style_member_and_sld_identity(

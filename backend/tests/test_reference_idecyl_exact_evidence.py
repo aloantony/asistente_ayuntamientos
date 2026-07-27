@@ -33,6 +33,10 @@ from app.reference_layers.idecyl_exact_evidence import (
     idecyl_exact_source_inventory,
     reviewed_idecyl_exact_source,
 )
+from app.reference_layers.idecyl_population_nitrate_style_evidence import (
+    idecyl_nitrate_style_inventory,
+    idecyl_population_style_exclusion,
+)
 from app.reference_layers.source_content_parity import (
     configured_parity_spec,
 )
@@ -118,7 +122,7 @@ WFS_CANDIDATE_IDS = {
     281,
 }
 COMPLETE_ARCHIVE_STYLE_IDS = {98, 137, 151, 197, 213, 225, 230}
-PARTIAL_ARCHIVE_STYLE_IDS = {268}
+MIXED_EXACT_ADAPTED_STYLE_IDS = {268}
 
 
 def _resource_body(resource_path: str) -> bytes:
@@ -201,9 +205,21 @@ def _layer_with_reviewed_archive_styles(
         with_cami_style=reviewed.audit_layer_id == 86,
     )
     style_evidence = reviewed.evidence.get("archive_style_evidence")
-    if not isinstance(style_evidence, dict):
+    if reviewed.audit_layer_id == 237:
+        catalog_styles = idecyl_population_style_exclusion()[
+            "catalog_styles"
+        ]
+    elif isinstance(style_evidence, dict):
+        catalog_styles = style_evidence["catalog_styles"]
+    else:
         return base
-    catalog_styles = style_evidence["catalog_styles"]
+    nitrate_titles = {
+        item.catalog_style_source_key: item.style_title
+        for item in idecyl_nitrate_style_inventory()
+    }
+    nitrate_titles["coad_cyl_nitrat_aguas_subterr_2021"] = (
+        "Recintos municipales 2021 paleta color"
+    )
     default = next(
         item for item in catalog_styles if item["is_default"] is True
     )
@@ -213,7 +229,13 @@ def _layer_with_reviewed_archive_styles(
         styles=tuple(
             ReferenceLayerStyleDefinition(
                 source_key=item["catalog_style_source_key"],
-                title=item["remote_name"],
+                title=item.get(
+                    "title",
+                    nitrate_titles.get(
+                        item["catalog_style_source_key"],
+                        item["remote_name"],
+                    ),
+                ),
                 remote_name=item["remote_name"],
                 sort_order=index,
                 is_default=item["is_default"],
@@ -419,7 +441,15 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         assert candidate.remote_name == reviewed.catalog_remote_name
         assert candidate.config["archive_member"]
         assert candidate.config["input_layer"]
-        if layer_id in COMPLETE_ARCHIVE_STYLE_IDS:
+        if layer_id in MIXED_EXACT_ADAPTED_STYLE_IDS:
+            assert len(candidate.config["archive_styles"]) == 1
+            assert len(candidate.config["reviewed_local_styles"]) == 15
+            assert len(candidate.config["archive_style_catalog"]) == 16
+            assert (
+                "archive_style_archive_sha256"
+                not in candidate.config
+            )
+        elif layer_id in COMPLETE_ARCHIVE_STYLE_IDS:
             assert len(candidate.config["archive_styles"]) == 1
             assert len(
                 candidate.config["archive_style_archive_sha256"]
@@ -449,6 +479,17 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
             }
         else:
             assert "reviewed_local_style" not in candidate.config
+        if layer_id == 237:
+            exclusion = candidate.config[
+                "reviewed_local_style_exclusion"
+            ]
+            assert exclusion["local_service_eligible"] is False
+            assert exclusion["catalog_style_count"] == 6
+        else:
+            assert (
+                "reviewed_local_style_exclusion"
+                not in candidate.config
+            )
         integrity = configured_reviewed_archive_integrity(
             candidate.config
         )
