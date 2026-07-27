@@ -319,7 +319,6 @@ def make_sources(tmp_path: Path) -> tuple[Path, Path]:
         "<global-configuration/>",
         encoding="utf-8",
     )
-    (geoserver / "gwc-cache").mkdir()
     return reference, geoserver
 
 
@@ -464,6 +463,8 @@ def downgrade_geowebcache_contract(
     geowebcache.pop("configuration_directory")
     geowebcache.pop("volume")
     geowebcache.pop("blob_store")
+    geoserver_tree = manifest["trees"]["geoserver_data"]  # type: ignore[index]
+    geoserver_tree["excluded_paths"] = ["gwc-cache"]
 
 
 def downgrade_backup_to_schema_v2(backup: Path) -> None:
@@ -616,9 +617,7 @@ def test_create_defaults_to_read_only_dry_run_and_inventories_exclusions(
         ".reference-blob-store.lock",
         "staging",
     ]
-    assert result["geoserver_data"]["excluded_paths"] == [  # type: ignore[index]
-        "gwc-cache"
-    ]
+    assert result["geoserver_data"]["excluded_paths"] == []  # type: ignore[index]
     assert {  # type: ignore[index]
         item["component"]
         for item in result["excluded_reconstructible_state"]
@@ -701,9 +700,7 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         "owners_must_differ_from_restore_role": True,
         "restore_comments": False,
     }
-    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == [
-        "gwc-cache"
-    ]
+    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == []
     evidence = (backup / QUIESCENCE_EVIDENCE_NAME).read_bytes()
     assert evidence == (
         tmp_path / "quiescence.json"
@@ -806,6 +803,7 @@ def test_declared_exclusions_verify_even_when_runtime_paths_are_absent(
         ".reference-blob-store.lock",
         "staging",
     ]
+    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == []
 
 
 def test_verify_detects_payload_tampering(
@@ -1249,6 +1247,7 @@ def test_create_rejects_nonempty_legacy_geowebcache_mountpoint(
     tmp_path: Path,
 ) -> None:
     reference, geoserver = make_sources(tmp_path)
+    (geoserver / "gwc-cache").mkdir()
     (geoserver / "gwc-cache" / "geowebcache.xml").write_text(
         "<legacy-mixed-volume/>",
         encoding="utf-8",
@@ -1262,9 +1261,36 @@ def test_create_rejects_nonempty_legacy_geowebcache_mountpoint(
 
     with pytest.raises(
         DisasterRecoverySafetyError,
-        match="legacy configuration or cache data",
+        match="configuration or cache data",
     ):
         create_backup(request, now=NOW)
+
+
+def test_schema_v5_includes_but_does_not_require_empty_legacy_placeholder(
+    tmp_path: Path,
+) -> None:
+    reference, geoserver = make_sources(tmp_path)
+    (geoserver / "gwc-cache").mkdir()
+    request = create_request(
+        tmp_path,
+        reference=reference,
+        geoserver=geoserver,
+        with_evidence=True,
+    )
+    runner = FakePostgresRunner()
+
+    create_backup(request, apply=True, runner=runner, now=NOW)
+    manifest = json.loads(
+        (request.destination / "manifest.json").read_text(encoding="ascii")
+    )
+    geoserver_tree = manifest["trees"]["geoserver_data"]
+
+    assert geoserver_tree["excluded_paths"] == []
+    assert any(
+        entry["path"] == "gwc-cache" and entry["kind"] == "directory"
+        for entry in geoserver_tree["entries"]
+    )
+    assert verify_backup(request.destination, runner=runner)["verified"] is True
 
 
 def test_create_rejects_special_permission_bits_on_tree_root(
@@ -2017,6 +2043,52 @@ def test_restore_apply_extracts_only_to_new_drill_path_and_empty_database(
     )
     assert "WITH RECURSIVE extension_objects" in preflight_sql
     assert "d.deptype IN ('a', 'i')" in preflight_sql
+
+
+def test_schema_v5_backup_restore_backup_round_trip_needs_no_gwc_placeholder(
+    tmp_path: Path,
+) -> None:
+    backup, _create_runner, _reference, _geoserver = completed_backup(tmp_path)
+    restore = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name="app_drill_round_trip",
+        destination_name=f"{RESTORE_PREFIX}round-trip",
+    )
+    restore_runner = FakePostgresRunner()
+    restore_backup(restore, apply=True, runner=restore_runner, now=NOW)
+    restored_reference = restore.destination / "reference_artifacts"
+    restored_geoserver = restore.destination / "geoserver_data"
+    assert not (restored_geoserver / "gwc-cache").exists()
+
+    second_backup = tmp_path / f"{BACKUP_PREFIX}round-trip"
+    second_evidence = evidence_file(
+        tmp_path,
+        reference=restored_reference,
+        geoserver=restored_geoserver,
+    )
+    second_request = CreateBackupRequest(
+        destination=second_backup,
+        reference_artifacts_source=restored_reference,
+        geoserver_data_source=restored_geoserver,
+        database_url_file=private_database_file(
+            tmp_path,
+            name="app",
+            password=SOURCE_SECRET,
+        ),
+        quiescence_evidence=second_evidence,
+    )
+    second_runner = FakePostgresRunner()
+
+    create_backup(second_request, apply=True, runner=second_runner, now=NOW)
+    report = verify_backup(second_backup, runner=second_runner)
+    manifest = json.loads(
+        (second_backup / "manifest.json").read_text(encoding="ascii")
+    )
+
+    assert report["verified"] is True
+    assert manifest["schema_version"] == 5
+    assert manifest["trees"]["geoserver_data"]["excluded_paths"] == []
 
 
 def test_subprocess_runner_passes_verified_descriptor_without_leaking_marker(

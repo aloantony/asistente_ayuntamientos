@@ -414,16 +414,18 @@ def create_backup(
             {"staging", ".reference-blob-store.lock"}
         ),
     )
-    # The actual tile volume is a distinct versioned Docker volume and is not
-    # mounted in the recovery container.  The directory visible through the
-    # parent GeoServer data volume must therefore be an empty mountpoint.  Any
-    # content here could be configuration left by the former mixed gwc volume.
-    _assert_empty_geowebcache_placeholder(
+    # Schema v5 has no tile-cache exclusion inside geoserver_data.  A legacy
+    # placeholder may remain in an upgraded parent volume, but it is ordinary
+    # included state and is accepted only while empty.
+    _assert_optional_empty_geowebcache_placeholder(
         geoserver_source / "gwc-cache",
     )
     geoserver_inventory = _inventory_tree(
         geoserver_source,
-        excluded_roots=frozenset({"gwc-cache"}),
+        excluded_roots=frozenset(),
+    )
+    _assert_inventory_optional_empty_geowebcache_placeholder(
+        geoserver_inventory,
     )
 
     plan = {
@@ -512,12 +514,15 @@ def create_backup(
                 {"staging", ".reference-blob-store.lock"}
             ),
         )
-        _assert_empty_geowebcache_placeholder(
+        _assert_optional_empty_geowebcache_placeholder(
             geoserver_source / "gwc-cache",
         )
         geoserver_after = _inventory_tree(
             geoserver_source,
-            excluded_roots=frozenset({"gwc-cache"}),
+            excluded_roots=frozenset(),
+        )
+        _assert_inventory_optional_empty_geowebcache_placeholder(
+            geoserver_after,
         )
         if (
             reference_inventory != reference_after
@@ -725,6 +730,11 @@ def _open_verified_backup(
         )
 
         verified_trees: dict[str, dict[str, int]] = {}
+        geoserver_exclusions = (
+            []
+            if manifest_schema_version >= GWC_FILE_BLOB_STORE_SCHEMA_VERSION
+            else ["gwc-cache"]
+        )
         for name, description, expected_archive, expected_exclusions in (
             (
                 "reference_artifacts",
@@ -736,7 +746,7 @@ def _open_verified_backup(
                 "geoserver_data",
                 geoserver,
                 "geoserver_data.tar",
-                ["gwc-cache"],
+                geoserver_exclusions,
             ),
         ):
             archive_description = _mapping_member(description, "archive")
@@ -1891,8 +1901,8 @@ def _inventory_tree(
         os.close(root_descriptor)
 
 
-def _assert_empty_geowebcache_placeholder(path: Path) -> None:
-    """Require the parent-volume view of the external tile mount to be empty."""
+def _assert_optional_empty_geowebcache_placeholder(path: Path) -> None:
+    """Accept an absent legacy placeholder, or prove an existing one empty."""
 
     parent = _existing_directory(
         path.parent,
@@ -1911,10 +1921,11 @@ def _assert_empty_geowebcache_placeholder(path: Path) -> None:
                 directory_flags,
                 dir_fd=parent_descriptor,
             )
+        except FileNotFoundError:
+            return
         except OSError as error:
             raise DisasterRecoverySafetyError(
-                "GeoWebCache tile mountpoint must exist in the GeoServer "
-                "parent volume"
+                "legacy GeoWebCache placeholder cannot be inspected safely"
             ) from error
         try:
             parent_metadata = os.fstat(parent_descriptor)
@@ -1924,15 +1935,14 @@ def _assert_empty_geowebcache_placeholder(path: Path) -> None:
                 or before.st_dev != parent_metadata.st_dev
             ):
                 raise DisasterRecoverySafetyError(
-                    "GeoWebCache tile data must not be mounted or copied into "
-                    "the recovery source"
+                    "legacy GeoWebCache placeholder must be an unmounted "
+                    "directory"
                 )
             with os.scandir(descriptor) as iterator:
                 if next(iterator, None) is not None:
                     raise DisasterRecoverySafetyError(
-                        "GeoWebCache tile mountpoint in the parent volume is "
-                        "not empty; legacy configuration or cache data may be "
-                        "present"
+                        "legacy GeoWebCache placeholder is not empty; "
+                        "configuration or cache data may be present"
                     )
             after = os.fstat(descriptor)
             _assert_same_node(before, after, kind="directory")
@@ -1940,11 +1950,36 @@ def _assert_empty_geowebcache_placeholder(path: Path) -> None:
             os.close(descriptor)
     except OSError as error:
         raise DisasterRecoverySafetyError(
-            "GeoWebCache tile mountpoint cannot be inspected safely"
+            "legacy GeoWebCache placeholder cannot be inspected safely"
         ) from error
     finally:
         if "parent_descriptor" in locals():
             os.close(parent_descriptor)
+
+
+def _assert_inventory_optional_empty_geowebcache_placeholder(
+    inventory: _TreeInventory,
+) -> None:
+    placeholder_entries = tuple(
+        entry
+        for entry in inventory.entries
+        if (
+            entry.path == "gwc-cache"
+            or entry.path.startswith("gwc-cache/")
+        )
+    )
+    if not placeholder_entries:
+        return
+    if (
+        len(placeholder_entries) != 1
+        or placeholder_entries[0].path != "gwc-cache"
+        or placeholder_entries[0].kind != "directory"
+        or placeholder_entries[0].device != inventory.source_device
+    ):
+        raise DisasterRecoverySafetyError(
+            "legacy GeoWebCache placeholder must be an empty unmounted "
+            "directory"
+        )
 
 
 def _validate_source_metadata(

@@ -727,6 +727,81 @@ def test_geowebcache_tile_blob_store_fails_before_put_on_mismatch() -> None:
     assert [request[0] for request in all_requests(factory)] == ["GET", "GET"]
 
 
+def test_geowebcache_tile_blob_store_migrates_only_block_size_when_allowed(
+) -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(file_blob_store_xml(block_size=4096)),
+            status_response(200),
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(file_blob_store_xml(block_size=8192)),
+        ]
+    )
+
+    store = client.ensure_geowebcache_tile_blob_store(
+        file_system_block_size=8192,
+        allow_file_system_block_size_migration=True,
+    )
+
+    assert store.file_system_block_size == 8192
+    requests = all_requests(factory)
+    assert [request[0] for request in requests] == [
+        "GET",
+        "GET",
+        "PUT",
+        "GET",
+        "GET",
+    ]
+    root = ElementTree.fromstring(requests[2][2] or b"")
+    assert root.findtext("fileSystemBlockSize") == "8192"
+
+
+def test_geowebcache_tile_blob_store_never_migrates_block_size_implicitly(
+) -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(file_blob_store_xml(block_size=4096)),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerAdminConflictError,
+        match="blob store differs",
+    ):
+        client.ensure_geowebcache_tile_blob_store(
+            file_system_block_size=8192,
+        )
+
+    assert [request[0] for request in all_requests(factory)] == ["GET", "GET"]
+
+
+def test_geowebcache_block_size_migration_never_weakens_other_fields() -> None:
+    client, factory = make_client(
+        [
+            xml_response(blob_store_list_xml(GEOWEBCACHE_TILE_BLOB_STORE_ID)),
+            xml_response(
+                file_blob_store_xml(
+                    block_size=4096,
+                    base_directory="/wrong/cache",
+                )
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerAdminConflictError,
+        match="blob store differs",
+    ):
+        client.ensure_geowebcache_tile_blob_store(
+            file_system_block_size=8192,
+            allow_file_system_block_size_migration=True,
+        )
+
+    assert [request[0] for request in all_requests(factory)] == ["GET", "GET"]
+
+
 def test_geowebcache_tile_blob_store_fails_on_configured_default() -> None:
     legacy_id = "defaultCache"
     client, factory = make_client(

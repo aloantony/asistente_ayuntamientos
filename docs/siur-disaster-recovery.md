@@ -4,9 +4,9 @@ Este runbook cubre el estado no reconstruible del espejo local:
 
 - el dump lógico de PostgreSQL;
 - `reference_artifacts`, salvo parciales de `staging` y su lock;
-- el directorio de datos de GeoServer completo; el placeholder histórico
-  `gwc-cache` se exige vacío y se excluye por compatibilidad con backups
-  anteriores.
+- el directorio de datos de GeoServer completo. Schema 5 no excluye ni exige
+  el placeholder histórico `gwc-cache`: si aún existe debe estar vacío y se
+  respalda como un directorio ordinario.
 
 Redis y las teselas de GeoWebCache **no** son fuentes de verdad. La cola se
 reconstruye desde el estado durable de PostgreSQL al reiniciar scheduler y
@@ -35,6 +35,15 @@ FileBlobStore `siur-tile-cache-v3` y su directorio de teselas
 `/var/lib/geowebcache`. También fija `default=true`, `enabled=true` y layout
 `DEFAULT`; el tamaño de bloque se vuelve a medir en el filesystem destino
 porque el volumen de teselas no forma parte del backup.
+
+La definición restaurada puede contener el tamaño de bloque del filesystem de
+origen. Antes de abrir el gateway, `gwc-bootstrap` permite cambiar **solo** ese
+campo cuando el identificador, ruta, estado, default y layout siguen siendo
+exactos y dos inventarios estables prueban que el volumen de teselas destino
+está vacío. Relee después el XML y deja en su JSON
+`block_size_migration_required`, `block_size_migration_permitted` y
+`block_size_migrated`. Con una sola tesela, otro campo distinto o un blobstore
+adicional, aborta sin migrar.
 
 Compose usa ahora el volumen de teselas versionado
 `geowebcache_tile_cache_v3` con `nocopy`. Los anteriores
@@ -139,21 +148,31 @@ GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS
 GEOWEBCACHE_DISK_QUOTA_POLICY
 ```
 
-El grafo de arranque ordinario de Compose interpone el servicio de una sola
-ejecución `gwc-bootstrap`. `backend`, `worker`, `reference-worker` y
-`reference-scheduler` dependen de que termine correctamente; `frontend` queda
-gated a través de `backend`. El bootstrap recibe solo credenciales
-administrativas de GeoServer y variables de cuota, mide el volumen v3, aplica
-el contrato y lo vuelve a leer. Reintenta únicamente indisponibilidad de red
-durante un máximo de 180 segundos. Credenciales incorrectas, capacidad
-insuficiente, XML inválido, un blobstore inesperado o una relectura distinta
-fallan inmediatamente y bloquean los consumidores.
+GeoServer ya no publica ningún puerto del host. `geoserver-network`, un
+contenedor sin secretos, solo reserva el namespace de red y mapea
+`127.0.0.1:${GEOSERVER_PORT}` al puerto 8081 de `gwc-gateway`; el Tomcat de
+GeoServer escucha únicamente en el 8080 no publicado de ese namespace.
+`gwc-bootstrap` entra por ese loopback privado, mide v3, aplica el contrato y
+lo relee antes de que arranque el gateway. Reintenta únicamente
+indisponibilidad de red durante un máximo de 180 segundos.
 
-Arrancar `geoserver` solo es una operación diagnóstica y no autoriza tráfico.
-Para el ciclo completo debe usarse Compose con los consumidores anteriores,
-sin omitir ni sustituir `gwc-bootstrap`. El dry-run operativo sigue disponible
-para inspección y evidencia; lee por REST todos los blobstores y la cuota y
-mide el filesystem real de v3:
+El one-shot no es la autorización permanente. Antes de **cada** petición WMS,
+REST o de publicación, `gwc-gateway` consulta de nuevo la salud de GeoServer,
+el único FileBlobStore completo, el block-size del mount y la cuota. Solo
+entonces reenvía al 8080 fijo. Una credencial incorrecta, reinicio, XML/JSON
+inválido, store extra o diferencia de contrato devuelve 503 y no llega a
+GeoServer. El gateway tampoco permite mutar blobstores o cuota por su puerto;
+esas escrituras solo existen en el camino privado del bootstrap. Sus únicas
+variables sensibles son las credenciales administrativas de GeoServer.
+
+`backend`, `worker`, `reference-worker` y `reference-scheduler` dependen de
+`gwc-gateway` sano; `frontend` queda condicionado a través de `backend`. Aun
+después del arranque, si el healthcheck se vuelve rojo los servicios pueden
+seguir vivos, pero toda entrega o publicación GeoServer continúa bloqueada por
+la validación por petición. Arrancar `geoserver` solo es diagnóstico: no abre
+ningún puerto utilizable. El dry-run operativo sigue disponible con el
+namespace ya arrancado; lee por REST todos los blobstores y la cuota y mide el
+filesystem real de v3:
 
 ```bash
 docker compose --profile operations run --rm -T --no-deps gwc-ops
@@ -192,10 +211,11 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops \
 ```
 
 En `--apply`, el cliente primero lista y lee por XML todos los blobstores. Si el
-identificador reservado ya existe con otra ruta, tamaño de bloque, estado o
-layout, o si existe **cualquier** otro blobstore —aunque no sea el
-predeterminado—, aborta sin mutar. Si falta y la lista está vacía, hace el
-`PUT` XML oficial a
+identificador reservado ya existe con otra ruta, estado o layout, o si existe
+**cualquier** otro blobstore —aunque no sea el predeterminado—, aborta sin
+mutar. Una diferencia exclusiva de block-size usa la migración vacía y
+auditada descrita arriba; con datos aborta. Si falta y la lista está vacía,
+hace el `PUT` XML oficial a
 `/geoserver/gwc/rest/blobstores/siur-tile-cache-v3.xml`, vuelve a listar y
 releer la representación canónica completa y solo entonces configura la cuota.
 El default anónimo que GeoWebCache genera cuando no hay ninguno configurado no
@@ -214,6 +234,29 @@ Repetir el dry-run y archivar su JSON como evidencia. Después de una
 restauración, ejecutar otra vez este bloque. Solo el volumen v3 de teselas se
 reconstruye; toda la configuración GWC se restaura con el data dir.
 
+### Fallo o reinicio del gate
+
+- Si GeoServer se detiene o reinicia, el puerto host sigue perteneciendo al
+  gateway: durante la caída devuelve 503 y, al volver, no reabre hasta
+  revalidar el contrato actual.
+- Si `gwc-gateway` o `geoserver-network` se detiene, el puerto queda cerrado;
+  no existe fallback directo al 8080.
+- Tras restaurar o cambiar GeoServer, rehacer explícitamente el one-shot y el
+  gateway:
+
+  ```bash
+  docker compose up -d --force-recreate gwc-bootstrap gwc-gateway
+  docker compose up -d \
+    reference-scheduler reference-worker worker backend frontend
+  ```
+
+- Si bootstrap falla, conservar su JSON/traza y el volumen. No vaciarlo,
+  eliminar stores ni reducir cuota para forzar el arranque. Un block-size
+  distinto solo se reconcilia automáticamente con volumen demostrado vacío.
+- Acciones directas con `docker restart` no aplican la cadena declarativa de
+  Compose. Recuperar siempre con `docker compose up`, que vuelve a evaluar
+  dependencias y healthchecks.
+
 ### Migración desde v2 y rollback
 
 1. Adquirir el lease del runtime y detener escritores, frontend/backend y
@@ -223,11 +266,12 @@ reconstruye; toda la configuración GWC se restaura con el data dir.
 3. Desplegar Compose: `GEOWEBCACHE_CACHE_DIR` debe resolver a
    `/opt/geoserver_data/gwc`; solo v3 debe estar montado en
    `/var/lib/geowebcache`. No montar v2 y v3 simultáneamente.
-4. Arrancar GeoServer sin admitir tráfico, ejecutar primero el dry-run y
-   después iniciar explícitamente `gwc-bootstrap`. No iniciar los consumidores
-   hasta que termine con código cero. Archivar el JSON con
+4. Arrancar el namespace y GeoServer sin gateway, ejecutar primero el dry-run
+   y después iniciar explícitamente `gwc-bootstrap`. No iniciar el gateway ni
+   los consumidores hasta que termine con código cero. Archivar el JSON con
    `blob_store.verified=true`, `disk_quota.verified=true` y `verified=true`.
-5. Generar una tesela de prueba y demostrar que aparece únicamente en v3; no
+5. Iniciar `gwc-gateway`, esperar a que esté sano y generar una tesela de
+   prueba. Demostrar que aparece únicamente en v3; no
    promover el despliegue si `geowebcache.xml`, `gwc-gs.xml`, `gwc-layers` o
    metadatos de configuración aparecen en ese volumen.
 
@@ -392,12 +436,16 @@ la identidad PostgreSQL, versiones requeridas de extensiones, `ctime`, número
 de enlaces e inventario canónico hashado de miembros, declaran el contrato
 exacto del FileBlobStore v3 descrito al principio.
 
-Solo tras obtener `"verified": true`, volver a ejecutar el gate y levantar los
-consumidores mediante `up`, de modo que Compose respete
-`service_completed_successfully`:
+En schema 5, `trees.geoserver_data.excluded_paths` es `[]`: una instalación
+limpia sin `gwc-cache` verifica, restaura y puede volver a respaldarse sin crear
+ese path. Schema 2–4 conservan y verifican exactamente su exclusión histórica
+`["gwc-cache"]`.
+
+Solo tras obtener `"verified": true`, volver a ejecutar el bootstrap, esperar
+al gateway sano y levantar los consumidores:
 
 ```bash
-docker compose up -d --force-recreate gwc-bootstrap
+docker compose up -d --force-recreate gwc-bootstrap gwc-gateway
 docker compose up -d \
   reference-scheduler reference-worker worker backend frontend
 ```

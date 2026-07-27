@@ -385,15 +385,22 @@ class GeoServerAdminClient:
         self,
         *,
         file_system_block_size: int,
+        allow_file_system_block_size_migration: bool = False,
     ) -> GeoWebCacheFileBlobStore:
         """Create or verify the one fixed default tile-only FileBlobStore.
 
-        Existing configuration is never modified. A differing store with the
-        reserved id, or any other configured blobstore, fails before PUT. The
-        upsert endpoint is used only after proving the complete list is empty,
-        then the complete list and exact resource are re-read.
+        A differing store with the reserved id, or any other configured
+        blobstore, fails before PUT. The upsert endpoint is used only after
+        proving the complete list is empty, then the complete list and exact
+        resource are re-read. The sole mutation of existing configuration is
+        an explicitly authorized block-size-only migration; its caller must
+        first prove the reconstructible tile volume is empty.
         """
 
+        if not isinstance(allow_file_system_block_size_migration, bool):
+            raise InvalidGeoServerPublicationError(
+                "GeoWebCache block-size migration flag is invalid"
+            )
         expected = expected_geowebcache_tile_blob_store(
             file_system_block_size=file_system_block_size,
         )
@@ -402,8 +409,11 @@ class GeoServerAdminClient:
             before,
             expected=expected,
             require_present=False,
+            allow_file_system_block_size_migration=(
+                allow_file_system_block_size_migration
+            ),
         )
-        if current is not None:
+        if current == expected:
             return current
 
         self._put_xml(
@@ -1386,10 +1396,21 @@ def _validate_geowebcache_tile_blob_store_set(
     *,
     expected: GeoWebCacheFileBlobStore,
     require_present: bool,
+    allow_file_system_block_size_migration: bool = False,
 ) -> GeoWebCacheFileBlobStore | None:
     defaults = tuple(store for store in stores if store.default)
     current = next((store for store in stores if store.id == expected.id), None)
-    if current is not None and current != expected:
+    if (
+        current is not None
+        and current != expected
+        and not (
+            allow_file_system_block_size_migration
+            and _blob_store_differs_only_in_file_system_block_size(
+                current,
+                expected,
+            )
+        )
+    ):
         raise GeoServerAdminConflictError(
             "existing GeoWebCache tile blob store differs"
         )
@@ -1408,6 +1429,25 @@ def _validate_geowebcache_tile_blob_store_set(
             "GeoWebCache has an unexpected additional blob store"
         )
     return current
+
+
+def _blob_store_differs_only_in_file_system_block_size(
+    current: GeoWebCacheFileBlobStore,
+    expected: GeoWebCacheFileBlobStore,
+) -> bool:
+    return (
+        current.file_system_block_size != expected.file_system_block_size
+        and all(
+            getattr(current, name) == getattr(expected, name)
+            for name in (
+                "id",
+                "enabled",
+                "default",
+                "base_directory",
+                "path_generator_type",
+            )
+        )
+    )
 
 
 def _serialize_geowebcache_file_blob_store(

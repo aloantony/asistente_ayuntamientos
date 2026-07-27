@@ -251,25 +251,22 @@ def quota_status(
     )
     before_blob_stores = admin.read_geowebcache_file_blob_stores()
     before_quota = admin.read_geowebcache_disk_quota()
-    desired_quota = {
-        "enabled": True,
-        "quota_bytes": configured.geowebcache_disk_quota_gib * GIB,
-        "quota_value": configured.geowebcache_disk_quota_gib,
-        "quota_units": "GiB",
-        "cleanup_frequency": (
-            configured.geowebcache_disk_quota_cleanup_seconds
-        ),
-        "cleanup_units": "SECONDS",
-        "expiration_policy": configured.geowebcache_disk_quota_policy,
-    }
+    desired_quota = _desired_quota(configured)
     blob_store_verified = _blob_store_matches(
         before_blob_stores,
         desired_blob_store,
     )
     quota_verified = _quota_matches(before_quota, desired_quota)
+    block_size_migration_required = _block_size_migration_required(
+        before_blob_stores,
+        desired_blob_store,
+    )
+    block_size_migration_permitted = (
+        block_size_migration_required and _cache_is_empty(capacity)
+    )
     if not apply:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "mode": "dry-run",
             "capacity": asdict(capacity),
             "blob_store": {
@@ -277,6 +274,13 @@ def quota_status(
                     asdict(store) for store in before_blob_stores
                 ],
                 "desired": asdict(desired_blob_store),
+                "block_size_migration_required": (
+                    block_size_migration_required
+                ),
+                "block_size_migration_permitted": (
+                    block_size_migration_permitted
+                ),
+                "block_size_migrated": False,
                 "verified": blob_store_verified,
             },
             "disk_quota": {
@@ -303,6 +307,9 @@ def quota_status(
         )
     after_blob_store = admin.ensure_geowebcache_tile_blob_store(
         file_system_block_size=capacity.filesystem_block_size_bytes,
+        allow_file_system_block_size_migration=(
+            block_size_migration_permitted
+        ),
     )
     if after_blob_store != desired_blob_store:
         raise GeoWebCacheQuotaSafetyError(
@@ -321,13 +328,23 @@ def quota_status(
             "GeoWebCache quota re-read does not match the requested state"
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": "apply",
         "capacity": asdict(capacity),
         "blob_store": {
             "before": [asdict(store) for store in before_blob_stores],
             "current": asdict(after_blob_store),
             "desired": asdict(desired_blob_store),
+            "block_size_migration_required": (
+                block_size_migration_required
+            ),
+            "block_size_migration_permitted": (
+                block_size_migration_permitted
+            ),
+            "block_size_migrated": (
+                block_size_migration_required
+                and block_size_migration_permitted
+            ),
             "verified": True,
         },
         "disk_quota": {
@@ -338,6 +355,88 @@ def quota_status(
         },
         "verified": True,
     }
+
+
+def runtime_contract_status(
+    *,
+    cache_path: Path,
+    configured: Settings = settings,
+    client: GeoServerAdminClient | None = None,
+) -> dict[str, object]:
+    """Actively verify the current serving contract without mutating it."""
+
+    admin = client or GeoServerAdminClient()
+    health = admin.health()
+    block_size = cache_filesystem_block_size(cache_path)
+    desired_blob_store = expected_geowebcache_tile_blob_store(
+        file_system_block_size=block_size,
+    )
+    stores = admin.read_geowebcache_file_blob_stores()
+    desired_quota = _desired_quota(configured)
+    current_quota = admin.read_geowebcache_disk_quota()
+    if not _blob_store_matches(stores, desired_blob_store):
+        raise GeoWebCacheQuotaSafetyError(
+            "active GeoWebCache FileBlobStore contract does not match"
+        )
+    if not _quota_matches(current_quota, desired_quota):
+        raise GeoWebCacheQuotaSafetyError(
+            "active GeoWebCache disk-quota contract does not match"
+        )
+    return {
+        "schema_version": 1,
+        "mode": "active-contract",
+        "geoserver": asdict(health),
+        "filesystem_block_size_bytes": block_size,
+        "blob_store": asdict(desired_blob_store),
+        "disk_quota": desired_quota,
+        "verified": True,
+    }
+
+
+def cache_filesystem_block_size(cache_path: Path) -> int:
+    """Read the stable block size of the exact mounted cache root."""
+
+    path = _existing_absolute_directory(cache_path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache filesystem block size cannot be measured safely"
+        ) from error
+    try:
+        before = os.fstat(descriptor)
+        filesystem = os.fstatvfs(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or not _same_cache_identity(before, after)
+            or filesystem.f_bsize <= 0
+            or filesystem.f_frsize <= 0
+        ):
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache filesystem block size is unstable"
+            )
+        block_size = max(filesystem.f_bsize, filesystem.f_frsize)
+        try:
+            expected_geowebcache_tile_blob_store(
+                file_system_block_size=block_size,
+            )
+        except ValueError as error:
+            raise GeoWebCacheQuotaSafetyError(
+                "GeoWebCache filesystem block size is unsupported"
+            ) from error
+        return block_size
+    except OSError as error:
+        raise GeoWebCacheQuotaSafetyError(
+            "GeoWebCache filesystem block size cannot be measured safely"
+        ) from error
+    finally:
+        os.close(descriptor)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -375,12 +474,56 @@ def _quota_matches(
     return all(getattr(actual, name) == value for name, value in desired.items())
 
 
+def _desired_quota(configured: Settings) -> dict[str, object]:
+    return {
+        "enabled": True,
+        "quota_bytes": configured.geowebcache_disk_quota_gib * GIB,
+        "quota_value": configured.geowebcache_disk_quota_gib,
+        "quota_units": "GiB",
+        "cleanup_frequency": (
+            configured.geowebcache_disk_quota_cleanup_seconds
+        ),
+        "cleanup_units": "SECONDS",
+        "expiration_policy": configured.geowebcache_disk_quota_policy,
+    }
+
+
 def _blob_store_matches(
     stores: tuple[GeoWebCacheFileBlobStore, ...],
     desired: GeoWebCacheFileBlobStore,
 ) -> bool:
     defaults = tuple(store for store in stores if store.default)
     return stores == (desired,) and defaults == (desired,)
+
+
+def _block_size_migration_required(
+    stores: tuple[GeoWebCacheFileBlobStore, ...],
+    desired: GeoWebCacheFileBlobStore,
+) -> bool:
+    if len(stores) != 1:
+        return False
+    current = stores[0]
+    return (
+        current.file_system_block_size != desired.file_system_block_size
+        and all(
+            getattr(current, name) == getattr(desired, name)
+            for name in (
+                "id",
+                "enabled",
+                "default",
+                "base_directory",
+                "path_generator_type",
+            )
+        )
+    )
+
+
+def _cache_is_empty(capacity: GeoWebCacheCapacity) -> bool:
+    return (
+        capacity.current_cache_files == 0
+        and capacity.current_cache_directories == 0
+        and capacity.current_cache_bytes == 0
+    )
 
 
 def _gib(value: int, *, minimum: int, label: str) -> int:
