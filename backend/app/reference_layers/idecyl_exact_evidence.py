@@ -28,6 +28,12 @@ from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+from app.reference_layers.idecyl_archive_style_evidence import (
+    IDECyLArchiveStyleEvidenceError,
+    MANIFEST_RESOURCE as ARCHIVE_STYLE_MANIFEST_RESOURCE,
+    MANIFEST_SHA256 as ARCHIVE_STYLE_MANIFEST_SHA256,
+    load_idecyl_archive_style_evidence,
+)
 from app.reference_layers.idecyl_wfs_snapshot_evidence import (
     IDECyLWFSSnapshotEvidenceError,
     MANIFEST_RESOURCE as WFS_SNAPSHOT_MANIFEST_RESOURCE,
@@ -349,6 +355,10 @@ def _committed_evidence_package() -> _EvidencePackage:
         ),
         _resource_body(RECORDS_RESOURCE, MAX_RECORDS_BYTES),
         expected_manifest_sha256=MANIFEST_SHA256,
+        archive_style_manifest_body=_resource_body(
+            ARCHIVE_STYLE_MANIFEST_RESOURCE,
+            MAX_MANIFEST_BYTES,
+        ),
     )
 
 
@@ -361,6 +371,10 @@ def _load_evidence_package(
     records_body: bytes,
     *,
     expected_manifest_sha256: str,
+    archive_style_manifest_body: bytes | None = None,
+    expected_archive_style_manifest_sha256: str = (
+        ARCHIVE_STYLE_MANIFEST_SHA256
+    ),
 ) -> _EvidencePackage:
     """Validate exact bytes and semantic links before exposing a candidate."""
 
@@ -448,6 +462,24 @@ def _load_evidence_package(
         previous_manifest.get("reviewable_archive_sources"),
         legacy_sources,
     )
+    if archive_style_manifest_body is None:
+        archive_style_manifest_body = _resource_body(
+            ARCHIVE_STYLE_MANIFEST_RESOURCE,
+            MAX_MANIFEST_BYTES,
+        )
+    try:
+        archive_style_evidence = load_idecyl_archive_style_evidence(
+            archive_style_manifest_body,
+            archive_sources=reviewable_archives,
+            catalog_sources=legacy_sources,
+            expected_manifest_sha256=(
+                expected_archive_style_manifest_sha256
+            ),
+        )
+    except IDECyLArchiveStyleEvidenceError as error:
+        raise IDECyLExactEvidenceError(
+            "IDECyL archive style evidence is invalid"
+        ) from error
     restricted_distributions = _restricted_https_distributions(
         previous_manifest.get("restricted_https_distributions"),
         legacy_sources,
@@ -494,6 +526,7 @@ def _load_evidence_package(
     ):
         layer_id = legacy_source["audit_layer_id"]
         classification = classifications[layer_id]
+        archive_styles = archive_style_evidence.get(layer_id)
         selected = (
             candidate
             if layer_id == _CANDIDATE_LAYER_ID
@@ -617,6 +650,20 @@ def _load_evidence_package(
                 evidence["license_evidence"] = deepcopy(
                     selected["license_evidence"]
                 )
+                if archive_styles is not None:
+                    evidence["evidence_binding"].update(
+                        {
+                            "archive_style_manifest_resource": (
+                                ARCHIVE_STYLE_MANIFEST_RESOURCE
+                            ),
+                            "archive_style_manifest_sha256": (
+                                expected_archive_style_manifest_sha256
+                            ),
+                        }
+                    )
+                    evidence["archive_style_evidence"] = deepcopy(
+                        archive_styles
+                    )
             evidence["review_requirements"] = deepcopy(
                 selected["review_requirements"]
             )
@@ -641,6 +688,19 @@ def _load_evidence_package(
             ):
                 if key in config_source:
                     candidate_config[key] = deepcopy(config_source[key])
+            if (
+                archive_styles is not None
+                and archive_styles["style_coverage"]["complete"] is True
+            ):
+                candidate_config["archive_styles"] = deepcopy(
+                    archive_styles["archive_styles"]
+                )
+                candidate_config["archive_style_catalog"] = deepcopy(
+                    archive_styles["catalog_styles"]
+                )
+                candidate_config["archive_style_archive_sha256"] = (
+                    archive_styles["archive_capture"]["archive_sha256"]
+                )
         source = ReviewedIDECyLExactSource(
             profile=profile,
             audit_layer_id=layer_id,

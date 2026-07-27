@@ -521,6 +521,7 @@ def test_acquisition_binds_enriched_archive_style_member_and_sld_identity(
         "input_layer": "reviewed",
         "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
         "archive_styles": [archive_style],
+        "archive_style_archive_sha256": inspection["archive_sha256"],
         **_parity_config(inspection),
     }
     store = ReferenceBlobStore(tmp_path / "blob-store")
@@ -562,6 +563,52 @@ def test_acquisition_binds_enriched_archive_style_member_and_sld_identity(
     assert acquired_style.metadata["sld_named_layer"] == "archive_layer"
     assert acquired_style.metadata["sld_user_style"] == "official_style"
     assert acquired_style.metadata["parity_kind"] == "exact"
+
+
+def test_acquisition_rejects_archive_changed_from_reviewed_style_capture(
+    tmp_path,
+) -> None:
+    path = _archive(tmp_path)
+    inspection = inspect_geopackage_zip(
+        path,
+        expected_member="dataset/reviewed.gpkg",
+        expected_layer="reviewed",
+        maximum_uncompressed_bytes=2 * 1024 * 1024,
+    )
+    config = {
+        "media_type": "application/zip",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        "archive_style_archive_sha256": "0" * 64,
+        **_parity_config(inspection),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        with pytest.raises(
+            AcquisitionValidationError,
+            match="reviewed style capture",
+        ) as captured:
+            ReferenceAcquisitionPipeline(
+                store,
+                limits=AcquisitionLimits(
+                    max_probe_bytes=256 * 1024,
+                    max_page_bytes=512 * 1024,
+                    max_dataset_bytes=2 * 1024 * 1024,
+                    max_total_bytes=4 * 1024 * 1024,
+                    page_size=100,
+                    max_pages=2,
+                    max_features=100,
+                    timeout_seconds=10,
+                    idle_timeout_seconds=2,
+                ),
+                downloader_factory=_Download(path.read_bytes()),
+            ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+    assert captured.value.code == "reviewed_archive_style_archive_changed"
 
 
 @pytest.mark.parametrize(

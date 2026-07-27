@@ -117,6 +117,8 @@ WFS_CANDIDATE_IDS = {
     246,
     281,
 }
+COMPLETE_ARCHIVE_STYLE_IDS = {98, 137, 151, 197, 213, 225, 230}
+PARTIAL_ARCHIVE_STYLE_IDS = {268}
 
 
 def _resource_body(resource_path: str) -> bytes:
@@ -187,6 +189,37 @@ def _layer(
         max_zoom=18,
         style_name=style_name,
         styles=styles,
+    )
+
+
+def _layer_with_reviewed_archive_styles(
+    reviewed,
+) -> ReferenceLayerDefinition:
+    base = _layer(
+        reviewed.catalog_layer_source_key,
+        reviewed.catalog_remote_name,
+        with_cami_style=reviewed.audit_layer_id == 86,
+    )
+    style_evidence = reviewed.evidence.get("archive_style_evidence")
+    if not isinstance(style_evidence, dict):
+        return base
+    catalog_styles = style_evidence["catalog_styles"]
+    default = next(
+        item for item in catalog_styles if item["is_default"] is True
+    )
+    return replace(
+        base,
+        style_name=default["catalog_style_source_key"],
+        styles=tuple(
+            ReferenceLayerStyleDefinition(
+                source_key=item["catalog_style_source_key"],
+                title=item["remote_name"],
+                remote_name=item["remote_name"],
+                sort_order=index,
+                is_default=item["is_default"],
+            )
+            for index, item in enumerate(catalog_styles)
+        ),
     )
 
 
@@ -372,11 +405,7 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         reviewed = inventory[layer_id]
         candidates = acquisition_candidates(
             _service(reviewed.catalog_endpoint_url),
-            _layer(
-                reviewed.catalog_layer_source_key,
-                reviewed.catalog_remote_name,
-                with_cami_style=layer_id == 86,
-            ),
+            _layer_with_reviewed_archive_styles(reviewed),
         )
 
         assert len(candidates) == 1
@@ -390,7 +419,18 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         assert candidate.remote_name == reviewed.catalog_remote_name
         assert candidate.config["archive_member"]
         assert candidate.config["input_layer"]
-        assert "archive_styles" not in candidate.config
+        if layer_id in COMPLETE_ARCHIVE_STYLE_IDS:
+            assert len(candidate.config["archive_styles"]) == 1
+            assert len(
+                candidate.config["archive_style_archive_sha256"]
+            ) == 64
+            assert "archive_style_catalog" not in candidate.config
+        else:
+            assert "archive_styles" not in candidate.config
+            assert (
+                "archive_style_archive_sha256"
+                not in candidate.config
+            )
         assert "source_content_parity" not in candidate.config
         if layer_id == 86:
             assert candidate.config["reviewed_local_style"] == {
@@ -434,6 +474,17 @@ def test_all_18_reviewable_archives_build_hash_bound_candidates() -> None:
         == "geopackage-zip"
         for layer_id in REVIEWABLE_ARCHIVE_IDS - {105}
     )
+    assert (
+        inventory[268].evidence["archive_style_evidence"][
+            "style_coverage"
+        ]["complete"]
+        is False
+    )
+    assert len(
+        inventory[268].evidence["archive_style_evidence"][
+            "style_coverage"
+        ]["missing_catalog_style_source_keys"]
+    ) == 15
 
 
 @pytest.mark.parametrize(

@@ -158,6 +158,7 @@ _DOWNLOAD_RESOURCE_KEY_RE = re.compile(
 _DOWNLOAD_RESOURCE_VALIDATION_KEYS = frozenset(
     {
         "archive_member",
+        "archive_style_archive_sha256",
         "input_layer",
         "reviewed_archive_integrity",
         "source_content_parity",
@@ -6887,6 +6888,22 @@ def _validate_geopackage_zip(
             str(error),
             code="geopackage_zip_invalid",
         ) from error
+    expected_archive_sha256 = config.get(
+        "archive_style_archive_sha256"
+    )
+    if expected_archive_sha256 is not None:
+        if (
+            not isinstance(expected_archive_sha256, str)
+            or _SHA256_RE.fullmatch(expected_archive_sha256) is None
+        ):
+            raise AcquisitionConfigurationError(
+                "GeoPackage ZIP reviewed style archive hash is invalid"
+            )
+        if inspection.get("archive_sha256") != expected_archive_sha256:
+            raise AcquisitionValidationError(
+                "GeoPackage ZIP differs from its reviewed style capture",
+                code="reviewed_archive_style_archive_changed",
+            )
     try:
         parity = evaluate_acquisition_parity(config, inspection)
     except SourceContentParityError as error:

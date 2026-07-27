@@ -415,6 +415,43 @@ def _idecyl_candidate_definition(
         and item.protocol == protocol
     ]
     assert len(reviewed) == expected_count
+
+    def catalog_styles(item):
+        if item.audit_layer_id == 86:
+            source_key = "cami_cyl_cuadricula_default"
+            return (
+                source_key,
+                (
+                    ReferenceLayerStyleDefinition(
+                        source_key=source_key,
+                        title="Borde celdas negro",
+                        remote_name=source_key,
+                        sort_order=0,
+                        is_default=True,
+                    ),
+                ),
+            )
+        evidence = item.evidence.get("archive_style_evidence")
+        if not isinstance(evidence, dict):
+            return None, ()
+        styles = evidence["catalog_styles"]
+        default = next(
+            style for style in styles if style["is_default"] is True
+        )
+        return (
+            default["catalog_style_source_key"],
+            tuple(
+                ReferenceLayerStyleDefinition(
+                    source_key=style["catalog_style_source_key"],
+                    title=style["remote_name"],
+                    remote_name=style["remote_name"],
+                    sort_order=index,
+                    is_default=style["is_default"],
+                )
+                for index, style in enumerate(styles)
+            ),
+        )
+
     return ReferenceCatalogDefinition(
         provider_key=provider_key,
         source_url="https://idecyl.jcyl.es/siur/settings.json",
@@ -450,6 +487,8 @@ def _idecyl_candidate_definition(
                 },
                 min_zoom=6,
                 max_zoom=18,
+                style_name=catalog_styles(item)[0],
+                styles=catalog_styles(item)[1],
             )
             for item in reviewed
         ),

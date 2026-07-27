@@ -1036,9 +1036,14 @@ def acquisition_candidates(
                 )
             config = deepcopy(reviewed_idecyl.candidate_config)
             if "archive_styles" in config:
+                reviewed_catalog_styles = config.pop(
+                    "archive_style_catalog",
+                    None,
+                )
                 config["archive_styles"] = _idecyl_archive_style_config(
                     layer,
                     config["archive_styles"],
+                    reviewed_catalog_styles=reviewed_catalog_styles,
                 )
             try:
                 local_style = reviewed_idecyl_local_style_for_source(
@@ -1294,6 +1299,8 @@ def acquisition_candidates(
 def _idecyl_archive_style_config(
     layer: ReferenceLayerDefinition,
     raw_styles: Any,
+    *,
+    reviewed_catalog_styles: Any = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(raw_styles, list) or not raw_styles:
         raise SourceDiscoveryError(
@@ -1306,8 +1313,7 @@ def _idecyl_archive_style_config(
         if style.status in {"active", "degraded"}
     ]
     if (
-        len(catalog_styles) != len(raw_styles)
-        or not catalog_styles
+        not catalog_styles
         or len({style.source_key for style in catalog_styles})
         != len(catalog_styles)
         or len(
@@ -1388,7 +1394,37 @@ def _idecyl_archive_style_config(
             )
             for item in result
         }
-        if reviewed_identities != expected_identities:
+        if reviewed_catalog_styles is None:
+            catalog_inventory_matches = (
+                reviewed_identities == expected_identities
+            )
+        else:
+            if not isinstance(reviewed_catalog_styles, list):
+                catalog_inventory_matches = False
+            else:
+                reviewed_catalog_identities = {
+                    (
+                        item.get("catalog_style_source_key"),
+                        item.get("remote_name"),
+                        item.get("is_default"),
+                    )
+                    for item in reviewed_catalog_styles
+                    if isinstance(item, dict)
+                    and set(item)
+                    == {
+                        "catalog_style_source_key",
+                        "remote_name",
+                        "is_default",
+                    }
+                }
+                catalog_inventory_matches = (
+                    len(reviewed_catalog_identities)
+                    == len(reviewed_catalog_styles)
+                    and reviewed_catalog_identities
+                    == expected_identities
+                    and reviewed_identities == expected_identities
+                )
+        if not catalog_inventory_matches:
             raise SourceDiscoveryError(
                 "catalog IDECyL styles differ from the reviewed archive",
                 code="reviewed_idecyl_style_identity_invalid",
