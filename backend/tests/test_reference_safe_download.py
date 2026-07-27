@@ -49,7 +49,9 @@ class FakeResponse:
         self.status = status
         self._body = body
         self._offset = 0
-        self._headers = {key.casefold(): value for key, value in (headers or {}).items()}
+        self._headers = {
+            key.casefold(): value for key, value in (headers or {}).items()
+        }
         self._chunk_size = chunk_size
         self._read_error = read_error
 
@@ -250,7 +252,9 @@ def test_redirects_are_reauthorized_against_exact_origin_allowlist(monkeypatch) 
     assert first.closed and second.closed
 
 
-def test_cross_origin_redirect_is_rejected_before_second_connection(monkeypatch) -> None:
+def test_cross_origin_redirect_is_rejected_before_second_connection(
+    monkeypatch,
+) -> None:
     first = FakeConnection(
         FakeResponse(302, headers={"Location": "https://evil.example/map"})
     )
@@ -285,6 +289,138 @@ def test_redirect_loop_and_limit_fail_closed(monkeypatch) -> None:
             io.BytesIO(),
         )
     assert limit_error.value.code == "redirect_limit"
+
+
+def test_head_and_exact_range_use_identity_and_strong_precondition(
+    monkeypatch,
+) -> None:
+    etag = '"archive-v1"'
+    head = FakeConnection(
+        FakeResponse(
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": "100",
+                "Content-Type": "application/zip",
+                "ETag": etag,
+            }
+        )
+    )
+    body = b"0123456789"
+    ranged = FakeConnection(
+        FakeResponse(
+            206,
+            body=body,
+            headers={
+                "Content-Length": str(len(body)),
+                "Content-Range": "bytes 90-99/100",
+                "Content-Type": "application/zip",
+                "ETag": etag,
+            },
+        )
+    )
+    install_connections(monkeypatch, [head, ranged])
+    policy = make_policy(
+        max_response_bytes=16,
+        max_redirects=0,
+        allowed_content_types=frozenset(
+            {"application/zip", "application/octet-stream"}
+        ),
+    )
+    downloader = SafeHTTPSDownloader(policy)
+
+    observed_head = downloader.head(
+        "https://maps.example/archive.zip",
+        accept="application/zip",
+    )
+    sink = io.BytesIO()
+    observed_range = downloader.download_range(
+        "https://maps.example/archive.zip",
+        sink,
+        start=90,
+        end=99,
+        if_match=etag,
+        accept="application/zip",
+    )
+
+    assert observed_head.content_length == 100
+    assert observed_head.accept_ranges == "bytes"
+    assert sink.getvalue() == body
+    assert observed_range.object_size == 100
+    assert observed_range.sha256 == hashlib.sha256(body).hexdigest()
+    assert head.requests[0][0] == "HEAD"
+    assert ranged.requests[0][2]["Range"] == "bytes=90-99"
+    assert ranged.requests[0][2]["If-Match"] == etag
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_code"),
+    [
+        (
+            FakeResponse(
+                200,
+                body=b"entire object",
+                headers={
+                    "Content-Length": "13",
+                    "Content-Type": "application/zip",
+                    "ETag": '"archive-v1"',
+                },
+            ),
+            "range_not_honored",
+        ),
+        (
+            FakeResponse(
+                206,
+                body=b"short",
+                headers={
+                    "Content-Length": "10",
+                    "Content-Range": "bytes 90-99/100",
+                    "Content-Type": "application/zip",
+                    "ETag": '"archive-v1"',
+                },
+            ),
+            "content_range_mismatch",
+        ),
+    ],
+)
+def test_exact_range_rejects_ignored_or_truncated_responses(
+    monkeypatch,
+    response,
+    expected_code,
+) -> None:
+    connection = FakeConnection(response)
+    install_connections(monkeypatch, [connection])
+    policy = make_policy(
+        max_response_bytes=16,
+        max_redirects=0,
+        allowed_content_types=frozenset(
+            {"application/zip", "application/octet-stream"}
+        ),
+    )
+
+    with pytest.raises(DownloadIntegrityError) as captured:
+        SafeHTTPSDownloader(policy).download_range(
+            "https://maps.example/archive.zip",
+            io.BytesIO(),
+            start=90,
+            end=99,
+            if_match='"archive-v1"',
+        )
+
+    assert captured.value.code == expected_code
+
+
+def test_metadata_requests_reject_redirects_when_policy_is_exact(
+    monkeypatch,
+) -> None:
+    connection = FakeConnection(FakeResponse(302, headers={"Location": "/moved.zip"}))
+    install_connections(monkeypatch, [connection])
+
+    with pytest.raises(DownloadLimitError) as captured:
+        SafeHTTPSDownloader(make_policy(max_redirects=0)).head(
+            "https://maps.example/archive.zip"
+        )
+
+    assert captured.value.code == "redirect_limit"
 
 
 @pytest.mark.parametrize(
@@ -603,9 +739,9 @@ def test_content_encoding_type_empty_and_headers_are_validated(monkeypatch) -> N
 def test_missing_content_type_defaults_only_when_no_allowlist(monkeypatch) -> None:
     missing = FakeConnection(FakeResponse(body=b"binary"))
     install_connections(monkeypatch, [missing])
-    result = SafeHTTPSDownloader(
-        make_policy(allowed_content_types=None)
-    ).download("https://maps.example/data", io.BytesIO())
+    result = SafeHTTPSDownloader(make_policy(allowed_content_types=None)).download(
+        "https://maps.example/data", io.BytesIO()
+    )
     assert result.content_type == "application/octet-stream"
 
 
@@ -622,7 +758,9 @@ def test_missing_content_type_defaults_only_when_no_allowlist(monkeypatch) -> No
         (503, True),
     ],
 )
-def test_http_errors_are_classified_for_retry(monkeypatch, status_code, retryable) -> None:
+def test_http_errors_are_classified_for_retry(
+    monkeypatch, status_code, retryable
+) -> None:
     connection = FakeConnection(
         FakeResponse(status_code, headers={"Retry-After": "999999"})
     )
@@ -664,7 +802,9 @@ def test_connection_failure_tries_next_validated_address(monkeypatch) -> None:
     assert failed.closed and successful.closed
 
 
-def test_certificate_failure_is_terminal_and_does_not_try_another_ip(monkeypatch) -> None:
+def test_certificate_failure_is_terminal_and_does_not_try_another_ip(
+    monkeypatch,
+) -> None:
     certificate_error = ssl.SSLCertVerificationError(1, "certificate invalid")
     failed = FakeConnection(request_error=certificate_error)
     opens = install_connections(

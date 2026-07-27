@@ -48,9 +48,11 @@ NON_PUBLIC_IPV6_NETWORKS = (
     ipaddress.ip_network("64:ff9b:1::/48"),
 )
 CONTENT_LENGTH_RE = re.compile(r"^[0-9]{1,20}$", re.ASCII)
-MEDIA_TYPE_RE = re.compile(
-    r"^[a-z0-9!#$&^_.+-]{1,127}/[a-z0-9!#$&^_.+-]{1,127}$"
+CONTENT_RANGE_RE = re.compile(
+    r"^bytes (?P<start>[0-9]{1,20})-(?P<end>[0-9]{1,20})/" r"(?P<total>[0-9]{1,20})$",
+    re.ASCII,
 )
+MEDIA_TYPE_RE = re.compile(r"^[a-z0-9!#$&^_.+-]{1,127}/[a-z0-9!#$&^_.+-]{1,127}$")
 
 
 class _StreamingSink(Protocol):
@@ -140,7 +142,9 @@ class HTTPSDownloadPolicy:
         if not self.allowed_origins:
             raise ValueError("allowed_origins cannot be empty")
         normalized_origins = tuple(
-            dict.fromkeys(_normalize_allowed_origin(value) for value in self.allowed_origins)
+            dict.fromkeys(
+                _normalize_allowed_origin(value) for value in self.allowed_origins
+            )
         )
         object.__setattr__(self, "allowed_origins", normalized_origins)
         _positive_integer(self.max_response_bytes, "max_response_bytes")
@@ -178,6 +182,38 @@ class HTTPSDownloadResult:
     content_type: str | None
     size_bytes: int
     sha256: str | None
+    etag: str | None
+    last_modified: str | None
+    redirects: int
+    redirect_chain: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HTTPSHeadResult:
+    source_url: str
+    final_url: str
+    status_code: int
+    content_type: str
+    content_length: int | None
+    accept_ranges: str | None
+    etag: str | None
+    last_modified: str | None
+    redirects: int
+    redirect_chain: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HTTPSRangeResult:
+    source_url: str
+    final_url: str
+    status_code: int
+    content_type: str
+    content_length: int
+    object_size: int
+    range_start: int
+    range_end: int
+    size_bytes: int
+    sha256: str
     etag: str | None
     last_modified: str | None
     redirects: int
@@ -345,9 +381,7 @@ class SafeHTTPSDownloader:
                         code="content_type",
                         retryable=False,
                     )
-                declared_size = _content_length(
-                    response.getheader("Content-Length")
-                )
+                declared_size = _content_length(response.getheader("Content-Length"))
                 if (
                     declared_size is not None
                     and declared_size > self.policy.max_response_bytes
@@ -395,6 +429,266 @@ class SafeHTTPSDownloader:
             code="redirect_limit",
         )
 
+    def head(
+        self,
+        url: str,
+        *,
+        accept: str | None = None,
+    ) -> HTTPSHeadResult:
+        """Read bounded response metadata without reading an object body."""
+
+        source_url = self._authorize_url(url)
+        accepted = _optional_request_header(accept, "accept") or "*/*"
+        deadline = monotonic() + self.policy.timeout_seconds
+        current_url = source_url
+        redirect_chain = [source_url]
+        seen = {source_url}
+        headers = {
+            "Accept": accepted,
+            "Accept-Encoding": "identity",
+            "User-Agent": self.policy.user_agent,
+        }
+
+        for redirect_count in range(self.policy.max_redirects + 1):
+            parsed = urlsplit(current_url)
+            connection, response = self._request_once_with_headers(
+                parsed,
+                deadline=deadline,
+                method="HEAD",
+                headers=headers,
+            )
+            try:
+                status_code = int(response.status)
+                if status_code in REDIRECT_STATUSES:
+                    current_url = self._redirect_url(
+                        current_url,
+                        response,
+                        redirect_count=redirect_count,
+                        redirect_chain=redirect_chain,
+                        seen=seen,
+                    )
+                    continue
+                if status_code != 200:
+                    raise DownloadHTTPError(
+                        status_code,
+                        retry_after_seconds=_retry_after_seconds(
+                            response.getheader("Retry-After")
+                        ),
+                    )
+                _require_identity_encoding(response)
+                content_type = _response_content_type(
+                    response.getheader("Content-Type")
+                )
+                if (
+                    self.policy.allowed_content_types is not None
+                    and content_type not in self.policy.allowed_content_types
+                ):
+                    raise DownloadIntegrityError(
+                        "reference source returned an unsupported content type",
+                        code="content_type",
+                        retryable=False,
+                    )
+                return HTTPSHeadResult(
+                    source_url=source_url,
+                    final_url=current_url,
+                    status_code=status_code,
+                    content_type=content_type,
+                    content_length=_content_length(
+                        response.getheader("Content-Length")
+                    ),
+                    accept_ranges=_bounded_response_header(
+                        response.getheader("Accept-Ranges"),
+                        "Accept-Ranges",
+                    ),
+                    etag=_bounded_response_header(
+                        response.getheader("ETag"),
+                        "ETag",
+                    ),
+                    last_modified=_bounded_response_header(
+                        response.getheader("Last-Modified"),
+                        "Last-Modified",
+                    ),
+                    redirects=redirect_count,
+                    redirect_chain=tuple(redirect_chain),
+                )
+            finally:
+                _close_connection(connection)
+
+        raise DownloadLimitError(
+            "reference source exceeded redirect limit",
+            code="redirect_limit",
+        )
+
+    def download_range(
+        self,
+        url: str,
+        sink: _StreamingSink,
+        *,
+        start: int,
+        end: int,
+        if_match: str,
+        accept: str | None = None,
+    ) -> HTTPSRangeResult:
+        """Download one exact byte range under a strong object validator."""
+
+        if (
+            isinstance(start, bool)
+            or not isinstance(start, int)
+            or start < 0
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+            or end < start
+        ):
+            raise ValueError("byte range is invalid")
+        expected_size = end - start + 1
+        if expected_size > self.policy.max_response_bytes:
+            raise DownloadLimitError(
+                "requested byte range exceeds its byte limit",
+                code="response_too_large",
+            )
+        source_url = self._authorize_url(url)
+        accepted = _optional_request_header(accept, "accept") or "*/*"
+        validator = _optional_request_header(if_match, "if_match")
+        if validator is None or validator.startswith("W/"):
+            raise ValueError("if_match must be a strong ETag")
+        deadline = monotonic() + self.policy.timeout_seconds
+        current_url = source_url
+        redirect_chain = [source_url]
+        seen = {source_url}
+        headers = {
+            "Accept": accepted,
+            "Accept-Encoding": "identity",
+            "If-Match": validator,
+            "Range": f"bytes={start}-{end}",
+            "User-Agent": self.policy.user_agent,
+        }
+
+        for redirect_count in range(self.policy.max_redirects + 1):
+            parsed = urlsplit(current_url)
+            connection, response = self._request_once_with_headers(
+                parsed,
+                deadline=deadline,
+                method="GET",
+                headers=headers,
+            )
+            try:
+                status_code = int(response.status)
+                if status_code in REDIRECT_STATUSES:
+                    current_url = self._redirect_url(
+                        current_url,
+                        response,
+                        redirect_count=redirect_count,
+                        redirect_chain=redirect_chain,
+                        seen=seen,
+                    )
+                    continue
+                if status_code == 200:
+                    raise DownloadIntegrityError(
+                        "reference source ignored the requested byte range",
+                        code="range_not_honored",
+                        retryable=False,
+                    )
+                if status_code != 206:
+                    raise DownloadHTTPError(
+                        status_code,
+                        retry_after_seconds=_retry_after_seconds(
+                            response.getheader("Retry-After")
+                        ),
+                    )
+                _require_identity_encoding(response)
+                content_type = _response_content_type(
+                    response.getheader("Content-Type")
+                )
+                if (
+                    self.policy.allowed_content_types is not None
+                    and content_type not in self.policy.allowed_content_types
+                ):
+                    raise DownloadIntegrityError(
+                        "reference source returned an unsupported content type",
+                        code="content_type",
+                        retryable=False,
+                    )
+                declared_size = _content_length(response.getheader("Content-Length"))
+                if declared_size != expected_size:
+                    raise DownloadIntegrityError(
+                        "reference source returned an invalid range length",
+                        code="content_range_mismatch",
+                        retryable=True,
+                    )
+                range_value = _bounded_response_header(
+                    response.getheader("Content-Range"),
+                    "Content-Range",
+                    required=True,
+                )
+                match = (
+                    CONTENT_RANGE_RE.fullmatch(range_value)
+                    if range_value is not None
+                    else None
+                )
+                if match is None:
+                    raise DownloadIntegrityError(
+                        "reference source returned an invalid Content-Range",
+                        code="content_range_mismatch",
+                        retryable=False,
+                    )
+                observed_start = int(match.group("start"))
+                observed_end = int(match.group("end"))
+                object_size = int(match.group("total"))
+                if observed_start != start or observed_end != end or object_size <= end:
+                    raise DownloadIntegrityError(
+                        "reference source returned a different byte range",
+                        code="content_range_mismatch",
+                        retryable=True,
+                    )
+                response_etag = _bounded_response_header(
+                    response.getheader("ETag"),
+                    "ETag",
+                )
+                if response_etag != validator:
+                    raise DownloadIntegrityError(
+                        "reference source changed during its ranged read",
+                        code="validator_mismatch",
+                        retryable=True,
+                    )
+                size_bytes, digest = self._stream_body(
+                    response,
+                    connection,
+                    sink,
+                    deadline=deadline,
+                )
+                if size_bytes != expected_size:
+                    raise DownloadIntegrityError(
+                        "reference source returned a truncated byte range",
+                        code="content_range_mismatch",
+                        retryable=True,
+                    )
+                return HTTPSRangeResult(
+                    source_url=source_url,
+                    final_url=current_url,
+                    status_code=status_code,
+                    content_type=content_type,
+                    content_length=declared_size,
+                    object_size=object_size,
+                    range_start=start,
+                    range_end=end,
+                    size_bytes=size_bytes,
+                    sha256=digest,
+                    etag=response_etag,
+                    last_modified=_bounded_response_header(
+                        response.getheader("Last-Modified"),
+                        "Last-Modified",
+                    ),
+                    redirects=redirect_count,
+                    redirect_chain=tuple(redirect_chain),
+                )
+            finally:
+                _close_connection(connection)
+
+        raise DownloadLimitError(
+            "reference source exceeded redirect limit",
+            code="redirect_limit",
+        )
+
     def _authorize_url(self, value: object) -> str:
         normalized = normalize_https_url(value)
         if _url_origin(urlsplit(normalized)) not in self._allowed_origins:
@@ -413,6 +707,32 @@ class SafeHTTPSDownloader:
         last_modified: str | None,
         accept: str,
     ):
+        headers = {
+            "Accept": accept,
+            "Accept-Encoding": "identity",
+            "User-Agent": self.policy.user_agent,
+        }
+        if etag is not None:
+            headers["If-None-Match"] = etag
+        if last_modified is not None:
+            headers["If-Modified-Since"] = last_modified
+        return self._request_once_with_headers(
+            parsed,
+            deadline=deadline,
+            method="GET",
+            headers=headers,
+        )
+
+    def _request_once_with_headers(
+        self,
+        parsed: SplitResult,
+        *,
+        deadline: float,
+        method: str,
+        headers: dict[str, str],
+    ):
+        if method not in {"GET", "HEAD"}:
+            raise ValueError("HTTPS request method is unsupported")
         remaining = _remaining(deadline)
         addresses = _resolve_public_addresses(
             parsed,
@@ -424,16 +744,6 @@ class SafeHTTPSDownloader:
                 "reference source request target is too long",
                 code="request_target_too_long",
             )
-        headers = {
-            "Accept": accept,
-            "Accept-Encoding": "identity",
-            "User-Agent": self.policy.user_agent,
-        }
-        if etag is not None:
-            headers["If-None-Match"] = etag
-        if last_modified is not None:
-            headers["If-Modified-Since"] = last_modified
-
         last_error: BaseException | None = None
         for address in addresses:
             connection = None
@@ -446,7 +756,7 @@ class SafeHTTPSDownloader:
                         _remaining(deadline),
                     ),
                 )
-                connection.request("GET", target, headers=headers)
+                connection.request(method, target, headers=headers)
                 _set_connection_timeout(
                     connection,
                     deadline,
@@ -475,6 +785,35 @@ class SafeHTTPSDownloader:
             "reference source is unavailable",
             code="connection_failed",
         ) from last_error
+
+    def _redirect_url(
+        self,
+        current_url: str,
+        response,
+        *,
+        redirect_count: int,
+        redirect_chain: list[str],
+        seen: set[str],
+    ) -> str:
+        if redirect_count >= self.policy.max_redirects:
+            raise DownloadLimitError(
+                "reference source exceeded redirect limit",
+                code="redirect_limit",
+            )
+        location = _bounded_response_header(
+            response.getheader("Location"),
+            "Location",
+            required=True,
+        )
+        redirected = self._authorize_url(urljoin(current_url, location))
+        if redirected in seen:
+            raise UnsafeDownloadURLError(
+                "reference source contains a redirect loop",
+                code="redirect_loop",
+            )
+        seen.add(redirected)
+        redirect_chain.append(redirected)
+        return redirected
 
     def _stream_body(
         self,
@@ -606,7 +945,11 @@ def _url_origin(parsed: SplitResult) -> tuple[str, str, int]:
     hostname = parsed.hostname
     if not hostname:
         raise UnsafeDownloadURLError("reference source URL has no hostname")
-    return (parsed.scheme.casefold(), hostname.rstrip(".").casefold(), parsed.port or 443)
+    return (
+        parsed.scheme.casefold(),
+        hostname.rstrip(".").casefold(),
+        parsed.port or 443,
+    )
 
 
 def _resolve_public_addresses(
@@ -622,7 +965,9 @@ def _resolve_public_addresses(
         _require_public_ip(literal)
         return (str(literal),)
     if timeout <= 0:
-        raise DownloadUnavailableError("reference source DNS timed out", code="dns_timeout")
+        raise DownloadUnavailableError(
+            "reference source DNS timed out", code="dns_timeout"
+        )
     deadline = monotonic() + timeout
 
     receive = None
@@ -869,7 +1214,9 @@ def _close_connection(connection) -> None:
         pass
 
 
-def _set_connection_timeout(connection, deadline: float, *, idle_timeout: float) -> None:
+def _set_connection_timeout(
+    connection, deadline: float, *, idle_timeout: float
+) -> None:
     timeout = min(idle_timeout, _remaining(deadline))
     connected_socket = getattr(connection, "sock", None)
     if connected_socket is not None:
@@ -898,6 +1245,19 @@ def _response_content_type(value: str | None) -> str:
             retryable=False,
         )
     return media_type
+
+
+def _require_identity_encoding(response) -> None:
+    encoding = _bounded_response_header(
+        response.getheader("Content-Encoding"),
+        "Content-Encoding",
+    )
+    if encoding is not None and encoding.casefold() != "identity":
+        raise DownloadIntegrityError(
+            "compressed transfer encodings are not accepted",
+            code="content_encoding",
+            retryable=False,
+        )
 
 
 def _content_length(value: str | None) -> int | None:
