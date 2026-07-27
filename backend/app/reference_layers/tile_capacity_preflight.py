@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.reference_layers.acquisition import (
@@ -35,6 +35,10 @@ from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
     require_current_source_authorization,
     url_origin,
+)
+from app.reference_layers.mirror_strategy import (
+    MirrorStrategyError,
+    current_mirror_strategies,
 )
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
@@ -485,6 +489,36 @@ def _current_snapshot(
     return snapshot
 
 
+def _require_complete_strategy_generation(
+    db: Session,
+    snapshot: ReferenceCatalogSnapshot,
+) -> None:
+    try:
+        current_mirror_strategies(
+            db,
+            provider_key=snapshot.provider_key,
+            snapshot_id=snapshot.id,
+        )
+    except MirrorStrategyError as error:
+        raise TileCapacityPreflightInputError(
+            "current mirror strategy generation is incomplete"
+        ) from error
+
+
+def _latest_strategy_generation(
+    snapshot: ReferenceCatalogSnapshot,
+):
+    return (
+        select(func.max(ReferenceLayerMirrorStrategy.generation))
+        .where(
+            ReferenceLayerMirrorStrategy.provider_key
+            == snapshot.provider_key,
+            ReferenceLayerMirrorStrategy.catalog_snapshot_id == snapshot.id,
+        )
+        .scalar_subquery()
+    )
+
+
 def _selected_strategies(
     db: Session,
     *,
@@ -499,6 +533,8 @@ def _selected_strategies(
         ReferenceLayer,
     ]
 ]:
+    _require_complete_strategy_generation(db, snapshot)
+    latest_generation = _latest_strategy_generation(snapshot)
     query = (
         select(
             ReferenceLayerMirrorStrategy,
@@ -522,6 +558,7 @@ def _selected_strategies(
             ReferenceLayerMirrorStrategy.provider_key
             == snapshot.provider_key,
             ReferenceLayerMirrorStrategy.catalog_snapshot_id == snapshot.id,
+            ReferenceLayerMirrorStrategy.generation == latest_generation,
             ReferenceLayerMirrorStrategy.strategy == "tiles",
         )
         .order_by(
@@ -571,6 +608,7 @@ def _capture_preflight_fence(
     source_id: int | None,
     source_key: str | None,
 ) -> TileCapacityPreflightFence:
+    _require_complete_strategy_generation(db, snapshot)
     snapshot_rows = db.execute(
         select(
             ReferenceCatalogSnapshot.id.label("catalog_snapshot_id"),
@@ -609,6 +647,7 @@ def _capture_preflight_fence(
             "current applied catalog changed during preflight"
         )
 
+    latest_generation = _latest_strategy_generation(snapshot)
     query = (
         select(
             ReferenceLayerMirrorStrategy.id.label("strategy_id"),
@@ -684,6 +723,7 @@ def _capture_preflight_fence(
             ReferenceLayerMirrorStrategy.provider_key
             == snapshot.provider_key,
             ReferenceLayerMirrorStrategy.catalog_snapshot_id == snapshot.id,
+            ReferenceLayerMirrorStrategy.generation == latest_generation,
             ReferenceLayerMirrorStrategy.strategy == "tiles",
         )
         .order_by(

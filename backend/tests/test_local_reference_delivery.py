@@ -353,6 +353,119 @@ def test_validated_fallback_delivery_can_differ_from_preferred_strategy(db) -> N
     assert availability.available_style_ids == (styles[0].id,)
 
 
+def test_catalog_delivery_uses_latest_complete_strategy_generation(db) -> None:
+    layer, styles, source, _, version, _ = seed_local_delivery(
+        db,
+        kind="tiles",
+    )
+    blocked_evidence = {"reason": "historical blocker"}
+    preferred_evidence = {
+        "preferred_strategy": "vector",
+        "effective_delivery": "tiles",
+    }
+    db.add_all(
+        [
+            ReferenceLayerMirrorStrategy(
+                provider_key=layer.provider_key,
+                layer_id=layer.id,
+                catalog_snapshot_id=version.catalog_snapshot_id,
+                catalog_definition_sha256=version.catalog_definition_sha256,
+                strategy="blocked",
+                source_id=None,
+                strategy_reason_code="historical_blocker",
+                strategy_reason="Historical generation was blocked.",
+                evidence_json=blocked_evidence,
+                evidence_sha256=canonical_json_sha256(blocked_evidence),
+                generation=1,
+                validated_at=datetime(
+                    2026,
+                    7,
+                    22,
+                    8,
+                    tzinfo=timezone.utc,
+                ),
+            ),
+            ReferenceLayerMirrorStrategy(
+                provider_key=layer.provider_key,
+                layer_id=layer.id,
+                catalog_snapshot_id=version.catalog_snapshot_id,
+                catalog_definition_sha256=version.catalog_definition_sha256,
+                strategy="vector",
+                source_id=source.id,
+                strategy_reason_code="preferred_vector_candidate",
+                strategy_reason="Vector is now the preferred strategy.",
+                evidence_json=preferred_evidence,
+                evidence_sha256=canonical_json_sha256(
+                    preferred_evidence
+                ),
+                generation=2,
+                validated_at=datetime(
+                    2026,
+                    7,
+                    22,
+                    9,
+                    tzinfo=timezone.utc,
+                ),
+            ),
+        ]
+    )
+    db.commit()
+
+    availability = catalog_local_delivery_availability(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        styles=[styles[0]],
+    )[layer.id]
+
+    assert availability is not None
+    assert availability.delivery_available is True
+    assert availability.delivery_blocker is None
+
+    db.add(
+        ReferenceLayerMirrorStrategy(
+            provider_key=layer.provider_key,
+            layer_id=layer.id,
+            catalog_snapshot_id=version.catalog_snapshot_id,
+            catalog_definition_sha256=version.catalog_definition_sha256,
+            strategy="vector",
+            source_id=source.id,
+            strategy_reason_code="corrupt_latest_generation",
+            strategy_reason="This simulated generation has invalid evidence.",
+            evidence_json={"generation": 3},
+            evidence_sha256="0" * 64,
+            generation=3,
+            validated_at=datetime(
+                2026,
+                7,
+                22,
+                10,
+                tzinfo=timezone.utc,
+            ),
+        )
+    )
+    db.commit()
+
+    unavailable = catalog_local_delivery_availability(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        styles=[styles[0]],
+    )[layer.id]
+
+    assert unavailable is not None
+    assert unavailable.delivery_available is False
+    assert unavailable.delivery_blocker == "strategy_matrix_incomplete"
+    with pytest.raises(LocalDeliveryError) as raised:
+        resolve_local_delivery(
+            db,
+            layer=layer,
+            style=styles[0],
+            operation="tile",
+        )
+    assert raised.value.blocker == "strategy_matrix_incomplete"
+
+
 def test_incomplete_style_parity_blocks_an_active_legacy_delivery(db) -> None:
     layer, styles, source, run, version, _ = seed_local_delivery(db)
     plan_evidence = {"reason": "legacy_backfill"}

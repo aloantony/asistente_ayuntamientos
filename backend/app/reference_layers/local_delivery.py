@@ -21,6 +21,10 @@ from app.reference_layers.mirror_authorization import (
     source_authorization_blocker,
     version_authorization_blocker,
 )
+from app.reference_layers.mirror_strategy import (
+    MirrorStrategyError,
+    current_mirror_strategies,
+)
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -30,7 +34,6 @@ from app.reference_layers.models import (
     ReferenceDeliveryVersion,
     ReferenceLayer,
     ReferenceLayerDeliveryState,
-    ReferenceLayerMirrorStrategy,
     ReferenceLayerSource,
     ReferenceLayerStyle,
     ReferenceStyleParityPlan,
@@ -102,6 +105,22 @@ def resolve_local_delivery(
         db,
         layer=layer,
     )
+    try:
+        strategy_rows = current_mirror_strategies(
+            db,
+            provider_key=current_layer.provider_key,
+            snapshot_id=current_snapshot.id,
+        )
+    except MirrorStrategyError as error:
+        raise LocalDeliveryError("strategy_matrix_incomplete") from error
+    if strategy_rows:
+        strategy = strategy_rows.get(current_layer.id)
+        if strategy is None:
+            raise LocalDeliveryError("strategy_matrix_incomplete")
+        if strategy.strategy == "blocked":
+            raise LocalDeliveryError(strategy.strategy_reason_code)
+        if strategy.strategy == "composition":
+            raise LocalDeliveryError("composition_not_materialized")
     state = db.scalar(
         select(ReferenceLayerDeliveryState).where(
             ReferenceLayerDeliveryState.provider_key
@@ -272,16 +291,18 @@ def catalog_local_delivery_availability(
     )
     strategy_rows = {}
     if current_snapshot is not None:
-        strategy_rows = {
-            row.layer_id: row
-            for row in db.scalars(
-                select(ReferenceLayerMirrorStrategy).where(
-                    ReferenceLayerMirrorStrategy.provider_key == provider_key,
-                    ReferenceLayerMirrorStrategy.catalog_snapshot_id
-                    == current_snapshot.id,
-                )
+        try:
+            strategy_rows = current_mirror_strategies(
+                db,
+                provider_key=provider_key,
+                snapshot_id=current_snapshot.id,
             )
-        }
+        except MirrorStrategyError:
+            for layer_id in leaf_ids:
+                result[layer_id] = _unavailable(
+                    "strategy_matrix_incomplete"
+                )
+            return result
     strategy_matrix_configured = bool(strategy_rows)
     layer_blockers = {
         layer.id: _current_layer_blocker(

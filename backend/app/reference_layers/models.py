@@ -3472,9 +3472,13 @@ class ReferenceLayerMirrorStrategy(Base):
         ),
         UniqueConstraint(
             "provider_key",
-            "layer_id",
             "catalog_snapshot_id",
-            name="uq_reference_layer_mirror_strategies_snapshot_layer",
+            "generation",
+            "layer_id",
+            name=(
+                "uq_reference_layer_mirror_strategies_"
+                "snapshot_generation_layer"
+            ),
         ),
         UniqueConstraint(
             "provider_key",
@@ -3485,6 +3489,7 @@ class ReferenceLayerMirrorStrategy(Base):
             "ix_reference_layer_mirror_strategies_current",
             "provider_key",
             "catalog_snapshot_id",
+            "generation",
             "layer_id",
         ),
     )

@@ -1,8 +1,28 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+from sqlalchemy import func, select
+
 from app.reference_layers import mirror_strategy
+from app.reference_layers.catalog import (
+    ReferenceCatalogDefinition,
+    ReferenceLayerDefinition,
+    ReferenceServiceDefinition,
+    apply_catalog_definition,
+)
+from app.reference_layers.mirror_lifecycle import (
+    apply_mirror_bootstrap_plan,
+    build_mirror_bootstrap_plan,
+)
+from app.reference_layers.models import (
+    ReferenceLayer,
+    ReferenceLayerMirrorStrategy,
+    ReferenceLayerMirrorStrategyDependency,
+)
 
 
 def _layer(source_key: str, *, options=None, layer_id: int = 1):
@@ -129,3 +149,198 @@ def test_strategy_plan_hash_changes_when_evidence_changes() -> None:
     )
 
     assert first.plan_sha256 != changed.plan_sha256
+
+
+def _seed_composition_strategy(db, provider_key: str):
+    service = ReferenceServiceDefinition(
+        source_key="service",
+        title="Strategy service",
+        upstream_protocol="wms",
+        base_url="https://example.test/geoserver/wms",
+        default_format="image/png",
+        license_status="approved",
+        cache_policy="mirror",
+    )
+    direct_layers = tuple(
+        ReferenceLayerDefinition(
+            source_key=f"layer:{suffix}",
+            node_type="layer",
+            title=f"Layer {suffix}",
+            service_key=service.source_key,
+            remote_name=f"planning:{suffix}",
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="mirror",
+            image_format="image/png",
+            bounds={
+                "west": -7.1,
+                "south": 40.0,
+                "east": -1.7,
+                "north": 43.3,
+            },
+            min_zoom=6,
+            max_zoom=18,
+        )
+        for suffix in ("a", "b")
+    )
+    composition = ReferenceLayerDefinition(
+        source_key="layer:composition",
+        node_type="layer",
+        title="Composition",
+        service_key=service.source_key,
+        remote_name="planning:composition",
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        options={
+            "mirror_composition": {
+                "dependencies": ["layer:a"],
+            }
+        },
+    )
+    definition = ReferenceCatalogDefinition(
+        provider_key=provider_key,
+        source_url="https://example.test/settings.json",
+        raw_catalog={"revision": 1},
+        services=(service,),
+        layers=(*direct_layers, composition),
+        retrieved_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+    )
+    snapshot, _ = apply_catalog_definition(db, definition)
+    bootstrap = build_mirror_bootstrap_plan(db, provider_key=provider_key)
+    apply_mirror_bootstrap_plan(db, bootstrap)
+    layers = {
+        layer.source_key: layer
+        for layer in db.scalars(
+            select(ReferenceLayer).where(
+                ReferenceLayer.provider_key == provider_key
+            )
+        )
+    }
+    return snapshot, layers
+
+
+def test_changed_dependency_appends_a_complete_generation_idempotently(
+    db,
+) -> None:
+    provider_key = "strategy-generation-test"
+    snapshot, layers = _seed_composition_strategy(db, provider_key)
+    initial_rows = list(
+        db.scalars(
+            select(ReferenceLayerMirrorStrategy)
+            .where(
+                ReferenceLayerMirrorStrategy.provider_key == provider_key,
+                ReferenceLayerMirrorStrategy.catalog_snapshot_id
+                == snapshot.id,
+                ReferenceLayerMirrorStrategy.generation == 1,
+            )
+            .order_by(ReferenceLayerMirrorStrategy.layer_id)
+        )
+    )
+    initial_ids = tuple(row.id for row in initial_rows)
+    initial_plan = mirror_strategy.build_mirror_strategy_plan(
+        db,
+        provider_key=provider_key,
+    )
+    changed_assignments = tuple(
+        replace(
+            assignment,
+            dependency_source_keys=("layer:b",),
+            evidence={"dependencies": ["layer:b"]},
+        )
+        if assignment.layer_source_key == "layer:composition"
+        else assignment
+        for assignment in initial_plan.assignments
+    )
+    changed_plan = replace(
+        initial_plan,
+        assignments=changed_assignments,
+    )
+
+    applied = mirror_strategy.apply_mirror_strategy_plan(db, changed_plan)
+
+    assert applied.generation == 2
+    assert applied.created_count == len(changed_assignments)
+    assert applied.unchanged_count == 0
+    assert db.scalar(
+        select(func.count(ReferenceLayerMirrorStrategy.id)).where(
+            ReferenceLayerMirrorStrategy.provider_key == provider_key,
+            ReferenceLayerMirrorStrategy.catalog_snapshot_id == snapshot.id,
+        )
+    ) == len(changed_assignments) * 2
+    assert tuple(
+        db.scalars(
+            select(ReferenceLayerMirrorStrategy.id)
+            .where(
+                ReferenceLayerMirrorStrategy.provider_key == provider_key,
+                ReferenceLayerMirrorStrategy.generation == 1,
+            )
+            .order_by(ReferenceLayerMirrorStrategy.layer_id)
+        )
+    ) == initial_ids
+    current = mirror_strategy.current_mirror_strategies(
+        db,
+        provider_key=provider_key,
+        snapshot_id=snapshot.id,
+    )
+    assert {row.generation for row in current.values()} == {2}
+    composition_row = current[layers["layer:composition"].id]
+    dependency = db.scalar(
+        select(ReferenceLayerMirrorStrategyDependency).where(
+            ReferenceLayerMirrorStrategyDependency.strategy_id
+            == composition_row.id
+        )
+    )
+    assert dependency.dependency_layer_id == layers["layer:b"].id
+
+    repeated = mirror_strategy.apply_mirror_strategy_plan(db, changed_plan)
+
+    assert repeated.generation == 2
+    assert repeated.created_count == 0
+    assert repeated.unchanged_count == len(changed_assignments)
+    assert db.scalar(
+        select(func.max(ReferenceLayerMirrorStrategy.generation)).where(
+            ReferenceLayerMirrorStrategy.provider_key == provider_key
+        )
+    ) == 2
+
+
+def test_current_strategy_reader_rejects_an_incomplete_latest_generation(
+    db,
+) -> None:
+    provider_key = "strategy-incomplete-generation-test"
+    snapshot, layers = _seed_composition_strategy(db, provider_key)
+    previous = db.scalar(
+        select(ReferenceLayerMirrorStrategy).where(
+            ReferenceLayerMirrorStrategy.provider_key == provider_key,
+            ReferenceLayerMirrorStrategy.layer_id == layers["layer:a"].id,
+            ReferenceLayerMirrorStrategy.generation == 1,
+        )
+    )
+    db.add(
+        ReferenceLayerMirrorStrategy(
+            provider_key=previous.provider_key,
+            layer_id=previous.layer_id,
+            catalog_snapshot_id=previous.catalog_snapshot_id,
+            catalog_definition_sha256=previous.catalog_definition_sha256,
+            strategy=previous.strategy,
+            source_id=previous.source_id,
+            strategy_reason_code=previous.strategy_reason_code,
+            strategy_reason=previous.strategy_reason,
+            evidence_json=previous.evidence_json,
+            evidence_sha256=previous.evidence_sha256,
+            generation=2,
+            validated_at=datetime(2026, 7, 27, 1, tzinfo=timezone.utc),
+        )
+    )
+    db.flush()
+
+    with pytest.raises(
+        mirror_strategy.MirrorStrategyError,
+        match="generation is incomplete",
+    ):
+        mirror_strategy.current_mirror_strategies(
+            db,
+            provider_key=provider_key,
+            snapshot_id=snapshot.id,
+        )

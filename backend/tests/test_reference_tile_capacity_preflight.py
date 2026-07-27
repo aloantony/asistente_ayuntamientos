@@ -405,15 +405,6 @@ def test_unauthorized_and_restricted_sources_never_reach_network(db):
             "tile_source_disabled",
         ),
         (
-            "tile-capacity-stale-test",
-            lambda _source, strategy: setattr(
-                strategy,
-                "catalog_definition_sha256",
-                "b" * 64,
-            ),
-            "tile_strategy_stale",
-        ),
-        (
             "tile-capacity-incompatible-test",
             lambda source, _strategy: setattr(
                 source,
@@ -460,6 +451,33 @@ def test_local_blockers_never_reach_authorization_or_network(
     assert tile_capacity_preflight_exit_code(report) == 1
 
 
+def test_stale_strategy_evidence_invalidates_the_complete_matrix(db) -> None:
+    _layer, _snapshot, source, strategy = _seed_tile_strategy(
+        db,
+        "tile-capacity-stale-test",
+    )
+    strategy.catalog_definition_sha256 = "b" * 64
+    db.commit()
+
+    with pytest.raises(
+        TileCapacityPreflightInputError,
+        match="strategy generation is incomplete",
+    ):
+        aggregate_tile_capacity_preflight(
+            db,
+            CapacityStore(),
+            provider_key=source.provider_key,
+            sample_limit=8,
+            concurrency=2,
+            max_archive_bytes=1_000_000,
+            max_tile_count=100,
+            resolver=lambda *_args: pytest.fail("network must not be reached"),
+            variant_preflight=lambda *_args, **_kwargs: pytest.fail(
+                "network must not be reached"
+            ),
+        )
+
+
 def test_exact_filters_select_one_strategy_and_mismatches_fail_closed(db):
     layer, _snapshot, source, _strategy = _seed_tile_strategy(
         db,
@@ -498,6 +516,91 @@ def test_exact_filters_select_one_strategy_and_mismatches_fail_closed(db):
             CapacityStore(),
             provider_key=source.provider_key,
             source_key=f"{source.source_key}:different",
+            sample_limit=8,
+            concurrency=2,
+            max_archive_bytes=1_000_000,
+            max_tile_count=100,
+        )
+
+
+def test_preflight_ignores_historical_tile_strategy_generations(db) -> None:
+    layer, snapshot, source, strategy = _seed_tile_strategy(
+        db,
+        "tile-capacity-latest-generation-test",
+    )
+    evidence = {"reason": "latest generation blocks bulk tiles"}
+    evidence_sha256 = hashlib.sha256(
+        json.dumps(
+            evidence,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    db.add(
+        ReferenceLayerMirrorStrategy(
+            provider_key=source.provider_key,
+            layer_id=layer.id,
+            catalog_snapshot_id=snapshot.id,
+            catalog_definition_sha256=snapshot.definition_sha256,
+            strategy="blocked",
+            source_id=None,
+            strategy_reason_code="latest_generation_blocked",
+            strategy_reason="Latest reviewed generation blocks tile seeding.",
+            evidence_json=evidence,
+            evidence_sha256=evidence_sha256,
+            generation=strategy.generation + 1,
+            validated_at=strategy.validated_at,
+        )
+    )
+    db.commit()
+
+    with pytest.raises(
+        TileCapacityPreflightInputError,
+        match="no current tile strategy",
+    ):
+        aggregate_tile_capacity_preflight(
+            db,
+            CapacityStore(),
+            provider_key=source.provider_key,
+            sample_limit=8,
+            concurrency=2,
+            max_archive_bytes=1_000_000,
+            max_tile_count=100,
+        )
+
+
+def test_preflight_rejects_an_incomplete_latest_strategy_generation(db) -> None:
+    layer, snapshot, source, strategy = _seed_tile_strategy(
+        db,
+        "tile-capacity-incomplete-generation-test",
+    )
+    db.add(
+        ReferenceLayerMirrorStrategy(
+            provider_key=source.provider_key,
+            layer_id=layer.id,
+            catalog_snapshot_id=snapshot.id,
+            catalog_definition_sha256=snapshot.definition_sha256,
+            strategy="tiles",
+            source_id=source.id,
+            strategy_reason_code="invalid_latest_generation",
+            strategy_reason="Latest generation has invalid evidence.",
+            evidence_json={"generation": strategy.generation + 1},
+            evidence_sha256="0" * 64,
+            generation=strategy.generation + 1,
+            validated_at=strategy.validated_at,
+        )
+    )
+    db.commit()
+
+    with pytest.raises(
+        TileCapacityPreflightInputError,
+        match="strategy generation is incomplete",
+    ):
+        aggregate_tile_capacity_preflight(
+            db,
+            CapacityStore(),
+            provider_key=source.provider_key,
             sample_limit=8,
             concurrency=2,
             max_archive_bytes=1_000_000,
