@@ -38,6 +38,7 @@ from app.reference_layers.mirror_authorization import (
     MirrorAuthorizationError,
     require_current_source_authorization,
     require_version_local_service_authorization,
+    source_authorization_blocker,
 )
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
@@ -611,8 +612,15 @@ def enqueue_due_sources(
     *,
     now: datetime | None = None,
     limit: int = 100,
+    require_authorization: bool,
 ) -> tuple[int, ...]:
-    """Queue only preferred sources, with at most one open run per layer."""
+    """Queue preferred sources, with at most one open run per layer.
+
+    Callers must choose the authorization policy explicitly. The production
+    scheduler requires it so an unreviewed source never creates a doomed run;
+    controlled lifecycle checks may disable it to model stale work queued
+    before the current authorization gate existed.
+    """
 
     moment = _moment(now)
     if not 1 <= limit <= 10_000:
@@ -635,26 +643,32 @@ def enqueue_due_sources(
         )
     )
     try:
-        candidate_ids = list(
-            db.scalars(
-                select(ReferenceLayerSource.id)
-                .where(
-                    ReferenceLayerSource.enabled.is_(True),
-                    ReferenceLayerSource.is_primary.is_(True),
-                    ReferenceLayerSource.sync_strategy != "manual",
-                    ReferenceLayerSource.next_check_at <= moment,
-                    ~open_run,
-                    ~administratively_disabled,
-                )
-                .order_by(
-                    ReferenceLayerSource.next_check_at,
-                    ReferenceLayerSource.id,
-                )
-                .limit(limit)
+        candidate_query = (
+            select(ReferenceLayerSource.id)
+            .where(
+                ReferenceLayerSource.enabled.is_(True),
+                ReferenceLayerSource.is_primary.is_(True),
+                ReferenceLayerSource.sync_strategy != "manual",
+                ReferenceLayerSource.next_check_at <= moment,
+                ~open_run,
+                ~administratively_disabled,
+            )
+            .order_by(
+                ReferenceLayerSource.next_check_at,
+                ReferenceLayerSource.id,
             )
         )
+        # When authorization is checked in Python, applying the queue limit
+        # in SQL would let earlier unreviewed sources starve a later reviewed
+        # source forever.  Read the ordered due set and stop after ``limit``
+        # successfully authorized runs instead.
+        if not require_authorization:
+            candidate_query = candidate_query.limit(limit)
+        candidate_ids = list(db.scalars(candidate_query))
         run_ids: list[int] = []
         for source_id in candidate_ids:
+            if len(run_ids) >= limit:
+                break
             preliminary = db.get(ReferenceLayerSource, source_id)
             if preliminary is None:
                 continue
@@ -675,6 +689,16 @@ def enqueue_due_sources(
                 or not source.is_primary
                 or source.sync_strategy == "manual"
                 or source.next_check_at > moment
+            ):
+                continue
+            if (
+                require_authorization
+                and source_authorization_blocker(
+                    db,
+                    source=source,
+                    require_acquisition=True,
+                )
+                is not None
             ):
                 continue
             state = db.scalar(

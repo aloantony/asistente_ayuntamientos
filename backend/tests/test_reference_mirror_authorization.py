@@ -37,7 +37,7 @@ from app.reference_layers.mirror_authorization import (
 from app.reference_layers.mirror_lifecycle import (
     canonical_promotion_event_sha256,
     claim_next_sync_run,
-    enqueue_due_sources,
+    enqueue_due_sources as _enqueue_due_sources,
 )
 from app.reference_layers.mirror_orchestrator import MirrorRunProcessor
 from app.reference_layers.models import (
@@ -64,6 +64,16 @@ from support_reference_mirror_authorization import (
 
 
 NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+
+
+def enqueue_due_sources(db, **kwargs):
+    """Model work queued before worker-side authorization revalidation."""
+
+    return _enqueue_due_sources(
+        db,
+        require_authorization=False,
+        **kwargs,
+    )
 
 
 def _seed_source(

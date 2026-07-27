@@ -42,7 +42,7 @@ from app.reference_layers.mirror_lifecycle import (
     SyncRunLease,
     claim_next_sync_run,
     delivery_state_matches_promotion_head,
-    enqueue_due_sources,
+    enqueue_due_sources as _enqueue_due_sources,
     enqueue_manual_sync_run,
     stored_promotion_hash_is_valid,
 )
@@ -103,6 +103,16 @@ from support_reference_mirror_authorization import (
 )
 
 NOW = datetime.now(timezone.utc)
+
+
+def enqueue_due_sources(db, **kwargs):
+    """Exercise queued-run processing independently from scheduler filtering."""
+
+    return _enqueue_due_sources(
+        db,
+        require_authorization=False,
+        **kwargs,
+    )
 
 
 def _deterministic_tile_png(red: int, green: int, blue: int) -> bytes:
@@ -1473,6 +1483,19 @@ def test_scheduler_reconciles_sources_before_enqueue_on_fresh_catalog(db) -> Non
 
     first = reconcile_reference_sources_once(lambda: nullcontext(db))
     second = reconcile_reference_sources_once(lambda: nullcontext(db))
+    unreviewed_run_ids = enqueue_reference_sources_once(
+        lambda: nullcontext(db),
+        reconcile=False,
+    )
+    primary = db.scalar(
+        select(ReferenceLayerSource).where(
+            ReferenceLayerSource.provider_key == definition.provider_key,
+            ReferenceLayerSource.enabled.is_(True),
+            ReferenceLayerSource.is_primary.is_(True),
+        )
+    )
+    assert primary is not None
+    ensure_authorized_mirror_source(db, primary, reviewed_at=NOW)
     run_ids = enqueue_reference_sources_once(
         lambda: nullcontext(db),
         reconcile=False,
@@ -1483,7 +1506,43 @@ def test_scheduler_reconciles_sources_before_enqueue_on_fresh_catalog(db) -> Non
     assert first[0].created_count > 0
     assert second[0].created_count == 0
     assert second[0].updated_count == 0
+    assert unreviewed_run_ids == ()
     assert run_ids
+
+
+def test_scheduler_authorization_filter_does_not_starve_reviewed_source(
+    db,
+) -> None:
+    unreviewed_definition = _definition("aaa-unreviewed")
+    apply_catalog_definition(db, unreviewed_definition)
+    reconcile_reference_sources_once(lambda: nullcontext(db))
+    unreviewed = db.scalar(
+        select(ReferenceLayerSource).where(
+            ReferenceLayerSource.provider_key
+            == unreviewed_definition.provider_key,
+            ReferenceLayerSource.enabled.is_(True),
+            ReferenceLayerSource.is_primary.is_(True),
+        )
+    )
+    assert unreviewed is not None
+
+    _, [reviewed] = _seed_source(db)
+    unreviewed.next_check_at = NOW - timedelta(minutes=2)
+    reviewed.next_check_at = NOW - timedelta(minutes=1)
+    db.commit()
+
+    [run_id] = enqueue_reference_sources_once(
+        lambda: nullcontext(db),
+        limit=1,
+        reconcile=False,
+    )
+    run = db.get(ReferenceSyncRun, run_id)
+
+    assert run is not None
+    assert run.source_id == reviewed.id
+    assert db.get(ReferenceLayerSource, unreviewed.id).next_check_at == (
+        NOW - timedelta(minutes=2)
+    )
 
 
 def test_conditional_tiles_reuse_active_archive_until_definition_changes(

@@ -1000,6 +1000,7 @@ def enqueue_reference_sources_once(
         return enqueue_due_sources(
             db,
             limit=config.reference_mirror_enqueue_limit if limit is None else limit,
+            require_authorization=True,
         )
 
 

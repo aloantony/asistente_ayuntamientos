@@ -33,7 +33,7 @@ from app.reference_layers.mirror_lifecycle import (
     build_mirror_bootstrap_plan,
     claim_next_sync_run,
     deactivate_delivery,
-    enqueue_due_sources,
+    enqueue_due_sources as _enqueue_due_sources,
     enqueue_fallback_source,
     enqueue_manual_sync_run,
     finish_sync_run,
@@ -148,6 +148,16 @@ def _physical_transition_verifier(db, version):
 
 def _missing_physical_transition_verifier(_db, _version):
     raise FileNotFoundError("published physical delivery is absent")
+
+
+def enqueue_due_sources(db, **kwargs):
+    """Exercise queue lifecycle independently from production filtering."""
+
+    return _enqueue_due_sources(
+        db,
+        require_authorization=False,
+        **kwargs,
+    )
 
 
 @pytest.mark.parametrize(

@@ -56,7 +56,7 @@ from app.reference_layers.mirror_lifecycle import (
     apply_mirror_bootstrap_plan,
     build_mirror_bootstrap_plan,
     claim_next_sync_run,
-    enqueue_due_sources,
+    enqueue_due_sources as _enqueue_due_sources,
     promote_delivery_version,
 )
 from app.reference_layers.source_content_parity import (
@@ -91,6 +91,16 @@ from support_reference_mirror_authorization import (
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=timezone.utc)
+
+
+def enqueue_due_sources(db, **kwargs):
+    """Create a frozen run before builder-specific authorization setup."""
+
+    return _enqueue_due_sources(
+        db,
+        require_authorization=False,
+        **kwargs,
+    )
 
 
 def test_web_reference_blob_store_is_strictly_read_only(monkeypatch) -> None:
