@@ -141,24 +141,31 @@ Preparar fuera del repositorio:
    postgresql://app:CONTRASEÑA@127.0.0.1:5432/app
    ```
 
-4. un filesystem dedicado de teselas. Para los valores predeterminados se
-   reserva por adelantado una imagen ext4 de 28 GiB y más de 5,5 millones de
-   inodos. Estos comandos requieren root y `mkfs.ext4` destruye el contenido
-   del fichero indicado: comprobar las dos rutas antes de ejecutarlos.
+4. un dispositivo de bloque dedicado exclusivamente a las teselas. Para los
+   valores predeterminados debe exponerse al host un volumen de 28 GiB,
+   formateado como ext4 con más de 5,5 millones de inodos. No usar un
+   directorio del filesystem raíz ni una imagen loopback: no aportan el
+   aislamiento operativo exigido para el límite físico. Los siguientes
+   comandos requieren root y `mkfs.ext4` destruye todo el dispositivo
+   indicado. Sustituir primero el marcador por la ruta estable
+   `/dev/disk/by-id/...`, comprobar con `lsblk` que es el volumen nuevo y no
+   continuar si contiene datos.
 
    ```bash
+   sudo lsblk -o NAME,PATH,SIZE,FSTYPE,LABEL,MOUNTPOINTS \
+     /dev/disk/by-id/REEMPLAZAR_POR_VOLUMEN_GWC
    sudo install -d -m 0750 -o 999 -g 2000 \
      /var/lib/asistente_ayuntamientos/gwc-cache-v4
-   sudo fallocate -l 28G \
-     /var/lib/asistente_ayuntamientos/gwc-cache-v4.ext4
-   sudo mkfs.ext4 -F -m 0 -i 4096 -L siur-gwc-v4 \
-     /var/lib/asistente_ayuntamientos/gwc-cache-v4.ext4
+   sudo mkfs.ext4 -m 0 -i 4096 -L siur-gwc-v4 \
+     /dev/disk/by-id/REEMPLAZAR_POR_VOLUMEN_GWC
+   sudo blkid /dev/disk/by-id/REEMPLAZAR_POR_VOLUMEN_GWC
    ```
 
-   Añadir una entrada persistente equivalente a `/etc/fstab`:
+   Copiar el UUID recién mostrado y añadir una entrada persistente equivalente
+   a `/etc/fstab`:
 
    ```text
-   /var/lib/asistente_ayuntamientos/gwc-cache-v4.ext4 /var/lib/asistente_ayuntamientos/gwc-cache-v4 ext4 loop,nodev,nosuid,noexec,noatime 0 2
+   UUID=REEMPLAZAR_POR_UUID /var/lib/asistente_ayuntamientos/gwc-cache-v4 ext4 nodev,nosuid,noexec,noatime 0 2
    ```
 
    Montar y fijar la propiedad que usa Compose:
@@ -178,7 +185,9 @@ Preparar fuera del repositorio:
    `GEOWEBCACHE_TILE_CACHE_HOST_PATH=/var/lib/asistente_ayuntamientos/gwc-cache-v4`.
    Si el mount falta tras un reinicio, Compose solo ve el directorio padre:
    `gwc-config-init` lo detecta por identidad/capacidad y bloquea GeoServer
-   antes de escribir. No continuar hasta que `findmnt` muestre `siur-gwc-v4`.
+   antes de escribir. No continuar hasta que `findmnt` muestre `siur-gwc-v4`,
+   `df -B1` confirme una capacidad total entre 27 y 28 GiB y `df -i` muestre
+   más de 5,5 millones de inodos.
 
 No usar `postgresql+psycopg://` y no pasar la URL en la línea de comandos. El
 programa la analiza y entrega host, puerto, usuario, base y contraseña
