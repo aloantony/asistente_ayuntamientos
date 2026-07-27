@@ -370,6 +370,15 @@ class AcquisitionResult:
         )
 
 
+@dataclass(frozen=True)
+class TileSourceProbeRequest:
+    """Bounded capabilities request needed to derive one tile descriptor."""
+
+    url: str
+    accept: str
+    allowed_content_types: frozenset[str]
+
+
 class _Downloader(Protocol):
     def download(
         self,
@@ -2181,22 +2190,16 @@ class ReferenceAcquisitionPipeline:
         del conditional
         artifacts: list[AcquiredArtifact] = []
         probe: SourceProbe | None = None
-        if candidate.protocol == "xyz":
-            descriptor = _xyz_tile_descriptor(candidate)
-        else:
+        if candidate.protocol != "xyz":
             probe, capabilities, _document = self._probe(candidate)
             artifacts.append(capabilities)
-            if candidate.protocol == "wmts":
-                descriptor = _wmts_tile_descriptor(candidate, probe)
-            else:
-                descriptor = _wms_tile_descriptor(candidate, probe)
+        tile_source_document = build_tile_source_document(
+            candidate,
+            probe=probe,
+        )
+        descriptor = cast(dict[str, Any], tile_source_document["descriptor"])
         tile_source = self._local_json_artifact(
-            {
-                "schema": "reference-tile-source/v1",
-                "protocol": candidate.protocol,
-                "definition_sha256": candidate.definition_sha256,
-                "descriptor": descriptor,
-            },
+            tile_source_document,
             kind="metadata",
             role="input",
             metadata={
@@ -2226,6 +2229,71 @@ class ReferenceAcquisitionPipeline:
             feature_count=None,
             stats=stats,
         )
+
+
+def tile_source_probe_request(
+    candidate: SourceCandidate,
+) -> TileSourceProbeRequest | None:
+    """Return the exact in-memory capabilities request for a tile source."""
+
+    _validate_candidate(candidate)
+    if candidate.protocol == "xyz":
+        return None
+    if candidate.protocol not in {"wmts", "wms_tiles"}:
+        raise AcquisitionConfigurationError(
+            "source is not a tile-seed candidate",
+            code="tile_source_required",
+        )
+    url, accept, media_types = _probe_request(candidate)
+    return TileSourceProbeRequest(
+        url=url,
+        accept=accept,
+        allowed_content_types=media_types,
+    )
+
+
+def build_tile_source_document(
+    candidate: SourceCandidate,
+    *,
+    probe: SourceProbe | None,
+) -> dict[str, Any]:
+    """Build the same reviewed tile document used by normal acquisition."""
+
+    _validate_candidate(candidate)
+    if candidate.protocol == "xyz":
+        if probe is not None:
+            raise AcquisitionConfigurationError(
+                "XYZ tile sources do not use capabilities",
+                code="unexpected_tile_probe",
+            )
+        descriptor = _xyz_tile_descriptor(candidate)
+    elif candidate.protocol in {"wmts", "wms_tiles"}:
+        if (
+            probe is None
+            or not probe.available
+            or probe.protocol != candidate.protocol
+            or probe.canonical_name is None
+        ):
+            raise AcquisitionValidationError(
+                "tile capabilities do not prove the requested layer",
+                code="invalid_capabilities",
+            )
+        descriptor = (
+            _wmts_tile_descriptor(candidate, probe)
+            if candidate.protocol == "wmts"
+            else _wms_tile_descriptor(candidate, probe)
+        )
+    else:
+        raise AcquisitionConfigurationError(
+            "source is not a tile-seed candidate",
+            code="tile_source_required",
+        )
+    return {
+        "schema": "reference-tile-source/v1",
+        "protocol": candidate.protocol,
+        "definition_sha256": candidate.definition_sha256,
+        "descriptor": descriptor,
+    }
 
 
 def candidate_from_source_model(source: ReferenceLayerSource) -> SourceCandidate:
