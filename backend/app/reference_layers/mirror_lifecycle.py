@@ -31,6 +31,7 @@ from app.reference_layers.local_metadata_contract import (
     local_metadata_gate_matches,
 )
 from app.reference_layers.mirror_strategy import (
+    AppliedMirrorStrategyPlan,
     apply_mirror_strategy_plan,
     build_mirror_strategy_plan,
 )
@@ -196,6 +197,11 @@ class AppliedMirrorBootstrap:
     created_count: int
     updated_count: int
     deactivated_count: int
+    strategy_plan_sha256: str
+    strategy_generation: int
+    strategy_created_count: int
+    strategy_unchanged_count: int
+    strategy_blocked_count: int
 
 
 @dataclass(frozen=True)
@@ -459,8 +465,15 @@ def build_mirror_bootstrap_plan(
 def apply_mirror_bootstrap_plan(
     db: Session,
     reviewed_plan: MirrorBootstrapPlan,
+    *,
+    expected_strategy_plan_sha256: str | None = None,
+    commit: bool = True,
 ) -> AppliedMirrorBootstrap:
-    """Apply a reviewed plan after revalidation under a provider lock."""
+    """Apply a reviewed plan after revalidation under a provider lock.
+
+    ``commit=False`` lets a narrower operator boundary verify additional
+    postconditions while retaining this transaction and its advisory lock.
+    """
 
     try:
         _lock_source_provider(db, reviewed_plan.provider_key)
@@ -471,6 +484,18 @@ def apply_mirror_bootstrap_plan(
         if current.plan_sha256 != reviewed_plan.plan_sha256:
             raise MirrorPlanChangedError(
                 "mirror bootstrap state changed after the plan was reviewed"
+            )
+        strategy_plan = build_mirror_strategy_plan(
+            db,
+            provider_key=reviewed_plan.provider_key,
+        )
+        if (
+            expected_strategy_plan_sha256 is not None
+            and strategy_plan.plan_sha256
+            != expected_strategy_plan_sha256
+        ):
+            raise MirrorPlanChangedError(
+                "mirror strategy plan changed after the plan was reviewed"
             )
 
         existing = {
@@ -590,17 +615,21 @@ def apply_mirror_bootstrap_plan(
                 record.enabled = False
                 record.is_primary = False
                 deactivated += 1
-        strategy_plan = build_mirror_strategy_plan(
-            db,
-            provider_key=reviewed_plan.provider_key,
+        applied_strategy: AppliedMirrorStrategyPlan = (
+            apply_mirror_strategy_plan(db, strategy_plan)
         )
-        apply_mirror_strategy_plan(db, strategy_plan)
-        db.commit()
+        if commit:
+            db.commit()
         return AppliedMirrorBootstrap(
             plan_sha256=reviewed_plan.plan_sha256,
             created_count=created,
             updated_count=updated_count,
             deactivated_count=deactivated,
+            strategy_plan_sha256=applied_strategy.plan_sha256,
+            strategy_generation=applied_strategy.generation,
+            strategy_created_count=applied_strategy.created_count,
+            strategy_unchanged_count=applied_strategy.unchanged_count,
+            strategy_blocked_count=applied_strategy.blocked_count,
         )
     except Exception:
         db.rollback()
