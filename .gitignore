@@ -21,3 +21,6 @@ postgres_data/
 frontend/tsconfig.tsbuildinfo
 .claude/settings.local.json
 .codex-sessions/
+
+ops/geoserver-gwc-health/.spotless-index
+ops/geoserver-gwc-health/target/

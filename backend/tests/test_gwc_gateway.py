@@ -175,6 +175,7 @@ def test_gateway_proxies_admin_body_and_rewrites_internal_location() -> None:
     "path",
     [
         "/geoserver/gwc/rest/diskquota.json",
+        "/geoserver/gwc/rest/diskquota.xml",
         "/geoserver/gwc/rest/blobstores/other.xml",
         "/geoserver/gwc/rest/blobstores.xml",
     ],

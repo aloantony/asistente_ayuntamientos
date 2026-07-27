@@ -12,8 +12,9 @@ mutating command is dry-run by default.  Apply mode:
 * keeps database credentials out of argv, reports and exception messages.
 
 Redis queues/cache and GeoWebCache tiles are reconstructible and are therefore
-declared exclusions rather than backup inputs. GeoWebCache configuration
-remains in the fully inventoried GeoServer data directory.
+declared exclusions rather than backup inputs. GeoWebCache XML configuration
+remains inventoried in the GeoServer data directory; its reconstructible HSQL
+quota database is excluded at one exact, mount-checked nested path.
 """
 
 from __future__ import annotations
@@ -36,9 +37,10 @@ from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 FILESYSTEM_IDENTITY_SCHEMA_VERSION = 4
 GWC_FILE_BLOB_STORE_SCHEMA_VERSION = 5
+GWC_QUOTA_STORE_EXCLUSION_SCHEMA_VERSION = 6
 DATABASE_IDENTITY_SCHEMA_VERSION = 3
 LEGACY_SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
@@ -69,8 +71,9 @@ REQUIRED_EXTENSION_SCHEMAS = {
 }
 PG_DUMP_EXTENSION_EXCLUSIONS = tuple(sorted(REQUIRED_EXTENSION_SCHEMAS))
 GWC_CONFIGURATION_DIRECTORY = "/opt/geoserver_data/gwc"
+GWC_QUOTA_STORE_RELATIVE_PATH = "gwc/diskquota_page_store_hsql"
 GWC_TILE_CACHE_DIRECTORY = "/var/lib/geowebcache"
-GWC_TILE_CACHE_VOLUME = "geowebcache_tile_cache_v3"
+GWC_TILE_CACHE_VOLUME = "geowebcache_tile_cache_v4"
 GWC_TILE_BLOB_STORE = {
     "type": "FileBlobStore",
     "id": "siur-tile-cache-v3",
@@ -81,6 +84,11 @@ GWC_TILE_BLOB_STORE = {
     "file_system_block_size": "measured-from-target-filesystem",
 }
 GWC_TILE_EXCLUDED_SCOPE = (
+    "external dedicated FileBlobStore v4 tile volume and exact "
+    "gwc/diskquota_page_store_hsql runtime quota database"
+)
+GWC_V5_TILE_CACHE_VOLUME = "geowebcache_tile_cache_v3"
+GWC_V5_TILE_EXCLUDED_SCOPE = (
     "external explicit FileBlobStore v3 tile volume only"
 )
 LEGACY_GWC_TILE_EXCLUDED_SCOPE = (
@@ -423,6 +431,9 @@ def create_backup(
     geoserver_inventory = _inventory_tree(
         geoserver_source,
         excluded_roots=frozenset(),
+        excluded_directories=frozenset(
+            {GWC_QUOTA_STORE_RELATIVE_PATH}
+        ),
     )
     _assert_inventory_optional_empty_geowebcache_placeholder(
         geoserver_inventory,
@@ -448,15 +459,18 @@ def create_backup(
                 "component": "geowebcache",
                 "included": False,
                 "reason": (
-                    "only the external explicit FileBlobStore v3 tile volume "
-                    "is derived; GEOWEBCACHE_CACHE_DIR is configuration "
-                    "inside the included GeoServer data directory"
+                    "the external dedicated tile volume and exact HSQL "
+                    "runtime quota database are derived; GeoWebCache XML "
+                    "configuration remains included"
                 ),
                 "configuration_included": True,
                 "configuration_directory": GWC_CONFIGURATION_DIRECTORY,
                 "cache_directory": GWC_TILE_CACHE_DIRECTORY,
                 "volume": GWC_TILE_CACHE_VOLUME,
                 "blob_store": dict(GWC_TILE_BLOB_STORE),
+                "quota_store_excluded_path": (
+                    GWC_QUOTA_STORE_RELATIVE_PATH
+                ),
             },
         ],
     }
@@ -520,6 +534,9 @@ def create_backup(
         geoserver_after = _inventory_tree(
             geoserver_source,
             excluded_roots=frozenset(),
+            excluded_directories=frozenset(
+                {GWC_QUOTA_STORE_RELATIVE_PATH}
+            ),
         )
         _assert_inventory_optional_empty_geowebcache_placeholder(
             geoserver_after,
@@ -730,11 +747,15 @@ def _open_verified_backup(
         )
 
         verified_trees: dict[str, dict[str, int]] = {}
-        geoserver_exclusions = (
-            []
-            if manifest_schema_version >= GWC_FILE_BLOB_STORE_SCHEMA_VERSION
-            else ["gwc-cache"]
-        )
+        if (
+            manifest_schema_version
+            >= GWC_QUOTA_STORE_EXCLUSION_SCHEMA_VERSION
+        ):
+            geoserver_exclusions = [GWC_QUOTA_STORE_RELATIVE_PATH]
+        elif manifest_schema_version >= GWC_FILE_BLOB_STORE_SCHEMA_VERSION:
+            geoserver_exclusions = []
+        else:
+            geoserver_exclusions = ["gwc-cache"]
         for name, description, expected_archive, expected_exclusions in (
             (
                 "reference_artifacts",
@@ -1648,11 +1669,15 @@ def _build_manifest(
                 "cache_directory": GWC_TILE_CACHE_DIRECTORY,
                 "volume": GWC_TILE_CACHE_VOLUME,
                 "blob_store": dict(GWC_TILE_BLOB_STORE),
+                "quota_store_excluded_path": (
+                    GWC_QUOTA_STORE_RELATIVE_PATH
+                ),
                 "reconstruction": (
                     "restore the complete GeoServer data directory, reapply "
-                    "and verify the exact FileBlobStore and declarative disk "
-                    "quota, then regenerate requested tiles from restored "
-                    "local delivery artifacts"
+                    "the pre-start quota XML, recreate and verify a fresh "
+                    "HSQL quota store plus exact FileBlobStore, then "
+                    "regenerate requested tiles from restored local delivery "
+                    "artifacts"
                 ),
             },
         ],
@@ -1725,7 +1750,22 @@ def _inventory_tree(
     source: Path,
     *,
     excluded_roots: frozenset[str],
+    excluded_directories: frozenset[str] = frozenset(),
 ) -> _TreeInventory:
+    for excluded in excluded_directories:
+        candidate = PurePosixPath(excluded)
+        if (
+            not excluded
+            or excluded.startswith("/")
+            or "\\" in excluded
+            or "\x00" in excluded
+            or candidate.as_posix() != excluded
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+            or candidate.parts[0] in excluded_roots
+        ):
+            raise DisasterRecoverySafetyError(
+                "excluded backup directory path is invalid"
+            )
     directory_flags = os.O_RDONLY
     file_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -1749,6 +1789,109 @@ def _inventory_tree(
         )
         _validate_source_metadata(source_before, root=True)
         entries: list[_InventoryEntry] = []
+
+        def audit_excluded_directory(
+            directory_descriptor: int,
+            *,
+            expected: os.stat_result,
+            parent_mount_id: int,
+        ) -> None:
+            before = os.fstat(directory_descriptor)
+            _assert_same_node(expected, before, kind="directory")
+            _validate_source_metadata(before, root=False)
+            if (
+                before.st_dev != source_before.st_dev
+                or _descriptor_mount_id(directory_descriptor)
+                != parent_mount_id
+            ):
+                raise DisasterRecoverySafetyError(
+                    "excluded backup directories cannot be mount points"
+                )
+            try:
+                with os.scandir(directory_descriptor) as iterator:
+                    children = sorted(iterator, key=lambda item: item.name)
+            except OSError as error:
+                raise DisasterRecoverySafetyError(
+                    "excluded backup directory cannot be audited"
+                ) from error
+            for child in children:
+                try:
+                    metadata = child.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise DisasterRecoverySafetyError(
+                        "excluded backup directory changed during audit"
+                    ) from error
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise DisasterRecoverySafetyError(
+                        "excluded backup directories cannot contain symlinks"
+                    )
+                if metadata.st_dev != source_before.st_dev:
+                    raise DisasterRecoverySafetyError(
+                        "excluded backup directories cannot cross "
+                        "filesystem boundaries"
+                    )
+                _validate_source_metadata(metadata, root=False)
+                if stat.S_ISDIR(metadata.st_mode):
+                    try:
+                        child_descriptor = os.open(
+                            child.name,
+                            directory_flags,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise DisasterRecoverySafetyError(
+                            "excluded backup directory changed during audit"
+                        ) from error
+                    try:
+                        opened = os.fstat(child_descriptor)
+                        _assert_same_node(
+                            metadata,
+                            opened,
+                            kind="directory",
+                        )
+                        audit_excluded_directory(
+                            child_descriptor,
+                            expected=opened,
+                            parent_mount_id=parent_mount_id,
+                        )
+                    finally:
+                        os.close(child_descriptor)
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise DisasterRecoverySafetyError(
+                        "excluded backup directories can contain only "
+                        "directories and regular files"
+                    )
+                if metadata.st_nlink != 1:
+                    raise DisasterRecoverySafetyError(
+                        "excluded backup directories cannot contain "
+                        "hard-linked files"
+                    )
+                try:
+                    child_descriptor = os.open(
+                        child.name,
+                        file_flags,
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as error:
+                    raise DisasterRecoverySafetyError(
+                        "excluded backup directory changed during audit"
+                    ) from error
+                try:
+                    opened = os.fstat(child_descriptor)
+                    _assert_same_node(metadata, opened, kind="file")
+                    if (
+                        _descriptor_mount_id(child_descriptor)
+                        != parent_mount_id
+                    ):
+                        raise DisasterRecoverySafetyError(
+                            "excluded backup directories cannot contain "
+                            "mounted files"
+                        )
+                finally:
+                    os.close(child_descriptor)
+            after = os.fstat(directory_descriptor)
+            _assert_same_node(before, after, kind="directory")
 
         def visit(
             directory_descriptor: int,
@@ -1785,6 +1928,42 @@ def _inventory_tree(
                         raise DisasterRecoverySafetyError(
                             "excluded backup roots cannot be symlinks"
                         )
+                    continue
+                if relative_text in excluded_directories:
+                    if stat.S_ISLNK(metadata.st_mode):
+                        raise DisasterRecoverySafetyError(
+                            "excluded backup directories cannot be symlinks"
+                        )
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        raise DisasterRecoverySafetyError(
+                            "excluded backup paths must be directories"
+                        )
+                    try:
+                        child_descriptor = os.open(
+                            child.name,
+                            directory_flags,
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as error:
+                        raise DisasterRecoverySafetyError(
+                            "excluded backup directory changed during audit"
+                        ) from error
+                    try:
+                        opened = os.fstat(child_descriptor)
+                        _assert_same_node(
+                            metadata,
+                            opened,
+                            kind="directory",
+                        )
+                        audit_excluded_directory(
+                            child_descriptor,
+                            expected=opened,
+                            parent_mount_id=_descriptor_mount_id(
+                                directory_descriptor
+                            ),
+                        )
+                    finally:
+                        os.close(child_descriptor)
                     continue
                 if stat.S_ISLNK(metadata.st_mode):
                     raise DisasterRecoverySafetyError(
@@ -1887,7 +2066,9 @@ def _inventory_tree(
         return _TreeInventory(
             source=source,
             entries=tuple(entries),
-            excluded_paths=tuple(sorted(excluded_roots)),
+            excluded_paths=tuple(
+                sorted(excluded_roots | excluded_directories)
+            ),
             source_device=source_before.st_dev,
             source_inode=source_before.st_ino,
             source_mode=stat.S_IMODE(source_before.st_mode),
@@ -1955,6 +2136,53 @@ def _assert_optional_empty_geowebcache_placeholder(path: Path) -> None:
     finally:
         if "parent_descriptor" in locals():
             os.close(parent_descriptor)
+
+
+def _descriptor_mount_id(descriptor: int) -> int:
+    """Read Linux's stable mount identity for an already-open descriptor."""
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    info_descriptor: int | None = None
+    try:
+        info_descriptor = os.open(
+            f"/proc/self/fdinfo/{descriptor}",
+            flags,
+        )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(info_descriptor, 4096)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 16 * 1024:
+                raise DisasterRecoverySafetyError(
+                    "filesystem mount identity is unavailable"
+                )
+            chunks.append(chunk)
+    except OSError as error:
+        raise DisasterRecoverySafetyError(
+            "filesystem mount identity is unavailable"
+        ) from error
+    finally:
+        if info_descriptor is not None:
+            os.close(info_descriptor)
+    try:
+        text = b"".join(chunks).decode("ascii")
+    except UnicodeDecodeError as error:
+        raise DisasterRecoverySafetyError(
+            "filesystem mount identity is unavailable"
+        ) from error
+    matches = re.findall(r"^mnt_id:\s*([1-9][0-9]*)$", text, re.MULTILINE)
+    if len(matches) != 1:
+        raise DisasterRecoverySafetyError(
+            "filesystem mount identity is unavailable"
+        )
+    return int(matches[0])
 
 
 def _assert_inventory_optional_empty_geowebcache_placeholder(
@@ -4114,6 +4342,15 @@ def _validate_tree_statistics(
     expected_bytes = sum(
         item.size_bytes for item in entries if item.kind == "file"
     )
+    if any(
+        entry.path == excluded
+        or entry.path.startswith(f"{excluded}/")
+        for excluded in expected_exclusions
+        for entry in entries
+    ):
+        raise DisasterRecoveryVerificationError(
+            "backup tree contains state declared as excluded"
+        )
     if (
         description.get("file_count") != expected_files
         or description.get("directory_count") != expected_directories
@@ -4171,7 +4408,10 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         raise DisasterRecoveryVerificationError(
             "GeoWebCache backup scope declaration is invalid"
         )
-    if manifest_schema_version >= GWC_FILE_BLOB_STORE_SCHEMA_VERSION:
+    if (
+        manifest_schema_version
+        >= GWC_QUOTA_STORE_EXCLUSION_SCHEMA_VERSION
+    ):
         if (
             geowebcache_exclusion.get("excluded_scope")
             != GWC_TILE_EXCLUDED_SCOPE
@@ -4183,6 +4423,25 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
             != GWC_TILE_CACHE_VOLUME
             or geowebcache_exclusion.get("blob_store")
             != GWC_TILE_BLOB_STORE
+            or geowebcache_exclusion.get("quota_store_excluded_path")
+            != GWC_QUOTA_STORE_RELATIVE_PATH
+        ):
+            raise DisasterRecoveryVerificationError(
+                "GeoWebCache FileBlobStore backup scope declaration is invalid"
+            )
+    elif manifest_schema_version >= GWC_FILE_BLOB_STORE_SCHEMA_VERSION:
+        if (
+            geowebcache_exclusion.get("excluded_scope")
+            != GWC_V5_TILE_EXCLUDED_SCOPE
+            or geowebcache_exclusion.get("configuration_directory")
+            != GWC_CONFIGURATION_DIRECTORY
+            or geowebcache_exclusion.get("cache_directory")
+            != GWC_TILE_CACHE_DIRECTORY
+            or geowebcache_exclusion.get("volume")
+            != GWC_V5_TILE_CACHE_VOLUME
+            or geowebcache_exclusion.get("blob_store")
+            != GWC_TILE_BLOB_STORE
+            or "quota_store_excluded_path" in geowebcache_exclusion
         ):
             raise DisasterRecoveryVerificationError(
                 "GeoWebCache FileBlobStore backup scope declaration is invalid"

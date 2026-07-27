@@ -1,4 +1,6 @@
 import os
+import stat
+from dataclasses import replace
 from pathlib import Path
 from shutil import _ntuple_diskusage
 from types import SimpleNamespace
@@ -11,13 +13,16 @@ from app.reference_layers.geoserver_admin import (
     GeoServerHealth,
     GeoWebCacheDiskQuota,
     GeoWebCacheFileBlobStore,
+    GeoWebCacheQuotaHealth,
     expected_geowebcache_tile_blob_store,
 )
 from app.reference_layers.gwc_quota import (
+    GeoWebCachePhysicalLimit,
     GeoWebCacheQuotaSafetyError,
     build_parser,
     cache_capacity_report,
     cache_filesystem_block_size,
+    physical_limit_status,
     quota_status,
     runtime_contract_status,
 )
@@ -29,7 +34,7 @@ def quota(
     *,
     enabled: bool = True,
     quota_gib: int = 20,
-    cleanup_seconds: int = 60,
+    cleanup_seconds: int = 10,
     policy: str = "LRU",
 ) -> GeoWebCacheDiskQuota:
     return GeoWebCacheDiskQuota(
@@ -39,7 +44,67 @@ def quota(
         quota_units="GiB",
         cleanup_frequency=cleanup_seconds,
         cleanup_units="SECONDS",
+        max_concurrent_cleanups=2,
         expiration_policy=policy,  # type: ignore[arg-type]
+    )
+
+
+def quota_health(
+    *,
+    healthy: bool = True,
+    monitor_enabled: bool = True,
+    monitor_running: bool = True,
+    scheduled_cleanup_active: bool = True,
+    provider_error: bool = False,
+    store_class: str | None = quota_module.EXPECTED_QUOTA_STORE_CLASS,
+    dialect_class: str | None = quota_module.EXPECTED_QUOTA_DIALECT_CLASS,
+    global_used_bytes: int | None = 0,
+) -> GeoWebCacheQuotaHealth:
+    return GeoWebCacheQuotaHealth(
+        healthy=healthy,
+        monitor_enabled=monitor_enabled,
+        monitor_running=monitor_running,
+        scheduled_cleanup_active=scheduled_cleanup_active,
+        provider_error=provider_error,
+        store_class=store_class,
+        dialect_class=dialect_class,
+        global_used_bytes=global_used_bytes,
+    )
+
+
+def safe_physical_limit(cache: Path) -> GeoWebCachePhysicalLimit:
+    return GeoWebCachePhysicalLimit(
+        cache_path=str(cache),
+        cache_root_device=2,
+        cache_root_inode=3,
+        parent_device=1,
+        dedicated_mount=True,
+        filesystem_total_bytes=28 * GIB,
+        filesystem_used_bytes=0,
+        filesystem_free_bytes=28 * GIB,
+        configured_hard_limit_bytes=28 * GIB,
+        configured_soft_quota_bytes=20 * GIB,
+        required_free_reserve_bytes=5 * GIB,
+        configured_burst_margin_bytes=2 * GIB,
+        required_minimum_total_bytes=27 * GIB,
+        maximum_runtime_used_bytes=22 * GIB,
+        hard_limit_margin_bytes=0,
+        minimum_total_margin_bytes=GIB,
+        free_reserve_margin_bytes=23 * GIB,
+        burst_remaining_bytes=22 * GIB,
+        safe=True,
+    )
+
+
+def patch_safe_physical_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    cache: Path,
+) -> None:
+    expected = safe_physical_limit(cache)
+    monkeypatch.setattr(
+        quota_module,
+        "physical_limit_status",
+        lambda _path, *, configured: expected,
     )
 
 
@@ -49,18 +114,22 @@ class FakeAdmin:
         *,
         before: GeoWebCacheDiskQuota,
         after: GeoWebCacheDiskQuota | None = None,
+        before_health: GeoWebCacheQuotaHealth | None = None,
+        after_health: GeoWebCacheQuotaHealth | None = None,
         before_blob_stores: tuple[GeoWebCacheFileBlobStore, ...] = (),
         after_blob_store: GeoWebCacheFileBlobStore | None = None,
     ) -> None:
         self.before = before
         self.after = after or before
+        self.before_health = before_health or quota_health()
+        self.after_health = after_health or self.before_health
         self.before_blob_stores = before_blob_stores
         self.after_blob_store = after_blob_store
         self.read_calls = 0
+        self.read_health_calls = 0
         self.read_blob_store_calls = 0
         self.ensure_blob_store_calls: list[int] = []
         self.ensure_block_size_migration_calls: list[bool] = []
-        self.configure_calls: list[dict[str, object]] = []
         self.call_order: list[str] = []
 
     def health(self) -> GeoServerHealth:
@@ -77,7 +146,16 @@ class FakeAdmin:
     def read_geowebcache_disk_quota(self) -> GeoWebCacheDiskQuota:
         self.call_order.append("read_quota")
         self.read_calls += 1
-        return self.before
+        return self.before if self.read_calls == 1 else self.after
+
+    def read_geowebcache_quota_health(self) -> GeoWebCacheQuotaHealth:
+        self.call_order.append("read_quota_health")
+        self.read_health_calls += 1
+        return (
+            self.before_health
+            if self.read_health_calls == 1
+            else self.after_health
+        )
 
     def ensure_geowebcache_tile_blob_store(
         self,
@@ -94,31 +172,15 @@ class FakeAdmin:
             file_system_block_size=file_system_block_size,
         )
 
-    def configure_geowebcache_disk_quota(
-        self,
-        *,
-        quota_gib: int,
-        cleanup_seconds: int,
-        expiration_policy: str,
-    ) -> GeoWebCacheDiskQuota:
-        self.call_order.append("configure_quota")
-        self.configure_calls.append(
-            {
-                "quota_gib": quota_gib,
-                "cleanup_seconds": cleanup_seconds,
-                "expiration_policy": expiration_policy,
-            }
-        )
-        return self.after
-
-
 def configured() -> Settings:
     return Settings(
         _env_file=None,
         geowebcache_disk_quota_gib=20,
         geowebcache_disk_quota_min_free_gib=5,
-        geowebcache_disk_quota_cleanup_seconds=60,
+        geowebcache_disk_quota_cleanup_seconds=10,
         geowebcache_disk_quota_policy="LRU",
+        geowebcache_physical_hard_limit_gib=28,
+        geowebcache_physical_burst_margin_gib=2,
     )
 
 
@@ -143,17 +205,17 @@ def test_capacity_report_exposes_quota_reserve_and_both_margins(
     assert report.required_free_reserve_bytes == 5 * GIB
     assert report.current_cache_bytes == 0
     assert report.remaining_quota_growth_bytes == 20 * GIB
-    assert report.physical_growth_safety_basis_points == 12_500
-    assert report.required_physical_growth_bytes == 25 * GIB
-    assert report.required_free_now_bytes == 30 * GIB
+    assert report.physical_growth_safety_basis_points == 10_000
+    assert report.required_physical_growth_bytes == 20 * GIB
+    assert report.required_free_now_bytes == 25 * GIB
     assert report.capacity_margin_bytes == (
         100 * GIB
         - report.current_cache_allocated_bytes
-        - 25 * GIB
+        - 20 * GIB
         - 5 * GIB
     )
     assert report.current_free_margin_bytes == 70 * GIB
-    assert report.growth_reserve_margin_bytes == 45 * GIB
+    assert report.growth_reserve_margin_bytes == 50 * GIB
     assert report.current_cache_inodes == 1
     assert report.required_future_inodes > 5_000_000
     assert report.inode_reserve_margin >= 0
@@ -170,6 +232,7 @@ def test_quota_command_is_dry_run_by_default_and_reports_mismatch(
         "app.reference_layers.gwc_quota.shutil.disk_usage",
         lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
     )
+    patch_safe_physical_limit(monkeypatch, cache)
     admin = FakeAdmin(before=quota(enabled=False))
 
     result = quota_status(
@@ -178,15 +241,15 @@ def test_quota_command_is_dry_run_by_default_and_reports_mismatch(
         client=admin,  # type: ignore[arg-type]
     )
 
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
     assert result["mode"] == "dry-run"
     assert result["verified"] is False
     assert result["blob_store"]["verified"] is False  # type: ignore[index]
     assert result["disk_quota"]["verified"] is False  # type: ignore[index]
     assert admin.read_blob_store_calls == 1
     assert admin.read_calls == 1
+    assert admin.read_health_calls == 1
     assert admin.ensure_blob_store_calls == []
-    assert admin.configure_calls == []
     args = build_parser().parse_args(["--cache-path", str(cache)])
     assert args.apply is False
 
@@ -201,6 +264,7 @@ def test_quota_dry_run_rejects_extra_nondefault_blob_store(
         "app.reference_layers.gwc_quota.shutil.disk_usage",
         lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
     )
+    patch_safe_physical_limit(monkeypatch, cache)
     monkeypatch.setattr(
         "app.reference_layers.gwc_quota.os.fstatvfs",
         lambda _descriptor: SimpleNamespace(
@@ -247,7 +311,8 @@ def test_quota_apply_checks_capacity_then_uses_exact_configuration(
         "app.reference_layers.gwc_quota.shutil.disk_usage",
         lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
     )
-    admin = FakeAdmin(before=quota(enabled=False), after=quota())
+    patch_safe_physical_limit(monkeypatch, cache)
+    admin = FakeAdmin(before=quota())
 
     result = quota_status(
         cache_path=cache,
@@ -264,18 +329,13 @@ def test_quota_apply_checks_capacity_then_uses_exact_configuration(
         result["capacity"]["filesystem_block_size_bytes"]  # type: ignore[index]
     ]
     assert admin.ensure_block_size_migration_calls == [False]
-    assert admin.configure_calls == [
-        {
-            "quota_gib": 20,
-            "cleanup_seconds": 60,
-            "expiration_policy": "LRU",
-        }
-    ]
     assert admin.call_order == [
         "read_blob_stores",
         "read_quota",
+        "read_quota_health",
         "ensure_blob_store",
-        "configure_quota",
+        "read_quota",
+        "read_quota_health",
     ]
 
 
@@ -289,6 +349,7 @@ def test_quota_apply_audits_block_size_only_migration_on_empty_cache(
         "app.reference_layers.gwc_quota.shutil.disk_usage",
         lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
     )
+    patch_safe_physical_limit(monkeypatch, cache)
     monkeypatch.setattr(
         "app.reference_layers.gwc_quota.os.fstatvfs",
         lambda _descriptor: SimpleNamespace(
@@ -314,6 +375,7 @@ def test_quota_apply_audits_block_size_only_migration_on_empty_cache(
         cache_path=cache,
         configured=configured(),
         apply=True,
+        allow_block_size_migration=True,
         client=admin,  # type: ignore[arg-type]
     )
 
@@ -323,6 +385,51 @@ def test_quota_apply_audits_block_size_only_migration_on_empty_cache(
     assert blob_store["block_size_migrated"] is True  # type: ignore[index]
     assert admin.ensure_blob_store_calls == [8192]
     assert admin.ensure_block_size_migration_calls == [True]
+
+
+def test_generic_quota_apply_cannot_migrate_blob_store_block_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        quota_module.shutil,
+        "disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+    )
+    monkeypatch.setattr(
+        quota_module.os,
+        "fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_bsize=8192,
+            f_frsize=8192,
+            f_files=10_000_000,
+            f_favail=10_000_000,
+        ),
+    )
+    patch_safe_physical_limit(monkeypatch, cache)
+    old_store = expected_geowebcache_tile_blob_store(
+        file_system_block_size=4096,
+    )
+    admin = FakeAdmin(
+        before=quota(),
+        before_blob_stores=(old_store,),
+        after_blob_store=old_store,
+    )
+
+    with pytest.raises(
+        GeoWebCacheQuotaSafetyError,
+        match="blob store re-read",
+    ):
+        quota_status(
+            cache_path=cache,
+            configured=configured(),
+            apply=True,
+            client=admin,  # type: ignore[arg-type]
+        )
+
+    assert admin.ensure_block_size_migration_calls == [False]
 
 
 def test_quota_dry_run_never_permits_block_size_migration_with_tiles(
@@ -336,6 +443,7 @@ def test_quota_dry_run_never_permits_block_size_migration_with_tiles(
         "app.reference_layers.gwc_quota.shutil.disk_usage",
         lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
     )
+    patch_safe_physical_limit(monkeypatch, cache)
     monkeypatch.setattr(
         "app.reference_layers.gwc_quota.os.fstatvfs",
         lambda _descriptor: SimpleNamespace(
@@ -379,6 +487,7 @@ def test_runtime_contract_actively_verifies_store_quota_and_block_size(
             f_frsize=4096,
         ),
     )
+    patch_safe_physical_limit(monkeypatch, cache)
     expected = expected_geowebcache_tile_blob_store(
         file_system_block_size=4096,
     )
@@ -399,6 +508,7 @@ def test_runtime_contract_actively_verifies_store_quota_and_block_size(
         "health",
         "read_blob_stores",
         "read_quota",
+        "read_quota_health",
     ]
 
     admin.before_blob_stores = ()
@@ -411,6 +521,154 @@ def test_runtime_contract_actively_verifies_store_quota_and_block_size(
             configured=configured(),
             client=admin,  # type: ignore[arg-type]
         )
+
+
+def test_runtime_contract_rejects_dummy_or_stopped_quota_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        quota_module.os,
+        "fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_bsize=4096,
+            f_frsize=4096,
+        ),
+    )
+    patch_safe_physical_limit(monkeypatch, cache)
+    expected = expected_geowebcache_tile_blob_store(
+        file_system_block_size=4096,
+    )
+    admin = FakeAdmin(
+        before=quota(),
+        before_blob_stores=(expected,),
+        before_health=quota_health(
+            healthy=False,
+            monitor_running=False,
+            scheduled_cleanup_active=False,
+            provider_error=True,
+            store_class="org.geowebcache.diskquota.DummyQuotaStore",
+            dialect_class=None,
+            global_used_bytes=None,
+        ),
+    )
+
+    with pytest.raises(
+        GeoWebCacheQuotaSafetyError,
+        match="quota store or monitor",
+    ):
+        runtime_contract_status(
+            cache_path=cache,
+            configured=configured(),
+            client=admin,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("root_device", "total_gib", "used_gib", "expected_safe"),
+    [
+        (2, 28, 7, True),
+        (1, 28, 7, False),
+        (2, 29, 7, False),
+        (2, 28, 23, False),
+    ],
+)
+def test_physical_limit_requires_dedicated_bounded_filesystem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_device: int,
+    total_gib: int,
+    used_gib: int,
+    expected_safe: bool,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+
+    def metadata(*, device: int, inode: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o755,
+            st_dev=device,
+            st_ino=inode,
+            st_size=0,
+            st_mtime_ns=1,
+            st_ctime_ns=1,
+            st_nlink=1,
+            st_blocks=0,
+        )
+
+    root = metadata(device=root_device, inode=20)
+    parent = metadata(device=1, inode=10)
+    fstat_results = iter((root, parent, root))
+    monkeypatch.setattr(
+        quota_module.os,
+        "fstat",
+        lambda _descriptor: next(fstat_results),
+    )
+    fragment = 4096
+    monkeypatch.setattr(
+        quota_module.os,
+        "fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_frsize=fragment,
+            f_blocks=total_gib * GIB // fragment,
+            f_bfree=(total_gib - used_gib) * GIB // fragment,
+            f_bavail=(total_gib - used_gib) * GIB // fragment,
+        ),
+    )
+
+    report = physical_limit_status(cache, configured=configured())
+
+    assert report.dedicated_mount is (root_device != 1)
+    assert report.filesystem_total_bytes == total_gib * GIB
+    assert report.filesystem_used_bytes == used_gib * GIB
+    assert report.safe is expected_safe
+
+
+def test_quota_apply_tolerates_only_live_filesystem_metric_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    usage = iter(
+        (
+            _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+            _ntuple_diskusage(100 * GIB, 26 * GIB, 74 * GIB),
+        )
+    )
+    monkeypatch.setattr(
+        quota_module.shutil,
+        "disk_usage",
+        lambda _path: next(usage),
+    )
+    first_physical = safe_physical_limit(cache)
+    second_physical = replace(
+        first_physical,
+        filesystem_used_bytes=GIB,
+        filesystem_free_bytes=27 * GIB,
+        free_reserve_margin_bytes=22 * GIB,
+        burst_remaining_bytes=21 * GIB,
+    )
+    physical_reports = iter((first_physical, second_physical))
+    monkeypatch.setattr(
+        quota_module,
+        "physical_limit_status",
+        lambda _path, *, configured: next(physical_reports),
+    )
+    admin = FakeAdmin(before=quota())
+
+    report = quota_status(
+        cache_path=cache,
+        configured=configured(),
+        apply=True,
+        client=admin,  # type: ignore[arg-type]
+    )
+
+    assert report["verified"] is True
+    assert report["capacity"]["filesystem_free_bytes"] == 74 * GIB  # type: ignore[index]
+    assert admin.ensure_blob_store_calls
 
 
 def test_cache_filesystem_block_size_rejects_unstable_root(
@@ -451,6 +709,7 @@ def test_quota_apply_fails_before_mutation_without_capacity_margin(
         "app.reference_layers.gwc_quota.shutil.disk_usage",
         lambda _path: _ntuple_diskusage(22 * GIB, 21 * GIB, 1 * GIB),
     )
+    patch_safe_physical_limit(monkeypatch, cache)
     admin = FakeAdmin(before=quota(enabled=False))
 
     with pytest.raises(GeoWebCacheQuotaSafetyError):
@@ -461,7 +720,6 @@ def test_quota_apply_fails_before_mutation_without_capacity_margin(
             client=admin,  # type: ignore[arg-type]
         )
 
-    assert admin.configure_calls == []
     assert admin.ensure_blob_store_calls == []
 
 
@@ -476,6 +734,7 @@ def test_empty_cache_with_only_six_gib_free_cannot_reserve_quota_growth(
         lambda _path: _ntuple_diskusage(100 * GIB, 94 * GIB, 6 * GIB),
     )
     admin = FakeAdmin(before=quota(enabled=False))
+    patch_safe_physical_limit(monkeypatch, cache)
 
     report = cache_capacity_report(
         cache,
@@ -485,10 +744,10 @@ def test_empty_cache_with_only_six_gib_free_cannot_reserve_quota_growth(
 
     assert report.current_cache_bytes == 0
     assert report.remaining_quota_growth_bytes == 20 * GIB
-    assert report.required_physical_growth_bytes == 25 * GIB
-    assert report.required_free_now_bytes == 30 * GIB
+    assert report.required_physical_growth_bytes == 20 * GIB
+    assert report.required_free_now_bytes == 25 * GIB
     assert report.current_free_margin_bytes == 1 * GIB
-    assert report.growth_reserve_margin_bytes == -24 * GIB
+    assert report.growth_reserve_margin_bytes == -19 * GIB
     assert report.safe_to_apply is False
     with pytest.raises(GeoWebCacheQuotaSafetyError):
         quota_status(
@@ -497,7 +756,6 @@ def test_empty_cache_with_only_six_gib_free_cannot_reserve_quota_growth(
             apply=True,
             client=admin,  # type: ignore[arg-type]
         )
-    assert admin.configure_calls == []
     assert admin.ensure_blob_store_calls == []
 
 
@@ -511,8 +769,9 @@ def test_quota_apply_fails_before_disk_quota_if_blob_store_is_not_exact(
         "app.reference_layers.gwc_quota.shutil.disk_usage",
         lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
     )
+    patch_safe_physical_limit(monkeypatch, cache)
     admin = FakeAdmin(
-        before=quota(enabled=False),
+        before=quota(),
         after_blob_store=GeoWebCacheFileBlobStore(
             id="siur-tile-cache-v3",
             enabled=True,
@@ -535,7 +794,6 @@ def test_quota_apply_fails_before_disk_quota_if_blob_store_is_not_exact(
         )
 
     assert admin.ensure_blob_store_calls
-    assert admin.configure_calls == []
     assert admin.call_order[-1] == "ensure_blob_store"
 
 

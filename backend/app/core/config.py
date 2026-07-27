@@ -51,8 +51,10 @@ class Settings(BaseSettings):
     geoserver_admin_password: SecretStr | None = None
     geowebcache_disk_quota_gib: int = 20
     geowebcache_disk_quota_min_free_gib: int = 5
-    geowebcache_disk_quota_cleanup_seconds: int = 60
+    geowebcache_disk_quota_cleanup_seconds: int = 10
     geowebcache_disk_quota_policy: str = "LRU"
+    geowebcache_physical_hard_limit_gib: int = 28
+    geowebcache_physical_burst_margin_gib: int = 2
     local_geoserver_postgis_host: str = "postgres"
     local_geoserver_postgis_port: int = 5432
     local_geoserver_postgis_database: str = "app"
@@ -380,6 +382,8 @@ class Settings(BaseSettings):
         "geowebcache_disk_quota_gib",
         "geowebcache_disk_quota_min_free_gib",
         "geowebcache_disk_quota_cleanup_seconds",
+        "geowebcache_physical_hard_limit_gib",
+        "geowebcache_physical_burst_margin_gib",
         mode="before",
     )
     @classmethod
@@ -391,6 +395,8 @@ class Settings(BaseSettings):
     @field_validator(
         "geowebcache_disk_quota_gib",
         "geowebcache_disk_quota_min_free_gib",
+        "geowebcache_physical_hard_limit_gib",
+        "geowebcache_physical_burst_margin_gib",
     )
     @classmethod
     def validate_geowebcache_disk_sizes(cls, value: int) -> int:
@@ -403,10 +409,9 @@ class Settings(BaseSettings):
     @field_validator("geowebcache_disk_quota_cleanup_seconds")
     @classmethod
     def validate_geowebcache_cleanup_seconds(cls, value: int) -> int:
-        if isinstance(value, bool) or not 1 <= value <= 86_400:
+        if isinstance(value, bool) or value != 10:
             raise ValueError(
-                "geowebcache_disk_quota_cleanup_seconds must be between "
-                "1 and 86400"
+                "geowebcache_disk_quota_cleanup_seconds must be exactly 10"
             )
         return value
 
@@ -429,10 +434,12 @@ class Settings(BaseSettings):
         if (
             self.geowebcache_disk_quota_gib
             + self.geowebcache_disk_quota_min_free_gib
-            > 1024
+            + self.geowebcache_physical_burst_margin_gib
+            > self.geowebcache_physical_hard_limit_gib
         ):
             raise ValueError(
-                "GeoWebCache quota and reserve cannot exceed 1024 GiB"
+                "GeoWebCache physical hard limit must contain the soft quota, "
+                "free reserve and burst margin"
             )
         return self
 

@@ -79,6 +79,7 @@ def test_bootstrap_applies_verified_quota_after_health(
             "cache_path": cache,
             "configured": configured(),
             "apply": True,
+            "allow_block_size_migration": True,
             "client": admin,
         }
     ]

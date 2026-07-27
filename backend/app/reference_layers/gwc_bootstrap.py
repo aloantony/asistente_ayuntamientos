@@ -69,6 +69,7 @@ def bootstrap_status(
                 cache_path=cache_path,
                 configured=configured,
                 apply=True,
+                allow_block_size_migration=True,
                 client=admin,
             )
             if quota.get("verified") is not True:
