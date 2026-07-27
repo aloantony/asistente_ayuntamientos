@@ -46,6 +46,11 @@ from app.reference_layers.reviewed_ortho_evidence import (
     reviewed_ign_ortho_expected_source_definition,
     reviewed_ign_ortho_substitution,
 )
+from app.reference_layers.reviewed_archive_styles import (
+    EXACT_ARCHIVE_STYLE_KEYS,
+    ReviewedArchiveStyleError,
+    reviewed_archive_style_specs,
+)
 
 SourceProtocol = Literal[
     "wfs",
@@ -87,6 +92,14 @@ _REVIEWED_DATASET_SOURCE_PRIORITY = 5
 _REVIEWED_ORTHO_SUBSTITUTION_PRIORITY = REVIEWED_ORTHO_SOURCE_PRIORITY
 _BULK_WMS_GUARD_SCHEMA = "siur-bulk-wms-guard/v1"
 _REVIEWED_LOCAL_STYLE_SCHEMA = "siur-reviewed-local-style-recipe/v1"
+_LEGACY_IDECYL_ARCHIVE_STYLE_EVIDENCE_KEYS = frozenset(
+    {"remote_name", "archive_member", "sha256"}
+)
+_LEGACY_IDECYL_ARCHIVE_DEFAULTS = {
+    "telefonia_movil_cyl_cobertura_carreteras": (
+        "telefonia_movil_cyl_cobertura_carreteras_tc_cnmc_mj"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -1235,35 +1248,20 @@ def acquisition_candidates(
 def _idecyl_archive_style_config(
     layer: ReferenceLayerDefinition,
     raw_styles: Any,
-) -> list[dict[str, str]]:
-    if not isinstance(raw_styles, list) or len(raw_styles) != 3:
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_styles, list) or not raw_styles:
         raise SourceDiscoveryError(
             "reviewed IDECyL archive styles are invalid",
             code="reviewed_idecyl_style_identity_invalid",
         )
-    reviewed_by_remote: dict[str, dict[str, Any]] = {}
-    for item in raw_styles:
-        remote_name = (
-            item.get("remote_name")
-            if isinstance(item, dict)
-            else None
-        )
-        if (
-            not isinstance(remote_name, str)
-            or remote_name in reviewed_by_remote
-        ):
-            raise SourceDiscoveryError(
-                "reviewed IDECyL archive styles are invalid",
-                code="reviewed_idecyl_style_identity_invalid",
-            )
-        reviewed_by_remote[remote_name] = item
     catalog_styles = [
         style
         for style in layer.styles
         if style.status in {"active", "degraded"}
     ]
     if (
-        len(catalog_styles) != len(reviewed_by_remote)
+        len(catalog_styles) != len(raw_styles)
+        or not catalog_styles
         or len({style.source_key for style in catalog_styles})
         != len(catalog_styles)
         or len(
@@ -1274,32 +1272,102 @@ def _idecyl_archive_style_config(
             }
         )
         != len(catalog_styles)
-        or {
-            style.remote_name
-            for style in catalog_styles
-        }
-        != set(reviewed_by_remote)
+        or sum(style.is_default for style in catalog_styles) != 1
     ):
         raise SourceDiscoveryError(
             "catalog IDECyL styles differ from the reviewed archive",
             code="reviewed_idecyl_style_identity_invalid",
         )
-    result = [
-        {
-            "catalog_style_source_key": style.source_key,
-            "remote_name": style.remote_name,
-            "archive_member": reviewed_by_remote[style.remote_name][
-                "archive_member"
-            ],
-            "sha256": reviewed_by_remote[style.remote_name]["sha256"],
+    key_sets = {
+        frozenset(item) if isinstance(item, dict) else frozenset()
+        for item in raw_styles
+    }
+    if key_sets == {_LEGACY_IDECYL_ARCHIVE_STYLE_EVIDENCE_KEYS}:
+        expected_default = _LEGACY_IDECYL_ARCHIVE_DEFAULTS.get(
+            layer.remote_name or ""
+        )
+        defaults = [
+            style.remote_name
+            for style in catalog_styles
+            if style.is_default
+        ]
+        reviewed_by_remote = {
+            item["remote_name"]: item
+            for item in raw_styles
+            if isinstance(item.get("remote_name"), str)
         }
-        for style in catalog_styles
-        if style.remote_name is not None
-    ]
-    return sorted(
-        result,
-        key=lambda item: item["catalog_style_source_key"],
-    )
+        if (
+            len(raw_styles) != 3
+            or len(reviewed_by_remote) != len(raw_styles)
+            or expected_default is None
+            or defaults != [expected_default]
+            or {
+                style.remote_name
+                for style in catalog_styles
+            }
+            != set(reviewed_by_remote)
+        ):
+            raise SourceDiscoveryError(
+                "legacy IDECyL archive styles differ from their reviewed identity",
+                code="reviewed_idecyl_style_identity_invalid",
+            )
+        result = [
+            {
+                "catalog_style_source_key": style.source_key,
+                "remote_name": style.remote_name,
+                "archive_member": reviewed_by_remote[style.remote_name][
+                    "archive_member"
+                ],
+                "sha256": reviewed_by_remote[style.remote_name]["sha256"],
+            }
+            for style in catalog_styles
+            if style.remote_name is not None
+        ]
+        result.sort(key=lambda item: item["catalog_style_source_key"])
+    elif key_sets == {EXACT_ARCHIVE_STYLE_KEYS}:
+        result = deepcopy(raw_styles)
+        expected_identities = {
+            (
+                style.source_key,
+                style.remote_name,
+                style.is_default,
+            )
+            for style in catalog_styles
+        }
+        reviewed_identities = {
+            (
+                item.get("catalog_style_source_key"),
+                item.get("remote_name"),
+                item.get("is_default"),
+            )
+            for item in result
+        }
+        if reviewed_identities != expected_identities:
+            raise SourceDiscoveryError(
+                "catalog IDECyL styles differ from the reviewed archive",
+                code="reviewed_idecyl_style_identity_invalid",
+            )
+    else:
+        raise SourceDiscoveryError(
+            "reviewed IDECyL archive style evidence is incomplete or mixed",
+            code="reviewed_idecyl_style_identity_invalid",
+        )
+    try:
+        reviewed_archive_style_specs(
+            {
+                "data_format": "geopackage-zip",
+                "archive_styles": result,
+            },
+            protocol="download",
+            target_kind="vector",
+            selected_layer_name=layer.remote_name or "",
+        )
+    except ReviewedArchiveStyleError as error:
+        raise SourceDiscoveryError(
+            "reviewed IDECyL archive styles are invalid",
+            code="reviewed_idecyl_style_identity_invalid",
+        ) from error
+    return result
 
 
 def _reviewed_dataset_source(

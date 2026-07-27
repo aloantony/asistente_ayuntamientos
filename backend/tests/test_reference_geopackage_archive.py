@@ -19,6 +19,7 @@ from app.reference_layers.geopackage_archive import (
     inspect_geopackage_zip,
 )
 from app.reference_layers.acquisition import (
+    AcquisitionConfigurationError,
     AcquisitionLimits,
     AcquisitionValidationError,
     ReferenceAcquisitionPipeline,
@@ -266,6 +267,67 @@ def _sld() -> bytes:
 """
 
 
+def _sld_with_identity(
+    *,
+    layer_name: str,
+    style_name: str,
+    external_resource: bool = False,
+) -> bytes:
+    document = _sld().replace(
+        b"<sld:Name>reviewed</sld:Name>",
+        f"<sld:Name>{layer_name}</sld:Name>".encode(),
+        1,
+    ).replace(
+        b"<sld:Name>reviewed_style</sld:Name>",
+        f"<sld:Name>{style_name}</sld:Name>".encode(),
+        1,
+    )
+    if external_resource:
+        document = document.replace(
+            b'xmlns:ogc="http://www.opengis.net/ogc">',
+            (
+                b'xmlns:ogc="http://www.opengis.net/ogc" '
+                b'xmlns:xlink="http://www.w3.org/1999/xlink">'
+            ),
+            1,
+        ).replace(
+            b"<sld:FeatureTypeStyle>",
+            (
+                b"<sld:OnlineResource "
+                b"xlink:href=\"https://styles.example.test/line.png\"/>"
+                b"<sld:FeatureTypeStyle>"
+            ),
+            1,
+        )
+    return document
+
+
+def _exact_archive_style(
+    path: Path,
+    *,
+    member: str,
+    catalog_style_source_key: str = "reviewed_style",
+    remote_name: str = "reviewed_style",
+    is_default: bool = True,
+    sld_layer_name: str = "reviewed",
+    sld_style_name: str = "reviewed_style",
+) -> dict:
+    with zipfile.ZipFile(path) as archive:
+        info = archive.getinfo(member)
+        document = archive.read(info)
+    return {
+        "catalog_style_source_key": catalog_style_source_key,
+        "remote_name": remote_name,
+        "is_default": is_default,
+        "archive_member": member,
+        "sha256": hashlib.sha256(document).hexdigest(),
+        "size_bytes": info.file_size,
+        "crc32": f"{info.CRC:08x}",
+        "sld_layer_name": sld_layer_name,
+        "sld_style_name": sld_style_name,
+    }
+
+
 class _Download:
     def __init__(
         self,
@@ -427,6 +489,334 @@ def test_acquisition_persists_exact_archive_parity_and_sld(
         inspection["archive_sha256"]
     )
     assert acquired_style.metadata["parity_kind"] == "exact"
+
+
+def test_acquisition_binds_enriched_archive_style_member_and_sld_identity(
+    tmp_path,
+) -> None:
+    path = _archive(tmp_path)
+    member = "styles/official.sld"
+    style = _sld_with_identity(
+        layer_name="archive_layer",
+        style_name="official_style",
+    )
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr(member, style)
+    inspection = inspect_geopackage_zip(
+        path,
+        expected_member="dataset/reviewed.gpkg",
+        expected_layer="reviewed",
+        maximum_uncompressed_bytes=2 * 1024 * 1024,
+    )
+    archive_style = _exact_archive_style(
+        path,
+        member=member,
+        sld_layer_name="archive_layer",
+        sld_style_name="official_style",
+    )
+    config = {
+        "media_type": "application/zip",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        "archive_styles": [archive_style],
+        **_parity_config(inspection),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        result = ReferenceAcquisitionPipeline(
+            store,
+            limits=AcquisitionLimits(
+                max_probe_bytes=256 * 1024,
+                max_page_bytes=512 * 1024,
+                max_dataset_bytes=2 * 1024 * 1024,
+                max_total_bytes=4 * 1024 * 1024,
+                page_size=100,
+                max_pages=2,
+                max_features=100,
+                timeout_seconds=10,
+                idle_timeout_seconds=2,
+            ),
+            downloader_factory=_Download(path.read_bytes()),
+        ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+    acquired_style = next(
+        item for item in result.artifacts if item.role == "style"
+    )
+    assert acquired_style.metadata["catalog_style_source_key"] == (
+        "reviewed_style"
+    )
+    assert acquired_style.metadata["remote_name"] == "reviewed_style"
+    assert acquired_style.metadata["is_default"] is True
+    assert acquired_style.metadata["archive_member"] == member
+    assert acquired_style.metadata["archive_member_sha256"] == (
+        archive_style["sha256"]
+    )
+    assert acquired_style.metadata["archive_member_size_bytes"] == len(style)
+    assert acquired_style.metadata["archive_member_crc32"] == (
+        archive_style["crc32"]
+    )
+    assert acquired_style.metadata["sld_named_layer"] == "archive_layer"
+    assert acquired_style.metadata["sld_user_style"] == "official_style"
+    assert acquired_style.metadata["parity_kind"] == "exact"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("size_bytes", 1),
+        ("crc32", "deadbeef"),
+    ],
+)
+def test_acquisition_rejects_changed_archive_style_size_or_crc(
+    tmp_path,
+    field,
+    value,
+) -> None:
+    path = _archive(tmp_path)
+    member = "reviewed.sld"
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr(member, _sld())
+    inspection = inspect_geopackage_zip(
+        path,
+        expected_member="dataset/reviewed.gpkg",
+        expected_layer="reviewed",
+        maximum_uncompressed_bytes=2 * 1024 * 1024,
+    )
+    archive_style = _exact_archive_style(path, member=member)
+    archive_style[field] = value
+    config = {
+        "media_type": "application/zip",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        "archive_styles": [archive_style],
+        **_parity_config(inspection),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        with pytest.raises(
+            AcquisitionValidationError,
+            match="style member is invalid",
+        ):
+            ReferenceAcquisitionPipeline(
+                store,
+                limits=AcquisitionLimits(
+                    max_probe_bytes=256 * 1024,
+                    max_page_bytes=512 * 1024,
+                    max_dataset_bytes=2 * 1024 * 1024,
+                    max_total_bytes=4 * 1024 * 1024,
+                    page_size=100,
+                    max_pages=2,
+                    max_features=100,
+                    timeout_seconds=10,
+                    idle_timeout_seconds=2,
+                ),
+                downloader_factory=_Download(path.read_bytes()),
+            ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+
+def test_archive_style_configuration_rejects_traversal_before_download(
+    tmp_path,
+) -> None:
+    config = {
+        "media_type": "application/zip",
+        "data_format": "geopackage-zip",
+        "archive_styles": [
+            {
+                "catalog_style_source_key": "reviewed_style",
+                "remote_name": "reviewed_style",
+                "is_default": True,
+                "archive_member": "styles/../reviewed.sld",
+                "sha256": "a" * 64,
+                "size_bytes": 100,
+                "crc32": "0123abcd",
+                "sld_layer_name": "reviewed",
+                "sld_style_name": "reviewed_style",
+            }
+        ],
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        with pytest.raises(
+            AcquisitionConfigurationError,
+            match="style identity is invalid",
+        ):
+            ReferenceAcquisitionPipeline(
+                store,
+                downloader_factory=lambda _policy: pytest.fail(
+                    "invalid style config reached the network"
+                ),
+            ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+
+def test_acquisition_rejects_archive_style_with_external_resource(
+    tmp_path,
+) -> None:
+    path = _archive(tmp_path)
+    member = "reviewed.sld"
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr(
+            member,
+            _sld_with_identity(
+                layer_name="reviewed",
+                style_name="reviewed_style",
+                external_resource=True,
+            ),
+        )
+    inspection = inspect_geopackage_zip(
+        path,
+        expected_member="dataset/reviewed.gpkg",
+        expected_layer="reviewed",
+        maximum_uncompressed_bytes=2 * 1024 * 1024,
+    )
+    config = {
+        "media_type": "application/zip",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        "archive_styles": [
+            _exact_archive_style(path, member=member)
+        ],
+        **_parity_config(inspection),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        with pytest.raises(
+            AcquisitionValidationError,
+            match="not self-contained",
+        ):
+            ReferenceAcquisitionPipeline(
+                store,
+                limits=AcquisitionLimits(
+                    max_probe_bytes=256 * 1024,
+                    max_page_bytes=512 * 1024,
+                    max_dataset_bytes=2 * 1024 * 1024,
+                    max_total_bytes=4 * 1024 * 1024,
+                    page_size=100,
+                    max_pages=2,
+                    max_features=100,
+                    timeout_seconds=10,
+                    idle_timeout_seconds=2,
+                ),
+                downloader_factory=_Download(path.read_bytes()),
+            ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("sld_layer_name", "invented_layer", "exact requested layer"),
+        ("sld_style_name", "invented_style", "exact requested style"),
+    ],
+)
+def test_acquisition_rejects_invented_sld_name_mapping(
+    tmp_path,
+    field,
+    value,
+    match,
+) -> None:
+    path = _archive(tmp_path)
+    member = "reviewed.sld"
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr(member, _sld())
+    inspection = inspect_geopackage_zip(
+        path,
+        expected_member="dataset/reviewed.gpkg",
+        expected_layer="reviewed",
+        maximum_uncompressed_bytes=2 * 1024 * 1024,
+    )
+    archive_style = _exact_archive_style(path, member=member)
+    archive_style[field] = value
+    config = {
+        "media_type": "application/zip",
+        "data_format": "geopackage-zip",
+        "archive_member": "dataset/reviewed.gpkg",
+        "input_layer": "reviewed",
+        "archive_max_uncompressed_bytes": 2 * 1024 * 1024,
+        "archive_styles": [archive_style],
+        **_parity_config(inspection),
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        with pytest.raises(AcquisitionValidationError, match=match):
+            ReferenceAcquisitionPipeline(
+                store,
+                limits=AcquisitionLimits(
+                    max_probe_bytes=256 * 1024,
+                    max_page_bytes=512 * 1024,
+                    max_dataset_bytes=2 * 1024 * 1024,
+                    max_total_bytes=4 * 1024 * 1024,
+                    page_size=100,
+                    max_pages=2,
+                    max_features=100,
+                    timeout_seconds=10,
+                    idle_timeout_seconds=2,
+                ),
+                downloader_factory=_Download(path.read_bytes()),
+            ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+
+def test_shapefile_zip_can_use_exact_embedded_sld(tmp_path) -> None:
+    path = tmp_path / "shapefile.zip"
+    style = _sld_with_identity(
+        layer_name="reviewed",
+        style_name="reviewed_style",
+    )
+    with zipfile.ZipFile(
+        path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.writestr("reviewed.shp", b"shp")
+        archive.writestr("reviewed.shx", b"shx")
+        archive.writestr("reviewed.dbf", b"dbf")
+        archive.writestr("reviewed.sld", style)
+    config = {
+        "media_type": "application/zip",
+        "data_format": "shapefile-zip",
+        "archive_styles": [
+            _exact_archive_style(path, member="reviewed.sld")
+        ],
+    }
+    store = ReferenceBlobStore(tmp_path / "blob-store")
+    try:
+        result = ReferenceAcquisitionPipeline(
+            store,
+            limits=AcquisitionLimits(
+                max_probe_bytes=256 * 1024,
+                max_page_bytes=512 * 1024,
+                max_dataset_bytes=2 * 1024 * 1024,
+                max_total_bytes=4 * 1024 * 1024,
+                page_size=100,
+                max_pages=2,
+                max_features=100,
+                timeout_seconds=10,
+                idle_timeout_seconds=2,
+            ),
+            downloader_factory=_Download(path.read_bytes()),
+        ).acquire(_download_candidate(config))
+    finally:
+        store.close()
+
+    acquired_style = next(
+        item for item in result.artifacts if item.role == "style"
+    )
+    assert acquired_style.metadata["archive_member"] == "reviewed.sld"
+    assert acquired_style.metadata["archive_member_size_bytes"] == len(style)
 
 
 def test_acquisition_accepts_reviewed_live_geopackage_without_pinning_data_hash(

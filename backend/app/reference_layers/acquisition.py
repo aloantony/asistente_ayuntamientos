@@ -103,6 +103,11 @@ from app.reference_layers.reviewed_archive_integrity import (
     inspect_reviewed_archive,
     validate_reviewed_archive_response,
 )
+from app.reference_layers.reviewed_archive_styles import (
+    ReviewedArchiveStyleError,
+    ReviewedArchiveStyleSpec,
+    reviewed_archive_style_specs,
+)
 
 
 ArtifactKind = Literal[
@@ -3472,76 +3477,23 @@ class ReferenceAcquisitionPipeline:
                 code="spatial_mask_invalid",
             )
         return downloaded, cast(MaskIdentity, downloaded.parsed)
+
     def _acquire_reviewed_archive_styles(
         self,
         candidate: SourceCandidate,
         downloaded: _Downloaded,
     ) -> list[AcquiredArtifact]:
-        """Extract exact, reviewed SLD members from the immutable dataset ZIP."""
+        """Extract exact, reviewed SLD members from the dataset ZIP."""
 
-        raw_styles = candidate.config.get("archive_styles")
-        if raw_styles is None:
+        specs = _configured_reviewed_archive_styles(candidate)
+        if not specs:
             return []
         if (
-            candidate.config.get("data_format") != "geopackage-zip"
-            or downloaded.blob is None
-            or not isinstance(raw_styles, list)
-            or len(raw_styles) > _MAX_STYLES_PER_SOURCE
+            downloaded.blob is None
+            or len(specs) > _MAX_STYLES_PER_SOURCE
         ):
             raise AcquisitionConfigurationError(
                 "reviewed archive style configuration is invalid"
-            )
-        specs: list[tuple[str, str, str, str]] = []
-        source_keys: set[str] = set()
-        remote_names: set[str] = set()
-        members: set[str] = set()
-        for raw in raw_styles:
-            if not isinstance(raw, dict) or set(raw) != {
-                "catalog_style_source_key",
-                "remote_name",
-                "archive_member",
-                "sha256",
-            }:
-                raise AcquisitionConfigurationError(
-                    "reviewed archive style identity is invalid"
-                )
-            source_key = raw.get("catalog_style_source_key")
-            remote_name = raw.get("remote_name")
-            member = raw.get("archive_member")
-            expected_sha256 = raw.get("sha256")
-            if (
-                not isinstance(source_key, str)
-                or _STYLE_SOURCE_KEY_RE.fullmatch(source_key) is None
-                or not isinstance(remote_name, str)
-                or _STYLE_NAME_RE.fullmatch(remote_name) is None
-                or not isinstance(member, str)
-                or not member
-                or len(member) > 4_096
-                or PurePosixPath(member).suffix.casefold() != ".sld"
-                or PurePosixPath(member).is_absolute()
-                or any(
-                    part in {"", ".", ".."}
-                    for part in PurePosixPath(member).parts
-                )
-                or "\\" in member
-                or source_key in source_keys
-                or remote_name in remote_names
-                or member in members
-                or not isinstance(expected_sha256, str)
-                or _SHA256_RE.fullmatch(expected_sha256) is None
-            ):
-                raise AcquisitionConfigurationError(
-                    "reviewed archive style identity is invalid"
-                )
-            source_keys.add(source_key)
-            remote_names.add(remote_name)
-            members.add(member)
-            specs.append(
-                (source_key, remote_name, member, expected_sha256)
-            )
-        if specs != sorted(specs):
-            raise AcquisitionConfigurationError(
-                "reviewed archive styles are not canonical"
             )
         archive_path = self.store.resolve_blob(downloaded.blob.storage_key)
         maximum = min(
@@ -3558,13 +3510,8 @@ class ReferenceAcquisitionPipeline:
                         "reviewed archive contains duplicate style paths",
                         code="archive_style_invalid",
                     )
-                for (
-                    source_key,
-                    remote_name,
-                    member,
-                    expected_sha256,
-                ) in specs:
-                    info = infos.get(member)
+                for spec in specs:
+                    info = infos.get(spec.archive_member)
                     if (
                         info is None
                         or info.is_dir()
@@ -3572,6 +3519,14 @@ class ReferenceAcquisitionPipeline:
                         or ((info.external_attr >> 16) & 0o170000)
                         == 0o120000
                         or not 1 <= info.file_size <= maximum
+                        or (
+                            spec.size_bytes is not None
+                            and info.file_size != spec.size_bytes
+                        )
+                        or (
+                            spec.crc32 is not None
+                            and f"{info.CRC:08x}" != spec.crc32
+                        )
                     ):
                         raise AcquisitionValidationError(
                             "reviewed archive style member is invalid",
@@ -3579,8 +3534,9 @@ class ReferenceAcquisitionPipeline:
                         )
                     document = archive.read(info)
                     if (
-                        hashlib.sha256(document).hexdigest()
-                        != expected_sha256
+                        len(document) != info.file_size
+                        or len(document) > maximum
+                        or hashlib.sha256(document).hexdigest() != spec.sha256
                     ):
                         raise AcquisitionValidationError(
                             "reviewed archive style digest changed",
@@ -3588,22 +3544,51 @@ class ReferenceAcquisitionPipeline:
                         )
                     parsed = _parse_style_bundle(
                         document,
-                        layer_name=candidate.remote_name,
-                        style_names=(remote_name,),
+                        layer_name=spec.sld_layer_name,
+                        style_names=(spec.sld_style_name,),
                     )
                     if (
                         len(parsed.standalone_slds) != 1
-                        or parsed.resource_hrefs != ((remote_name, ()),)
+                        or parsed.resource_hrefs
+                        != ((spec.sld_style_name, ()),)
                     ):
                         raise AcquisitionValidationError(
                             "reviewed archive style is not self-contained",
                             code="archive_style_invalid",
                         )
-                    standalone = parsed.standalone_slds[0][1]
+                    standalone = dict(parsed.standalone_slds)[
+                        spec.sld_style_name
+                    ]
                     blob = self.store.put_stream(
                         io.BytesIO(standalone),
                         max_bytes=maximum,
                     )
+                    metadata: dict[str, Any] = {
+                        "schema": "reference-style-sld/v1",
+                        "catalog_style_source_key": (
+                            spec.catalog_style_source_key
+                        ),
+                        "remote_name": spec.remote_name,
+                        "style_layer_name": candidate.remote_name,
+                        "parent_sha256": downloaded.blob.sha256,
+                        "archive_member": spec.archive_member,
+                        "archive_member_sha256": spec.sha256,
+                        "parity_kind": "exact",
+                        "resource_bindings": [],
+                        "unresolved_resources": [],
+                    }
+                    if spec.has_exact_member_evidence:
+                        metadata.update(
+                            {
+                                "is_default": spec.is_default,
+                                "archive_member_size_bytes": (
+                                    spec.size_bytes
+                                ),
+                                "archive_member_crc32": spec.crc32,
+                                "sld_named_layer": spec.sld_layer_name,
+                                "sld_user_style": spec.sld_style_name,
+                            }
+                        )
                     artifacts.append(
                         AcquiredArtifact(
                             artifact_kind="style",
@@ -3611,18 +3596,7 @@ class ReferenceAcquisitionPipeline:
                             media_type="application/vnd.ogc.sld+xml",
                             blob=blob,
                             source_version=parsed.sld_version,
-                            metadata={
-                                "schema": "reference-style-sld/v1",
-                                "catalog_style_source_key": source_key,
-                                "remote_name": remote_name,
-                                "style_layer_name": candidate.remote_name,
-                                "parent_sha256": downloaded.blob.sha256,
-                                "archive_member": member,
-                                "archive_member_sha256": expected_sha256,
-                                "parity_kind": "exact",
-                                "resource_bindings": [],
-                                "unresolved_resources": [],
-                            },
+                            metadata=metadata,
                         )
                     )
         except ReferenceAcquisitionError:
@@ -4402,7 +4376,22 @@ def _validate_candidate(candidate: SourceCandidate) -> None:
     if candidate.protocol == "xyz":
         endpoint_for_validation = _ANY_TEMPLATE_TOKEN_RE.sub("0", endpoint_for_validation)
     normalize_https_url(endpoint_for_validation)
+    _configured_reviewed_archive_styles(candidate)
     _style_request_config(candidate)
+
+
+def _configured_reviewed_archive_styles(
+    candidate: SourceCandidate,
+) -> tuple[ReviewedArchiveStyleSpec, ...]:
+    try:
+        return reviewed_archive_style_specs(
+            candidate.config,
+            protocol=candidate.protocol,
+            target_kind=candidate.target_kind,
+            selected_layer_name=candidate.remote_name,
+        )
+    except ReviewedArchiveStyleError as error:
+        raise AcquisitionConfigurationError(str(error)) from error
 
 
 def source_candidate_definition_sha256(candidate: SourceCandidate) -> str:
