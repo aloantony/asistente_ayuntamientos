@@ -64,21 +64,24 @@
       ]
     },
     {
-      "profile": "ign-pnoa-historico-ortofoto-2021-v1",
+      "profile": "ign-pnoa-historico-ortofoto-2021-pnoa2020-v2",
       "catalog_layer": "Ortofoto_2021",
-      "selected_layer": "PNOA2021",
-      "selected_title": "PNOA 2021",
-      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2021. Abarca las Comunidades Autónomas de Aragón, Castilla-La Mancha, Cataluña, Comunitat Valenciana y las Illes Balears a una resolución de 0,25 m y las Islas Canarias a 0,15 m.",
-      "metadata_record_id": "spaignPNOA2021",
-      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2021",
-      "equivalence_status": "blocked",
-      "public_notice": "Sustitución bloqueada: el resumen oficial de PNOA2021 no declara cobertura en Castilla y León. No se configura ni se promueve esta capa IGN como reemplazo de Ortofoto_2021.",
+      "selected_layer": "PNOA2020",
+      "selected_title": "PNOA 2020",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2020. Abarca las Comunidades Autónomas de Asturias, Castilla y León, La Rioja, Madrid, País Vasco y Comunidad Foral de Navarra a una resolución de 0,25 m y Galicia y Cantabria a 0,15 m.",
+      "metadata_record_id": "spaignPNOA2020",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2020",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: Ortofoto_2021 de ITACyL declara únicamente el sector oriental de Castilla y León a 25 cm, mientras que IGN PNOA2020 cubre Castilla y León con una anualidad distinta. Se conserva la diferencia y no se afirma equivalencia temporal ni píxel a píxel.",
       "review_notes": [
         "exact_remote_layer_identity",
-        "no_declared_castilla_y_leon_coverage",
+        "selected_official_pnoa2020_full_castilla_y_leon_coverage",
+        "itacyl_2021_partial_east_coverage",
+        "different_capture_year",
         "explicit_public_degradation_notice",
-        "promotion_blocked_until_equivalence_evidence",
-        "no_local_source_from_rejected_mapping"
+        "immutable_degraded_delivery_classification",
+        "no_pixel_equivalence_claim",
+        "jpeg_dimensions_and_content_type"
       ]
     },
     {

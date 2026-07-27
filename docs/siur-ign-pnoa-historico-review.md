@@ -49,6 +49,7 @@ visible e inmutable y nunca se presenta como equivalente.
 | SIUR | IGN | Cobertura/resolución declarada para Castilla y León | Estado | Fuente automática |
 | --- | --- | --- | --- | --- |
 | `Ortofoto_2023` | `PNOA2023` | IGN 0,25 m; ITACyL añade bordes de máxima actualidad y Valladolid a 0,10 m | `substitute_degraded` | Sí, degradada |
+| `Ortofoto_2021` | `PNOA2020` | ITACyL 2021 cubre solo el sector oriental a 0,25 m; IGN 2020 cubre toda CyL con una anualidad distinta | `substitute_degraded` | Sí, degradada |
 | `Ortofoto_2020` | `PNOA2020` | Completa, 0,25 m | `exact` | Sí |
 | `Ortofoto_2017` | `PNOA2017` | Completa, 0,25 m | `exact` | Sí |
 | `Ortofoto_2014` | `PNOA2014` | Completa, 0,50 m | `exact` | Sí |
@@ -67,14 +68,15 @@ visible e inmutable y nunca se presenta como equivalente.
 | `Ortofoto_1997` | `SIGPAC` | ITACyL SIG oleícola a 1 m; IGN es un mosaico 1997–2003 | `substitute_degraded` | Sí, degradada |
 | `Ortofoto_1973-83` | `Interministerial_1973-1986` | Mismo vuelo base, distinta ortorrectificación/intervalo declarado | `substitute_degraded` | Sí, degradada |
 | `Ortofoto_1956` | `AMS_1956-1957` | ITACyL 0,40 m; IGN 0,50–1 m y sólo parte de España | `substitute_degraded` | Sí, degradada |
-| `Ortofoto_2021` | `PNOA2021` | El resumen no incluye Castilla y León | `blocked` | No |
 
-Por tanto, se crean 19 fuentes IGN: seis exactas y trece degradadas. Las cinco
+Por tanto, se crean 20 fuentes IGN: seis exactas y catorce degradadas. Las cinco
 capas anuales 1997–2002 pueden reutilizar el mosaico genérico `SIGPAC`, pero cada
 una muestra su año solicitado, la fuente real y que no es un mosaico anual
-equivalente. `Ortofoto_2021` no crea candidato ni puede promoverse.
+equivalente. `Ortofoto_2021` reutiliza `PNOA2020` solo como sustitución
+degradada explícita: no se afirma que represente la misma anualidad ni la misma
+máscara.
 
-## Perfil local de las 19 fuentes entregables
+## Perfil local de las 20 fuentes entregables
 
 - límites finitos: oeste `-7.6`, sur `39.9`, este `-1.3`, norte `43.4`;
 - zoom `0..15`, máximo 2.000.000 de teselas;
@@ -84,15 +86,14 @@ equivalente. `Ortofoto_2021` no crea candidato ni puede promoverse.
 - definición completa ligada a hash: endpoint, capa remota, protocolo, formato,
   límites, zoom, prioridad, perfil operativo y evidencia revisada.
 
-El bootstrap desactiva cualquier fuente automática ITACyL anterior. Las trece
+El bootstrap desactiva cualquier fuente automática ITACyL anterior. Las catorce
 fuentes degradadas quedan como `candidate_substitute_degraded`, con su
-clasificación incorporada a la definición hash-bound. La única estrategia
-`reviewed_ortho_substitution_blocked` es `Ortofoto_2021`.
+clasificación incorporada a la definición hash-bound.
 
 ## Barreras operativas
 
-1. Descubrimiento genera candidato para seis entradas `exact` y trece
-   `substitute_degraded`; no lo genera para 2021.
+1. Descubrimiento genera candidato para seis entradas `exact` y catorce
+   `substitute_degraded`.
 2. Una autorización humana puede permitir descarga y servicio de una degradada,
    pero no puede cambiar su clasificación a `exact`; cualquier alteración rompe
    la definición y la evidencia esperadas.
@@ -103,20 +104,21 @@ clasificación incorporada a la definición hash-bound. La única estrategia
 4. La versión candidata puede prepararse, pero no promoverse sin el gate de
    paridad persistido y ligado por hash al contenido local.
 5. Servir, reactivar o revertir vuelve a validar la fuente congelada, la
-   clasificación y el gate. Cualquier entrega histórica de `Ortofoto_2021` y
-   cualquier versión anterior sin la evidencia nueva quedan cercadas.
+   clasificación y el gate. Cualquier entrega histórica de `Ortofoto_2021`
+   ligada al emparejamiento rechazado con `PNOA2021`, y cualquier versión sin
+   la evidencia nueva, quedan cercadas.
 6. Los metadatos locales conservan clasificación, atribución, hash de los bytes
    activos y hash de paridad.
 7. El API y el árbol de capas distinguen una fuente `candidate` de una
    `active_delivery`; si hay bytes activos nunca los describen con la candidata
    actual.
-8. Cada una de las 19 fuentes necesita su propia revisión
+8. Cada una de las 20 fuentes necesita su propia revisión
    `siur-mirror-authorization-v1`, ligada a su `source_id` y
    `source_definition_sha256`, antes del primer acceso de red.
 
 ## Qué debe revisar Antonio
 
-Para cada una de las 19 fuentes, Antonio debe recibir el documento exacto
+Para cada una de las 20 fuentes, Antonio debe recibir el documento exacto
 `siur-mirror-authorization-v1` y comprobar:
 
 1. que `source_id`, `source_definition_sha256`, capa IGN y capa SIUR son las que
@@ -129,8 +131,8 @@ Para cada una de las 19 fuentes, Antonio debe recibir el documento exacto
 4. que los permisos `metadata_probe`, `dataset_download`, `bulk_tile_seed`,
    `local_storage` y `local_service` reflejan literalmente su decisión, sin
    ampliar un «sí» parcial;
-5. que las trece sustituciones degradadas siguen rotuladas como degradadas en
-   selector, panel y metadatos, y que `Ortofoto_2021` no se autoriza;
+5. que las catorce sustituciones degradadas siguen rotuladas como degradadas
+   en selector, panel y metadatos, incluida `Ortofoto_2021 → PNOA2020`;
 6. que los hashes `review_sha256` y `document_sha256` del dry-run son los mismos
    que se aplicarán.
 

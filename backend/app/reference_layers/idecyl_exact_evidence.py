@@ -5,9 +5,9 @@ that those routes could be retained and served locally.  This module treats
 that file only as an immutable catalog identity inventory and applies the
 superseding v2 technical classification:
 
-* 28 exact identities are restricted;
-* 2 exact identities remain pending because no reviewed HTTPS distribution
-  exists; and
+* 30 exact identities are restricted, including two SIGPAC identities with a
+  deterministic official HTTPS distribution that still require IGCYL-NC
+  review; and
 * 1 exact identity may produce a technical download candidate, still subject
   to the repository's separately persisted human mirror authorization.
 """
@@ -39,8 +39,8 @@ MANIFEST_RESOURCE = "evidence/idecyl_exact/decision-manifest-v2.json"
 LEGACY_MANIFEST_RESOURCE = "evidence/idecyl_exact/manifest-v1.json"
 RECORDS_RESOURCE = "evidence/idecyl_exact/records-20260727.xml"
 MANIFEST_SHA256 = (
-    "0d9ea6086e9916dc925a572191f5e83b"
-    "4591805b8bb75fe892d8355cb9e8adf9"
+    "3b642924170117914ef23b10da606aad"
+    "c7476674d60fee39eace25457642c948"
 )
 LEGACY_MANIFEST_SHA256 = (
     "5b60099dfbe8000e286b1da30491e846"
@@ -64,7 +64,44 @@ _REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,500}$", re.ASCII)
 _PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,254}$", re.ASCII)
 _WORKSPACE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.ASCII)
 _CANDIDATE_LAYER_ID = 39
-_PENDING_LAYER_IDS = frozenset({123, 166})
+_SIGPAC_LAYER_YEARS = {
+    123: "2024",
+    166: "2022",
+}
+_SIGPAC_PROVINCE_ARCHIVES = (
+    "AVILA.zip",
+    "BURGOS.zip",
+    "LEON.zip",
+    "PALENCIA.zip",
+    "SALAMANCA.zip",
+    "SEGOVIA.zip",
+    "SORIA.zip",
+    "VALLADOLID.zip",
+    "ZAMORA.zip",
+)
+_SIGPAC_INDEX_SHA256 = {
+    123: (
+        "28d5a28dee3dcee8cc1d21801d508ed9"
+        "59cbe212143664013e8acceb256655b4"
+    ),
+    166: (
+        "6f7d6c29bf2c42660f17a75dcb0efb7"
+        "b8321e5de69a60a8c7ebdb69fdeae7ebd"
+    ),
+}
+_SIGPAC_PROVINCE_INDEX_SHA256 = {
+    123: (
+        "7a0cf5e12369b9bd6f6380220aa43a48"
+        "fca910bc01d0c2967f87903455bd0479"
+    ),
+    166: (
+        "4ef68079eb3f3dea123397398015b1f16"
+        "afde5ad8bac9c9a1120b0cc0ca47f5b"
+    ),
+}
+_IGCYL_NC_LICENSE_URL = (
+    "https://ftp.itacyl.es/cartografia/LICENCIA-IGCYL-NC-2012.pdf"
+)
 _WFS_LAYER_IDS = frozenset(
     {78, 84, 118, 142, 161, 171, 194, 243, 246, 281}
 )
@@ -238,6 +275,7 @@ def _load_evidence_package(
         "capture",
         "technical_classifications",
         "candidate_source",
+        "restricted_https_distributions",
     } or manifest.get("schema") != MANIFEST_SCHEMA:
         raise IDECyLExactEvidenceError(
             "IDECyL classification manifest shape is invalid"
@@ -252,6 +290,10 @@ def _load_evidence_package(
         manifest.get("candidate_source"),
         legacy_sources,
         legacy_records,
+    )
+    restricted_distributions = _restricted_https_distributions(
+        manifest.get("restricted_https_distributions"),
+        legacy_sources,
     )
 
     sources: list[ReviewedIDECyLExactSource] = []
@@ -268,10 +310,15 @@ def _load_evidence_package(
         classification = classifications[layer_id]
         is_candidate = layer_id == _CANDIDATE_LAYER_ID
         selected = candidate if is_candidate else None
+        restricted_distribution = restricted_distributions.get(layer_id)
         profile = (
             selected["profile"]
             if selected is not None
-            else legacy_source["profile"]
+            else (
+                restricted_distribution["profile"]
+                if restricted_distribution is not None
+                else legacy_source["profile"]
+            )
         )
         evidence = {
             "schema": EVIDENCE_SCHEMA,
@@ -326,6 +373,10 @@ def _load_evidence_package(
             },
             "authorization_effect": _AUTHORIZATION_EFFECT,
         }
+        if restricted_distribution is not None:
+            evidence["official_https_distribution"] = deepcopy(
+                restricted_distribution
+            )
         candidate_config: dict[str, Any] | None = None
         if selected is not None:
             evidence["official_metadata"] = deepcopy(
@@ -680,12 +731,12 @@ def _expected_classification(
                 "general_open_data_terms_linked",
             ],
         )
-    if layer_id in _PENDING_LAYER_IDS:
+    if layer_id in _SIGPAC_LAYER_YEARS:
         return (
-            "permission_pending",
+            "restricted",
             [
-                "distribution_transport_not_https",
-                "no_reviewed_safe_distribution",
+                "https_directory_igcyl_nc_requires_recipient_acceptance",
+                "local_service_requires_persisted_human_review",
             ],
         )
     if layer_id in _WFS_LAYER_IDS:
@@ -714,6 +765,98 @@ def _expected_metadata_binding(
     if layer_id in _MISMATCH_METADATA_FIDS:
         return "mismatch", _MISMATCH_METADATA_FIDS[layer_id]
     return "exact", expected_fid
+
+
+def _restricted_https_distributions(
+    value: Any,
+    legacy_sources: dict[int, dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Validate the exact non-executable SIGPAC HTTPS acquisition plans."""
+
+    if not isinstance(value, list) or len(value) != len(_SIGPAC_LAYER_YEARS):
+        raise IDECyLExactEvidenceError(
+            "IDECyL restricted HTTPS distributions are incomplete"
+        )
+    expected_keys = {
+        "audit_layer_id",
+        "profile",
+        "verified_on",
+        "root_directory_url",
+        "province_directory_url",
+        "root_index_sha256",
+        "province_index_sha256",
+        "archive_names",
+        "selection_rule",
+        "license_name",
+        "license_url",
+        "authorization_effect",
+    }
+    result: dict[int, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict) or set(item) != expected_keys:
+            raise IDECyLExactEvidenceError(
+                "IDECyL restricted HTTPS distribution shape is invalid"
+            )
+        layer_id = item.get("audit_layer_id")
+        if (
+            isinstance(layer_id, bool)
+            or not isinstance(layer_id, int)
+            or layer_id not in _SIGPAC_LAYER_YEARS
+            or layer_id in result
+            or layer_id not in legacy_sources
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL restricted HTTPS distribution identity is invalid"
+            )
+        year = _SIGPAC_LAYER_YEARS[layer_id]
+        root_url = (
+            f"https://ftp.itacyl.es/cartografia/05_SIGPAC/"
+            f"{year}_ETRS89/"
+        )
+        province_url = (
+            root_url + "Parcelario_SIGPAC_CyL_Provincias/"
+        )
+        expected_profile = (
+            f"idecyl-sigpac-{year}-https-provinces-20260727-v2"
+        )
+        if (
+            item.get("profile") != expected_profile
+            or item.get("verified_on") != "2026-07-27"
+            or item.get("root_directory_url") != root_url
+            or item.get("province_directory_url") != province_url
+            or item.get("root_index_sha256")
+            != _SIGPAC_INDEX_SHA256[layer_id]
+            or item.get("province_index_sha256")
+            != _SIGPAC_PROVINCE_INDEX_SHA256[layer_id]
+            or item.get("archive_names")
+            != list(_SIGPAC_PROVINCE_ARCHIVES)
+            or item.get("selection_rule")
+            != "exact_nine_castilla_y_leon_province_archives_v1"
+            or item.get("license_name") != "LICENCIA-IGCYL-NC"
+            or item.get("license_url") != _IGCYL_NC_LICENSE_URL
+            or item.get("authorization_effect") != _AUTHORIZATION_EFFECT
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL restricted HTTPS distribution changed"
+            )
+        _https_url(root_url, allow_query=False)
+        _https_url(province_url, allow_query=False)
+        _https_url(item["license_url"], allow_query=False)
+        if any(
+            "/" in name
+            or "\\" in name
+            or not re.fullmatch(r"[A-Z]+\.zip", name, re.ASCII)
+            for name in item["archive_names"]
+        ):
+            raise IDECyLExactEvidenceError(
+                "IDECyL restricted HTTPS archive set is invalid"
+            )
+        result[layer_id] = item
+    if list(result) != sorted(_SIGPAC_LAYER_YEARS):
+        raise IDECyLExactEvidenceError(
+            "IDECyL restricted HTTPS distributions are not canonical"
+        )
+    return result
 
 
 def _candidate_source(

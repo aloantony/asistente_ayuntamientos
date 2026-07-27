@@ -39,8 +39,8 @@ CATALOG_CAPABILITIES_RESOURCE = (
     "evidence/ign_pnoa_historico/itacyl-capabilities-20260727.xml"
 )
 PROFILE_SHA256 = (
-    "951082e32627c1744e7f04bb4592a315"
-    "857c08047c3240cf47187c5ebefd1187"
+    "af2fa5a3dc1ede47580d46d8c7c1992f"
+    "4066a2cc7795fac20b3b7b14d47e7223"
 )
 CAPABILITIES_SHA256 = (
     "1a0fede7e1d1bfd2746656b7b2e731df"
@@ -539,10 +539,6 @@ def require_reviewed_ign_ortho_delivery_allowed(
         raise ReviewedOrthoEvidenceError(
             "reviewed ortho bytes no longer have their catalog identity"
         )
-    if catalog_layer == "Ortofoto_2021":
-        raise ReviewedOrthoEvidenceError(
-            "the 2021 ortho delivery is permanently blocked"
-        )
     if (
         projection["profile"] != reviewed.profile
         or projection["equivalence_status"] != reviewed.equivalence_status
@@ -814,8 +810,8 @@ def _reviewed_substitutions() -> dict[str, ReviewedIgnOrthoSubstitution]:
     if (
         frozenset(result) != _EXPECTED_CATALOG_LAYERS
         or exact_count != 6
-        or degraded_count != 13
-        or blocked_count != 1
+        or degraded_count != 14
+        or blocked_count != 0
     ):
         raise ReviewedOrthoEvidenceError(
             "reviewed IGN ortho coverage is incomplete"
@@ -1412,16 +1408,18 @@ def _derived_equivalence_status(
     selected_normalized = _normalized_text(selected_abstract)
     if catalog_layer == "Ortofoto_2021":
         if (
-            selected_layer != "PNOA2021"
-            or declared_coverage != "none"
+            selected_layer != "PNOA2020"
+            or declared_coverage != "full"
             or "2021" not in catalog_normalized
             or "cyl" not in catalog_normalized
-            or "2021" not in selected_normalized
+            or "2020" not in selected_normalized
+            or "castilla y leon" not in selected_normalized
         ):
             raise ReviewedOrthoEvidenceError(
-                "PNOA2021 blocked assessment no longer matches capabilities"
+                "Ortofoto_2021 to PNOA2020 degraded assessment no longer "
+                "matches capabilities"
             )
-        return "blocked"
+        return "substitute_degraded"
     if catalog_layer in _EXACT_CATALOG_LAYERS:
         catalog_resolutions = set(
             _declared_resolutions_metres(catalog_abstract)

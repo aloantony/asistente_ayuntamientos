@@ -882,12 +882,7 @@ def _validate_active_record(
                 content_sha256=record.version.content_sha256,
             )
         except ReviewedOrthoEvidenceError:
-            blocker = (
-                "reviewed_ortho_2021_blocked"
-                if catalog_layer == "Ortofoto_2021"
-                else "reviewed_ortho_legacy_fenced"
-            )
-            raise LocalDeliveryError(blocker) from None
+            raise LocalDeliveryError("reviewed_ortho_legacy_fenced") from None
     try:
         catalog_hash_is_valid = (
             record.snapshot.id == record.version.catalog_snapshot_id

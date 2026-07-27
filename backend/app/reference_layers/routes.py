@@ -113,11 +113,7 @@ def _active_reviewed_ortho_projection(
             )
     except (ReviewedOrthoEvidenceError, DeliveryBuildError):
         return {
-            "equivalence_status": (
-                "blocked"
-                if catalog_layer == "Ortofoto_2021"
-                else "invalid"
-            ),
+            "equivalence_status": "invalid",
             "public_notice": (
                 "La entrega local activa está bloqueada: sus bytes "
                 "históricos no tienen la identidad y la paridad "

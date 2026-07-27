@@ -99,7 +99,7 @@ def _catalog_definition(
     )
 
 
-def test_local_serving_fences_any_historical_2021_delivery(
+def test_local_serving_requires_2021_executable_parity_gate(
     monkeypatch,
 ) -> None:
     reviewed = reviewed_ign_ortho_substitution(
@@ -192,7 +192,7 @@ def test_local_serving_fences_any_historical_2021_delivery(
 
     with pytest.raises(LocalDeliveryError) as error:
         local_delivery._validate_active_record(db, record, [])
-    assert error.value.blocker == "reviewed_ortho_2021_blocked"
+    assert error.value.blocker == "reviewed_ortho_legacy_fenced"
 
 
 def seed_local_delivery(

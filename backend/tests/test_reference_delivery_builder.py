@@ -1020,24 +1020,29 @@ def test_local_metadata_projects_visible_degraded_ortho_without_urls() -> None:
     assert "endpoint_url" not in serialized
 
 
-def test_local_metadata_rejects_blocked_reviewed_ortho() -> None:
+def test_local_metadata_exposes_2021_as_pnoa2020_degraded() -> None:
     reviewed = reviewed_ign_ortho_substitution(
         CATALOG_ENDPOINT_URL,
         "Ortofoto_2021",
     )
     assert reviewed is not None
 
-    with pytest.raises(LocalMetadataError):
-        _source_metadata_projection(
-            source=SimpleNamespace(
-                id=42,
-                source_key="auto:wms_tiles:" + "c" * 32,
-            ),
-            run_definition=(
-                reviewed_ign_ortho_expected_source_definition(reviewed)
-            ),
-            source_definition_sha256="d" * 64,
-        )
+    source = _source_metadata_projection(
+        source=SimpleNamespace(
+            id=42,
+            source_key="auto:wms_tiles:" + "c" * 32,
+        ),
+        run_definition=(
+            reviewed_ign_ortho_expected_source_definition(reviewed)
+        ),
+        source_definition_sha256="d" * 64,
+    )
+
+    substitution = source["ortho_substitution"]
+    assert substitution["selected_layer"] == "PNOA2020"
+    assert substitution["equivalence_status"] == "substitute_degraded"
+    assert substitution["promotion_eligible"] is True
+    assert "anualidad distinta" in substitution["public_notice"]
 
 
 def test_semantic_catalog_refresh_preserves_frozen_map_and_metadata(

@@ -33,7 +33,12 @@ EXPECTED_MAPPINGS = {
         "full",
         True,
     ),
-    "Ortofoto_2021": ("PNOA2021", "blocked", "none", False),
+    "Ortofoto_2021": (
+        "PNOA2020",
+        "substitute_degraded",
+        "full",
+        True,
+    ),
     "Ortofoto_2020": ("PNOA2020", "exact", "full", True),
     "Ortofoto_2017": ("PNOA2017", "exact", "full", True),
     "Ortofoto_2014": ("PNOA2014", "exact", "full", True),
@@ -200,8 +205,8 @@ def test_reviewed_profile_maps_exactly_twenty_layers_and_probes_snapshot() -> No
         )
 
     assert statuses.count("exact") == 6
-    assert statuses.count("substitute_degraded") == 13
-    assert statuses.count("blocked") == 1
+    assert statuses.count("substitute_degraded") == 14
+    assert statuses.count("blocked") == 0
     assert len(source_keys) == 20
 
 
@@ -305,7 +310,7 @@ def test_full_product_year_mapping_is_bound_to_complete_promotable_source() -> N
         )
 
 
-def test_blocked_mapping_cannot_be_acquired() -> None:
+def test_2021_uses_visible_pnoa2020_degraded_mapping() -> None:
     reviewed = reviewed_ign_ortho_substitution(
         CATALOG_ENDPOINT_URL,
         "Ortofoto_2021",
@@ -313,8 +318,16 @@ def test_blocked_mapping_cannot_be_acquired() -> None:
     assert reviewed is not None
     definition = reviewed_ign_ortho_expected_source_definition(reviewed)
 
-    with pytest.raises(ReviewedOrthoEvidenceError):
-        require_reviewed_ign_ortho_acquisition_allowed(definition)
+    projection = require_reviewed_ign_ortho_acquisition_allowed(definition)
+
+    assert projection is not None
+    assert projection["selected_layer"] == "PNOA2020"
+    assert projection["equivalence_status"] == "substitute_degraded"
+    assert projection["promotion_eligible"] is True
+    assert "anualidad distinta" in projection["public_notice"]
+    assert projection["parity_policy"]["promotion"][
+        "immutable_degraded_classification"
+    ] is True
 
 
 def test_both_capabilities_drive_quadrant_classification() -> None:
@@ -491,7 +504,7 @@ def test_exact_parity_gate_is_structured_hash_bound_and_executable() -> None:
         )
 
 
-def test_2021_delivery_is_blocked_even_with_historical_validation() -> None:
+def test_2021_delivery_still_requires_executable_parity_evidence() -> None:
     reviewed = reviewed_ign_ortho_substitution(
         CATALOG_ENDPOINT_URL,
         "Ortofoto_2021",
@@ -501,7 +514,7 @@ def test_2021_delivery_is_blocked_even_with_historical_validation() -> None:
 
     with pytest.raises(
         ReviewedOrthoEvidenceError,
-        match="permanently blocked",
+        match="no executable parity gate",
     ):
         require_reviewed_ign_ortho_delivery_allowed(
             catalog_endpoint_url=CATALOG_ENDPOINT_URL,

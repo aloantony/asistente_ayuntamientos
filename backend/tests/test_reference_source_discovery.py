@@ -967,7 +967,7 @@ def test_mirror_bootstrap_makes_reviewed_wms_primary_and_keeps_wmts_fallback(
     assert fallback.is_primary is False
 
 
-def test_ortho_bootstrap_keeps_visible_degraded_source_and_blocks_2021(
+def test_ortho_bootstrap_keeps_visible_degraded_sources_including_2021(
     db,
 ) -> None:
     catalog_service = replace(
@@ -1032,15 +1032,26 @@ def test_ortho_bootstrap_keeps_visible_degraded_source_and_blocks_2021(
 
     plan = build_mirror_bootstrap_plan(db, provider_key="siur")
 
-    assert len(plan.sources) == 1
-    assert plan.sources[0].layer_id == stored_layers["Ortofoto_2023"].id
-    assert plan.sources[0].endpoint_url == (
-        "https://www.ign.es/wms/pnoa-historico"
+    assert len(plan.sources) == 2
+    planned_by_layer_id = {item.layer_id: item for item in plan.sources}
+    assert set(planned_by_layer_id) == {
+        stored_layers["Ortofoto_2023"].id,
+        stored_layers["Ortofoto_2021"].id,
+    }
+    assert planned_by_layer_id[
+        stored_layers["Ortofoto_2023"].id
+    ].remote_name == "PNOA2023"
+    assert planned_by_layer_id[
+        stored_layers["Ortofoto_2021"].id
+    ].remote_name == "PNOA2020"
+    assert all(
+        item.endpoint_url == "https://www.ign.es/wms/pnoa-historico"
+        and item.config_json["reviewed_equivalence"][
+            "equivalence_status"
+        ]
+        == "substitute_degraded"
+        for item in plan.sources
     )
-    assert plan.sources[0].remote_name == "PNOA2023"
-    assert plan.sources[0].config_json["reviewed_equivalence"][
-        "equivalence_status"
-    ] == "substitute_degraded"
     assert len(plan.deactivated_source_keys) == 2
 
     applied = apply_mirror_bootstrap_plan(db, plan)
@@ -1057,21 +1068,25 @@ def test_ortho_bootstrap_keeps_visible_degraded_source_and_blocks_2021(
         if item.layer_id == stored_layers["Ortofoto_2023"].id
         and item.enabled
     ]
-    blocked_sources = [
+    sources_2021 = [
         item
         for item in sources
         if item.layer_id == stored_layers["Ortofoto_2021"].id
         and item.enabled
     ]
 
-    assert applied.created_count == 1
+    assert applied.created_count == 2
     assert applied.deactivated_count == 2
     assert len(degraded_sources) == 1
     assert degraded_sources[0].is_primary is True
     assert degraded_sources[0].endpoint_url == (
         "https://www.ign.es/wms/pnoa-historico"
     )
-    assert blocked_sources == []
+    assert len(sources_2021) == 1
+    assert sources_2021[0].remote_name == "PNOA2020"
+    assert sources_2021[0].config_json["reviewed_equivalence"][
+        "equivalence_status"
+    ] == "substitute_degraded"
 
 
 def test_siur_tile_fallback_uses_the_reviewed_finite_coverage() -> None:
@@ -1145,7 +1160,12 @@ def test_xyz_jpeg_template_uses_matching_archive_format() -> None:
     ("catalog_layer", "selected_layer", "equivalence_status", "eligible"),
     [
         ("Ortofoto_2023", "PNOA2023", "substitute_degraded", True),
-        ("Ortofoto_2021", "PNOA2021", "blocked", False),
+        (
+            "Ortofoto_2021",
+            "PNOA2020",
+            "substitute_degraded",
+            True,
+        ),
         ("Ortofoto_2020", "PNOA2020", "exact", True),
         ("Ortofoto_2017", "PNOA2017", "exact", True),
         ("Ortofoto_2014", "PNOA2014", "exact", True),
@@ -1176,7 +1196,7 @@ def test_xyz_jpeg_template_uses_matching_archive_format() -> None:
         ),
     ],
 )
-def test_itacyl_ortho_builds_exact_or_visible_degraded_source_but_blocks_2021(
+def test_itacyl_ortho_builds_exact_or_visible_degraded_source(
     catalog_layer: str,
     selected_layer: str,
     equivalence_status: str,
