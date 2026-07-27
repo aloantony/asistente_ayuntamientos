@@ -51,16 +51,28 @@ Se puede acotar con `--layer-id`, `--source-id` o `--source-key`. No existe
 modo `--apply`: el comando no crea ejecuciones, artefactos ni versiones y no
 modifica `next_check_at`. Una fuente sin autorización vigente se informa como
 `unauthorized`; una revisión restrictiva o una fuente deshabilitada se informa
-como `blocked`, en ambos casos sin realizar ninguna petición de red.
+como `blocked`, en ambos casos sin realizar ninguna petición de red. Es un gate
+fail-closed: cualquiera de esos estados, un error de una fuente autorizada o
+una proyección que exceda la capacidad produce `ok=false`,
+`ready_for_bulk_seed=false` y código de salida 1. El código 0 significa
+exclusivamente que todas las estrategias seleccionadas están autorizadas,
+proyectadas y caben.
 
 El recuento operativo es capa por estilo, no únicamente el número de
 estrategias. Por ejemplo, las 24 estrategias primarias actuales pueden producir
 más de 24 MBTiles si alguna capa tiene varios estilos horneados. El informe suma
-todas esas proyecciones y las contrasta una sola vez con la cuota y la reserva
-de espacio del mismo CAS. `capacity_margin_bytes` es el margen posterior a esa
-suma conservadora; un valor negativo o el fallo de cualquier fuente ya
-autorizada hace que el proceso termine con código 1. El cálculo no reserva
-espacio, por lo que debe repetirse justo antes de iniciar la descarga masiva.
+todas esas proyecciones y, después del muestreo, las contrasta una sola vez con
+la cuota y la reserva de espacio del mismo CAS. Esa lectura toma el lock
+compartido ya existente: no crea ni corrige el lock y falla si falta o no es un
+fichero seguro. `capacity_margin_bytes` es el margen posterior a la suma
+conservadora.
+
+El informe incluye un `state_fence` ligado al snapshot, estrategias, fuentes,
+estilos y revisiones de autorización exactos. Si cualquiera cambia durante el
+muestreo o durante la lectura de capacidad, el comando rechaza el informe y se
+debe repetir. El cálculo sigue sin reservar espacio; debe ejecutarse
+inmediatamente antes de iniciar la descarga masiva y cada escritor vuelve a
+comprobar cuota y espacio mientras escribe.
 
 ## Sincronización manual acotada
 
