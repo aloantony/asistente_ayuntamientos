@@ -36,8 +36,8 @@ PREVIOUS_MANIFEST_RESOURCE = (
     "evidence/idecyl_local_styles/manifest-v1.json"
 )
 MANIFEST_SHA256 = (
-    "01948171db8103704d1658ab69f0ed7e"
-    "13ecf19f482d8ff68171707b40b35bc6"
+    "e4507978fd3cb7b759674f2c876f632e"
+    "d423fbe26680cd177fcff5d146ebce82"
 )
 PREVIOUS_MANIFEST_SHA256 = (
     "c71b6493ff7def4fe57676e558abe658"
@@ -373,6 +373,10 @@ _BOUNDARY_LAYER_SPECS = {
         },
         "style_prefix": "limites_provincias_",
         "default_style": "limites_provincias_negro",
+        "catalog_title_overrides": {
+            "amarillo": "Contorno amarillo",
+            "fucsia": "Contorno fucsia",
+        },
         "label_field": "n_prov",
         "unit_name": "provincia",
         "dataset_inspection": {
@@ -962,10 +966,14 @@ def _expected_boundary_styles(
     expected: dict[str, dict[str, Any]] = {}
     for template in _BOUNDARY_STYLE_TEMPLATES:
         style_name = spec["style_prefix"] + template["suffix"]
+        catalog_title = spec.get(
+            "catalog_title_overrides",
+            {},
+        ).get(template["suffix"], template["catalog_title"])
         labelled = template["labelled"]
         visual: dict[str, Any] = {
             "evidence_basis": {
-                "catalog_style_title": template["catalog_title"],
+                "catalog_style_title": catalog_title,
                 "geometry_type": "MULTIPOLYGON",
                 "label_field": spec["label_field"] if labelled else None,
                 "style_family_reference_name": (
@@ -1007,7 +1015,7 @@ def _expected_boundary_styles(
                 "catalog_style_source_key": style_name,
                 "is_default": style_name == spec["default_style"],
                 "remote_name": style_name,
-                "title": template["catalog_title"],
+                "title": catalog_title,
             },
             "exact_style_claim": False,
             "parity_kind": "adapted",

@@ -507,14 +507,14 @@
             "catalog_style_source_key": "limites_provincias_amarillo",
             "is_default": false,
             "remote_name": "limites_provincias_amarillo",
-            "title": "Contorno amarillo resalte"
+            "title": "Contorno amarillo"
           },
           "exact_style_claim": false,
           "parity_kind": "adapted",
-          "recipe_identity_sha256": "6260194a7cbf220f1fd0582d95731d8b94306068cd00c9eef93b2c0a14e5fd03",
+          "recipe_identity_sha256": "9e179ce50520dca62c7102bbc255e12ad1c324a91272d4c507062f673357e11d",
           "visual_recipe": {
             "evidence_basis": {
-              "catalog_style_title": "Contorno amarillo resalte",
+              "catalog_style_title": "Contorno amarillo",
               "geometry_type": "MULTIPOLYGON",
               "label_field": null,
               "style_family_reference_name": "limites_municipios_amarillo",
@@ -600,14 +600,14 @@
             "catalog_style_source_key": "limites_provincias_fucsia",
             "is_default": false,
             "remote_name": "limites_provincias_fucsia",
-            "title": "Contorno fucsia resalte"
+            "title": "Contorno fucsia"
           },
           "exact_style_claim": false,
           "parity_kind": "adapted",
-          "recipe_identity_sha256": "72eca7e97c562231a95a96442ebfaed861438253c45c703d1d9a0e39ad13b4b2",
+          "recipe_identity_sha256": "1f7e63a7a15cdfa53617a7d1dd2c077c2696301c039670b9174d2358e9619c11",
           "visual_recipe": {
             "evidence_basis": {
-              "catalog_style_title": "Contorno fucsia resalte",
+              "catalog_style_title": "Contorno fucsia",
               "geometry_type": "MULTIPOLYGON",
               "label_field": null,
               "style_family_reference_name": "limites_municipios_fucsia",

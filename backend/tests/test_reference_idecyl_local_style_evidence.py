@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,7 @@ from app.reference_layers.idecyl_local_style_evidence import (
     _load_evidence_package,
     _resource_body,
 )
+from app.reference_layers.siur_wmc import parse_wmc_evidence
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -119,6 +121,41 @@ def test_inventory_keeps_layer_86_and_adds_two_complete_boundaries() -> None:
             item.evidence["visual_recipe"]["label_field"]
             for item in labelled
         } == {label_field}
+
+
+def test_province_styles_match_versioned_wmc_catalog_evidence() -> None:
+    document = (
+        Path(__file__).parent / "fixtures" / "siur_context.xml"
+    ).read_bytes().rstrip(b"\r\n")
+    wmc = parse_wmc_evidence(document)
+    province = next(
+        layer
+        for layer in wmc.layers
+        if layer.remote_name == "limites_esp_provincias"
+    )
+    reviewed = tuple(
+        item
+        for item in idecyl_local_style_inventory()
+        if item.audit_layer_id == 234
+    )
+
+    assert {
+        (
+            style.source_key,
+            style.remote_name,
+            style.title,
+            style.selected,
+        )
+        for style in province.styles
+    } == {
+        (
+            style.catalog_style_source_key,
+            style.remote_style_name,
+            style.style_title,
+            style.is_default,
+        )
+        for style in reviewed
+    }
 
 
 def test_source_definitions_bind_every_catalog_style_and_default() -> None:
