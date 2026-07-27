@@ -36,6 +36,39 @@ La revisión se valida antes de la primera petición y después de inspeccionar
 los nueve recursos. La sonda no usa el CAS, no crea `ReferenceSyncRun`, no crea
 versiones y no promociona entregas.
 
+## Alta de la fuente de sonda
+
+La fuente deshabilitada se crea mediante un plan separado y confirmado por
+hash. El `audit-layer-id` es `123` para SIGPAC 2024 y `166` para SIGPAC 2022:
+
+```bash
+python -m app.reference_layers.zip_metadata_probe_source \
+  --audit-layer-id 123 \
+  --root-index /ruta/review-sigpac-2024-root.html \
+  --province-index /ruta/review-sigpac-2024-provinces.html
+```
+
+El dry-run no escribe la base de datos. Tras revisar la identidad de catálogo,
+el plan de nueve recursos y la definición exacta, se repite con el hash:
+
+```bash
+python -m app.reference_layers.zip_metadata_probe_source \
+  --audit-layer-id 123 \
+  --root-index /ruta/review-sigpac-2024-root.html \
+  --province-index /ruta/review-sigpac-2024-provinces.html \
+  --apply \
+  --expected-plan-sha256 HASH_DEL_DRY_RUN
+```
+
+El hash incluye también el estado operativo exacto: `enabled=false`,
+`is_primary=false`, `source_format=null` y sus dos intervalos. El alta es
+append-only e idempotente: nunca actualiza ni reemplaza una fuente. Si existe
+una fuente de sonda distinta o alterada, falla. Este paso no usa red, no crea
+una autorización y no concede descarga, conservación ni servicio local. El
+`source_id` y `source_definition_sha256` resultantes deben usarse en la
+revisión metadata-only persistida con
+`app.reference_layers.mirror_authorization`.
+
 ## Flujo operador
 
 El dry-run no usa la red ni escribe el archivo:

@@ -174,6 +174,12 @@ def _lock_catalog_provider(db: Session, provider_key: str) -> None:
     )
 
 
+def lock_catalog_provider(db: Session, provider_key: str) -> None:
+    """Serialize an operator transition with catalog apply for one provider."""
+
+    _lock_catalog_provider(db, provider_key)
+
+
 def canonical_definition_sha256(
     definition: ReferenceCatalogDefinition,
 ) -> str:
