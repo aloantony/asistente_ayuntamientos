@@ -11,11 +11,16 @@ from types import SimpleNamespace
 import pytest
 from conftest import headers_for
 from sqlalchemy import event, select
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.reference_layers import (
     local_metadata as reference_local_metadata,
 )
 from app.reference_layers import routes as reference_layer_routes
+from app.reference_layers.acquisition import (
+    candidate_from_source_model,
+    source_candidate_definition_sha256,
+)
 from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers.catalog import (
     ReferenceCatalogDefinition,
@@ -45,11 +50,17 @@ from app.reference_layers.local_metadata import (
 from app.reference_layers.local_delivery import resolve_local_delivery
 from app.reference_layers.mirror_lifecycle import (
     MirrorLeaseLostError,
+    MirrorPromotionConflict,
     apply_mirror_bootstrap_plan,
     build_mirror_bootstrap_plan,
     claim_next_sync_run,
     enqueue_due_sources,
     promote_delivery_version,
+)
+from app.reference_layers.source_content_parity import (
+    PARITY_SPEC_SCHEMA,
+    canonical_json_sha256 as parity_json_sha256,
+    evaluate_acquisition_parity,
 )
 from app.reference_layers.models import (
     ReferenceDeliveryAsset,
@@ -94,7 +105,13 @@ def test_web_reference_blob_store_is_strictly_read_only(monkeypatch) -> None:
     assert captured["read_only"] is True
 
 
-def _lease_and_input(db, storage_root):
+def _lease_and_input(
+    db,
+    storage_root,
+    *,
+    source_content_parity: bool = False,
+    include_acquisition_gate: bool = True,
+):
     definition = ReferenceCatalogDefinition(
         provider_key="delivery-builder-test",
         source_url="https://example.test/catalog.json",
@@ -157,6 +174,23 @@ def _lease_and_input(db, storage_root):
         item.enabled = item.id == source.id
         item.is_primary = item.id == source.id
         item.next_check_at = NOW - timedelta(seconds=1)
+    acquisition_gate = None
+    if source_content_parity:
+        config, acquisition_gate = _source_content_parity_values(
+            base_config=source.config_json,
+            artifact_sha256="a" * 64,
+            artifact_size_bytes=512,
+        )
+        current = candidate_from_source_model(source)
+        changed = replace(
+            current,
+            config=config,
+            definition_sha256="0" * 64,
+        )
+        source.config_json = config
+        source.definition_sha256 = source_candidate_definition_sha256(
+            changed
+        )
     db.commit()
     review = authorize_mirror_source(db, source, reviewed_at=NOW)
     enqueue_due_sources(db, now=NOW)
@@ -178,7 +212,12 @@ def _lease_and_input(db, storage_root):
         storage_key=f"blobs/sha256/{'a' * 2}/{'a' * 64}",
         size_bytes=512,
         sha256="a" * 64,
-        metadata_json={},
+        metadata_json=(
+            {"source_content_parity": acquisition_gate}
+            if acquisition_gate is not None
+            and include_acquisition_gate
+            else {}
+        ),
         retrieved_at=NOW,
     )
     db.add(artifact)
@@ -389,6 +428,68 @@ def _prepared(fixture, *, input_artifact_id: int | None = None) -> PreparedDeliv
     return _with_metadata_asset(prepared, fixture)
 
 
+def _source_content_parity_values(
+    *,
+    base_config,
+    artifact_sha256: str,
+    artifact_size_bytes: int,
+) -> tuple[dict, dict]:
+    expected = {
+        "archive_sha256": artifact_sha256,
+        "archive_size_bytes": artifact_size_bytes,
+        "archive_entry_count": 2,
+        "archive_uncompressed_bytes": 1024,
+        "archive_member": "reviewed.gpkg",
+        "archive_member_crc32": "1234abcd",
+        "archive_member_size_bytes": 1000,
+        "archive_member_sha256": "c" * 64,
+        "feature_layer": "planning",
+        "feature_layers": ["planning"],
+        "feature_count": 123,
+        "geometry_type": "MULTIPOLYGON",
+        "crs": "EPSG:3857",
+        "declared_bounds": {
+            "west": -7.1,
+            "south": 40.0,
+            "east": -1.7,
+            "north": 43.3,
+        },
+        "geometry_bounds": {
+            "west": -7.1,
+            "south": 40.0,
+            "east": -1.7,
+            "north": 43.3,
+        },
+        "empty_geometry_count": 0,
+        "data_schema_sha256": "d" * 64,
+        "sample_sha256": "e" * 64,
+        "content_identity_sha256": "f" * 64,
+    }
+    semantic = {
+        "schema_version": PARITY_SPEC_SCHEMA,
+        "expected": expected,
+    }
+    config = {
+        **base_config,
+        "source_content_parity": {
+            **semantic,
+            "spec_sha256": parity_json_sha256(semantic),
+        },
+    }
+    inspection = {
+        **expected,
+        "sample": {"sha256": expected["sample_sha256"]},
+    }
+    inspection.pop("sample_sha256")
+    acquisition_gate = evaluate_acquisition_parity(
+        config,
+        inspection,
+    )
+    assert acquisition_gate is not None
+    assert acquisition_gate["passed"] is True
+    return config, acquisition_gate
+
+
 def _with_metadata_asset(
     prepared: PreparedDelivery,
     fixture,
@@ -511,6 +612,116 @@ def test_create_delivery_version_links_inputs_and_assets(
     assert built.manifest_sha256 == version.manifest_sha256
     assert asset.storage_key == "reference_data.siur_layer_1_run_1"
     assert asset.metadata_json["renderer"] == "geoserver"
+
+
+def test_first_delivery_persists_source_content_parity_gate(
+    db,
+    tmp_path,
+) -> None:
+    source, lease, fixture = _lease_and_input(
+        db,
+        tmp_path,
+        source_content_parity=True,
+    )
+    artifact = db.get(ReferenceSourceArtifact, fixture.id)
+    prepared = _prepared(fixture)
+
+    built = create_delivery_version(
+        db,
+        lease=lease,
+        prepared=prepared,
+        metadata_verifier=_metadata_verifier(fixture),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    version = db.get(ReferenceDeliveryVersion, built.version_id)
+    gate = version.validation_json["source_content_parity_gate"]
+    assert gate["passed"] is True
+    assert gate["source_definition_sha256"] == source.definition_sha256
+    assert gate["input_artifact_id"] == artifact.id
+    assert gate["input_artifact_sha256"] == artifact.sha256
+    assert gate["checks"]["feature_count"] == {
+        "passed": True,
+        "expected": 123,
+        "observed": 123,
+    }
+    assert (
+        version.validation_json["continuity_gate"]["baseline_version_id"]
+        is None
+    )
+
+
+def test_builder_rejects_configured_parity_without_acquisition_gate(
+    db,
+    tmp_path,
+) -> None:
+    _source, lease, fixture = _lease_and_input(
+        db,
+        tmp_path,
+        source_content_parity=True,
+        include_acquisition_gate=False,
+    )
+
+    with pytest.raises(
+        DeliveryBuildError,
+        match="source-content parity rejected",
+    ):
+        create_delivery_version(
+            db,
+            lease=lease,
+            prepared=_prepared(fixture),
+            metadata_verifier=_metadata_verifier(fixture),
+            now=NOW + timedelta(seconds=1),
+        )
+
+
+@pytest.mark.parametrize("tamper", ["missing", "changed"])
+def test_promotion_revalidates_persisted_source_content_parity_gate(
+    db,
+    tmp_path,
+    tamper,
+) -> None:
+    source, lease, fixture = _lease_and_input(
+        db,
+        tmp_path,
+        source_content_parity=True,
+    )
+    artifact = db.get(ReferenceSourceArtifact, fixture.id)
+    built = create_delivery_version(
+        db,
+        lease=lease,
+        prepared=_prepared(fixture),
+        metadata_verifier=_metadata_verifier(fixture),
+        now=NOW + timedelta(seconds=1),
+    )
+    version = db.get(ReferenceDeliveryVersion, built.version_id)
+    validation = deepcopy(version.validation_json)
+    if tamper == "missing":
+        validation.pop("source_content_parity_gate")
+    else:
+        validation["source_content_parity_gate"][
+            "input_artifact_sha256"
+        ] = "0" * 64
+    set_committed_value(version, "validation_json", validation)
+    set_committed_value(
+        version,
+        "validation_sha256",
+        canonical_json_sha256(validation),
+    )
+
+    with pytest.raises(
+        MirrorPromotionConflict,
+        match="source-content parity gate is invalid",
+    ):
+        promote_delivery_version(
+            db,
+            version_id=version.id,
+            lease=lease,
+            expected_generation=0,
+            reason="Reject tampered source-content parity",
+            metadata_verifier=_transition_verifier(fixture),
+            now=NOW + timedelta(seconds=2),
+        )
 
 
 def test_builder_requires_one_exact_version_bound_metadata_asset(

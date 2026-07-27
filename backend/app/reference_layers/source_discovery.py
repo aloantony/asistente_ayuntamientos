@@ -687,21 +687,63 @@ def acquisition_candidates(
                     "reviewed IDECyL layer identity is invalid",
                     code="reviewed_idecyl_identity_invalid",
                 )
+            if reviewed_idecyl.local_service_status != "candidate":
+                status = reviewed_idecyl.local_service_status
+                raise SourceDiscoveryError(
+                    "IDECyL source cannot produce a local-service candidate",
+                    code=(
+                        "idecyl_permission_pending"
+                        if status == "permission_pending"
+                        else "idecyl_local_service_restricted"
+                    ),
+                    evidence={
+                        "schema": reviewed_idecyl.evidence["schema"],
+                        "audit_layer_id": reviewed_idecyl.audit_layer_id,
+                        "local_service_status": status,
+                        "reason_codes": list(
+                            reviewed_idecyl.reason_codes
+                        ),
+                        "metadata_binding": deepcopy(
+                            reviewed_idecyl.evidence[
+                                "metadata_binding"
+                            ]
+                        ),
+                        "authorization_effect": (
+                            reviewed_idecyl.evidence[
+                                "authorization_effect"
+                            ]
+                        ),
+                    },
+                )
+            if (
+                reviewed_idecyl.protocol != "download"
+                or reviewed_idecyl.target_kind != "vector"
+                or reviewed_idecyl.endpoint_url is None
+                or reviewed_idecyl.remote_name is None
+                or reviewed_idecyl.sync_strategy != "conditional_get"
+                or reviewed_idecyl.candidate_config is None
+            ):
+                raise SourceDiscoveryError(
+                    "reviewed IDECyL candidate is incomplete",
+                    code="reviewed_idecyl_evidence_invalid",
+                )
+            config = deepcopy(reviewed_idecyl.candidate_config)
+            config["archive_styles"] = _idecyl_archive_style_config(
+                layer,
+                config.get("archive_styles"),
+            )
+            config["reviewed_equivalence"] = deepcopy(
+                reviewed_idecyl.evidence
+            )
             return (
                 _candidate(
-                    protocol="wfs",
+                    protocol="download",
                     target_kind="vector",
                     endpoint_url=reviewed_idecyl.endpoint_url,
                     remote_name=reviewed_idecyl.remote_name,
-                    sync_strategy="paged_snapshot",
+                    sync_strategy="conditional_get",
                     priority=_REVIEWED_DATASET_SOURCE_PRIORITY,
-                    config={
-                        "discovery": "wfs_capabilities",
-                        **_geoserver_style_config(endpoint, layer),
-                        "reviewed_equivalence": deepcopy(
-                            reviewed_idecyl.evidence
-                        ),
-                    },
+                    config=config,
                 ),
             )
 
@@ -902,6 +944,76 @@ def acquisition_candidates(
         raise SourceDiscoveryError(f"unsupported catalog protocol: {protocol}")
 
     return tuple(sorted(_deduplicate(candidates), key=lambda item: item.priority))
+
+
+def _idecyl_archive_style_config(
+    layer: ReferenceLayerDefinition,
+    raw_styles: Any,
+) -> list[dict[str, str]]:
+    if not isinstance(raw_styles, list) or len(raw_styles) != 3:
+        raise SourceDiscoveryError(
+            "reviewed IDECyL archive styles are invalid",
+            code="reviewed_idecyl_style_identity_invalid",
+        )
+    reviewed_by_remote: dict[str, dict[str, Any]] = {}
+    for item in raw_styles:
+        remote_name = (
+            item.get("remote_name")
+            if isinstance(item, dict)
+            else None
+        )
+        if (
+            not isinstance(remote_name, str)
+            or remote_name in reviewed_by_remote
+        ):
+            raise SourceDiscoveryError(
+                "reviewed IDECyL archive styles are invalid",
+                code="reviewed_idecyl_style_identity_invalid",
+            )
+        reviewed_by_remote[remote_name] = item
+    catalog_styles = [
+        style
+        for style in layer.styles
+        if style.status in {"active", "degraded"}
+    ]
+    if (
+        len(catalog_styles) != len(reviewed_by_remote)
+        or len({style.source_key for style in catalog_styles})
+        != len(catalog_styles)
+        or len(
+            {
+                style.remote_name
+                for style in catalog_styles
+                if style.remote_name is not None
+            }
+        )
+        != len(catalog_styles)
+        or {
+            style.remote_name
+            for style in catalog_styles
+        }
+        != set(reviewed_by_remote)
+    ):
+        raise SourceDiscoveryError(
+            "catalog IDECyL styles differ from the reviewed archive",
+            code="reviewed_idecyl_style_identity_invalid",
+        )
+    result = [
+        {
+            "catalog_style_source_key": style.source_key,
+            "remote_name": style.remote_name,
+            "archive_member": reviewed_by_remote[style.remote_name][
+                "archive_member"
+            ],
+            "sha256": reviewed_by_remote[style.remote_name]["sha256"],
+        }
+        for style in catalog_styles
+        if style.remote_name is not None
+    ]
+    return sorted(
+        result,
+        key=lambda item: item["catalog_style_source_key"],
+    )
 
 
 def _reviewed_dataset_source(

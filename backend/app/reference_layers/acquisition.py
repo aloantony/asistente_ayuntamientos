@@ -39,6 +39,10 @@ from app.reference_layers.blob_store import (
     ReferenceBlobStore,
     StoredReferenceBlob,
 )
+from app.reference_layers.geopackage_archive import (
+    GeoPackageArchiveError,
+    inspect_geopackage_zip,
+)
 from app.reference_layers.local_style_adaptation import (
     LocalStyleAdaptationError,
     generate_reviewed_local_style,
@@ -58,6 +62,10 @@ from app.reference_layers.safe_download import (
     HTTPSDownloadResult,
     SafeHTTPSDownloader,
     normalize_https_url,
+)
+from app.reference_layers.source_content_parity import (
+    SourceContentParityError,
+    evaluate_acquisition_parity,
 )
 from app.reference_layers.source_discovery import SourceCandidate, candidate_definition
 from app.reference_layers.source_probes import (
@@ -1843,10 +1851,15 @@ class ReferenceAcquisitionPipeline:
                 ),
             },
         )
-        style_artifacts = self._author_reviewed_local_style(
+        style_artifacts = self._acquire_reviewed_archive_styles(
             candidate,
-            dataset_artifacts=[dataset],
+            downloaded,
         )
+        if not style_artifacts:
+            style_artifacts = self._author_reviewed_local_style(
+                candidate,
+                dataset_artifacts=[dataset],
+            )
         artifacts = [dataset, *style_artifacts]
         materialization = {
             "kind": "direct-dataset",
@@ -1867,6 +1880,175 @@ class ReferenceAcquisitionPipeline:
             stats=stats,
             observed=downloaded.result,
         )
+
+    def _acquire_reviewed_archive_styles(
+        self,
+        candidate: SourceCandidate,
+        downloaded: _Downloaded,
+    ) -> list[AcquiredArtifact]:
+        """Extract exact, reviewed SLD members from the immutable dataset ZIP."""
+
+        raw_styles = candidate.config.get("archive_styles")
+        if raw_styles is None:
+            return []
+        if (
+            candidate.config.get("data_format") != "geopackage-zip"
+            or downloaded.blob is None
+            or not isinstance(raw_styles, list)
+            or len(raw_styles) > _MAX_STYLES_PER_SOURCE
+        ):
+            raise AcquisitionConfigurationError(
+                "reviewed archive style configuration is invalid"
+            )
+        specs: list[tuple[str, str, str, str]] = []
+        source_keys: set[str] = set()
+        remote_names: set[str] = set()
+        members: set[str] = set()
+        for raw in raw_styles:
+            if not isinstance(raw, dict) or set(raw) != {
+                "catalog_style_source_key",
+                "remote_name",
+                "archive_member",
+                "sha256",
+            }:
+                raise AcquisitionConfigurationError(
+                    "reviewed archive style identity is invalid"
+                )
+            source_key = raw.get("catalog_style_source_key")
+            remote_name = raw.get("remote_name")
+            member = raw.get("archive_member")
+            expected_sha256 = raw.get("sha256")
+            if (
+                not isinstance(source_key, str)
+                or _STYLE_SOURCE_KEY_RE.fullmatch(source_key) is None
+                or not isinstance(remote_name, str)
+                or _STYLE_NAME_RE.fullmatch(remote_name) is None
+                or not isinstance(member, str)
+                or not member
+                or len(member) > 4_096
+                or PurePosixPath(member).suffix.casefold() != ".sld"
+                or PurePosixPath(member).is_absolute()
+                or any(
+                    part in {"", ".", ".."}
+                    for part in PurePosixPath(member).parts
+                )
+                or "\\" in member
+                or source_key in source_keys
+                or remote_name in remote_names
+                or member in members
+                or not isinstance(expected_sha256, str)
+                or _SHA256_RE.fullmatch(expected_sha256) is None
+            ):
+                raise AcquisitionConfigurationError(
+                    "reviewed archive style identity is invalid"
+                )
+            source_keys.add(source_key)
+            remote_names.add(remote_name)
+            members.add(member)
+            specs.append(
+                (source_key, remote_name, member, expected_sha256)
+            )
+        if specs != sorted(specs):
+            raise AcquisitionConfigurationError(
+                "reviewed archive styles are not canonical"
+            )
+        archive_path = self.store.resolve_blob(downloaded.blob.storage_key)
+        maximum = min(
+            self.limits.max_probe_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        artifacts: list[AcquiredArtifact] = []
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                infos = {item.filename: item for item in archive.infolist()}
+                if len(infos) != len(archive.infolist()):
+                    raise AcquisitionValidationError(
+                        "reviewed archive contains duplicate style paths",
+                        code="archive_style_invalid",
+                    )
+                for (
+                    source_key,
+                    remote_name,
+                    member,
+                    expected_sha256,
+                ) in specs:
+                    info = infos.get(member)
+                    if (
+                        info is None
+                        or info.is_dir()
+                        or info.flag_bits & 0x1
+                        or ((info.external_attr >> 16) & 0o170000)
+                        == 0o120000
+                        or not 1 <= info.file_size <= maximum
+                    ):
+                        raise AcquisitionValidationError(
+                            "reviewed archive style member is invalid",
+                            code="archive_style_invalid",
+                        )
+                    document = archive.read(info)
+                    if (
+                        hashlib.sha256(document).hexdigest()
+                        != expected_sha256
+                    ):
+                        raise AcquisitionValidationError(
+                            "reviewed archive style digest changed",
+                            code="archive_style_invalid",
+                        )
+                    parsed = _parse_style_bundle(
+                        document,
+                        layer_name=candidate.remote_name,
+                        style_names=(remote_name,),
+                    )
+                    if (
+                        len(parsed.standalone_slds) != 1
+                        or parsed.resource_hrefs != ((remote_name, ()),)
+                    ):
+                        raise AcquisitionValidationError(
+                            "reviewed archive style is not self-contained",
+                            code="archive_style_invalid",
+                        )
+                    standalone = parsed.standalone_slds[0][1]
+                    blob = self.store.put_stream(
+                        io.BytesIO(standalone),
+                        max_bytes=maximum,
+                    )
+                    artifacts.append(
+                        AcquiredArtifact(
+                            artifact_kind="style",
+                            role="style",
+                            media_type="application/vnd.ogc.sld+xml",
+                            blob=blob,
+                            source_version=parsed.sld_version,
+                            metadata={
+                                "schema": "reference-style-sld/v1",
+                                "catalog_style_source_key": source_key,
+                                "remote_name": remote_name,
+                                "style_layer_name": candidate.remote_name,
+                                "parent_sha256": downloaded.blob.sha256,
+                                "archive_member": member,
+                                "archive_member_sha256": expected_sha256,
+                                "parity_kind": "exact",
+                                "resource_bindings": [],
+                                "unresolved_resources": [],
+                            },
+                        )
+                    )
+        except ReferenceAcquisitionError:
+            raise
+        except (
+            KeyError,
+            OSError,
+            RuntimeError,
+            zipfile.BadZipFile,
+            zipfile.LargeZipFile,
+        ) as error:
+            raise AcquisitionValidationError(
+                "reviewed archive styles could not be inspected",
+                code="archive_style_invalid",
+            ) from error
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        return artifacts
 
     def _acquire_atom(
         self,
@@ -3425,6 +3607,43 @@ def _dataset_file_validator(
         )
     if normalized in {"geopackage", "gpkg"}:
         return _validate_geopackage
+    if normalized == "geopackage-zip":
+        if config is None:
+            raise AcquisitionConfigurationError(
+                "GeoPackage ZIP requires reviewed member configuration"
+            )
+        archive_member = _config_optional_text(
+            config,
+            "archive_member",
+            max_chars=4_096,
+        )
+        input_layer = _config_optional_text(
+            config,
+            "input_layer",
+            max_chars=1_000,
+        )
+        maximum = config.get(
+            "archive_max_uncompressed_bytes",
+            limits.max_total_bytes,
+        )
+        if (
+            archive_member is None
+            or input_layer is None
+            or isinstance(maximum, bool)
+            or not isinstance(maximum, int)
+            or not 100 <= maximum <= limits.max_total_bytes
+        ):
+            raise AcquisitionConfigurationError(
+                "GeoPackage ZIP reviewed member configuration is invalid"
+            )
+        return lambda path, size: _validate_geopackage_zip(
+            path,
+            size,
+            archive_member=archive_member,
+            input_layer=input_layer,
+            maximum_uncompressed=maximum,
+            config=config,
+        )
     if normalized in {"geotiff", "tiff"}:
         return _validate_raster_file
     if normalized == "flatgeobuf":
@@ -3435,6 +3654,52 @@ def _dataset_file_validator(
         "data_format has no fail-closed acquisition validator",
         code="unsupported_data_format",
     )
+
+
+def _validate_geopackage_zip(
+    path: Path,
+    size_bytes: int,
+    *,
+    archive_member: str,
+    input_layer: str,
+    maximum_uncompressed: int,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    if size_bytes < 22:
+        raise AcquisitionValidationError("GeoPackage ZIP is too small")
+    try:
+        inspection = inspect_geopackage_zip(
+            path,
+            expected_member=archive_member,
+            expected_layer=input_layer,
+            maximum_uncompressed_bytes=maximum_uncompressed,
+        )
+        parity = evaluate_acquisition_parity(config, inspection)
+    except SourceContentParityError as error:
+        raise AcquisitionConfigurationError(
+            "GeoPackage ZIP parity configuration is invalid"
+        ) from error
+    except GeoPackageArchiveError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="geopackage_zip_invalid",
+        ) from error
+    if parity is None:
+        raise AcquisitionConfigurationError(
+            "GeoPackage ZIP requires source-content parity"
+        )
+    if parity["passed"] is not True:
+        failed = ", ".join(parity["failed_checks"])
+        raise AcquisitionValidationError(
+            f"GeoPackage ZIP content parity failed: {failed}",
+            code="source_content_parity_failed",
+        )
+    return {
+        "archive_member": archive_member,
+        "input_layer": input_layer,
+        "geopackage_inspection": inspection,
+        "source_content_parity": parity,
+    }
 
 
 def _validate_zip_dataset(

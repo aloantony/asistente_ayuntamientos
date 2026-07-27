@@ -14,11 +14,27 @@ final no semántico:
 - SHA-256 del bundle curado:
   `9e7eb47a169eb22303267378cd762357abe0c97137267e37e6e80c4f720e07d5`.
 
-`manifest-v1.json` vincula cada identidad exacta de capa SIUR con su FID,
-metadato, WMS de catálogo, WFS seleccionado, distribución oficial observada,
-términos y atribuciones. El cargador valida los bytes y esas relaciones antes
-de añadir la evidencia a la definición de fuente.
+`manifest-v1.json` conserva el inventario de identidades y las rutas que la
+primera auditoría propuso explorar. Está **sustituido como configuración
+efectiva**: sus WFS, directorios HTTP y atribuciones inferidas no se convierten
+en fuentes locales.
 
-Estos archivos no conceden autorización por sí mismos. Descargar o promover
-un espejo sigue requiriendo una revisión humana persistida y ligada al nuevo
-hash de definición.
+`decision-manifest-v2.json` registra la auditoría posterior de las 31
+identidades contra las capacidades WMS/WFS y el contenido real de las
+distribuciones:
+
+- 28 quedan `restricted`: los WFS publican IGCYL-NC y paginación no
+  transaccional, o el ZIP incluye `Licencia-IGCYL.txt`;
+- 2 quedan `permission_pending`: solo se localizó un directorio HTTP y no hay
+  una distribución segura revisada;
+- solo la capa 39 queda como `candidate`, mediante el ZIP GeoPackage HTTPS de
+  datos abiertos. Su archivo, GeoPackage, esquema, recuento, CRS, límites,
+  muestra y SLD se fijan por huellas exactas.
+
+La candidata conserva una advertencia explícita: el registro oficial indica
+que los datos de cobertura se adquirieron mediante una suscripción externa a
+GeoHash. La auditoría técnica no interpreta ese dato como permiso de tercero.
+
+Ninguno de estos archivos concede autorización por sí mismo. La candidata
+puede prepararse técnicamente, pero descargar/promover un espejo sigue
+requiriendo una revisión humana persistida y ligada al hash de definición.

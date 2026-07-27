@@ -111,21 +111,116 @@ def _vector_manifest_sha256(
     *,
     input_driver: str = "GeoJSON",
     input_layer: str | None = None,
+    archive_member: str | None = None,
 ) -> str:
+    artifact = {
+        "ordinal": 0,
+        "input_sha256": input_sha256,
+        "input_driver": input_driver,
+        "input_layer": input_layer,
+        "size_bytes": path.stat().st_size,
+    }
+    if archive_member is not None:
+        artifact["archive_member"] = archive_member
     return canonical_json_sha256(
         {
             "schema_version": "reference-vector-input-manifest-v1",
-            "artifacts": [
-                {
-                    "ordinal": 0,
-                    "input_sha256": input_sha256,
-                    "input_driver": input_driver,
-                    "input_layer": input_layer,
-                    "size_bytes": path.stat().st_size,
-                }
-            ],
+            "artifacts": [artifact],
         }
     )
+
+
+def _reviewed_geopackage_zip(tmp_path: Path) -> tuple[Path, str]:
+    member = "reviewed.gpkg"
+    package = Path(tmp_path, member)
+    geometry = (
+        b"GP"
+        + bytes((0, 3))
+        + struct.pack("<i4d", 25830, 0.0, 10.0, 0.0, 10.0)
+        + struct.pack("<BI", 1, 2)
+        + struct.pack("<I", 2)
+        + struct.pack("<4d", 0.0, 0.0, 10.0, 10.0)
+    )
+    with sqlite3.connect(package) as connection:
+        connection.executescript(
+            """
+            PRAGMA application_id = 1196444487;
+            CREATE TABLE gpkg_spatial_ref_sys (
+                srs_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL PRIMARY KEY,
+                organization TEXT NOT NULL,
+                organization_coordsys_id INTEGER NOT NULL,
+                definition TEXT NOT NULL,
+                description TEXT
+            );
+            CREATE TABLE gpkg_contents (
+                table_name TEXT NOT NULL PRIMARY KEY,
+                data_type TEXT NOT NULL,
+                identifier TEXT,
+                description TEXT DEFAULT '',
+                last_change DATETIME NOT NULL,
+                min_x DOUBLE,
+                min_y DOUBLE,
+                max_x DOUBLE,
+                max_y DOUBLE,
+                srs_id INTEGER
+            );
+            CREATE TABLE gpkg_geometry_columns (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                geometry_type_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL,
+                z TINYINT NOT NULL,
+                m TINYINT NOT NULL,
+                PRIMARY KEY (table_name, column_name)
+            );
+            CREATE TABLE reviewed (
+                id INTEGER PRIMARY KEY,
+                geometry MULTICURVE,
+                label TEXT
+            );
+            INSERT INTO gpkg_spatial_ref_sys VALUES (
+                'ETRS89 / UTM zone 30N',
+                25830,
+                'EPSG',
+                25830,
+                'EPSG:25830',
+                ''
+            );
+            INSERT INTO gpkg_contents VALUES (
+                'reviewed',
+                'features',
+                'reviewed',
+                '',
+                '2026-07-27T00:00:00.000Z',
+                0,
+                0,
+                10,
+                10,
+                25830
+            );
+            INSERT INTO gpkg_geometry_columns VALUES (
+                'reviewed',
+                'geometry',
+                'MULTICURVE',
+                25830,
+                0,
+                0
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO reviewed (id, geometry, label) VALUES (?, ?, ?)",
+            (1, geometry, "one"),
+        )
+    archive = Path(tmp_path, "reviewed.zip")
+    with zipfile.ZipFile(
+        archive,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as target:
+        target.write(package, member)
+    return archive, member
 
 
 def test_database_target_and_versioned_name_are_strict() -> None:
@@ -407,6 +502,121 @@ def test_vector_ingest_accepts_revalidated_geopackage(
             "size_bytes": source.stat().st_size,
         }
     ]
+
+
+def test_vector_ingest_accepts_one_reviewed_geopackage_zip_member(
+    db,
+    tmp_path,
+) -> None:
+    source, member = _reviewed_geopackage_zip(tmp_path)
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest_sha256 = _vector_manifest_sha256(
+        source,
+        source_sha256,
+        input_driver="GPKGZIP",
+        input_layer="reviewed",
+        archive_member=member,
+    )
+    table_name = versioned_vector_table_name(
+        provider_key="siur",
+        layer_id=104,
+        run_id=105,
+        input_sha256=manifest_sha256,
+    )
+
+    def runner(argv, environment, timeout):
+        del environment, timeout
+        assert argv[1:3] == ["-if", "GPKG"]
+        assert argv[-1] == "reviewed"
+        assert argv[-2].startswith("/vsizip/")
+        assert argv[-2].endswith(f"/{member}")
+        assert source.as_posix() not in argv[-2]
+        staging_table = argv[argv.index("-nln") + 1].split(".", 1)[1]
+        db.execute(
+            text(
+                f"""
+                CREATE TABLE reference_data_staging.{staging_table} (
+                    source_fid bigserial PRIMARY KEY,
+                    geom geometry(MultiLineString, 3857)
+                )
+                """
+            )
+        )
+        db.execute(
+            text(
+                f"""
+                INSERT INTO reference_data_staging.{staging_table} (geom)
+                VALUES (ST_Multi(ST_GeomFromText(
+                    'LINESTRING(0 0,1000 1000)',
+                    3857
+                )))
+                """
+            )
+        )
+        return GeoCommandResult(b"", b"")
+
+    result = ingest_vector_artifact(
+        db,
+        database=GeoDatabaseTarget.from_url(
+            "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+        ),
+        source_path=source,
+        input_sha256=source_sha256,
+        provider_key="siur",
+        layer_id=104,
+        run_id=105,
+        input_layer="reviewed",
+        input_driver="GPKGZIP",
+        archive_member=member,
+        runner=runner,
+    )
+
+    assert result.storage_key == f"reference_data.{table_name}"
+    assert result.feature_count == 1
+    assert result.validation_json["checks"]["input_manifest"] == [
+        {
+            "ordinal": 0,
+            "input_sha256": source_sha256,
+            "input_driver": "GPKGZIP",
+            "input_layer": "reviewed",
+            "archive_member": member,
+            "size_bytes": source.stat().st_size,
+        }
+    ]
+
+
+def test_vector_ingest_rejects_wrong_geopackage_zip_member_before_gdal(
+    db,
+    tmp_path,
+) -> None:
+    source, _member = _reviewed_geopackage_zip(tmp_path)
+    calls = 0
+
+    def runner(*_args):
+        nonlocal calls
+        calls += 1
+        return GeoCommandResult(b"", b"")
+
+    with pytest.raises(
+        GeoIngestError,
+        match="unique reviewed member",
+    ):
+        ingest_vector_artifact(
+            db,
+            database=GeoDatabaseTarget.from_url(
+                "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+            ),
+            source_path=source,
+            input_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            provider_key="siur",
+            layer_id=106,
+            run_id=107,
+            input_layer="reviewed",
+            input_driver="GPKGZIP",
+            archive_member="wrong.gpkg",
+            runner=runner,
+        )
+    assert calls == 0
 
 
 def test_vector_ingest_rejects_spoofed_geopackage_before_gdal(

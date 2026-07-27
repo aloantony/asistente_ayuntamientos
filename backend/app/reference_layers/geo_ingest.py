@@ -32,6 +32,11 @@ from app.reference_layers.blob_store import (
     StoredReferenceBlob,
 )
 from app.reference_layers.delivery_builder import canonical_json_sha256
+from app.reference_layers.geopackage_archive import (
+    GeoPackageArchiveError,
+    geopackage_vsi_path,
+    inspect_geopackage_zip,
+)
 from app.reference_layers.local_tile_archive import (
     InvalidLocalTileArchiveError,
     validate_tile_image,
@@ -62,6 +67,7 @@ _ALLOWED_VECTOR_DRIVERS = {
     "GeoJSON": ".geojson",
     "FlatGeobuf": ".fgb",
     "GPKG": ".gpkg",
+    "GPKGZIP": ".zip",
     "GMLZIP": ".zip",
 }
 _VECTOR_DATA_SCHEMA = "reference_data"
@@ -194,6 +200,7 @@ class VectorArtifactInput:
     source_path: Path
     input_sha256: str
     input_layer: str | None = None
+    archive_member: str | None = None
 
 
 @dataclass(frozen=True)
@@ -462,6 +469,7 @@ def ingest_vector_artifact(
     run_id: int,
     input_layer: str | None = None,
     input_driver: str | None = None,
+    archive_member: str | None = None,
     minimum_features: int = 1,
     max_source_bytes: int = MAX_VECTOR_SOURCE_BYTES,
     timeout_seconds: int = 3600,
@@ -472,7 +480,14 @@ def ingest_vector_artifact(
     return ingest_vector_artifacts(
         db,
         database=database,
-        artifacts=(VectorArtifactInput(source_path, input_sha256, input_layer),),
+        artifacts=(
+            VectorArtifactInput(
+                source_path,
+                input_sha256,
+                input_layer,
+                archive_member,
+            ),
+        ),
         provider_key=provider_key,
         layer_id=layer_id,
         run_id=run_id,
@@ -489,7 +504,10 @@ def ingest_vector_artifacts(
     *,
     database: GeoDatabaseTarget,
     artifacts: Sequence[
-        VectorArtifactInput | tuple[Path, str] | tuple[Path, str, str | None]
+        VectorArtifactInput
+        | tuple[Path, str]
+        | tuple[Path, str, str | None]
+        | tuple[Path, str, str | None, str | None]
     ],
     provider_key: str,
     layer_id: int,
@@ -516,7 +534,9 @@ def ingest_vector_artifacts(
     normalized_inputs = _vector_artifact_inputs(artifacts)
     with tempfile.TemporaryDirectory(prefix="reference-vector-") as directory:
         private_directory = Path(directory)
-        snapshots: list[tuple[_ArtifactSnapshot, str, str | None]] = []
+        snapshots: list[
+            tuple[_ArtifactSnapshot, str, str | None, str | None]
+        ] = []
         manifest: list[dict[str, Any]] = []
         remaining_bytes = max_source_bytes
         for ordinal, artifact in enumerate(normalized_inputs):
@@ -540,17 +560,31 @@ def ingest_vector_artifacts(
                 expected_sha256=artifact.input_sha256,
             )
             remaining_bytes -= snapshot.size_bytes
-            _validate_vector_signature(snapshot.path, driver)
-            snapshots.append((snapshot, driver, artifact.input_layer))
-            manifest.append(
-                {
-                    "ordinal": ordinal,
-                    "input_sha256": snapshot.sha256,
-                    "input_driver": driver,
-                    "input_layer": artifact.input_layer,
-                    "size_bytes": snapshot.size_bytes,
-                }
+            _validate_vector_signature(
+                snapshot.path,
+                driver,
+                archive_member=artifact.archive_member,
+                input_layer=artifact.input_layer,
+                maximum_uncompressed_bytes=max_source_bytes,
             )
+            snapshots.append(
+                (
+                    snapshot,
+                    driver,
+                    artifact.input_layer,
+                    artifact.archive_member,
+                )
+            )
+            manifest_item = {
+                "ordinal": ordinal,
+                "input_sha256": snapshot.sha256,
+                "input_driver": driver,
+                "input_layer": artifact.input_layer,
+                "size_bytes": snapshot.size_bytes,
+            }
+            if artifact.archive_member is not None:
+                manifest_item["archive_member"] = artifact.archive_member
+            manifest.append(manifest_item)
         manifest_sha256 = canonical_json_sha256(
             {
                 "schema_version": "reference-vector-input-manifest-v1",
@@ -616,13 +650,19 @@ def ingest_vector_artifacts(
             environment["CPL_TMPDIR"] = str(private_directory)
             artifact_geometry_evidence: list[dict[str, Any]] = []
             previous_max_source_fid: int | None = None
-            for ordinal, (snapshot, driver, input_layer) in enumerate(snapshots):
+            for ordinal, (
+                snapshot,
+                driver,
+                input_layer,
+                archive_member,
+            ) in enumerate(snapshots):
                 argv = _vector_import_command(
                     database=database,
                     storage_key=staging_storage_key,
                     snapshot=snapshot.path,
                     driver=driver,
                     input_layer=input_layer,
+                    archive_member=archive_member,
                     append=ordinal > 0,
                 )
                 runner(argv, environment, timeout_seconds)
@@ -1344,7 +1384,7 @@ def _vector_driver(input_driver: str | None, source_path: Path) -> tuple[str, st
         selected = _VECTOR_DRIVER_ALIASES.get(input_driver.casefold())
     else:
         suffix = Path(source_path).suffix.casefold()
-        selected = next(
+        selected = None if suffix == ".zip" else next(
             (
                 (driver, expected_suffix)
                 for driver, expected_suffix in _ALLOWED_VECTOR_DRIVERS.items()
@@ -1359,7 +1399,10 @@ def _vector_driver(input_driver: str | None, source_path: Path) -> tuple[str, st
 
 def _vector_artifact_inputs(
     artifacts: Sequence[
-        VectorArtifactInput | tuple[Path, str] | tuple[Path, str, str | None]
+        VectorArtifactInput
+        | tuple[Path, str]
+        | tuple[Path, str, str | None]
+        | tuple[Path, str, str | None, str | None]
     ],
 ) -> tuple[VectorArtifactInput, ...]:
     if (
@@ -1369,16 +1412,17 @@ def _vector_artifact_inputs(
     ):
         raise GeoIngestError("vector artifact sequence is invalid")
     result: list[VectorArtifactInput] = []
-    identities: set[tuple[str, str | None]] = set()
+    identities: set[tuple[str, str | None, str | None]] = set()
     for value in artifacts:
         if isinstance(value, VectorArtifactInput):
             artifact = value
-        elif isinstance(value, tuple) and len(value) in {2, 3}:
+        elif isinstance(value, tuple) and len(value) in {2, 3, 4}:
             try:
                 artifact = VectorArtifactInput(
                     source_path=Path(value[0]),
                     input_sha256=value[1],
-                    input_layer=value[2] if len(value) == 3 else None,
+                    input_layer=value[2] if len(value) >= 3 else None,
+                    archive_member=value[3] if len(value) == 4 else None,
                 )
             except (TypeError, ValueError) as error:
                 raise GeoIngestError("vector artifact path is invalid") from error
@@ -1395,9 +1439,17 @@ def _vector_artifact_inputs(
                 artifact.input_layer is not None
                 and not isinstance(artifact.input_layer, str)
             )
+            or (
+                artifact.archive_member is not None
+                and not isinstance(artifact.archive_member, str)
+            )
         ):
             raise GeoIngestError("vector artifact identity is invalid")
-        identity = (artifact.input_sha256, artifact.input_layer)
+        identity = (
+            artifact.input_sha256,
+            artifact.input_layer,
+            artifact.archive_member,
+        )
         if identity in identities:
             raise GeoIngestError("vector artifact sequence contains a duplicate page")
         identities.add(identity)
@@ -1406,6 +1458,7 @@ def _vector_artifact_inputs(
                 source_path=source_path,
                 input_sha256=artifact.input_sha256,
                 input_layer=artifact.input_layer,
+                archive_member=artifact.archive_member,
             )
         )
     return tuple(result)
@@ -1418,10 +1471,18 @@ def _vector_import_command(
     snapshot: Path,
     driver: str,
     input_layer: str | None,
+    archive_member: str | None,
     append: bool,
 ) -> list[str]:
-    gdal_driver = "GML" if driver == "GMLZIP" else driver
-    source_argument = _vector_source_argument(snapshot, driver)
+    gdal_driver = {
+        "GMLZIP": "GML",
+        "GPKGZIP": "GPKG",
+    }.get(driver, driver)
+    source_argument = _vector_source_argument(
+        snapshot,
+        driver,
+        archive_member=archive_member,
+    )
     command = [
         _ALLOWED_BINARIES["ogr2ogr"],
         "-if",
@@ -2338,13 +2399,47 @@ def _raster_driver(input_driver: str | None, source_path: Path) -> tuple[str, st
     return selected
 
 
-def _validate_vector_signature(path: Path, driver: str) -> None:
+def _validate_vector_signature(
+    path: Path,
+    driver: str,
+    *,
+    archive_member: str | None,
+    input_layer: str | None,
+    maximum_uncompressed_bytes: int,
+) -> None:
     if driver == "GMLZIP":
+        if archive_member is not None:
+            raise GeoIngestError(
+                "cadastral GML archive member must not be configured"
+            )
         _cadastral_gml_member(path)
         return
     if driver == "GPKG":
+        if archive_member is not None:
+            raise GeoIngestError(
+                "plain GeoPackage cannot declare an archive member"
+            )
         _validate_vector_geopackage(path)
         return
+    if driver == "GPKGZIP":
+        if archive_member is None or input_layer is None:
+            raise GeoIngestError(
+                "GeoPackage ZIP lacks its reviewed member or layer"
+            )
+        try:
+            inspect_geopackage_zip(
+                path,
+                expected_member=archive_member,
+                expected_layer=input_layer,
+                maximum_uncompressed_bytes=maximum_uncompressed_bytes,
+            )
+        except GeoPackageArchiveError as error:
+            raise GeoIngestError(str(error)) from error
+        return
+    if archive_member is not None:
+        raise GeoIngestError(
+            "vector archive member is incompatible with its driver"
+        )
     try:
         with path.open("rb") as source:
             prefix = source.read(4096)
@@ -2421,7 +2516,24 @@ def _validate_vector_geopackage(path: Path) -> None:
         ) from error
 
 
-def _vector_source_argument(path: Path, driver: str) -> str:
+def _vector_source_argument(
+    path: Path,
+    driver: str,
+    *,
+    archive_member: str | None,
+) -> str:
+    if driver == "GPKGZIP":
+        if archive_member is None:
+            raise GeoIngestError(
+                "GeoPackage ZIP lacks its reviewed member"
+            )
+        try:
+            return geopackage_vsi_path(
+                path,
+                expected_member=archive_member,
+            )
+        except GeoPackageArchiveError as error:
+            raise GeoIngestError(str(error)) from error
     if driver != "GMLZIP":
         return str(path)
     member = _cadastral_gml_member(path)
