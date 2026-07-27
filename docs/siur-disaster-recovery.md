@@ -30,6 +30,17 @@ que distingue `GEOWEBCACHE_CACHE_DIR` de `gwc-layers/` y
 [FileBlobStore oficial](https://geowebcache.osgeo.org/docs/current/rest/blobstores.html),
 que permite separar su `baseDirectory`.
 
+En este despliegue, `GEOWEBCACHE_CACHE_DIR` **no es el directorio de teselas**:
+es la raíz persistente de configuración de GeoWebCache integrado. La ubicación
+antigua `/opt/geoserver_data/gwc-cache` solo aparece en manifests schema 2–4 y
+como placeholder vacío de compatibilidad. El manifest schema 5 fija por
+separado y de forma verificable la configuración
+`/opt/geoserver_data/gwc`, el volumen `geowebcache_tile_cache_v3`, el
+FileBlobStore `siur-tile-cache-v3` y su directorio de teselas
+`/var/lib/geowebcache`. También fija `default=true`, `enabled=true` y layout
+`DEFAULT`; el tamaño de bloque se vuelve a medir en el filesystem destino
+porque el volumen de teselas no forma parte del backup.
+
 Compose usa ahora el volumen de teselas versionado
 `geowebcache_tile_cache_v3` con `nocopy`. Los anteriores
 `geowebcache_tile_cache_v2` y `geowebcache_data` quedan sin montar y **no se
@@ -133,9 +144,21 @@ GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS
 GEOWEBCACHE_DISK_QUOTA_POLICY
 ```
 
-Con GeoServer arrancado pero antes de admitir tráfico de teselas, el dry-run
-lee por REST tanto los blobstores como la cuota y mide el filesystem real de
-v3:
+El grafo de arranque ordinario de Compose interpone el servicio de una sola
+ejecución `gwc-bootstrap`. `backend`, `worker`, `reference-worker` y
+`reference-scheduler` dependen de que termine correctamente; `frontend` queda
+gated a través de `backend`. El bootstrap recibe solo credenciales
+administrativas de GeoServer y variables de cuota, mide el volumen v3, aplica
+el contrato y lo vuelve a leer. Reintenta únicamente indisponibilidad de red
+durante un máximo de 180 segundos. Credenciales incorrectas, capacidad
+insuficiente, XML inválido, un blobstore inesperado o una relectura distinta
+fallan inmediatamente y bloquean los consumidores.
+
+Arrancar `geoserver` solo es una operación diagnóstica y no autoriza tráfico.
+Para el ciclo completo debe usarse Compose con los consumidores anteriores,
+sin omitir ni sustituir `gwc-bootstrap`. El dry-run operativo sigue disponible
+para inspección y evidencia; lee por REST todos los blobstores y la cuota y
+mide el filesystem real de v3:
 
 ```bash
 docker compose --profile operations run --rm -T --no-deps gwc-ops
@@ -175,8 +198,9 @@ docker compose --profile operations run --rm -T --no-deps gwc-ops \
 
 En `--apply`, el cliente primero lista y lee por XML todos los blobstores. Si el
 identificador reservado ya existe con otra ruta, tamaño de bloque, estado o
-layout, o si hay otro blobstore configurado como predeterminado, aborta sin
-mutar. Si falta y no hay otro default configurado, hace el `PUT` XML oficial a
+layout, o si existe **cualquier** otro blobstore —aunque no sea el
+predeterminado—, aborta sin mutar. Si falta y la lista está vacía, hace el
+`PUT` XML oficial a
 `/geoserver/gwc/rest/blobstores/siur-tile-cache-v3.xml`, vuelve a listar y
 releer la representación canónica completa y solo entonces configura la cuota.
 El default anónimo que GeoWebCache genera cuando no hay ninguno configurado no
@@ -205,8 +229,9 @@ reconstruye; toda la configuración GWC se restaura con el data dir.
    `/opt/geoserver_data/gwc`; solo v3 debe estar montado en
    `/var/lib/geowebcache`. No montar v2 y v3 simultáneamente.
 4. Arrancar GeoServer sin admitir tráfico, ejecutar primero el dry-run y
-   después `--apply`. Archivar el JSON con `blob_store.verified=true`,
-   `disk_quota.verified=true` y `verified=true`.
+   después iniciar explícitamente `gwc-bootstrap`. No iniciar los consumidores
+   hasta que termine con código cero. Archivar el JSON con
+   `blob_store.verified=true`, `disk_quota.verified=true` y `verified=true`.
 5. Generar una tesela de prueba y demostrar que aparece únicamente en v3; no
    promover el despliegue si `geowebcache.xml`, `gwc-gs.xml`, `gwc-layers` o
    metadatos de configuración aparecen en ese volumen.
@@ -364,17 +389,22 @@ docker compose --profile operations run --rm -T --no-deps \
   --backup /backups/siur-backup-20260726T120000Z
 ```
 
-El verificador conserva compatibilidad de lectura con backups schema 2 y 3 ya
-publicados, pero no los restaura automáticamente porque carecen del baseline
-canónico de miembros de extensiones. Los backups nuevos son schema 4: conservan
+El verificador conserva compatibilidad de lectura con backups schema 2, 3 y 4
+ya publicados. Los schema 2 y 3 no se restauran automáticamente porque carecen
+del baseline canónico de miembros de extensiones; schema 4 sí conserva ese
+baseline y sigue siendo restaurable. Los backups nuevos son schema 5: además de
 la identidad PostgreSQL, versiones requeridas de extensiones, `ctime`, número
-de enlaces y el inventario canónico hashado de miembros.
+de enlaces e inventario canónico hashado de miembros, declaran el contrato
+exacto del FileBlobStore v3 descrito al principio.
 
-Solo tras obtener `"verified": true`:
+Solo tras obtener `"verified": true`, volver a ejecutar el gate y levantar los
+consumidores mediante `up`, de modo que Compose respete
+`service_completed_successfully`:
 
 ```bash
-docker compose start \
-  geoserver reference-scheduler reference-worker worker backend
+docker compose up -d --force-recreate gwc-bootstrap
+docker compose up -d \
+  reference-scheduler reference-worker worker backend frontend
 ```
 
 Liberar el lease del runtime. Una ejecución fallida no publica el nombre final:

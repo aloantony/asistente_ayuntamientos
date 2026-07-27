@@ -380,7 +380,7 @@ def _blob_store_matches(
     desired: GeoWebCacheFileBlobStore,
 ) -> bool:
     defaults = tuple(store for store in stores if store.default)
-    return desired in stores and defaults == (desired,)
+    return stores == (desired,) and defaults == (desired,)
 
 
 def _gib(value: int, *, minimum: int, label: str) -> int:

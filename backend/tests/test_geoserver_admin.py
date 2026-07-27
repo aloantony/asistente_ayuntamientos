@@ -743,7 +743,7 @@ def test_geowebcache_tile_blob_store_fails_on_configured_default() -> None:
 
     with pytest.raises(
         GeoServerAdminConflictError,
-        match="another GeoWebCache default",
+        match="another GeoWebCache blob store",
     ):
         client.ensure_geowebcache_tile_blob_store(
             file_system_block_size=4096,
@@ -774,7 +774,43 @@ def test_geowebcache_tile_blob_store_fails_on_extra_default() -> None:
 
     with pytest.raises(
         GeoServerAdminConflictError,
-        match="additional default",
+        match="additional blob store",
+    ):
+        client.ensure_geowebcache_tile_blob_store(
+            file_system_block_size=4096,
+        )
+
+    assert [request[0] for request in all_requests(factory)] == [
+        "GET",
+        "GET",
+        "GET",
+    ]
+
+
+def test_geowebcache_tile_blob_store_fails_on_extra_nondefault() -> None:
+    other_id = "other-cache"
+    client, factory = make_client(
+        [
+            xml_response(
+                blob_store_list_xml(
+                    GEOWEBCACHE_TILE_BLOB_STORE_ID,
+                    other_id,
+                )
+            ),
+            xml_response(file_blob_store_xml()),
+            xml_response(
+                file_blob_store_xml(
+                    identifier=other_id,
+                    default=False,
+                    base_directory="/other/cache",
+                )
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        GeoServerAdminConflictError,
+        match="additional blob store",
     ):
         client.ensure_geowebcache_tile_blob_store(
             file_system_block_size=4096,

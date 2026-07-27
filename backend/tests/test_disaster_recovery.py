@@ -448,6 +448,24 @@ def rewrite_manifest(
     )
 
 
+def downgrade_geowebcache_contract(
+    manifest: dict[str, object],
+) -> None:
+    exclusions = manifest["excluded_reconstructible_state"]
+    geowebcache = next(  # type: ignore[arg-type]
+        item
+        for item in exclusions
+        if item["component"] == "geowebcache"
+    )
+    geowebcache["excluded_scope"] = (
+        "external GEOWEBCACHE_CACHE_DIR tile volume only"
+    )
+    geowebcache["cache_directory"] = "/opt/geoserver_data/gwc-cache"
+    geowebcache.pop("configuration_directory")
+    geowebcache.pop("volume")
+    geowebcache.pop("blob_store")
+
+
 def downgrade_backup_to_schema_v2(backup: Path) -> None:
     evidence_path = backup / QUIESCENCE_EVIDENCE_NAME
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -467,6 +485,7 @@ def downgrade_backup_to_schema_v2(backup: Path) -> None:
 
     def mutate(manifest: dict[str, object]) -> None:
         manifest["schema_version"] = 2
+        downgrade_geowebcache_contract(manifest)
         consistency = manifest["consistency"]  # type: ignore[assignment]
         for key in (
             "postgres_database_name",
@@ -510,10 +529,19 @@ def downgrade_backup_to_schema_v2(backup: Path) -> None:
 def downgrade_backup_to_schema_v3(backup: Path) -> None:
     def mutate(manifest: dict[str, object]) -> None:
         manifest["schema_version"] = 3
+        downgrade_geowebcache_contract(manifest)
         database = manifest["database"]  # type: ignore[assignment]
         database.pop("extension_members")
         extensions = manifest["restore_contract"]["extensions"]  # type: ignore[index]
         extensions.pop("exact_canonical_members_required")
+
+    rewrite_manifest(backup, mutate)
+
+
+def downgrade_backup_to_schema_v4(backup: Path) -> None:
+    def mutate(manifest: dict[str, object]) -> None:
+        manifest["schema_version"] = 4
+        downgrade_geowebcache_contract(manifest)
 
     rewrite_manifest(backup, mutate)
 
@@ -639,7 +667,7 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         ".reference-blob-store.lock",
         "staging",
     ]
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["consistency"]["postgres_system_identifier"] == (
         SOURCE_SYSTEM_IDENTIFIER
     )
@@ -690,6 +718,32 @@ def test_create_apply_writes_hashed_manifest_and_verifiable_payloads(
         ]
         is True
     )
+    assert manifest["excluded_reconstructible_state"][1] == {
+        "component": "geowebcache",
+        "included": False,
+        "excluded_scope": (
+            "external explicit FileBlobStore v3 tile volume only"
+        ),
+        "configuration_included": True,
+        "configuration_directory": "/opt/geoserver_data/gwc",
+        "cache_directory": "/var/lib/geowebcache",
+        "volume": "geowebcache_tile_cache_v3",
+        "blob_store": {
+            "type": "FileBlobStore",
+            "id": "siur-tile-cache-v3",
+            "default": True,
+            "enabled": True,
+            "base_directory": "/var/lib/geowebcache",
+            "path_generator_type": "DEFAULT",
+            "file_system_block_size": "measured-from-target-filesystem",
+        },
+        "reconstruction": (
+            "restore the complete GeoServer data directory, reapply and "
+            "verify the exact FileBlobStore and declarative disk quota, then "
+            "regenerate requested tiles from restored local delivery "
+            "artifacts"
+        ),
+    }
     assert (
         sum(
             command[0] == "psql"
@@ -803,6 +857,77 @@ def test_verify_remains_compatible_with_schema_v3_backup(
         for item in SOURCE_EXTENSIONS
     ]
     assert report["extension_member_inventories"] is None
+
+
+def test_verify_and_restore_dry_run_remain_compatible_with_schema_v4_backup(
+    tmp_path: Path,
+) -> None:
+    backup, runner, _reference, _geoserver = completed_backup(tmp_path)
+    downgrade_backup_to_schema_v4(backup)
+
+    verification = verify_backup(backup, runner=runner)
+    request = restore_request(
+        tmp_path,
+        backup=backup,
+        database_name="app_drill_schema_v4",
+        destination_name=f"{RESTORE_PREFIX}schema-v4",
+    )
+    report = restore_backup(request, runner=runner)
+
+    assert verification["verified"] is True
+    assert verification["manifest_schema_version"] == 4
+    assert verification["extension_member_inventories"] == (
+        EXTENSION_MEMBER_INVENTORIES
+    )
+    assert report["verified"] is True
+    assert report["mode"] == "dry-run"
+    assert not request.destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("excluded_scope", "some tile volume"),
+        ("configuration_directory", "/wrong/configuration"),
+        ("cache_directory", "/wrong/tiles"),
+        ("volume", "wrong-volume"),
+        (
+            "blob_store",
+            {
+                "type": "FileBlobStore",
+                "id": "wrong-store",
+                "default": True,
+                "enabled": True,
+                "base_directory": "/var/lib/geowebcache",
+                "path_generator_type": "DEFAULT",
+                "file_system_block_size": "measured-from-target-filesystem",
+            },
+        ),
+    ],
+)
+def test_schema_v5_rejects_mutated_geowebcache_recovery_contract(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    backup, runner, _reference, _geoserver = completed_backup(tmp_path)
+
+    def mutate(manifest: dict[str, object]) -> None:
+        exclusions = manifest["excluded_reconstructible_state"]
+        geowebcache = next(  # type: ignore[arg-type]
+            item
+            for item in exclusions
+            if item["component"] == "geowebcache"
+        )
+        geowebcache[field] = replacement
+
+    rewrite_manifest(backup, mutate)
+
+    with pytest.raises(
+        DisasterRecoveryVerificationError,
+        match="FileBlobStore backup scope",
+    ):
+        verify_backup(backup, runner=runner)
 
 
 def test_restore_rejects_legacy_backup_without_extension_baseline(
