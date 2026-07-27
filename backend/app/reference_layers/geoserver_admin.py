@@ -13,6 +13,7 @@ import hashlib
 import http.client
 import io
 import json
+import math
 import re
 import socket
 from collections.abc import Callable, Mapping
@@ -24,6 +25,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from xml.etree import ElementTree
 import zipfile
 
+from PIL import Image, UnidentifiedImageError
 from pydantic import SecretStr
 
 from app.core.config import settings
@@ -51,6 +53,14 @@ MAX_STYLE_PACKAGE_RESOURCES = 512
 MAX_ERROR_BYTES = 16 * 1024
 MAX_REQUEST_TARGET_BYTES = 4096
 MAX_CONTENT_LENGTH_DIGITS = 20
+MAX_SMOKE_TILE_CANDIDATES = 64
+MAX_SMOKE_ZOOM_CANDIDATES = 3
+MAX_WEB_MERCATOR_ZOOM = 24
+SMOKE_TARGET_TILE_COUNT = 16
+SMOKE_COLOR_TOLERANCE = 24
+# OGC 0.28 mm portrayal pixel at the EPSG:3857 zoom-zero resolution.
+WEB_MERCATOR_SCALE_DENOMINATOR_Z0 = 559_082_264.0287178
+WEB_MERCATOR_MAX_LATITUDE = 85.0511287798066
 GEOSERVER_ARTIFACT_ROOT = PurePosixPath("/mnt/reference_artifacts")
 GEOWEBCACHE_TILE_BLOB_STORE_ID = "siur-tile-cache-v3"
 GEOWEBCACHE_TILE_BLOB_STORE_DIRECTORY = "/var/lib/geowebcache"
@@ -178,6 +188,11 @@ class LayerSmokeResult:
     identify_feature_count: int | None = None
     pixel_x: int | None = None
     pixel_y: int | None = None
+    visible_pixel_count: int = 0
+    coverage_required: bool = False
+    attempted_tile_count: int = 1
+    expected_style_colors: tuple[str, ...] = ()
+    matched_style_color: str | None = None
 
 
 @dataclass(frozen=True)
@@ -893,6 +908,11 @@ class GeoServerAdminClient:
         y: int = 0,
         pixel_x: int = 128,
         pixel_y: int = 128,
+        bounds: Mapping[str, float] | None = None,
+        zoom_candidates: tuple[int, ...] | None = None,
+        coverage_required: bool = False,
+        progress_callback: Callable[[], None] | None = None,
+        expected_style_colors: tuple[str, ...] = (),
     ) -> LayerSmokeResult:
         layer = _validate_versioned_name(layer_name, "versioned layer")
         style = (
@@ -900,6 +920,46 @@ class GeoServerAdminClient:
             if style_name is None
             else _validate_versioned_name(style_name, "immutable style")
         )
+        if not isinstance(coverage_required, bool):
+            raise InvalidGeoServerPublicationError(
+                "local GeoServer smoke coverage flag is invalid"
+            )
+        if progress_callback is not None and not callable(progress_callback):
+            raise InvalidGeoServerPublicationError(
+                "local GeoServer smoke progress callback is invalid"
+            )
+        expected_colors = _validate_smoke_colors(expected_style_colors)
+        if bounds is None:
+            if zoom_candidates is not None:
+                raise InvalidGeoServerPublicationError(
+                    "local GeoServer smoke zooms require bounds"
+                )
+            coordinates = ((z, x, y),)
+        else:
+            if zoom_candidates is None:
+                zoom_candidates = style_smoke_zoom_candidates(
+                    bounds=bounds,
+                )
+            selected_coordinates: list[tuple[int, int, int]] = []
+            for zoom in _validate_smoke_zooms(zoom_candidates):
+                remaining = (
+                    MAX_SMOKE_TILE_CANDIDATES
+                    - len(selected_coordinates)
+                )
+                if remaining == 0:
+                    break
+                selected_coordinates.extend(
+                    _representative_tile_coordinates(
+                        bounds,
+                        zoom,
+                        limit=remaining,
+                    )
+                )
+            coordinates = tuple(selected_coordinates)
+            if not coordinates:
+                raise InvalidGeoServerPublicationError(
+                    "local GeoServer smoke coverage is empty"
+                )
         payload = self._get_json(
             f"/layers/{_segment(self._workspace)}:{_segment(layer)}.json"
             "?quietOnNotFound=true",
@@ -916,14 +976,54 @@ class GeoServerAdminClient:
             timeout_seconds=self._timeout_seconds,
             connection_factory=self._connection_factory,
         )
+        response = None
+        visible_pixel_count = 0
+        matched_style_color = None
+        attempted_tile_count = 0
+        selected_z = z
+        selected_x = x
+        selected_y = y
         try:
-            response = renderer.render_tile(
-                layer_name=layer,
-                style_name=style,
-                z=z,
-                x=x,
-                y=y,
-            )
+            for selected_z, selected_x, selected_y in coordinates:
+                if progress_callback is not None:
+                    progress_callback()
+                response = renderer.render_tile(
+                    layer_name=layer,
+                    style_name=style,
+                    z=selected_z,
+                    x=selected_x,
+                    y=selected_y,
+                )
+                attempted_tile_count += 1
+                (
+                    visible_pixel_count,
+                    matched_style_color,
+                ) = _analyze_smoke_png(
+                    response.body,
+                    expected_colors=expected_colors,
+                )
+                if not coverage_required or (
+                    visible_pixel_count > 0
+                    and (
+                        not expected_colors
+                        or matched_style_color is not None
+                    )
+                ):
+                    break
+            if response is None or (
+                coverage_required
+                and (
+                    visible_pixel_count == 0
+                    or (
+                        expected_colors
+                        and matched_style_color is None
+                    )
+                )
+            ):
+                raise GeoServerLayerSmokeError(
+                    "local GeoServer layer did not render required coverage "
+                    "and style"
+                )
             legend_response = (
                 renderer.render_legend(
                     layer_name=layer,
@@ -936,9 +1036,9 @@ class GeoServerAdminClient:
                 renderer.get_feature_info(
                     layer_name=layer,
                     style_name=style,
-                    z=z,
-                    x=x,
-                    y=y,
+                    z=selected_z,
+                    x=selected_x,
+                    y=selected_y,
                     pixel_x=pixel_x,
                     pixel_y=pixel_y,
                     feature_count=1,
@@ -963,9 +1063,9 @@ class GeoServerAdminClient:
             image_sha256=hashlib.sha256(response.body).hexdigest(),
             image_bytes=len(response.body),
             image_content_type=response.content_type,
-            z=z,
-            x=x,
-            y=y,
+            z=selected_z,
+            x=selected_x,
+            y=selected_y,
             legend_sha256=(
                 hashlib.sha256(legend_response.body).hexdigest()
                 if legend_response is not None
@@ -999,6 +1099,11 @@ class GeoServerAdminClient:
             identify_feature_count=identify_feature_count,
             pixel_x=pixel_x if identify_response is not None else None,
             pixel_y=pixel_y if identify_response is not None else None,
+            visible_pixel_count=visible_pixel_count,
+            coverage_required=coverage_required,
+            attempted_tile_count=attempted_tile_count,
+            expected_style_colors=expected_colors,
+            matched_style_color=matched_style_color,
         )
 
     def _require_postgis_password(self) -> str:
@@ -1291,6 +1396,444 @@ class GeoServerAdminClient:
                 f"unexpected local GeoServer administrative status {status}"
             )
         return _AdminResponse(status, response_body, response_content_type)
+
+
+def style_smoke_zoom_candidates(
+    *,
+    bounds: Mapping[str, float],
+    payload: bytes | None = None,
+    asset_kind: Literal["style_sld", "style_package"] | None = None,
+    expected_sld_sha256: str | None = None,
+) -> tuple[int, ...]:
+    """Choose deterministic Web Mercator zooms inside a style's scale rules."""
+
+    normalized_bounds = _validate_smoke_bounds(bounds)
+    if payload is None:
+        if asset_kind is not None or expected_sld_sha256 is not None:
+            raise InvalidGeoServerPublicationError(
+                "local GeoServer smoke style evidence is incomplete"
+            )
+        ranges: tuple[tuple[float | None, float | None], ...] = (
+            (None, None),
+        )
+    else:
+        sld = _validated_smoke_sld(
+            payload,
+            asset_kind=asset_kind,
+            expected_sld_sha256=expected_sld_sha256,
+        )
+        ranges = _sld_portrayal_scale_ranges(sld)
+
+    allowed = [
+        zoom
+        for zoom in range(MAX_WEB_MERCATOR_ZOOM + 1)
+        if any(
+            _scale_range_contains(
+                minimum,
+                maximum,
+                WEB_MERCATOR_SCALE_DENOMINATOR_Z0 / (2**zoom),
+            )
+            for minimum, maximum in ranges
+        )
+    ]
+    if not allowed:
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer style has no renderable Web Mercator scale"
+        )
+    target = _smoke_fit_zoom(normalized_bounds)
+    ordered = sorted(allowed, key=lambda zoom: (abs(zoom - target), zoom))
+    return tuple(ordered[:MAX_SMOKE_ZOOM_CANDIDATES])
+
+
+def style_smoke_expected_colors(
+    *,
+    payload: bytes,
+    asset_kind: Literal["style_sld", "style_package"],
+    expected_sld_sha256: str | None = None,
+) -> tuple[str, ...]:
+    """Return one unambiguous literal portrayal color, when available."""
+
+    sld = _validated_smoke_sld(
+        payload,
+        asset_kind=asset_kind,
+        expected_sld_sha256=expected_sld_sha256,
+    )
+    colors: set[str] = set()
+    for symbol_part in (
+        element
+        for element in ElementTree.fromstring(sld).iter()
+        if isinstance(element.tag, str)
+        and element.tag.rsplit("}", 1)[-1] in {"Fill", "Stroke"}
+    ):
+        parameters = {
+            child.attrib.get("name", "").casefold(): (
+                child.text or ""
+            ).strip()
+            for child in symbol_part
+            if (
+                isinstance(child.tag, str)
+                and child.tag.rsplit("}", 1)[-1]
+                in {"CssParameter", "SvgParameter"}
+            )
+        }
+        local_name = symbol_part.tag.rsplit("}", 1)[-1].casefold()
+        raw_color = parameters.get(local_name)
+        raw_opacity = parameters.get(f"{local_name}-opacity", "1")
+        try:
+            opacity = float(raw_opacity)
+        except ValueError:
+            continue
+        if (
+            opacity <= 0
+            or raw_color is None
+            or re.fullmatch(r"#[0-9A-Fa-f]{6}", raw_color) is None
+        ):
+            continue
+        colors.add(raw_color.casefold())
+    return tuple(sorted(colors)) if len(colors) == 1 else ()
+
+
+def _validated_smoke_sld(
+    payload: bytes,
+    *,
+    asset_kind: Literal["style_sld", "style_package"] | None,
+    expected_sld_sha256: str | None,
+) -> bytes:
+    if asset_kind == "style_sld" and expected_sld_sha256 is None:
+        return _validate_sld(payload)
+    if asset_kind == "style_package" and expected_sld_sha256 is not None:
+        _package, sld = _validate_sld_package(
+            payload,
+            expected_sld_sha256=expected_sld_sha256,
+        )
+        return sld
+    raise InvalidGeoServerPublicationError(
+        "local GeoServer smoke style evidence is incomplete"
+    )
+
+
+def _sld_portrayal_scale_ranges(
+    sld: bytes,
+) -> tuple[tuple[float | None, float | None], ...]:
+    try:
+        root = ElementTree.fromstring(sld)
+    except ElementTree.ParseError as error:  # pragma: no cover - prevalidated
+        raise InvalidGeoServerPublicationError(
+            "invalid immutable SLD"
+        ) from error
+    ranges: list[tuple[float | None, float | None]] = []
+    for rule in (
+        element
+        for element in root.iter()
+        if isinstance(element.tag, str)
+        and element.tag.rsplit("}", 1)[-1] == "Rule"
+    ):
+        if not any(
+            isinstance(element.tag, str)
+            and element.tag.rsplit("}", 1)[-1].endswith("Symbolizer")
+            for element in rule
+        ):
+            continue
+        minimum = _single_scale_denominator(
+            rule,
+            "MinScaleDenominator",
+        )
+        maximum = _single_scale_denominator(
+            rule,
+            "MaxScaleDenominator",
+        )
+        if (
+            minimum is not None
+            and maximum is not None
+            and minimum >= maximum
+        ):
+            raise InvalidGeoServerPublicationError(
+                "local GeoServer style scale range is invalid"
+            )
+        ranges.append((minimum, maximum))
+    # GeoServer may accept extension symbolizers that this closed parser does
+    # not recognize.  Let the visible-pixel gate decide those styles.
+    return tuple(ranges) or ((None, None),)
+
+
+def _single_scale_denominator(
+    rule: ElementTree.Element,
+    local_name: str,
+) -> float | None:
+    values = [
+        element
+        for element in rule
+        if (
+            isinstance(element.tag, str)
+            and element.tag.rsplit("}", 1)[-1] == local_name
+        )
+    ]
+    if not values:
+        return None
+    if (
+        len(values) != 1
+        or values[0].attrib
+        or list(values[0])
+        or values[0].text is None
+        or values[0].text != values[0].text.strip()
+    ):
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer style scale denominator is invalid"
+        )
+    try:
+        value = float(values[0].text)
+    except ValueError as error:
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer style scale denominator is invalid"
+        ) from error
+    if not isfinite(value) or value < 0:
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer style scale denominator is invalid"
+        )
+    return value
+
+
+def _scale_range_contains(
+    minimum: float | None,
+    maximum: float | None,
+    scale: float,
+) -> bool:
+    return (
+        (minimum is None or scale >= minimum)
+        and (maximum is None or scale < maximum)
+    )
+
+
+def _validate_smoke_bounds(
+    bounds: Mapping[str, float],
+) -> dict[str, float]:
+    if (
+        not isinstance(bounds, Mapping)
+        or set(bounds) != {"west", "south", "east", "north"}
+    ):
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer smoke bounds are invalid"
+        )
+    normalized: dict[str, float] = {}
+    for name in ("west", "south", "east", "north"):
+        raw = bounds[name]
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, (int, float))
+            or not isfinite(float(raw))
+        ):
+            raise InvalidGeoServerPublicationError(
+                "local GeoServer smoke bounds are invalid"
+            )
+        normalized[name] = float(raw)
+    if (
+        not -180 <= normalized["west"] < normalized["east"] <= 180
+        or not -90 <= normalized["south"] < normalized["north"] <= 90
+    ):
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer smoke bounds are outside WGS84"
+        )
+    return normalized
+
+
+def _validate_smoke_zooms(value: tuple[int, ...]) -> tuple[int, ...]:
+    if (
+        not isinstance(value, tuple)
+        or not 1 <= len(value) <= MAX_SMOKE_ZOOM_CANDIDATES
+        or len(set(value)) != len(value)
+        or any(
+            isinstance(zoom, bool)
+            or not isinstance(zoom, int)
+            or not 0 <= zoom <= MAX_WEB_MERCATOR_ZOOM
+            for zoom in value
+        )
+    ):
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer smoke zooms are invalid"
+        )
+    return value
+
+
+def _smoke_fit_zoom(bounds: Mapping[str, float]) -> int:
+    result = 0
+    for zoom in range(MAX_WEB_MERCATOR_ZOOM + 1):
+        west, east, north, south = _smoke_tile_window(bounds, zoom)
+        tile_count = (east - west + 1) * (south - north + 1)
+        if tile_count > SMOKE_TARGET_TILE_COUNT:
+            break
+        result = zoom
+    return result
+
+
+def _representative_tile_coordinates(
+    bounds: Mapping[str, float],
+    zoom: int,
+    *,
+    limit: int = MAX_SMOKE_TILE_CANDIDATES,
+) -> tuple[tuple[int, int, int], ...]:
+    normalized = _validate_smoke_bounds(bounds)
+    if (
+        isinstance(zoom, bool)
+        or not isinstance(zoom, int)
+        or not 0 <= zoom <= MAX_WEB_MERCATOR_ZOOM
+    ):
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer smoke zoom is invalid"
+        )
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= MAX_SMOKE_TILE_CANDIDATES
+    ):
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer smoke tile limit is invalid"
+        )
+    west, east, north, south = _smoke_tile_window(normalized, zoom)
+    tile_count = (east - west + 1) * (south - north + 1)
+    if tile_count <= limit:
+        xs = tuple(range(west, east + 1))
+        ys = tuple(range(north, south + 1))
+    else:
+        side = max(1, int(math.sqrt(limit)))
+        xs = _spread_tile_indexes(west, east, side)
+        ys = _spread_tile_indexes(north, south, side)
+    center_x = (west + east) / 2
+    center_y = (north + south) / 2
+    coordinates = [
+        (zoom, x, y)
+        for y in ys
+        for x in xs
+    ]
+    coordinates.sort(
+        key=lambda item: (
+            abs(item[1] - center_x) + abs(item[2] - center_y),
+            item[2],
+            item[1],
+        )
+    )
+    return tuple(coordinates[:limit])
+
+
+def _spread_tile_indexes(
+    lower: int,
+    upper: int,
+    count: int,
+) -> tuple[int, ...]:
+    if lower == upper:
+        return (lower,)
+    values = {
+        round(lower + (upper - lower) * index / (count - 1))
+        for index in range(count)
+    }
+    return tuple(sorted(values))
+
+
+def _smoke_tile_window(
+    bounds: Mapping[str, float],
+    zoom: int,
+) -> tuple[int, int, int, int]:
+    scale = 2**zoom
+
+    def tile_x(longitude: float) -> float:
+        return (longitude + 180.0) / 360.0 * scale
+
+    def tile_y(latitude: float) -> float:
+        clamped = max(
+            -WEB_MERCATOR_MAX_LATITUDE,
+            min(WEB_MERCATOR_MAX_LATITUDE, latitude),
+        )
+        radians = math.radians(clamped)
+        return (
+            1 - math.asinh(math.tan(radians)) / math.pi
+        ) / 2 * scale
+
+    west = math.floor(tile_x(float(bounds["west"])))
+    east = math.floor(
+        math.nextafter(tile_x(float(bounds["east"])), -math.inf)
+    )
+    north = math.floor(tile_y(float(bounds["north"])))
+    south = math.floor(
+        math.nextafter(tile_y(float(bounds["south"])), -math.inf)
+    )
+    maximum = scale - 1
+    return (
+        max(0, min(maximum, west)),
+        max(0, min(maximum, east)),
+        max(0, min(maximum, north)),
+        max(0, min(maximum, south)),
+    )
+
+
+def _validate_smoke_colors(value: tuple[str, ...]) -> tuple[str, ...]:
+    if (
+        not isinstance(value, tuple)
+        or len(value) > 32
+        or len(set(value)) != len(value)
+        or any(
+            not isinstance(color, str)
+            or re.fullmatch(r"#[0-9a-f]{6}", color) is None
+            for color in value
+        )
+    ):
+        raise InvalidGeoServerPublicationError(
+            "local GeoServer smoke style colors are invalid"
+        )
+    return value
+
+
+def _analyze_smoke_png(
+    body: bytes,
+    *,
+    expected_colors: tuple[str, ...],
+) -> tuple[int, str | None]:
+    """Fully decode a smoke PNG and inspect alpha and expected portrayal."""
+
+    try:
+        with Image.open(io.BytesIO(body)) as image:
+            if image.format != "PNG" or image.size != (256, 256):
+                raise GeoServerLayerSmokeError(
+                    "local GeoServer smoke image is not a complete tile"
+                )
+            image.load()
+            rgba = image.convert("RGBA")
+            histogram = rgba.getchannel("A").histogram()
+            pixels = rgba.tobytes() if expected_colors else b""
+    except GeoServerLayerSmokeError:
+        raise
+    except (
+        Image.DecompressionBombError,
+        OSError,
+        SyntaxError,
+        UnidentifiedImageError,
+        ValueError,
+    ) as error:
+        raise GeoServerLayerSmokeError(
+            "local GeoServer smoke image could not be decoded"
+        ) from error
+    if len(histogram) != 256:  # pragma: no cover - Pillow contract
+        raise GeoServerLayerSmokeError(
+            "local GeoServer smoke image alpha is invalid"
+        )
+    visible = sum(histogram[1:])
+    matched = None
+    for expected in expected_colors:
+        target = tuple(
+            int(expected[index : index + 2], 16)
+            for index in (1, 3, 5)
+        )
+        if any(
+            pixels[offset + 3] > 0
+            and max(
+                abs(pixels[offset] - target[0]),
+                abs(pixels[offset + 1] - target[1]),
+                abs(pixels[offset + 2] - target[2]),
+            )
+            <= SMOKE_COLOR_TOLERANCE
+            for offset in range(0, len(pixels), 4)
+        ):
+            matched = expected
+            break
+    return visible, matched
 
 
 def _basic_authorization(user: str | None, password: SecretStr | None) -> str:

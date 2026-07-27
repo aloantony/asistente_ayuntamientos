@@ -62,6 +62,8 @@ from app.reference_layers.geoserver_admin import (
     InvalidGeoServerPublicationError,
     LayerSmokeResult,
     UnsafeGeoServerAdminConfigurationError,
+    style_smoke_expected_colors,
+    style_smoke_zoom_candidates,
 )
 from app.reference_layers.local_tile_archive import (
     LocalTileArchiveError,
@@ -231,6 +233,8 @@ class GeoServerPublicationPlan:
     title: str
     primary_storage_key: str
     declared_srs: str
+    smoke_bounds: dict[str, float]
+    coverage_required: bool
     table_name: str | None
     store_name: str | None
     styles: tuple[StylePublication, ...]
@@ -1983,6 +1987,8 @@ def _geoserver_materialization(
             title=context.layer.title,
             primary_storage_key=vector.storage_key,
             declared_srs=vector.crs,
+            smoke_bounds=dict(vector.bounds_json),
+            coverage_required=True,
             table_name=vector.table_name,
             store_name=None,
             styles=tuple(style_publications),
@@ -2034,6 +2040,8 @@ def _geoserver_materialization(
         title=context.layer.title,
         primary_storage_key=raster.blob.storage_key,
         declared_srs=raster.inspection.crs,
+        smoke_bounds=dict(raster.inspection.bounds_json),
+        coverage_required=False,
         table_name=None,
         store_name=store_name,
         styles=tuple(style_publications),
@@ -2640,6 +2648,8 @@ def publish_geoserver_delivery(
             title=plan.title,
         )
     supervisor.pulse()
+    style_smoke_zooms: dict[str, tuple[int, ...]] = {}
+    style_smoke_colors: dict[str, tuple[str, ...]] = {}
     for style in plan.styles:
         payload = _read_blob_bytes(
             store,
@@ -2650,6 +2660,21 @@ def publish_geoserver_delivery(
                 if style.asset_kind == "style_package"
                 else 1024 * 1024
             ),
+        )
+        style_smoke_zooms[style.style_name] = (
+            style_smoke_zoom_candidates(
+                bounds=plan.smoke_bounds,
+                payload=payload,
+                asset_kind=style.asset_kind,
+                expected_sld_sha256=style.expected_sld_sha256,
+            )
+        )
+        style_smoke_colors[style.style_name] = (
+            style_smoke_expected_colors(
+                payload=payload,
+                asset_kind=style.asset_kind,
+                expected_sld_sha256=style.expected_sld_sha256,
+            )
         )
         if style.asset_kind == "style_package":
             if style.expected_sld_sha256 is None:
@@ -2673,26 +2698,59 @@ def publish_geoserver_delivery(
         )
         supervisor.pulse()
     smoke_results: list[LayerSmokeResult] = []
+    representative_coordinate: tuple[int, int, int] | None = None
     for style_name in plan.smoke_style_names:
-        smoke_results.append(
-            client.smoke_layer(
-                layer_name=plan.layer_name,
-                style_name=style_name,
-                legend_available=plan.legend_available,
-                identify_available=plan.identify_available,
-                z=0,
-                x=0,
-                y=0,
-                pixel_x=128,
-                pixel_y=128,
-            )
+        zoom_candidates = (
+            style_smoke_zoom_candidates(bounds=plan.smoke_bounds)
+            if style_name is None
+            else style_smoke_zooms.get(style_name)
         )
+        if zoom_candidates is None:
+            raise MirrorOrchestrationError(
+                "GeoServer smoke style is not part of the publication plan",
+                code="publication_plan_invalid",
+            )
+        coordinate_arguments: dict[str, Any] = (
+            {
+                "z": representative_coordinate[0],
+                "x": representative_coordinate[1],
+                "y": representative_coordinate[2],
+            }
+            if (
+                representative_coordinate is not None
+                and representative_coordinate[0] in zoom_candidates
+            )
+            else {
+                "bounds": plan.smoke_bounds,
+                "zoom_candidates": zoom_candidates,
+            }
+        )
+        result = client.smoke_layer(
+            layer_name=plan.layer_name,
+            style_name=style_name,
+            legend_available=plan.legend_available,
+            identify_available=plan.identify_available,
+            pixel_x=128,
+            pixel_y=128,
+            coverage_required=plan.coverage_required,
+            progress_callback=supervisor.pulse,
+            expected_style_colors=(
+                ()
+                if style_name is None
+                else style_smoke_colors[style_name]
+            ),
+            **coordinate_arguments,
+        )
+        smoke_results.append(result)
+        if representative_coordinate is None:
+            representative_coordinate = (result.z, result.x, result.y)
         supervisor.pulse()
     return {
         "schema_version": "reference-local-operation-smoke/v1",
         "renderer": "geoserver",
         "transport": "numeric_loopback_http",
         "delivery_kind": plan.delivery_kind,
+        "coverage_required": plan.coverage_required,
         "layer_name": plan.layer_name,
         "style_checks": [
             _geoserver_style_smoke_evidence(result)
@@ -2764,6 +2822,11 @@ def _geoserver_style_smoke_evidence(
             "z": result.z,
             "x": result.x,
             "y": result.y,
+            "visible_pixel_count": result.visible_pixel_count,
+            "coverage_required": result.coverage_required,
+            "attempted_tile_count": result.attempted_tile_count,
+            "expected_style_colors": list(result.expected_style_colors),
+            "matched_style_color": result.matched_style_color,
         },
     }
     if result.legend_sha256 is not None:
@@ -2991,6 +3054,12 @@ def load_existing_publication(
         title=context.layer.title,
         primary_storage_key=primary[0].storage_key,
         declared_srs=version.crs,
+        smoke_bounds=dict(version.bounds_json),
+        coverage_required=(
+            version.delivery_kind == "vector"
+            and isinstance(version.feature_count, int)
+            and version.feature_count > 0
+        ),
         table_name=(
             _metadata_text(metadata, "table_name")
             if version.delivery_kind == "vector"
