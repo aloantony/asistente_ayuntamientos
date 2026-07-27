@@ -989,12 +989,19 @@ def acquisition_candidates(
                     },
                 )
             if (
-                reviewed_idecyl.protocol != "download"
-                or reviewed_idecyl.target_kind != "vector"
+                reviewed_idecyl.target_kind != "vector"
                 or reviewed_idecyl.endpoint_url is None
                 or reviewed_idecyl.remote_name is None
-                or reviewed_idecyl.sync_strategy != "conditional_get"
                 or reviewed_idecyl.candidate_config is None
+                or (
+                    reviewed_idecyl.protocol == "download"
+                    and reviewed_idecyl.sync_strategy != "conditional_get"
+                )
+                or (
+                    reviewed_idecyl.protocol == "wfs"
+                    and reviewed_idecyl.sync_strategy != "full_snapshot"
+                )
+                or reviewed_idecyl.protocol not in {"download", "wfs"}
             ):
                 raise SourceDiscoveryError(
                     "reviewed IDECyL candidate is incomplete",
@@ -1006,16 +1013,28 @@ def acquisition_candidates(
                     layer,
                     config["archive_styles"],
                 )
+            if reviewed_idecyl.protocol == "wfs":
+                config.update(_geoserver_style_config(endpoint, layer))
             config["reviewed_equivalence"] = deepcopy(
                 reviewed_idecyl.evidence
             )
+            selected_protocol: SourceProtocol = (
+                "wfs"
+                if reviewed_idecyl.protocol == "wfs"
+                else "download"
+            )
+            selected_sync_strategy: SyncStrategy = (
+                "full_snapshot"
+                if selected_protocol == "wfs"
+                else "conditional_get"
+            )
             return (
                 _candidate(
-                    protocol="download",
+                    protocol=selected_protocol,
                     target_kind="vector",
                     endpoint_url=reviewed_idecyl.endpoint_url,
                     remote_name=reviewed_idecyl.remote_name,
-                    sync_strategy="conditional_get",
+                    sync_strategy=selected_sync_strategy,
                     priority=_REVIEWED_DATASET_SOURCE_PRIORITY,
                     config=config,
                 ),

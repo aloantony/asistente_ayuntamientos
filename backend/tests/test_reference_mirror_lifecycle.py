@@ -380,17 +380,45 @@ def _idecyl_reviewable_archive_definition(
     *,
     provider_key: str = "idecyl-reviewable-archives",
 ) -> ReferenceCatalogDefinition:
+    return _idecyl_candidate_definition(
+        provider_key=provider_key,
+        protocol="download",
+        expected_count=18,
+        revision="reviewable-archives-v3",
+    )
+
+
+def _idecyl_wfs_candidate_definition(
+    *,
+    provider_key: str = "idecyl-wfs-candidates",
+) -> ReferenceCatalogDefinition:
+    return _idecyl_candidate_definition(
+        provider_key=provider_key,
+        protocol="wfs",
+        expected_count=10,
+        revision="wfs-snapshots-v4",
+    )
+
+
+def _idecyl_candidate_definition(
+    *,
+    provider_key: str,
+    protocol: str,
+    expected_count: int,
+    revision: str,
+) -> ReferenceCatalogDefinition:
     reviewed = [
         item
         for item in idecyl_exact_source_inventory()
         if item.audit_layer_id != 39
         and item.local_service_status == "candidate"
+        and item.protocol == protocol
     ]
-    assert len(reviewed) == 18
+    assert len(reviewed) == expected_count
     return ReferenceCatalogDefinition(
         provider_key=provider_key,
         source_url="https://idecyl.jcyl.es/siur/settings.json",
-        raw_catalog={"revision": "reviewable-archives-v3"},
+        raw_catalog={"revision": revision},
         services=tuple(
             ReferenceServiceDefinition(
                 source_key=f"service:idecyl:{item.audit_layer_id}",
@@ -1141,6 +1169,77 @@ def test_18_idecyl_archives_persist_enabled_but_cannot_queue_without_review(
             )
         )
     } == {1}
+
+
+def test_10_idecyl_wfs_sources_persist_but_cannot_queue_without_review(
+    db,
+) -> None:
+    definition = _idecyl_wfs_candidate_definition()
+    apply_catalog_definition(db, definition)
+    plan = build_mirror_bootstrap_plan(
+        db,
+        provider_key=definition.provider_key,
+    )
+
+    assert len(plan.sources) == 10
+    assert len(plan.new_source_keys) == 10
+    applied = apply_mirror_bootstrap_plan(db, plan)
+    assert applied.created_count == 10
+    sources = list(
+        db.scalars(
+            select(ReferenceLayerSource)
+            .where(
+                ReferenceLayerSource.provider_key
+                == definition.provider_key
+            )
+            .order_by(ReferenceLayerSource.layer_id)
+        )
+    )
+    assert len(sources) == 10
+    assert all(
+        source.enabled
+        and source.is_primary
+        and source.protocol == "wfs"
+        and source.target_kind == "vector"
+        and source.sync_strategy == "full_snapshot"
+        and source.config_json["reviewed_equivalence"][
+            "license_evidence"
+        ]["authorization_granted"]
+        is False
+        and source.config_json["reviewed_equivalence"][
+            "license_evidence"
+        ]["required_attribution"]
+        == "© Junta de Castilla y León"
+        for source in sources
+    )
+    assert {
+        source.config_json["wfs_snapshot"]["mode"]
+        for source in sources
+    } == {"single_response", "paged"}
+    assert sum("page_size" in source.config_json for source in sources) == 2
+
+    due = NOW - timedelta(seconds=1)
+    for source in sources:
+        source.next_check_at = due
+    db.commit()
+
+    assert (
+        reference_mirror_lifecycle.enqueue_due_sources(
+            db,
+            now=NOW,
+            require_authorization=True,
+        )
+        == ()
+    )
+    assert db.scalar(
+        select(func.count(ReferenceSyncRun.id)).where(
+            ReferenceSyncRun.provider_key == definition.provider_key
+        )
+    ) == 0
+    assert all(
+        db.get(ReferenceLayerSource, source.id).next_check_at == due
+        for source in sources
+    )
 
 
 def test_bootstrap_rejects_stale_plan_and_deactivates_superseded_auto_sources(

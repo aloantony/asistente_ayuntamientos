@@ -1,0 +1,286 @@
+{
+  "capture": {
+    "authorization_effect": "none_without_persisted_human_mirror_review",
+    "authorization_granted": false,
+    "license_evidence": {
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "authorization_granted": false,
+      "commercial_license_required_if_commercial": true,
+      "license_name": "LICENCIA-IGCYL-NC",
+      "license_url": "https://ftp.itacyl.es/cartografia/LICENCIA-IGCYL-NC-2012.pdf",
+      "local_download_authorized": false,
+      "local_service_authorized": false,
+      "recipient_acceptance_required": true,
+      "required_attribution": "© Junta de Castilla y León"
+    },
+    "local_download_authorized": false,
+    "local_service_authorized": false,
+    "previous_classification": {
+      "resource": "evidence/idecyl_exact/decision-manifest-v3.json",
+      "sha256": "201deb9372cc1201bf1645ec8249cdf9fdac69784915d71492a0db7b36a01eb5"
+    },
+    "resulting_classification": {
+      "candidate_count": 29,
+      "restricted_count": 2,
+      "restricted_layer_ids": [
+        123,
+        166
+      ]
+    },
+    "wfs_snapshot_observations": {
+      "resource": "evidence/idecyl_wfs_snapshot/manifest-v1.json",
+      "sha256": "bba50fe19c72ae09018765ed29b205f789665b6e486d42a5d7eb568dc4a67ac2"
+    }
+  },
+  "schema": "siur-idecyl-local-service-classification/v4",
+  "wfs_candidate_sources": [
+    {
+      "audit_layer_id": 78,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-znie_cyl_vvpp_ejes-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "montes:znie_cyl_vvpp_ejes",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "24599fae1517b46e4f8609c29b15f586ebd2811f051c069c441b92cdf09bfe27",
+      "snapshot_projection_sha256": "402742438425874321c0027dd8a15d1575fa2059f4b868ddf0c45574b074f81b"
+    },
+    {
+      "audit_layer_id": 84,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-carr_cyl_red_vias-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/viascomunicacion/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "viascomunicacion:carr_cyl_red_vias",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "efe3441795b78101804b002699119a61a87246fc2057c1ca7b98b99ad7f5837f",
+      "snapshot_projection_sha256": "f0956646c61b4cb9bed6d81558ec42f1e5c2658ce2fd0c9ed096e4925a1cf05c"
+    },
+    {
+      "audit_layer_id": 118,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-pesca_cyl_cangrejo_v-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/pesca/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "pesca:pesca_cyl_cangrejo_v",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "80d147764f4c52de0b62f34e389a9d54f5a947263d1035dba1ae4241885f2932",
+      "snapshot_projection_sha256": "216c97c14e37edfb8febf0baccfb612870f6ce6b90b531c2413224aa66b006d7"
+    },
+    {
+      "audit_layer_id": 142,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-montes_cyl_propiedad_cyl_vw-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "montes:montes_cyl_propiedad_cyl_vw",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "ab823161b1ccf3b9f0373e5f9bfb375b9c4904a8318986b5ef80b05b0342e521",
+      "snapshot_projection_sha256": "7b87371db44d5615b4ce6ccba484af70689226ecd412269b1278f373f1ea167b"
+    },
+    {
+      "audit_layer_id": 161,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-energia_cyl_renov_zonas_sens_amb_flora-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/energia/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "energia:energia_cyl_renov_zonas_sens_amb_flora",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "c16321c4371196136ed841edd14cfaa98a97572545b8f412e95bdab1559ec07c",
+      "snapshot_projection_sha256": "88892bcda36bdf76fa3bdf621eee0a5330e66d53035eb5e7d455fa923f42ad4a"
+    },
+    {
+      "audit_layer_id": 171,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-montes_cyl_contratados_jcyl_vw-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "montes:montes_cyl_contratados_jcyl_vw",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "0774fa2373a7d13e07f5e43270b21889b4138ff1ea8980d7ff56ef599f4d7aad",
+      "snapshot_projection_sha256": "1555282a8bf57843e901ca265c5cee47220e26d3ded3185416e15695583e17c2"
+    },
+    {
+      "audit_layer_id": 194,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-energia_cyl_renov_zonas_sens_actv_crit-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/energia/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "energia:energia_cyl_renov_zonas_sens_actv_crit",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "abde08d88d83c20ed680705a27067ca26095ae1da26223b15c951336266364a2",
+      "snapshot_projection_sha256": "3e2b5fae6a53ec4b3d678d9e2a9ee361b959082bb28b8de7fae00990176dd013"
+    },
+    {
+      "audit_layer_id": 243,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "page_size": 11000,
+        "wfs_snapshot": {
+          "identity_properties": [
+            "fid"
+          ],
+          "mode": "paged"
+        }
+      },
+      "profile": "idecyl-habitantes_cyl_2024-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/poblacion/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "poblacion:habitantes_cyl_2024",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "93239f46e5275040226797f31a7a96982d32e7c7b2c4c4ccf67f94b5c5b3af1b",
+      "snapshot_projection_sha256": "6f96c00bae8a8b800f778ef809ecf6c5dc87055eea26e14f6a427e8ba5a6788e"
+    },
+    {
+      "audit_layer_id": 246,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "wfs_snapshot": {
+          "mode": "single_response"
+        }
+      },
+      "profile": "idecyl-limites_cyl_entidad_local_menor-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/entidades/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "entidades:limites_cyl_entidad_local_menor",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "d45bc24d6a8c8a290d8118a3434aba39af556fcbf68cdc7c29903a17c1dfb18f",
+      "snapshot_projection_sha256": "817bbb61c0ddcceac63307d4b35f3711dd45e24811c16fd1769f860bca2ff3a0"
+    },
+    {
+      "audit_layer_id": 281,
+      "authorization_effect": "none_without_persisted_human_mirror_review",
+      "candidate_config": {
+        "discovery": "wfs_capabilities",
+        "page_size": 11000,
+        "wfs_snapshot": {
+          "identity_properties": [
+            "fid"
+          ],
+          "mode": "paged"
+        }
+      },
+      "profile": "idecyl-habitantes_cyl_2015-wfs-snapshot-20260727-v4",
+      "reason_codes": [
+        "igcyl_nc_recipient_acceptance_requires_review",
+        "igcyl_nc_visible_attribution_requires_review",
+        "igcyl_nc_commercial_license_required_if_commercial",
+        "local_service_requires_persisted_human_review"
+      ],
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/poblacion/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "poblacion:habitantes_cyl_2015",
+      "selected_sync_strategy": "full_snapshot",
+      "selected_target_kind": "vector",
+      "snapshot_evidence_sha256": "780f2221601dcd12fb9b0004a78a65e44614d003c067df39e6cfe733fb4c22aa",
+      "snapshot_projection_sha256": "6784642e4bd110d4f24ed014e773a695de310d1d5a097c965a08162cb249ea51"
+    }
+  ]
+}
