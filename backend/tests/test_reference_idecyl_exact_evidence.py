@@ -41,6 +41,7 @@ from app.reference_layers.reviewed_archive_integrity import (
 )
 from app.reference_layers.source_discovery import (
     SourceDiscoveryError,
+    _idecyl_archive_style_config,
     acquisition_candidates,
     candidate_definition,
 )
@@ -332,6 +333,16 @@ def test_layer_39_keeps_its_exact_https_geopackage_candidate() -> None:
         len(item["sha256"]) == 64
         for item in candidate.config["archive_styles"]
     )
+    assert all(
+        set(item)
+        == {
+            "catalog_style_source_key",
+            "remote_name",
+            "archive_member",
+            "sha256",
+        }
+        for item in candidate.config["archive_styles"]
+    )
     assert candidate.config["reviewed_equivalence"] == reviewed.evidence
     assert candidate.definition_sha256 == _canonical_sha256(
         candidate_definition(candidate)
@@ -603,6 +614,118 @@ def test_candidate_identity_or_style_drift_fails_closed() -> None:
         )
     assert (
         changed_styles.value.code
+        == "reviewed_idecyl_style_identity_invalid"
+    )
+
+    changed_default = tuple(
+        replace(
+            style,
+            is_default=(
+                style.remote_name
+                == "telefonia_movil_cyl_cobertura_carreteras_4g_cnmc"
+            ),
+        )
+        for style in valid.styles
+    )
+    with pytest.raises(SourceDiscoveryError) as default_drift:
+        acquisition_candidates(
+            _service(reviewed.catalog_endpoint_url),
+            replace(valid, styles=changed_default),
+        )
+    assert (
+        default_drift.value.code
+        == "reviewed_idecyl_style_identity_invalid"
+    )
+
+
+def _exact_archive_styles() -> list[dict[str, Any]]:
+    return [
+        {
+            "catalog_style_source_key": "official_a",
+            "remote_name": "catalog_a",
+            "is_default": True,
+            "archive_member": "styles/official-a.sld",
+            "sha256": "a" * 64,
+            "size_bytes": 1_234,
+            "crc32": "0123abcd",
+            "sld_layer_name": "archive_layer",
+            "sld_style_name": "official_a",
+        },
+        {
+            "catalog_style_source_key": "official_b",
+            "remote_name": "catalog_b",
+            "is_default": False,
+            "archive_member": "styles/official-b.sld",
+            "sha256": "b" * 64,
+            "size_bytes": 2_345,
+            "crc32": "89abcdef",
+            "sld_layer_name": "archive_layer",
+            "sld_style_name": "official_b",
+        },
+    ]
+
+
+def _layer_with_exact_archive_styles() -> ReferenceLayerDefinition:
+    return replace(
+        _layer("layer:siur:" + "a" * 64, "catalog_layer"),
+        style_name="catalog_a",
+        styles=(
+            ReferenceLayerStyleDefinition(
+                source_key="official_a",
+                title="A",
+                remote_name="catalog_a",
+                sort_order=0,
+                is_default=True,
+            ),
+            ReferenceLayerStyleDefinition(
+                source_key="official_b",
+                title="B",
+                remote_name="catalog_b",
+                sort_order=1,
+                is_default=False,
+            ),
+        ),
+    )
+
+
+def test_exact_archive_styles_bind_every_catalog_identity_and_default() -> None:
+    raw_styles = _exact_archive_styles()
+
+    assert _idecyl_archive_style_config(
+        _layer_with_exact_archive_styles(),
+        raw_styles,
+    ) == raw_styles
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda styles: styles.pop(),
+        lambda styles: styles[0].update(
+            {"catalog_style_source_key": "wrong"}
+        ),
+        lambda styles: styles[0].update({"is_default": False}),
+        lambda styles: styles[1].update(
+            {"archive_member": styles[0]["archive_member"]}
+        ),
+        lambda styles: styles[1].update({"archive_member": "../style.sld"}),
+        lambda styles: styles[1].update({"sha256": styles[0]["sha256"]}),
+    ],
+)
+def test_exact_archive_styles_reject_partial_or_invented_mappings(
+    mutate,
+) -> None:
+    raw_styles = _exact_archive_styles()
+    mutate(raw_styles)
+
+    with pytest.raises(SourceDiscoveryError) as captured:
+        _idecyl_archive_style_config(
+            _layer_with_exact_archive_styles(),
+            raw_styles,
+        )
+
+    assert (
+        captured.value.code
         == "reviewed_idecyl_style_identity_invalid"
     )
 
