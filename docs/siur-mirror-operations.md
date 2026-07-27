@@ -46,6 +46,13 @@ fuente habilitada sin una revisión vigente mantiene su capa bloqueada.
 El informe declara `legacy_wms_evidence_required=false` para hacer visible esta
 separación. Este comando no crea ni aprueba evidencia legal.
 
+El planificador periódico comprueba la cadena y los permisos vigentes antes de
+crear una ejecución. Una fuente sin revisión no consume un turno de cola ni
+avanza `next_check_at`, por lo que se recoge en el siguiente ciclo después de
+ser autorizada y tampoco puede dejar sin turno a otra fuente ya revisada. El
+worker repite la validación antes de cualquier petición de red y entre etapas;
+el filtro del planificador reduce ruido, pero no sustituye ese segundo cierre.
+
 ## Aplicación atómica de revisiones
 
 Cuando la persona revisora confirma varias fuentes, no se aplican una a una.
