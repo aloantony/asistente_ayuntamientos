@@ -389,9 +389,9 @@ class GeoServerAdminClient:
         """Create or verify the one fixed default tile-only FileBlobStore.
 
         Existing configuration is never modified. A differing store with the
-        reserved id, or any other configured default, fails before PUT. The
-        upsert endpoint is used only after proving the id is absent, then the
-        complete list and exact resource are re-read.
+        reserved id, or any other configured blobstore, fails before PUT. The
+        upsert endpoint is used only after proving the complete list is empty,
+        then the complete list and exact resource are re-read.
         """
 
         expected = expected_geowebcache_tile_blob_store(
@@ -1394,18 +1394,18 @@ def _validate_geowebcache_tile_blob_store_set(
             "existing GeoWebCache tile blob store differs"
         )
     if current is None:
-        if defaults:
+        if stores:
             raise GeoServerAdminConflictError(
-                "another GeoWebCache default blob store is configured"
+                "another GeoWebCache blob store is configured"
             )
         if require_present:
             raise GeoServerAdminConflictError(
                 "GeoWebCache tile blob store is missing after configuration"
             )
         return None
-    if defaults != (current,):
+    if stores != (current,) or defaults != (current,):
         raise GeoServerAdminConflictError(
-            "GeoWebCache has an unexpected additional default blob store"
+            "GeoWebCache has an unexpected additional blob store"
         )
     return current
 

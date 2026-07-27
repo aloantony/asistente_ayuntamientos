@@ -1,3 +1,13 @@
+x-gwc-admin-environment: &gwc-admin-environment
+  GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
+  GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
+  GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS: ${GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS:-60}
+  GEOWEBCACHE_DISK_QUOTA_GIB: ${GEOWEBCACHE_DISK_QUOTA_GIB:-20}
+  GEOWEBCACHE_DISK_QUOTA_MIN_FREE_GIB: ${GEOWEBCACHE_DISK_QUOTA_MIN_FREE_GIB:-5}
+  GEOWEBCACHE_DISK_QUOTA_POLICY: ${GEOWEBCACHE_DISK_QUOTA_POLICY:-LRU}
+  LOCAL_GEOSERVER_BASE_URL: ${LOCAL_GEOSERVER_BASE_URL:-http://127.0.0.1:8081/geoserver}
+  LOCAL_GEOSERVER_TIMEOUT_SECONDS: ${LOCAL_GEOSERVER_TIMEOUT_SECONDS:-8}
+
 services:
   backend:
     build:
@@ -24,6 +34,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      gwc-bootstrap:
+        condition: service_completed_successfully
+        restart: true
 
   worker:
     build:
@@ -44,6 +57,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      gwc-bootstrap:
+        condition: service_completed_successfully
+        restart: true
 
   reference-worker:
     build:
@@ -59,8 +75,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      geoserver:
-        condition: service_started
+      gwc-bootstrap:
+        condition: service_completed_successfully
+        restart: true
 
   reference-scheduler:
     build:
@@ -80,6 +97,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      gwc-bootstrap:
+        condition: service_completed_successfully
+        restart: true
 
   frontend:
     build:
@@ -93,7 +113,9 @@ services:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
     network_mode: host
     depends_on:
-      - backend
+      backend:
+        condition: service_started
+        restart: true
 
   postgres:
     build:
@@ -152,14 +174,41 @@ services:
       timeout: 5s
       retries: 10
 
+  gwc-bootstrap:
+    build:
+      context: ./backend
+    environment: *gwc-admin-environment
+    network_mode: host
+    restart: "no"
+    command:
+      [
+        "python",
+        "-m",
+        "app.reference_layers.gwc_bootstrap",
+        "--cache-path",
+        "/var/lib/geowebcache",
+        "--wait-seconds",
+        "180",
+      ]
+    volumes:
+      - type: volume
+        source: geowebcache_tile_cache_v3
+        target: /var/lib/geowebcache
+        read_only: true
+        volume:
+          nocopy: true
+    depends_on:
+      geoserver:
+        condition: service_started
+        # Compose-managed GeoServer updates/restarts rerun the gate; the
+        # restart chain above then restarts consumers only after success.
+        restart: true
+
   gwc-ops:
     profiles: ["operations"]
     build:
       context: ./backend
-    env_file:
-      - .env
-    environment:
-      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
+    environment: *gwc-admin-environment
     network_mode: host
     command:
       [

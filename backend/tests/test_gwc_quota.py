@@ -179,6 +179,52 @@ def test_quota_command_is_dry_run_by_default_and_reports_mismatch(
     assert args.apply is False
 
 
+def test_quota_dry_run_rejects_extra_nondefault_blob_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.shutil.disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+    )
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.os.fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_bsize=4096,
+            f_frsize=4096,
+            f_files=10_000_000,
+            f_favail=10_000_000,
+        ),
+    )
+    expected = expected_geowebcache_tile_blob_store(
+        file_system_block_size=4096,
+    )
+    extra = GeoWebCacheFileBlobStore(
+        id="extra-cache",
+        enabled=True,
+        default=False,
+        base_directory="/extra/cache",
+        file_system_block_size=4096,
+        path_generator_type="DEFAULT",
+    )
+    admin = FakeAdmin(
+        before=quota(),
+        before_blob_stores=(extra, expected),
+    )
+
+    result = quota_status(
+        cache_path=cache,
+        configured=configured(),
+        client=admin,  # type: ignore[arg-type]
+    )
+
+    assert result["blob_store"]["verified"] is False  # type: ignore[index]
+    assert result["disk_quota"]["verified"] is True  # type: ignore[index]
+    assert result["verified"] is False
+
+
 def test_quota_apply_checks_capacity_then_uses_exact_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

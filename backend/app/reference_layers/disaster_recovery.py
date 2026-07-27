@@ -36,13 +36,17 @@ from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+FILESYSTEM_IDENTITY_SCHEMA_VERSION = 4
+GWC_FILE_BLOB_STORE_SCHEMA_VERSION = 5
 DATABASE_IDENTITY_SCHEMA_VERSION = 3
 LEGACY_SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = frozenset(
     {
         LEGACY_SCHEMA_VERSION,
         DATABASE_IDENTITY_SCHEMA_VERSION,
+        FILESYSTEM_IDENTITY_SCHEMA_VERSION,
+        GWC_FILE_BLOB_STORE_SCHEMA_VERSION,
         SCHEMA_VERSION,
     }
 )
@@ -64,6 +68,25 @@ REQUIRED_EXTENSION_SCHEMAS = {
     "vector": "public",
 }
 PG_DUMP_EXTENSION_EXCLUSIONS = tuple(sorted(REQUIRED_EXTENSION_SCHEMAS))
+GWC_CONFIGURATION_DIRECTORY = "/opt/geoserver_data/gwc"
+GWC_TILE_CACHE_DIRECTORY = "/var/lib/geowebcache"
+GWC_TILE_CACHE_VOLUME = "geowebcache_tile_cache_v3"
+GWC_TILE_BLOB_STORE = {
+    "type": "FileBlobStore",
+    "id": "siur-tile-cache-v3",
+    "default": True,
+    "enabled": True,
+    "base_directory": GWC_TILE_CACHE_DIRECTORY,
+    "path_generator_type": "DEFAULT",
+    "file_system_block_size": "measured-from-target-filesystem",
+}
+GWC_TILE_EXCLUDED_SCOPE = (
+    "external explicit FileBlobStore v3 tile volume only"
+)
+LEGACY_GWC_TILE_EXCLUDED_SCOPE = (
+    "external GEOWEBCACHE_CACHE_DIR tile volume only"
+)
+LEGACY_GWC_TILE_CACHE_DIRECTORY = "/opt/geoserver_data/gwc-cache"
 EXPECTED_STOPPED_SERVICES = frozenset(
     {
         "backend",
@@ -75,6 +98,7 @@ EXPECTED_STOPPED_SERVICES = frozenset(
 )
 PROTECTED_RUNTIME_PATHS = (
     Path("/var/lib/asistente_ayuntamientos/reference-artifacts"),
+    Path("/var/lib/geowebcache"),
     Path("/mnt/reference_artifacts"),
     Path("/opt/geoserver_data"),
     Path("/sources/reference_artifacts"),
@@ -420,11 +444,17 @@ def create_backup(
             },
             {
                 "component": "geowebcache",
+                "included": False,
                 "reason": (
-                    "only the external GEOWEBCACHE_CACHE_DIR tile volume is "
-                    "derived; all GeoWebCache configuration inside the "
-                    "GeoServer data directory is included"
+                    "only the external explicit FileBlobStore v3 tile volume "
+                    "is derived; GEOWEBCACHE_CACHE_DIR is configuration "
+                    "inside the included GeoServer data directory"
                 ),
+                "configuration_included": True,
+                "configuration_directory": GWC_CONFIGURATION_DIRECTORY,
+                "cache_directory": GWC_TILE_CACHE_DIRECTORY,
+                "volume": GWC_TILE_CACHE_VOLUME,
+                "blob_store": dict(GWC_TILE_BLOB_STORE),
             },
         ],
     }
@@ -761,7 +791,7 @@ def _open_verified_backup(
                     error_type=DisasterRecoveryVerificationError,
                 ),
             )
-            if manifest_schema_version == SCHEMA_VERSION
+            if manifest_schema_version >= FILESYSTEM_IDENTITY_SCHEMA_VERSION
             else None
         )
         result: dict[str, object] = {
@@ -1095,7 +1125,12 @@ def _restore_verified_backup(
     )
     required_extensions = verification.get("required_extensions")
     if (
-        verification.get("manifest_schema_version") != SCHEMA_VERSION
+        not isinstance(
+            verification.get("manifest_schema_version"),
+            int,
+        )
+        or verification["manifest_schema_version"]
+        < FILESYSTEM_IDENTITY_SCHEMA_VERSION
         or not isinstance(required_extensions, list)
     ):
         raise DisasterRecoverySafetyError(
@@ -1597,15 +1632,17 @@ def _build_manifest(
             {
                 "component": "geowebcache",
                 "included": False,
-                "excluded_scope": (
-                    "external GEOWEBCACHE_CACHE_DIR tile volume only"
-                ),
+                "excluded_scope": GWC_TILE_EXCLUDED_SCOPE,
                 "configuration_included": True,
-                "cache_directory": "/opt/geoserver_data/gwc-cache",
+                "configuration_directory": GWC_CONFIGURATION_DIRECTORY,
+                "cache_directory": GWC_TILE_CACHE_DIRECTORY,
+                "volume": GWC_TILE_CACHE_VOLUME,
+                "blob_store": dict(GWC_TILE_BLOB_STORE),
                 "reconstruction": (
                     "restore the complete GeoServer data directory, reapply "
-                    "and verify the declarative disk quota, then regenerate "
-                    "requested tiles from restored local delivery artifacts"
+                    "and verify the exact FileBlobStore and declarative disk "
+                    "quota, then regenerate requested tiles from restored "
+                    "local delivery artifacts"
                 ),
             },
         ],
@@ -4095,15 +4132,34 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
         if isinstance(item, Mapping)
     }
     geowebcache_exclusion = exclusion_map["geowebcache"]
-    if (
-        geowebcache_exclusion.get("configuration_included") is not True
-        or geowebcache_exclusion.get("excluded_scope")
-        != "external GEOWEBCACHE_CACHE_DIR tile volume only"
-        or geowebcache_exclusion.get("cache_directory")
-        != "/opt/geoserver_data/gwc-cache"
-    ):
+    if geowebcache_exclusion.get("configuration_included") is not True:
         raise DisasterRecoveryVerificationError(
             "GeoWebCache backup scope declaration is invalid"
+        )
+    if manifest_schema_version >= GWC_FILE_BLOB_STORE_SCHEMA_VERSION:
+        if (
+            geowebcache_exclusion.get("excluded_scope")
+            != GWC_TILE_EXCLUDED_SCOPE
+            or geowebcache_exclusion.get("configuration_directory")
+            != GWC_CONFIGURATION_DIRECTORY
+            or geowebcache_exclusion.get("cache_directory")
+            != GWC_TILE_CACHE_DIRECTORY
+            or geowebcache_exclusion.get("volume")
+            != GWC_TILE_CACHE_VOLUME
+            or geowebcache_exclusion.get("blob_store")
+            != GWC_TILE_BLOB_STORE
+        ):
+            raise DisasterRecoveryVerificationError(
+                "GeoWebCache FileBlobStore backup scope declaration is invalid"
+            )
+    elif (
+        geowebcache_exclusion.get("excluded_scope")
+        != LEGACY_GWC_TILE_EXCLUDED_SCOPE
+        or geowebcache_exclusion.get("cache_directory")
+        != LEGACY_GWC_TILE_CACHE_DIRECTORY
+    ):
+        raise DisasterRecoveryVerificationError(
+            "legacy GeoWebCache backup scope declaration is invalid"
         )
     consistency = _manifest_mapping(manifest, "consistency")
     evidence_description = _mapping_member(
@@ -4179,7 +4235,7 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
             raise DisasterRecoveryVerificationError(
                 "backup extension baseline does not match its source identity"
             )
-        if manifest_schema_version == SCHEMA_VERSION:
+        if manifest_schema_version >= FILESYSTEM_IDENTITY_SCHEMA_VERSION:
             _parse_manifest_extension_member_inventories(
                 database.get("extension_members"),
                 extensions=source_extensions,
@@ -4239,7 +4295,7 @@ def _validate_manifest_header(manifest: Mapping[str, Any]) -> None:
             "exact_versions_required": True,
             **(
                 {"exact_canonical_members_required": True}
-                if manifest_schema_version == SCHEMA_VERSION
+                if manifest_schema_version >= FILESYSTEM_IDENTITY_SCHEMA_VERSION
                 else {}
             ),
             "owners_must_differ_from_restore_role": True,
