@@ -56,6 +56,9 @@ services:
       ["python", "-m", "app.reference_layers.mirror_runtime", "worker"]
     volumes:
       - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts
+      # Scratch aislado del CAS servido y de las copias de seguridad. Permite
+      # derivar productos autorizados sin conservar el fichero bruto.
+      - reference_transient:/var/lib/asistente_ayuntamientos/reference-transient
     depends_on:
       postgres:
         condition: service_healthy
@@ -194,5 +197,6 @@ volumes:
   postgres_data:
   document_storage:
   reference_artifacts:
+  reference_transient:
   geoserver_data:
   geowebcache_tile_cache_v2:

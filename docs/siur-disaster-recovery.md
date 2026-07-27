@@ -7,6 +7,11 @@ Este runbook cubre el estado no reconstruible del espejo local:
 - el directorio de datos de GeoServer completo, salvo el mountpoint derivado
   `gwc-cache`.
 
+El volumen `reference_transient` se excluye deliberadamente: contiene solo
+descargas brutas de trabajo, nunca artefactos promovidos. Los parciales se
+borran al finalizar y los huérfanos de una interrupción se purgan antes de la
+siguiente adquisición.
+
 Redis y las teselas de GeoWebCache **no** son fuentes de verdad. La cola se
 reconstruye desde el estado durable de PostgreSQL al reiniciar scheduler y
 workers. Las teselas se regeneran bajo demanda a partir de los artefactos

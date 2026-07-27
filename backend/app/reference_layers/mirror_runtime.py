@@ -16,14 +16,37 @@ from app.reference_layers.catalog_watcher import (
 )
 from app.reference_layers.mirror_orchestrator import (
     MirrorRunProcessor,
+    build_reference_transient_store,
     enqueue_reference_sources_once,
     reconcile_reference_sources_once,
+)
+from app.reference_layers.masked_geopackage import (
+    cleanup_masked_geopackage_workspaces,
 )
 from app.reference_layers.style_update_watcher import (
     run_official_style_update_check_job,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def prepare_reference_transient_storage() -> None:
+    """Remove crash residue before the worker can claim another run."""
+
+    with build_reference_transient_store(settings) as transient:
+        staging = transient.cleanup_staging(older_than_seconds=0)
+        if staging.skipped_count:
+            raise RuntimeError(
+                "reference transient staging cleanup is incomplete"
+            )
+        cleanup_masked_geopackage_workspaces(transient)
+    logger.info(
+        "Reference transient storage prepared",
+        extra={
+            "deleted_staging_count": staging.deleted_count,
+            "deleted_staging_bytes": staging.deleted_bytes,
+        },
+    )
 
 
 def _poll_catalog_watcher_if_due(
@@ -162,6 +185,7 @@ def run_worker(
     *,
     once: bool = False,
 ) -> None:
+    prepare_reference_transient_storage()
     processor = MirrorRunProcessor(stop_event=stop_event)
     try:
         while not stop_event.is_set():

@@ -13,7 +13,8 @@ remain separate concerns.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,12 +38,21 @@ from sqlalchemy.orm import Session
 
 from app.reference_layers.blob_store import (
     ReferenceBlobStore,
+    ReferenceStagingWriter,
     StoredReferenceBlob,
 )
 from app.reference_layers.local_style_adaptation import (
     LocalStyleAdaptationError,
     generate_reviewed_local_style,
     local_style_package_metadata,
+)
+from app.reference_layers.masked_geopackage import (
+    MaskIdentity,
+    MaskedGeoPackageError,
+    MaskedGeoPackageSpec,
+    derive_masked_geopackage_files,
+    parse_masked_geopackage_spec,
+    validate_reviewed_mask,
 )
 from app.reference_layers.models import (
     ReferenceLayerSource,
@@ -59,7 +69,11 @@ from app.reference_layers.safe_download import (
     SafeHTTPSDownloader,
     normalize_https_url,
 )
-from app.reference_layers.source_discovery import SourceCandidate, candidate_definition
+from app.reference_layers.source_discovery import (
+    SourceCandidate,
+    candidate_definition,
+    reviewed_cross_origin_style_source,
+)
 from app.reference_layers.source_probes import (
     MAX_PROBE_BYTES,
     SourceProbe,
@@ -404,6 +418,63 @@ class _Downloaded:
 
 
 @dataclass(frozen=True)
+class _TransientDownloaded:
+    result: HTTPSDownloadResult
+    local_path: Path | None
+    sha256: str | None
+    size_bytes: int
+    parsed: Any = None
+    workspace_store: ReferenceBlobStore | None = None
+
+
+@contextmanager
+def _strict_staging(
+    store: ReferenceBlobStore,
+    *,
+    max_bytes: int,
+) -> Iterator[ReferenceStagingWriter]:
+    staging = store.stage(max_bytes=max_bytes)
+    path = staging.staging_path
+    try:
+        with staging:
+            yield staging
+    finally:
+        _require_staging_removed(path)
+
+
+def _require_staging_removed(path: Path) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise AcquisitionPersistenceError(
+            "staging cleanup could not be verified",
+            code="staging_cleanup_failed",
+        ) from error
+    try:
+        path.unlink()
+    except OSError as error:
+        raise AcquisitionPersistenceError(
+            "staging artifact could not be removed",
+            code="staging_cleanup_failed",
+        ) from error
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise AcquisitionPersistenceError(
+            "staging cleanup could not be verified",
+            code="staging_cleanup_failed",
+        ) from error
+    raise AcquisitionPersistenceError(
+        "staging artifact remains after cleanup",
+        code="staging_cleanup_failed",
+    )
+
+
+@dataclass(frozen=True)
 class _FeaturePage:
     count: int
     number_matched: int | None
@@ -436,6 +507,7 @@ class _StyleRequest:
     endpoint_url: str
     layer_name: str
     styles: tuple[_StyleSpec, ...]
+    expected_bundle_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -466,10 +538,25 @@ class ReferenceAcquisitionPipeline:
         *,
         limits: AcquisitionLimits | None = None,
         downloader_factory: DownloaderFactory = SafeHTTPSDownloader,
+        transient_root: str | Path | None = None,
     ) -> None:
         self.store = store
         self.limits = limits or AcquisitionLimits()
         self._downloader_factory = downloader_factory
+        self._transient_root = (
+            Path(transient_root).expanduser().resolve(strict=False)
+            if transient_root is not None
+            else None
+        )
+        if self._transient_root is not None and (
+            self._transient_root == self.store.root
+            or self.store.root in self._transient_root.parents
+            or self._transient_root in self.store.root.parents
+        ):
+            raise ValueError(
+                "transient acquisition storage must not overlap "
+                "the persistent reference store"
+            )
 
     def acquire(
         self,
@@ -515,17 +602,29 @@ class ReferenceAcquisitionPipeline:
         validator: Validator | None = None,
         file_validator: FileValidator | None = None,
         conditional: ConditionalRequest | None = None,
+        reviewed_origin_url: str | None = None,
+        reviewed_sha256: str | None = None,
     ) -> _Downloaded:
         if validator is not None and file_validator is not None:
             raise ValueError("only one artifact validator may be configured")
-        requested_url = _require_same_origin(candidate.endpoint_url, url)
+        if reviewed_sha256 is not None and (
+            not isinstance(reviewed_sha256, str)
+            or _SHA256_RE.fullmatch(reviewed_sha256) is None
+        ):
+            raise ValueError("reviewed_sha256 must be a SHA-256 digest")
+        reviewed_origin = (
+            candidate.endpoint_url
+            if reviewed_origin_url is None
+            else normalize_https_url(reviewed_origin_url)
+        )
+        requested_url = _require_same_origin(reviewed_origin, url)
         applied_conditional = (
             conditional
             if conditional is not None
             and normalize_https_url(conditional.source_url) == requested_url
             else None
         )
-        origin = _origin(candidate.endpoint_url)
+        origin = _origin(reviewed_origin)
         effective_max_bytes = min(
             max_bytes,
             self.store.max_blob_bytes,
@@ -540,7 +639,10 @@ class ReferenceAcquisitionPipeline:
             allowed_content_types=allowed_media_types,
         )
         downloader = self._downloader_factory(policy)
-        with self.store.stage(max_bytes=effective_max_bytes) as staging:
+        with _strict_staging(
+            self.store,
+            max_bytes=effective_max_bytes,
+        ) as staging:
             result = downloader.download(
                 requested_url,
                 staging,
@@ -550,7 +652,11 @@ class ReferenceAcquisitionPipeline:
                 ),
                 accept=accept,
             )
-            _validate_download_result(candidate, requested_url, result)
+            _validate_download_result(
+                reviewed_origin,
+                requested_url,
+                result,
+            )
             if result.not_modified:
                 if applied_conditional is None:
                     raise AcquisitionValidationError(
@@ -562,6 +668,14 @@ class ReferenceAcquisitionPipeline:
                 raise AcquisitionValidationError(
                     "download result omitted its content digest",
                     code="missing_download_digest",
+                )
+            if (
+                reviewed_sha256 is not None
+                and result.sha256 != reviewed_sha256
+            ):
+                raise AcquisitionValidationError(
+                    "reviewed style bundle changed",
+                    code="reviewed_style_changed",
                 )
             parsed = None
             if file_validator is not None:
@@ -581,6 +695,145 @@ class ReferenceAcquisitionPipeline:
             )
         return _Downloaded(result=result, blob=blob, parsed=parsed)
 
+    @contextmanager
+    def _download_transient(
+        self,
+        candidate: SourceCandidate,
+        url: str,
+        *,
+        max_bytes: int,
+        accept: str,
+        allowed_media_types: frozenset[str] | None,
+        validator: Validator | None = None,
+        file_validator: FileValidator | None = None,
+        conditional: ConditionalRequest | None = None,
+        reviewed_origin_url: str | None = None,
+    ) -> Iterator[_TransientDownloaded]:
+        """Yield a validated staging file and remove it without CAS commit."""
+
+        if validator is not None and file_validator is not None:
+            raise ValueError("only one artifact validator may be configured")
+        if self._transient_root is None:
+            raise AcquisitionConfigurationError(
+                "transient acquisition storage is not configured",
+                code="transient_storage_unavailable",
+            )
+        reviewed_origin = (
+            candidate.endpoint_url
+            if reviewed_origin_url is None
+            else normalize_https_url(reviewed_origin_url)
+        )
+        requested_url = _require_same_origin(reviewed_origin, url)
+        applied_conditional = (
+            conditional
+            if conditional is not None
+            and normalize_https_url(conditional.source_url) == requested_url
+            else None
+        )
+        transient_max_bytes = min(
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        transient_quota_bytes = self.store.quota_bytes
+        if (
+            transient_quota_bytes is not None
+            and transient_max_bytes > transient_quota_bytes
+        ):
+            transient_max_bytes = transient_quota_bytes
+        with ReferenceBlobStore(
+            self._transient_root,
+            max_blob_bytes=transient_max_bytes,
+            quota_bytes=transient_quota_bytes,
+            min_free_bytes=self.store.min_free_bytes,
+        ) as transient_store:
+            # Locked in-flight partials are skipped. Anything left by a
+            # previous crash is removed before a new transient acquisition.
+            transient_store.cleanup_staging(older_than_seconds=0)
+            effective_max_bytes = min(
+                max_bytes,
+                transient_store.max_blob_bytes,
+                self.limits.max_total_bytes,
+            )
+            downloader = self._downloader_factory(
+                HTTPSDownloadPolicy(
+                    allowed_origins=(_origin(reviewed_origin),),
+                    max_response_bytes=effective_max_bytes,
+                    timeout_seconds=self.limits.timeout_seconds,
+                    idle_timeout_seconds=self.limits.idle_timeout_seconds,
+                    max_redirects=self.limits.max_redirects,
+                    allowed_content_types=allowed_media_types,
+                )
+            )
+            with _strict_staging(
+                transient_store,
+                max_bytes=effective_max_bytes
+            ) as staging:
+                result = downloader.download(
+                    requested_url,
+                    staging,
+                    etag=applied_conditional.etag
+                    if applied_conditional
+                    else None,
+                    last_modified=(
+                        applied_conditional.last_modified
+                        if applied_conditional
+                        else None
+                    ),
+                    accept=accept,
+                )
+                _validate_download_result(
+                    reviewed_origin,
+                    requested_url,
+                    result,
+                )
+                if result.not_modified:
+                    if applied_conditional is None:
+                        raise AcquisitionValidationError(
+                            "upstream returned not-modified for a different "
+                            "resource URL",
+                            code="unexpected_not_modified",
+                        )
+                    yield _TransientDownloaded(
+                        result=result,
+                        local_path=None,
+                        sha256=None,
+                        size_bytes=0,
+                        workspace_store=transient_store,
+                    )
+                    return
+                if (
+                    result.sha256 is None
+                    or staging.sha256 != result.sha256
+                    or staging.size_bytes != result.size_bytes
+                ):
+                    raise AcquisitionValidationError(
+                        "transient download identity does not match staged bytes",
+                        code="download_integrity_mismatch",
+                    )
+                parsed = None
+                if file_validator is not None:
+                    parsed = file_validator(
+                        staging.staging_path,
+                        result.size_bytes,
+                    )
+                elif validator is not None:
+                    try:
+                        payload = staging.staging_path.read_bytes()
+                    except OSError as error:
+                        raise AcquisitionValidationError(
+                            "staged artifact could not be read for validation",
+                            code="staging_read_failed",
+                        ) from error
+                    parsed = validator(payload)
+                yield _TransientDownloaded(
+                    result=result,
+                    local_path=staging.staging_path,
+                    sha256=result.sha256,
+                    size_bytes=result.size_bytes,
+                    parsed=parsed,
+                    workspace_store=transient_store,
+                )
+
     def _local_json_artifact(
         self,
         payload: dict[str, Any],
@@ -588,6 +841,7 @@ class ReferenceAcquisitionPipeline:
         kind: ArtifactKind,
         role: ArtifactRole,
         metadata: dict[str, Any],
+        observed: HTTPSDownloadResult | None = None,
     ) -> AcquiredArtifact:
         encoded = _canonical_json(payload) + b"\n"
         maximum = min(
@@ -606,6 +860,20 @@ class ReferenceAcquisitionPipeline:
             role=role,
             media_type="application/json",
             blob=blob,
+            source_url=(
+                observed.source_url if observed is not None else None
+            ),
+            final_url=(
+                observed.final_url if observed is not None else None
+            ),
+            upstream_etag=(
+                observed.etag if observed is not None else None
+            ),
+            upstream_last_modified=(
+                _http_datetime(observed.last_modified)
+                if observed is not None
+                else None
+            ),
             metadata=metadata,
         )
 
@@ -719,6 +987,8 @@ class ReferenceAcquisitionPipeline:
                 layer_name=request.layer_name,
                 style_names=tuple(item.remote_name for item in request.styles),
             ),
+            reviewed_origin_url=request.endpoint_url,
+            reviewed_sha256=request.expected_bundle_sha256,
         )
         parsed = cast(_ParsedStyleBundle, downloaded.parsed)
         bundle = self._remote_artifact(
@@ -778,6 +1048,7 @@ class ReferenceAcquisitionPipeline:
                         ),
                         allowed_media_types=_STYLE_RESOURCE_MEDIA_TYPES,
                         validator=_inspect_style_resource,
+                        reviewed_origin_url=request.endpoint_url,
                     )
                     inspection = cast(
                         _StyleResourceInspection,
@@ -1066,6 +1337,7 @@ class ReferenceAcquisitionPipeline:
         *,
         probe: SourceProbe | None = None,
         artifacts: tuple[AcquiredArtifact, ...] = (),
+        stats: Mapping[str, Any] | None = None,
     ) -> AcquisitionResult:
         return AcquisitionResult(
             source_key=candidate.source_key,
@@ -1081,7 +1353,7 @@ class ReferenceAcquisitionPipeline:
             observed_version=probe.service_version if probe else None,
             feature_count=None,
             total_bytes=sum(item.blob.size_bytes for item in artifacts),
-            stats={"not_modified": True},
+            stats={"not_modified": True, **dict(stats or {})},
         )
 
     def _acquire_wfs(
@@ -1789,6 +2061,13 @@ class ReferenceAcquisitionPipeline:
         *,
         conditional: ConditionalRequest | None,
     ) -> AcquisitionResult:
+        try:
+            transform = parse_masked_geopackage_spec(candidate.config)
+        except MaskedGeoPackageError as error:
+            raise AcquisitionConfigurationError(
+                "direct dataset transform is invalid",
+                code=error.code,
+            ) from error
         download_url = _config_optional_text(
             candidate.config,
             "download_url",
@@ -1812,7 +2091,43 @@ class ReferenceAcquisitionPipeline:
             raise AcquisitionConfigurationError(
                 "direct download requires an explicit data_format"
             )
+        if transform is not None and (
+            candidate.target_kind != "vector"
+            or data_format.strip().casefold()
+            not in {"geopackage", "gpkg"}
+            or candidate.config.get("source_retention")
+            != "discard_after_derivation"
+        ):
+            raise AcquisitionConfigurationError(
+                "masked GeoPackage transform requires transient vector input",
+                code="masked_geopackage_config_invalid",
+            )
         allowed = frozenset({media_type.casefold()})
+        if transform is not None:
+            with self._download_transient(
+                candidate,
+                download_url,
+                max_bytes=self.limits.max_dataset_bytes,
+                accept=media_type,
+                allowed_media_types=allowed,
+                file_validator=_dataset_file_validator(
+                    data_format,
+                    self.limits,
+                    config=candidate.config,
+                ),
+                conditional=conditional,
+            ) as downloaded:
+                if downloaded.result.not_modified:
+                    return self._unchanged_masked_geopackage(
+                        candidate,
+                        downloaded=downloaded,
+                        transform=transform,
+                    )
+                return self._finish_masked_geopackage(
+                    candidate,
+                    downloaded=downloaded,
+                    transform=transform,
+                )
         downloaded = self._download(
             candidate,
             download_url,
@@ -1843,10 +2158,12 @@ class ReferenceAcquisitionPipeline:
                 ),
             },
         )
-        style_artifacts = self._author_reviewed_local_style(
-            candidate,
-            dataset_artifacts=[dataset],
-        )
+        style_artifacts = self._acquire_styles(candidate)
+        if not style_artifacts:
+            style_artifacts = self._author_reviewed_local_style(
+                candidate,
+                dataset_artifacts=[dataset],
+            )
         artifacts = [dataset, *style_artifacts]
         materialization = {
             "kind": "direct-dataset",
@@ -1867,6 +2184,237 @@ class ReferenceAcquisitionPipeline:
             stats=stats,
             observed=downloaded.result,
         )
+
+    def _finish_masked_geopackage(
+        self,
+        candidate: SourceCandidate,
+        *,
+        downloaded: _TransientDownloaded,
+        transform: MaskedGeoPackageSpec,
+    ) -> AcquisitionResult:
+        if (
+            downloaded.local_path is None
+            or downloaded.sha256 is None
+            or downloaded.workspace_store is None
+        ):
+            raise AcquisitionValidationError(
+                "masked GeoPackage source artifact is unavailable",
+                code="missing_artifact",
+            )
+        try:
+            mask_downloaded, mask_identity = (
+                self._acquire_masked_geopackage_mask(
+                    candidate,
+                    transform=transform,
+                )
+            )
+            mask_blob = mask_downloaded.blob
+            if mask_blob is None:
+                raise MaskedGeoPackageError(
+                    "reviewed mask artifact is unavailable",
+                    code="spatial_mask_invalid",
+                )
+            derived = derive_masked_geopackage_files(
+                self.store,
+                workspace_store=downloaded.workspace_store,
+                source_path=downloaded.local_path,
+                source_sha256=downloaded.sha256,
+                source_size_bytes=downloaded.size_bytes,
+                mask_path=self.store.resolve_blob(
+                    mask_blob.storage_key
+                ),
+                mask_sha256=mask_blob.sha256,
+                mask_size_bytes=mask_blob.size_bytes,
+                mask_identity=mask_identity,
+                spec=transform,
+                max_output_bytes=min(
+                    self.limits.max_dataset_bytes,
+                    self.store.max_blob_bytes,
+                    self.limits.max_total_bytes,
+                ),
+                timeout_seconds=max(
+                    1,
+                    min(
+                        86_400,
+                        math.ceil(self.limits.timeout_seconds),
+                    ),
+                ),
+            )
+        except MaskedGeoPackageError as error:
+            raise AcquisitionValidationError(
+                "masked GeoPackage derivation failed validation",
+                code=error.code,
+            ) from error
+
+        source = self._local_json_artifact(
+            {
+                "schema": "reference-transient-source-observation/v1",
+                "source_url": downloaded.result.source_url,
+                "final_url": downloaded.result.final_url,
+                "sha256": downloaded.sha256,
+                "size_bytes": downloaded.size_bytes,
+                "etag": downloaded.result.etag,
+                "last_modified": downloaded.result.last_modified,
+                "retained": False,
+                "discarded_after_derivation": True,
+                "selected_fields": list(transform.selected_fields),
+            },
+            kind="metadata",
+            role="input",
+            metadata={
+                "schema": "reference-transient-source-observation/v1",
+                "protocol": "download",
+                "data_format": "geopackage",
+                "remote_name": candidate.remote_name,
+                "input_layer": transform.source_layer,
+                "derivation_role": "source_dataset",
+                "raw_source_retained": False,
+            },
+            observed=downloaded.result,
+        )
+        mask = self._remote_artifact(
+            mask_downloaded,
+            kind="metadata",
+            role="input",
+            metadata={
+                "schema": "reference-spatial-mask-input/v1",
+                "derivation_role": "spatial_mask",
+                "mask_identity": mask_identity.metadata(),
+            },
+        )
+        dataset = AcquiredArtifact(
+            artifact_kind="dataset",
+            role="input",
+            media_type="application/geopackage+sqlite3",
+            blob=derived.blob,
+            metadata={
+                "protocol": "derived",
+                "data_format": "geopackage",
+                "remote_name": candidate.remote_name,
+                "input_layer": transform.output_layer,
+                "materialization_input": True,
+                "derivation": {
+                    **derived.validation,
+                    "raw_source_retained": False,
+                },
+            },
+        )
+        style_artifacts = self._acquire_styles(candidate)
+        if not style_artifacts:
+            style_artifacts = self._author_reviewed_local_style(
+                candidate,
+                dataset_artifacts=[dataset],
+            )
+        artifacts = [source, mask, dataset, *style_artifacts]
+        materialization = {
+            "kind": "derived-direct-dataset",
+            "format": "geopackage",
+            "dataset_sha256": dataset.blob.sha256,
+            "input_layer": transform.output_layer,
+            "derivation": {
+                **derived.validation,
+                "raw_source_retained": False,
+            },
+            "raw_source_retained": False,
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=derived.feature_count,
+            stats={
+                "source_dataset_bytes": downloaded.size_bytes,
+                "mask_bytes": mask.blob.size_bytes,
+                "dataset_bytes": dataset.blob.size_bytes,
+                "feature_count": derived.feature_count,
+                "identifier_sha256": derived.identifier_sha256,
+                "composite_snapshot_full_refresh": True,
+                "raw_source_retained": False,
+                **(
+                    {"style_count": len(style_digests)}
+                    if style_digests
+                    else {}
+                ),
+            },
+            observed=downloaded.result,
+        )
+
+    def _unchanged_masked_geopackage(
+        self,
+        candidate: SourceCandidate,
+        *,
+        downloaded: _TransientDownloaded,
+        transform: MaskedGeoPackageSpec,
+    ) -> AcquisitionResult:
+        """Check every independent input before accepting a dataset 304."""
+
+        try:
+            mask_downloaded, mask_identity = (
+                self._acquire_masked_geopackage_mask(
+                    candidate,
+                    transform=transform,
+                )
+            )
+        except MaskedGeoPackageError as error:
+            raise AcquisitionValidationError(
+                "masked GeoPackage inputs failed validation",
+                code=error.code,
+            ) from error
+        mask = self._remote_artifact(
+            mask_downloaded,
+            kind="metadata",
+            role="observation",
+            metadata={
+                "schema": "reference-spatial-mask-observation/v1",
+                "derivation_role": "spatial_mask",
+                "mask_identity": mask_identity.metadata(),
+            },
+        )
+        style_artifacts = self._acquire_styles(candidate)
+        artifacts = (mask, *style_artifacts)
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        return self._unchanged(
+            candidate,
+            downloaded.result,
+            artifacts=artifacts,
+            stats={
+                "composite_inputs_checked": True,
+                "mask_identity_sha256": mask_identity.sha256,
+                "style_count": len(_style_digests(style_artifacts)),
+            },
+        )
+
+    def _acquire_masked_geopackage_mask(
+        self,
+        candidate: SourceCandidate,
+        *,
+        transform: MaskedGeoPackageSpec,
+    ) -> tuple[_Downloaded, MaskIdentity]:
+        downloaded = self._download(
+            candidate,
+            transform.mask_url,
+            max_bytes=transform.mask_max_bytes,
+            accept=transform.mask_media_type,
+            allowed_media_types=frozenset(
+                {transform.mask_media_type.casefold()}
+            ),
+            file_validator=lambda path, size: validate_reviewed_mask(
+                path,
+                size,
+                transform,
+            ),
+            reviewed_origin_url=transform.mask_url,
+        )
+        if downloaded.result.not_modified or downloaded.blob is None:
+            raise MaskedGeoPackageError(
+                "reviewed mask artifact is unavailable",
+                code="spatial_mask_invalid",
+            )
+        return downloaded, cast(MaskIdentity, downloaded.parsed)
 
     def _acquire_atom(
         self,
@@ -2596,7 +3144,7 @@ def source_candidate_definition_sha256(candidate: SourceCandidate) -> str:
 
 
 def _validate_download_result(
-    candidate: SourceCandidate,
+    reviewed_origin_url: str,
     requested_url: str,
     result: HTTPSDownloadResult,
 ) -> None:
@@ -2610,7 +3158,7 @@ def _validate_download_result(
             "downloader result source URL does not match the request",
             code="download_url_mismatch",
         )
-    _require_same_origin(candidate.endpoint_url, result.final_url)
+    _require_same_origin(reviewed_origin_url, result.final_url)
     if result.not_modified:
         if result.status_code != 304 or result.size_bytes != 0 or result.sha256 is not None:
             raise AcquisitionValidationError(
@@ -2875,11 +3423,21 @@ def _style_request_config(candidate: SourceCandidate) -> _StyleRequest | None:
     has_endpoint = "style_endpoint_url" in config
     has_layer = "style_layer_name" in config
     has_styles = "styles" in config
-    if not any((has_endpoint, has_layer, has_styles)):
+    has_bundle_sha256 = "style_bundle_sha256" in config
+    if not any(
+        (has_endpoint, has_layer, has_styles, has_bundle_sha256)
+    ):
         return None
-    if candidate.protocol not in {"wfs", "wcs"}:
+    reviewed_cross_origin = reviewed_cross_origin_style_source(candidate)
+    if (
+        candidate.protocol not in {"wfs", "wcs"}
+        and not (
+            candidate.protocol == "download"
+            and reviewed_cross_origin
+        )
+    ):
         raise AcquisitionConfigurationError(
-            "style acquisition is only supported for GeoServer data sources"
+            "style acquisition is not reviewed for this data source"
         )
     if not all((has_endpoint, has_layer, has_styles)):
         raise AcquisitionConfigurationError(
@@ -2901,11 +3459,30 @@ def _style_request_config(candidate: SourceCandidate) -> _StyleRequest | None:
         )
     if _SAFE_REMOTE_NAME_RE.fullmatch(layer_name) is None:
         raise AcquisitionConfigurationError("style layer name is invalid")
-    if layer_name != candidate.remote_name:
+    if (
+        layer_name != candidate.remote_name
+        and not reviewed_cross_origin
+    ):
         raise AcquisitionConfigurationError(
             "style layer name does not match the acquired collection"
         )
-    endpoint = _require_same_origin(candidate.endpoint_url, endpoint)
+    endpoint = (
+        normalize_https_url(endpoint)
+        if reviewed_cross_origin
+        else _require_same_origin(candidate.endpoint_url, endpoint)
+    )
+    expected_bundle_sha256 = config.get("style_bundle_sha256")
+    if expected_bundle_sha256 is not None and (
+        not isinstance(expected_bundle_sha256, str)
+        or _SHA256_RE.fullmatch(expected_bundle_sha256) is None
+    ):
+        raise AcquisitionConfigurationError(
+            "reviewed style bundle digest is invalid"
+        )
+    if reviewed_cross_origin and expected_bundle_sha256 is None:
+        raise AcquisitionConfigurationError(
+            "cross-origin style bundle has no reviewed digest"
+        )
     raw_styles = config.get("styles")
     if not isinstance(raw_styles, list):
         raise AcquisitionConfigurationError("source config styles must be a list")
@@ -2963,6 +3540,7 @@ def _style_request_config(candidate: SourceCandidate) -> _StyleRequest | None:
         endpoint_url=endpoint,
         layer_name=layer_name,
         styles=tuple(styles),
+        expected_bundle_sha256=expected_bundle_sha256,
     )
 
 

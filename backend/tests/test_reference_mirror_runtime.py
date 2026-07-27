@@ -3,6 +3,10 @@ from __future__ import annotations
 import logging
 import threading
 
+import pytest
+
+from app.core.config import Settings
+from app.reference_layers.blob_store import ReferenceBlobStore
 from app.reference_layers import mirror_runtime
 
 
@@ -24,6 +28,110 @@ def test_cli_registers_all_models_before_running_scheduler(monkeypatch) -> None:
 
     assert mirror_runtime.main(["scheduler", "--once"]) == 0
     assert calls == ["register_models", "scheduler:True:False"]
+
+
+def test_worker_prepares_transient_storage_before_processing(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class Processor:
+        def __init__(self, *, stop_event):
+            assert stop_event.is_set() is False
+            calls.append("processor")
+
+        def process_next(self):
+            calls.append("process")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(
+        mirror_runtime,
+        "prepare_reference_transient_storage",
+        lambda: calls.append("prepare"),
+    )
+    monkeypatch.setattr(
+        mirror_runtime,
+        "MirrorRunProcessor",
+        Processor,
+    )
+
+    mirror_runtime.run_worker(threading.Event(), once=True)
+
+    assert calls == ["prepare", "processor", "process", "close"]
+
+
+def test_worker_startup_purges_transient_crash_residue(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = Settings(
+        reference_storage_root=str(tmp_path / "persistent"),
+        reference_transient_root=str(tmp_path / "transient"),
+        reference_blob_max_bytes=2 * 1024 * 1024,
+        reference_tile_archive_max_bytes=2 * 1024 * 1024,
+        reference_storage_quota_bytes=4 * 1024 * 1024,
+        reference_storage_min_free_bytes=0,
+        _env_file=None,
+    )
+    with ReferenceBlobStore(
+        config.reference_transient_root,
+        max_blob_bytes=config.reference_blob_max_bytes,
+        quota_bytes=config.reference_storage_quota_bytes,
+    ) as transient:
+        orphan_part = (
+            transient.root
+            / "staging"
+            / f"{'a' * 32}.part"
+        )
+        orphan_part.write_bytes(b"raw source")
+        orphan_workspace = (
+            transient.root
+            / "workspaces"
+            / f"masked-geopackage-{'b' * 32}"
+        )
+        orphan_workspace.mkdir(parents=True)
+        (orphan_workspace / "source.gpkg").write_bytes(b"raw source")
+
+    monkeypatch.setattr(mirror_runtime, "settings", config)
+
+    mirror_runtime.prepare_reference_transient_storage()
+
+    assert list(
+        (tmp_path / "transient" / "staging").iterdir()
+    ) == []
+    assert list(
+        (tmp_path / "transient" / "workspaces").iterdir()
+    ) == []
+
+
+def test_worker_refuses_incomplete_transient_cleanup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = Settings(
+        reference_storage_root=str(tmp_path / "persistent"),
+        reference_transient_root=str(tmp_path / "transient"),
+        reference_blob_max_bytes=2 * 1024 * 1024,
+        reference_tile_archive_max_bytes=2 * 1024 * 1024,
+        reference_storage_quota_bytes=4 * 1024 * 1024,
+        reference_storage_min_free_bytes=0,
+        _env_file=None,
+    )
+    with ReferenceBlobStore(
+        config.reference_transient_root,
+        max_blob_bytes=config.reference_blob_max_bytes,
+        quota_bytes=config.reference_storage_quota_bytes,
+    ) as transient:
+        (transient.root / "staging" / "unexpected").write_bytes(
+            b"unclassified residue"
+        )
+
+    monkeypatch.setattr(mirror_runtime, "settings", config)
+
+    with pytest.raises(RuntimeError, match="cleanup is incomplete"):
+        mirror_runtime.prepare_reference_transient_storage()
 
 
 def test_catalog_watcher_poll_is_throttled_and_reports_evidence(

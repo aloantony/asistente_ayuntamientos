@@ -592,6 +592,130 @@ def test_vector_materialization_routes_ordered_cadastral_zip_parts(
     assert supervisor.pulses == 2
 
 
+def test_vector_materialization_uses_only_derived_geopackage_input(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store = ReferenceBlobStore(
+        Path(tmp_path, "derived-geopackage-store"),
+        max_blob_bytes=1024 * 1024,
+    )
+    raw_blob = store.put_stream(io.BytesIO(b"raw source package"))
+    derived_blob = store.put_stream(io.BytesIO(b"derived package"))
+    artifacts = (
+        PersistedRunArtifact(
+            artifact_id=1,
+            artifact_kind="dataset",
+            roles=frozenset({"input"}),
+            media_type="application/geopackage+sqlite3",
+            storage_backend="filesystem",
+            storage_key=raw_blob.storage_key,
+            size_bytes=raw_blob.size_bytes,
+            sha256=raw_blob.sha256,
+            metadata_json={
+                "data_format": "geopackage",
+                "input_layer": "grid_100km_surf",
+                "materialization_input": False,
+            },
+        ),
+        PersistedRunArtifact(
+            artifact_id=2,
+            artifact_kind="dataset",
+            roles=frozenset({"input"}),
+            media_type="application/geopackage+sqlite3",
+            storage_backend="filesystem",
+            storage_key=derived_blob.storage_key,
+            size_bytes=derived_blob.size_bytes,
+            sha256=derived_blob.sha256,
+            metadata_json={
+                "data_format": "geopackage",
+                "input_layer": "grid_100km_cyl",
+                "materialization_input": True,
+            },
+        ),
+    )
+    captured = {}
+    vector_result = object()
+
+    def ingest(_db, **kwargs):
+        captured.update(kwargs)
+        return vector_result
+
+    monkeypatch.setattr(
+        mirror_orchestrator.geo_ingest,
+        "ingest_vector_artifacts",
+        ingest,
+    )
+    monkeypatch.setattr(
+        mirror_orchestrator,
+        "_geoserver_materialization",
+        lambda *_args, **kwargs: kwargs["vector"],
+    )
+    context = SimpleNamespace(
+        styles=(),
+        source=SimpleNamespace(
+            provider_key="siur",
+            layer_id=287,
+            config_json={},
+        ),
+        run=SimpleNamespace(id=31),
+    )
+    supervisor = FakeSupervisor()
+    try:
+        result = mirror_orchestrator.materialize_vector_delivery(
+            lambda: nullcontext(object()),
+            store,
+            context,
+            SimpleNamespace(),
+            artifacts,
+            supervisor,
+            database_url=(
+                "postgresql+psycopg://app:secret@127.0.0.1:5432/app"
+            ),
+            max_source_bytes=1024 * 1024,
+            timeout_seconds=30,
+        )
+    finally:
+        store.close()
+
+    assert result is vector_result
+    assert captured["input_driver"] == "GPKG"
+    assert captured["artifacts"] == [
+        (
+            Path(
+                tmp_path,
+                "derived-geopackage-store",
+                derived_blob.storage_key,
+            ),
+            derived_blob.sha256,
+            "grid_100km_cyl",
+        )
+    ]
+    assert supervisor.pulses == 2
+
+
+def test_dataset_materialization_marker_fails_closed() -> None:
+    artifact = PersistedRunArtifact(
+        artifact_id=1,
+        artifact_kind="dataset",
+        roles=frozenset({"input"}),
+        media_type="application/geopackage+sqlite3",
+        storage_backend="filesystem",
+        storage_key="sha256/aa/blob",
+        size_bytes=100,
+        sha256="a" * 64,
+        metadata_json={
+            "data_format": "geopackage",
+            "materialization_input": "yes",
+        },
+    )
+
+    with pytest.raises(MirrorOrchestrationError) as error:
+        mirror_orchestrator._ordered_dataset_artifacts((artifact,))
+
+    assert error.value.code == "vector_page_order_invalid"
+
+
 def test_geoserver_publication_smokes_every_local_style_and_returns_audit(
     tmp_path,
 ) -> None:
@@ -1304,6 +1428,9 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
                 role="input",
                 media_type="application/json",
                 blob=descriptor_blob,
+                source_url=source.endpoint_url,
+                final_url=source.endpoint_url,
+                upstream_etag='"gisco-grid-100km-v1"',
                 metadata={"schema": "reference-tile-source/v1"},
             ),
         ),
@@ -1317,9 +1444,11 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
         stats={"artifact_count": 1},
     )
 
+    acquisition_conditionals = []
+
     class Acquisition:
         def acquire(self, candidate, **kwargs):
-            del kwargs
+            acquisition_conditionals.append(kwargs.get("conditional"))
             return replace(
                 acquired,
                 source_key=candidate.source_key,
@@ -1410,7 +1539,7 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
     )
     try:
         first = processor.process_next()
-        assert first.state == "succeeded"
+        assert first.state == "succeeded", first
         assert len(materialized) == 1
         metadata_asset = db.scalar(
             select(ReferenceDeliveryAsset).where(
@@ -1442,6 +1571,10 @@ def test_conditional_tiles_reuse_active_archive_until_definition_changes(
         assert conditional.version_id == first.version_id
         assert len(materialized) == 1
         assert len(published) == 2
+        assert acquisition_conditionals[0] is None
+        assert acquisition_conditionals[1] is not None
+        assert acquisition_conditionals[1].source_url == source.endpoint_url
+        assert acquisition_conditionals[1].etag == '"gisco-grid-100km-v1"'
         assert isinstance(published[1][1], TilePublicationPlan)
         assert published[1][1].requires_full_inspection is True
 
@@ -1808,4 +1941,10 @@ def test_reference_settings_reject_incoherent_lease_and_quota(tmp_path) -> None:
             reference_storage_root=str(tmp_path),
             reference_blob_max_bytes=10 * 1024 * 1024,
             reference_storage_quota_bytes=5 * 1024 * 1024,
+        )
+    with pytest.raises(ValueError, match="must not overlap"):
+        Settings(
+            reference_storage_root=str(tmp_path),
+            reference_transient_root=str(tmp_path / "transient"),
+            _env_file=None,
         )

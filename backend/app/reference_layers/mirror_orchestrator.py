@@ -350,6 +350,19 @@ def build_reference_blob_store(config: Settings = settings) -> ReferenceBlobStor
     )
 
 
+def build_reference_transient_store(
+    config: Settings = settings,
+) -> ReferenceBlobStore:
+    """Build the worker scratch store, isolated from the served CAS."""
+
+    return ReferenceBlobStore(
+        config.reference_transient_root,
+        max_blob_bytes=config.reference_blob_max_bytes,
+        quota_bytes=config.reference_storage_quota_bytes,
+        min_free_bytes=config.reference_storage_min_free_bytes,
+    )
+
+
 class LeaseSupervisor:
     """Renew one lease using independent, short-lived sessions."""
 
@@ -462,7 +475,10 @@ class MirrorRunProcessor:
         self.config = config
         self.stop_event = stop_event
         self.store = store or build_reference_blob_store(config)
-        self.acquisition = acquisition or ReferenceAcquisitionPipeline(self.store)
+        self.acquisition = acquisition or ReferenceAcquisitionPipeline(
+            self.store,
+            transient_root=config.reference_transient_root,
+        )
         self.geoserver = geoserver
         self.materializer = materializer or self._materialize_delivery
         self.publisher = publisher or self._publish_and_smoke
@@ -1090,7 +1106,14 @@ def load_run_context(
             and active_source_id == source.id
             and active_definition_matches
         ):
-            artifact = db.scalar(
+            composite_conditional = (
+                source.protocol == "download"
+                and isinstance(
+                    source.config_json.get("vector_transform"),
+                    dict,
+                )
+            )
+            artifact_query = (
                 select(ReferenceSourceArtifact)
                 .join(
                     ReferenceDeliveryVersionArtifact,
@@ -1112,15 +1135,30 @@ def load_run_context(
                         ReferenceSourceArtifact.upstream_last_modified.is_not(None),
                     ),
                 )
+            )
+            if composite_conditional:
+                configured_url = source.config_json.get("download_url")
+                dataset_url = (
+                    configured_url
+                    if isinstance(configured_url, str)
+                    else source.endpoint_url
+                )
+                if isinstance(dataset_url, str):
+                    artifact_query = artifact_query.where(
+                        ReferenceSourceArtifact.source_url == dataset_url
+                    )
+            artifact = db.scalar(
+                artifact_query
                 .order_by(ReferenceSourceArtifact.retrieved_at.desc())
                 .limit(1)
             )
             conditional = ConditionalRequest.from_artifact(artifact)
             # A dataset-only 304 cannot prove that an independently served
-            # GetStyles response and its graphics are unchanged. Styled WCS
-            # sources therefore take a full snapshot so style parity is
-            # evaluated on every scheduled check.
-            if styles:
+            # GetStyles response and its graphics are unchanged.  The reviewed
+            # masked-GeoPackage path explicitly rechecks its mask and styles
+            # before accepting a dataset 304; other styled sources still take
+            # a full snapshot on every scheduled check.
+            if styles and not composite_conditional:
                 conditional = None
         context = RunContext(
             lease=lease,
@@ -1580,6 +1618,8 @@ def materialize_vector_delivery(
         "geojson": "GeoJSON",
         "json": "GeoJSON",
         "flatgeobuf": "FlatGeobuf",
+        "geopackage": "GPKG",
+        "gpkg": "GPKG",
         "inspire-cadastral-parcel-gml-zip": "GMLZIP",
     }.get(data_format)
     if len(datasets) > 1 and input_driver is None:
@@ -2929,11 +2969,21 @@ def _tile_documents_for_catalog_styles(
 def _ordered_dataset_artifacts(
     artifacts: tuple[PersistedRunArtifact, ...],
 ) -> tuple[PersistedRunArtifact, ...]:
-    datasets = [
-        item
-        for item in artifacts
-        if "input" in item.roles and item.artifact_kind == "dataset"
-    ]
+    datasets: list[PersistedRunArtifact] = []
+    for item in artifacts:
+        if "input" not in item.roles or item.artifact_kind != "dataset":
+            continue
+        materialization_input = item.metadata_json.get(
+            "materialization_input",
+            True,
+        )
+        if not isinstance(materialization_input, bool):
+            raise MirrorOrchestrationError(
+                "dataset materialization marker is invalid",
+                code="vector_page_order_invalid",
+            )
+        if materialization_input:
+            datasets.append(item)
     if not datasets:
         return ()
     indexed: list[tuple[int, PersistedRunArtifact]] = []

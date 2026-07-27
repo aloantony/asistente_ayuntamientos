@@ -56,6 +56,7 @@ _EPSG_WKT_RE = re.compile(
 _ALLOWED_BINARIES = {
     "gdalinfo": "/usr/bin/gdalinfo",
     "gdal_translate": "/usr/bin/gdal_translate",
+    "ogrinfo": "/usr/bin/ogrinfo",
     "ogr2ogr": "/usr/bin/ogr2ogr",
 }
 _ALLOWED_VECTOR_DRIVERS = {
@@ -279,6 +280,15 @@ def _strict_gdal_environment(*, cpl_tmpdir: Path | None = None) -> dict[str, str
     if cpl_tmpdir is not None:
         result["CPL_TMPDIR"] = str(cpl_tmpdir)
     return result
+
+
+def strict_geo_command_environment(
+    *,
+    cpl_tmpdir: Path | None = None,
+) -> dict[str, str]:
+    """Return the closed GDAL environment for non-database derivations."""
+
+    return _strict_gdal_environment(cpl_tmpdir=cpl_tmpdir)
 
 
 def _validated_command_environment(environment: Mapping[str, str]) -> dict[str, str]:

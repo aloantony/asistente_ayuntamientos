@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     reference_storage_root: str = (
         "/var/lib/asistente_ayuntamientos/reference-artifacts"
     )
+    reference_transient_root: str = (
+        "/var/lib/asistente_ayuntamientos/reference-transient"
+    )
     reference_blob_max_bytes: int = 256 * 1024 * 1024 * 1024
     reference_storage_quota_bytes: int | None = 1024 * 1024 * 1024 * 1024
     reference_storage_min_free_bytes: int = 20 * 1024 * 1024 * 1024
@@ -202,15 +205,17 @@ class Settings(BaseSettings):
             )
         return f"http://127.0.0.1:{port}/geoserver"
 
-    @field_validator("reference_storage_root")
+    @field_validator("reference_storage_root", "reference_transient_root")
     @classmethod
-    def validate_reference_storage_root(cls, value: str) -> str:
+    def validate_reference_directory_root(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized or "\x00" in normalized:
-            raise ValueError("reference_storage_root is invalid")
+            raise ValueError("reference storage directory is invalid")
         path = Path(normalized)
         if not path.is_absolute() or path == Path("/"):
-            raise ValueError("reference_storage_root must be an absolute directory")
+            raise ValueError(
+                "reference storage directories must be absolute"
+            )
         return str(path.resolve(strict=False))
 
     @field_validator(
@@ -336,6 +341,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_reference_mirror_limits(self):
+        persistent = Path(self.reference_storage_root)
+        transient = Path(self.reference_transient_root)
+        if (
+            persistent == transient
+            or persistent in transient.parents
+            or transient in persistent.parents
+        ):
+            raise ValueError(
+                "reference_transient_root must not overlap "
+                "reference_storage_root"
+            )
         if (
             self.reference_storage_quota_bytes is not None
             and self.reference_blob_max_bytes

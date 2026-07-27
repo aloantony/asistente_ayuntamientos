@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+from pathlib import Path
+import sqlite3
 import struct
 from urllib.parse import parse_qs, urlsplit
 from xml.etree import ElementTree
@@ -13,6 +15,7 @@ import zipfile
 import pytest
 from sqlalchemy import func, select
 
+import app.reference_layers.acquisition as acquisition_module
 from app.reference_layers.acquisition import (
     AcquiredArtifact,
     AcquisitionResult,
@@ -41,6 +44,10 @@ from app.reference_layers.models import (
     ReferenceSourceArtifact,
     ReferenceSyncRun,
     ReferenceSyncRunArtifact,
+)
+from app.reference_layers.masked_geopackage import (
+    MaskIdentity,
+    MaskedGeoPackageResult,
 )
 from app.reference_layers.safe_download import HTTPSDownloadResult
 from app.reference_layers.source_discovery import (
@@ -224,6 +231,59 @@ def reviewed_catalog_candidate(
     return acquisition_candidates(service, layer)[0]
 
 
+def reviewed_eurostat_grid_candidate(
+    resolution: str = "100",
+) -> SourceCandidate:
+    service = ReferenceServiceDefinition(
+        source_key="service:idecyl-rejillas",
+        title="IDECyL Eurostat grids",
+        upstream_protocol="wms",
+        base_url="https://idecyl.jcyl.es/geoserver/rejillas/wms",
+        default_format="image/png",
+    )
+    styles = (
+        ReferenceLayerStyleDefinition(
+            source_key="rejilla_eurostat_cyl_morado",
+            title="Borde celdas morado",
+            remote_name="rejilla_eurostat_cyl_morado",
+            is_default=True,
+        ),
+        ReferenceLayerStyleDefinition(
+            source_key="rejilla_eurostat_cyl_blanco",
+            title="Borde celdas blanco",
+            remote_name="rejilla_eurostat_cyl_blanco",
+        ),
+        ReferenceLayerStyleDefinition(
+            source_key="rejilla_eurostat_cyl_fucsia",
+            title="Borde celdas fucsia",
+            remote_name="rejilla_eurostat_cyl_fucsia",
+        ),
+    )
+    layer = ReferenceLayerDefinition(
+        source_key="layer:siur:" + "8" * 64,
+        node_type="layer",
+        title=f"Rejilla Eurostat {resolution} km",
+        service_key=service.source_key,
+        remote_name=(
+            f"rejilla_eurostat_cyl_{resolution}x{resolution}"
+        ),
+        role="overlay",
+        renderer="raster_tile",
+        delivery_mode="mirror",
+        bounds={
+            "west": -7.6,
+            "south": 39.9,
+            "east": -1.3,
+            "north": 43.4,
+        },
+        style_name="rejilla_eurostat_cyl_morado",
+        styles=styles,
+    )
+    selected = acquisition_candidates(service, layer)
+    assert len(selected) == 1
+    return selected[0]
+
+
 def json_response(value, **kwargs) -> Response:
     return Response(
         body=json.dumps(value, separators=(",", ":")).encode(),
@@ -239,6 +299,50 @@ def shapefile_zip_payload() -> bytes:
         archive.writestr("roads.shx", b"shx payload")
         archive.writestr("roads.dbf", b"dbf payload")
     return target.getvalue()
+
+
+def minimal_geopackage_payload(path: Path) -> bytes:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE gpkg_spatial_ref_sys "
+            "(srs_name TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE gpkg_contents "
+            "(table_name TEXT NOT NULL)"
+        )
+    return path.read_bytes()
+
+
+def masked_geopackage_config(
+    mask_url: str,
+    *,
+    mask_identity_sha256: str = "a" * 64,
+    identifier_sha256: str = "b" * 64,
+) -> dict:
+    return {
+        "media_type": "application/geopackage+sqlite3",
+        "data_format": "geopackage",
+        "source_retention": "discard_after_derivation",
+        "vector_transform": {
+            "schema": "reference-masked-geopackage/v1",
+            "mask_url": mask_url,
+            "mask_media_type": "application/json",
+            "mask_max_bytes": 1024 * 1024,
+            "mask_identity_sha256": mask_identity_sha256,
+            "source_layer": "grid_100km_surf",
+            "output_layer": "grid_100km_surf_cyl",
+            "selected_fields": ["GRD_ID", "X_LLC", "Y_LLC"],
+            "identifier_field": "GRD_ID",
+            "cell_size_meters": 100_000,
+            "expected_feature_count": 19,
+            "expected_identifier_sha256": identifier_sha256,
+            "source_crs": "EPSG:3035",
+            "mask_target_crs": "EPSG:3035",
+            "predicate": "intersects",
+            "geometry_mode": "preserve-whole-source-features",
+        },
+    }
 
 
 def cadastral_gml_zip_payload(code: str = "05001") -> bytes:
@@ -1653,6 +1757,418 @@ def test_direct_download_is_content_addressed_and_records_conditional_headers(st
         read_json_artifact(store, result, "manifest")["materialization"]["format"]
         == "shapefile-zip"
     )
+
+
+def test_masked_geopackage_acquisition_keeps_composite_provenance(
+    store,
+    limits,
+    monkeypatch,
+    tmp_path,
+):
+    source_url = "https://grid.example.es/grid.gpkg"
+    mask_url = "https://mask.example.es/cyl.geojson"
+    source_payload = minimal_geopackage_payload(
+        tmp_path / "grid-source.gpkg"
+    )
+    mask_payload = b'{"type":"FeatureCollection","features":[]}'
+    mask_identity = MaskIdentity(
+        sha256="a" * 64,
+        feature_id="ES41",
+        properties={"codnut2": "ES41"},
+        coordinate_pairs=5,
+    )
+    derived_blob = store.put_stream(io.BytesIO(b"derived-only" * 100))
+    identifier_sha256 = "b" * 64
+    captured_source_path = None
+
+    def validate_mask(_path, _size, spec):
+        assert spec.mask_url == mask_url
+        return mask_identity
+
+    def derive(
+        target_store,
+        *,
+        source_path,
+        source_sha256,
+        source_size_bytes,
+        mask_path,
+        mask_sha256,
+        mask_size_bytes,
+        mask_identity: MaskIdentity,
+        spec,
+        **_kwargs,
+    ):
+        nonlocal captured_source_path
+        captured_source_path = source_path
+        assert target_store is store
+        assert source_path.is_relative_to(tmp_path / "transient")
+        assert source_path.read_bytes() == source_payload
+        assert source_sha256 == hashlib.sha256(source_payload).hexdigest()
+        assert source_size_bytes == len(source_payload)
+        assert mask_path.read_bytes() == mask_payload
+        assert mask_sha256 == hashlib.sha256(mask_payload).hexdigest()
+        assert mask_size_bytes == len(mask_payload)
+        assert mask_identity == mask_identity_value
+        assert spec.output_layer == "grid_100km_surf_cyl"
+        return MaskedGeoPackageResult(
+            blob=derived_blob,
+            feature_count=19,
+            identifier_sha256=identifier_sha256,
+            validation={
+                "schema": (
+                    "reference-masked-geopackage-derivation/v1"
+                ),
+                "passed": True,
+            },
+        )
+
+    mask_identity_value = mask_identity
+    monkeypatch.setattr(
+        acquisition_module,
+        "validate_reviewed_mask",
+        validate_mask,
+    )
+    monkeypatch.setattr(
+        acquisition_module,
+        "derive_masked_geopackage_files",
+        derive,
+    )
+
+    def handler(url, etag, modified):
+        assert modified is None
+        if url == source_url:
+            assert etag == '"source-v1"'
+            return Response(
+                source_payload,
+                "application/geopackage+sqlite3",
+                etag='"source-v2"',
+            )
+        assert url == mask_url
+        assert etag is None
+        return Response(mask_payload, "application/json")
+
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+        transient_root=tmp_path / "transient",
+    ).acquire(
+        candidate(
+            "download",
+            remote_name="grid_100km_surf",
+            endpoint=source_url,
+            config=masked_geopackage_config(
+                mask_url,
+                mask_identity_sha256=mask_identity.sha256,
+                identifier_sha256=identifier_sha256,
+            ),
+        ),
+        conditional=ConditionalRequest(
+            source_url=source_url,
+            etag='"source-v1"',
+        ),
+    )
+
+    assert [item["url"] for item in transport.calls] == [
+        source_url,
+        mask_url,
+    ]
+    assert [policy.allowed_origins for policy in transport.policies] == [
+        ("https://grid.example.es",),
+        ("https://mask.example.es",),
+    ]
+    datasets = [
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "dataset"
+    ]
+    assert len(datasets) == 1
+    assert datasets[0].metadata["materialization_input"] is True
+    assert datasets[0].metadata["input_layer"] == (
+        "grid_100km_surf_cyl"
+    )
+    assert datasets[0].metadata["derivation"][
+        "raw_source_retained"
+    ] is False
+    observations = [
+        item
+        for item in result.artifacts
+        if item.artifact_kind == "metadata"
+    ]
+    source_observation = next(
+        item
+        for item in observations
+        if item.metadata["derivation_role"] == "source_dataset"
+    )
+    with store.open_blob(source_observation.blob.storage_key) as stream:
+        source_document = json.load(stream)
+    assert source_observation.role == "input"
+    assert source_observation.source_url == source_url
+    assert source_observation.final_url == source_url
+    assert source_observation.upstream_etag == '"source-v2"'
+    assert source_document["sha256"] == hashlib.sha256(
+        source_payload
+    ).hexdigest()
+    assert source_document["retained"] is False
+    assert source_document["discarded_after_derivation"] is True
+    mask = next(
+        item
+        for item in observations
+        if item.metadata["derivation_role"] == "spatial_mask"
+    )
+    assert mask.metadata["derivation_role"] == "spatial_mask"
+    assert captured_source_path is not None
+    assert captured_source_path.exists() is False
+    source_digest = hashlib.sha256(source_payload).hexdigest()
+    assert (
+        store.root
+        / "blobs"
+        / "sha256"
+        / source_digest[:2]
+        / source_digest
+    ).exists() is False
+    assert list((tmp_path / "transient" / "staging").iterdir()) == []
+    assert list((tmp_path / "transient" / "blobs" / "sha256").iterdir()) == []
+    assert result.feature_count == 19
+    assert result.stats["identifier_sha256"] == identifier_sha256
+    assert result.stats["composite_snapshot_full_refresh"] is True
+    assert result.stats["raw_source_retained"] is False
+    manifest = read_json_artifact(store, result, "manifest")
+    assert manifest["materialization"]["dataset_sha256"] == (
+        derived_blob.sha256
+    )
+    assert manifest["materialization"]["input_layer"] == (
+        "grid_100km_surf_cyl"
+    )
+
+
+def test_masked_geopackage_304_still_validates_independent_mask(
+    store,
+    limits,
+    monkeypatch,
+    tmp_path,
+):
+    source_url = "https://grid.example.es/grid.gpkg"
+    mask_url = "https://mask.example.es/cyl.geojson"
+    mask_payload = b"{}"
+    mask_identity = MaskIdentity(
+        sha256="a" * 64,
+        feature_id="ES41",
+        properties={"codnut2": "ES41"},
+        coordinate_pairs=5,
+    )
+    monkeypatch.setattr(
+        acquisition_module,
+        "validate_reviewed_mask",
+        lambda *_args: mask_identity,
+    )
+    monkeypatch.setattr(
+        acquisition_module,
+        "derive_masked_geopackage_files",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a dataset 304 must not run the expensive derivation"
+        ),
+    )
+
+    def handler(url, etag, modified):
+        assert modified is None
+        if url == source_url:
+            assert etag == '"source-v1"'
+            return Response(status=304, etag='"source-v1"')
+        assert url == mask_url
+        assert etag is None
+        return Response(mask_payload, "application/json")
+
+    transport = FakeTransport(handler)
+    result = ReferenceAcquisitionPipeline(
+        store,
+        limits=limits,
+        downloader_factory=transport,
+        transient_root=tmp_path / "transient",
+    ).acquire(
+        candidate(
+            "download",
+            remote_name="grid_100km_surf",
+            endpoint=source_url,
+            config=masked_geopackage_config(mask_url),
+        ),
+        conditional=ConditionalRequest(
+            source_url=source_url,
+            etag='"source-v1"',
+        ),
+    )
+
+    assert result.not_modified is True
+    assert [item["url"] for item in transport.calls] == [
+        source_url,
+        mask_url,
+    ]
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].metadata["mask_identity"][
+        "sha256"
+    ] == mask_identity.sha256
+    assert result.stats == {
+        "not_modified": True,
+        "composite_inputs_checked": True,
+        "mask_identity_sha256": mask_identity.sha256,
+        "style_count": 0,
+    }
+
+
+def test_masked_geopackage_requires_nonpersistent_transient_storage(
+    store,
+    limits,
+):
+    selected = reviewed_eurostat_grid_candidate()
+    transport = FakeTransport(
+        lambda *_args: pytest.fail(
+            "missing transient storage must fail before network access"
+        )
+    )
+
+    with pytest.raises(AcquisitionConfigurationError) as error:
+        ReferenceAcquisitionPipeline(
+            store,
+            limits=limits,
+            downloader_factory=transport,
+        ).acquire(selected)
+
+    assert error.value.code == "transient_storage_unavailable"
+    assert transport.calls == []
+
+
+def test_transient_storage_must_not_overlap_persistent_store(
+    store,
+    limits,
+):
+    for root in (store.root, store.root / "transient"):
+        with pytest.raises(ValueError, match="must not overlap"):
+            ReferenceAcquisitionPipeline(
+                store,
+                limits=limits,
+                transient_root=root,
+            )
+
+
+def test_transient_source_cleanup_failure_fails_closed(
+    tmp_path,
+    monkeypatch,
+):
+    original_unlink = Path.unlink
+    transient_root = tmp_path / "transient"
+
+    def fail_transient_unlink(path, *args, **kwargs):
+        if path.parent == transient_root / "staging":
+            raise OSError("injected transient unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    with ReferenceBlobStore(transient_root) as transient:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(Path, "unlink", fail_transient_unlink)
+            with pytest.raises(AcquisitionPersistenceError) as error:
+                with acquisition_module._strict_staging(
+                    transient,
+                    max_bytes=1024,
+                ) as staging:
+                    staging.write(b"raw source")
+
+        assert error.value.code == "staging_cleanup_failed"
+        leftovers = list((transient_root / "staging").iterdir())
+        assert len(leftovers) == 1
+        leftovers[0].unlink()
+
+
+def test_strict_staging_does_not_suppress_body_failure(tmp_path):
+    with ReferenceBlobStore(tmp_path / "store") as strict_store:
+        with pytest.raises(RuntimeError, match="injected body failure"):
+            with acquisition_module._strict_staging(
+                strict_store,
+                max_bytes=1024,
+            ) as staging:
+                staging.write(b"partial")
+                raise RuntimeError("injected body failure")
+
+        assert list((strict_store.root / "staging").iterdir()) == []
+
+
+def test_reviewed_eurostat_grid_rechecks_changed_style_after_dataset_304(
+    store,
+    limits,
+    monkeypatch,
+    tmp_path,
+):
+    selected = reviewed_eurostat_grid_candidate()
+    transform = selected.config["vector_transform"]
+    mask_identity = MaskIdentity(
+        sha256=transform["mask_identity_sha256"],
+        feature_id="1124753",
+        properties={"codnut2": "ES41"},
+        coordinate_pairs=5,
+    )
+    monkeypatch.setattr(
+        acquisition_module,
+        "validate_reviewed_mask",
+        lambda *_args: mask_identity,
+    )
+    monkeypatch.setattr(
+        acquisition_module,
+        "derive_masked_geopackage_files",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a dataset 304 must not run the expensive derivation"
+        ),
+    )
+    style_names = tuple(
+        item["remote_name"] for item in selected.config["styles"]
+    )
+    changed_style = sld_payload(
+        *style_names,
+        layer_name=selected.config["style_layer_name"],
+    )
+
+    def handler(url, etag, _modified):
+        if url == selected.endpoint_url:
+            assert etag == '"source-v1"'
+            return Response(
+                status=304,
+                etag='"source-v1"',
+            )
+        if url == transform["mask_url"]:
+            assert etag is None
+            return Response(b"{}", "application/json")
+        query = parse_qs(urlsplit(url).query)
+        assert query["request"] == ["GetStyles"]
+        assert query["layers"] == [
+            selected.config["style_layer_name"]
+        ]
+        return Response(
+            changed_style,
+            "application/vnd.ogc.sld+xml",
+        )
+
+    with pytest.raises(AcquisitionValidationError) as error:
+            ReferenceAcquisitionPipeline(
+                store,
+                limits=limits,
+                downloader_factory=FakeTransport(handler),
+                transient_root=tmp_path / "transient",
+            ).acquire(
+            selected,
+            conditional=ConditionalRequest(
+                source_url=selected.endpoint_url,
+                etag='"source-v1"',
+            ),
+        )
+
+    assert error.value.code == "reviewed_style_changed"
+    changed_digest = hashlib.sha256(changed_style).hexdigest()
+    assert (
+        store.root
+        / "blobs"
+        / "sha256"
+        / changed_digest[:2]
+        / changed_digest
+    ).exists() is False
 
 
 def test_conditional_headers_are_not_reused_for_a_different_url(store, limits):

@@ -198,6 +198,177 @@ _MITECO_WMS_TERMS = (
     "https://www.miteco.gob.es/es/cartografia-y-sig/ide/"
     "directorio_datos_servicios/caracteristicas_wms.html"
 )
+_IDECYL_GRID_WMS = "https://idecyl.jcyl.es/geoserver/rejillas/wms"
+_IGN_CASTILLA_Y_LEON_MASK_URL = (
+    "https://api-features.ign.es/collections/administrativeunit/items"
+    "?f=json&codnut2=ES41&nationallevelname=Comunidad%20aut%C3%B3noma"
+    "&limit=10&crs=http%3A%2F%2Fwww.opengis.net%2Fdef%2Fcrs%2FOGC"
+    "%2F1.3%2FCRS84"
+)
+_IGN_CASTILLA_Y_LEON_MASK_IDENTITY_SHA256 = (
+    "7512d51bbe505f72390c3402c9e7c28132563efb907a174bb2b0c4c5908b8bd3"
+)
+_EUROSTAT_GRID_PARITY = {
+    "100": (
+        19,
+        "3b275f7d129ece404f5d30945cfaa01106ac4bf4ae342bc4410a754fc53724e8",
+        "d3cb61a8a2cdff30a7cb756e90ed34165a86d398a1fe7a56bc14e052336ecca8",
+    ),
+    "50": (
+        59,
+        "31dc8e9032f005208e73fe9c0953a8705baa939f073daf173d407fb90245ed29",
+        "08616c3298860350c7493d206841c1c89a51db21d4e259f956b8cf705896985e",
+    ),
+    "20": (
+        295,
+        "2fec8c573394fb627dca042d857e3add71d49c09914c4769270950b2e80a0e87",
+        "88cc3325e6714c99ea8a4d278ec4d06660f54e71b19579bc6a1fba544b6ce563",
+    ),
+    "5": (
+        4_046,
+        "3a1d8be941eca72ebc415920cfcd023a7e40ed6468b42510a68ba40627e996bf",
+        "ad798dbc48fc6f9d8e33c756225a796b556e068f7042bdc8eb8dac7e698e96ea",
+    ),
+    "2": (
+        24_323,
+        "834260837e2ad9b0bcd186175e23ba143faa7e41718afca9017f331ef3435a5f",
+        "6d7006192433e64ba98a108c3e2d84da4fa6f850dd5ddf7d5063a50952907dff",
+    ),
+    "1": (
+        95_818,
+        "5f7ec0b6a6fc773ead27954380eb54aa63a6ba874ce8e71c7a349333acd7266c",
+        "aa5bc932ff75bfa82a2d07766461b7f7c7bc98bae4334c312344a59b7c5c5031",
+    ),
+}
+_EUROSTAT_GRID_STYLES = [
+    {
+        "catalog_style_source_key": "rejilla_eurostat_cyl_blanco",
+        "remote_name": "rejilla_eurostat_cyl_blanco",
+    },
+    {
+        "catalog_style_source_key": "rejilla_eurostat_cyl_fucsia",
+        "remote_name": "rejilla_eurostat_cyl_fucsia",
+    },
+    {
+        "catalog_style_source_key": "rejilla_eurostat_cyl_morado",
+        "remote_name": "rejilla_eurostat_cyl_morado",
+    },
+]
+
+
+def _eurostat_grid_style_evidence(
+    catalog_remote_name: str,
+) -> dict[str, Any]:
+    return {
+        "style_parity_status": "exact_original_sld_required",
+        "original_wms_endpoint_url": _IDECYL_GRID_WMS,
+        "original_wms_layer_name": catalog_remote_name,
+        "catalog_default_style_source_key": (
+            "rejilla_eurostat_cyl_morado"
+        ),
+        "original_wms_style_name": "rejilla_eurostat_cyl_morado",
+        "catalog_styles": [
+            {
+                **item,
+                "is_default": item["catalog_style_source_key"]
+                == "rejilla_eurostat_cyl_morado",
+            }
+            for item in _EUROSTAT_GRID_STYLES
+        ],
+    }
+
+
+def _eurostat_grid_sources() -> tuple[_ReviewedDatasetSource, ...]:
+    sources: list[_ReviewedDatasetSource] = []
+    for resolution, (
+        feature_count,
+        identifier_sha256,
+        style_bundle_sha256,
+    ) in _EUROSTAT_GRID_PARITY.items():
+        catalog_remote_name = (
+            f"rejilla_eurostat_cyl_{resolution}x{resolution}"
+        )
+        source_layer = f"grid_{resolution}km_surf"
+        sources.append(
+            _ReviewedDatasetSource(
+                profile=(
+                    f"eurostat-gisco-grid-{resolution}km-cyl-exact-v1"
+                ),
+                catalog_endpoint_url=_IDECYL_GRID_WMS,
+                catalog_remote_name=catalog_remote_name,
+                protocol="download",
+                target_kind="vector",
+                endpoint_url=(
+                    "https://gisco-services.ec.europa.eu/grid/"
+                    f"{source_layer}.gpkg"
+                ),
+                remote_name=source_layer,
+                sync_strategy="full_snapshot",
+                config={
+                    "data_format": "geopackage",
+                    "media_type": "application/geopackage+sqlite3",
+                    "source_retention": "discard_after_derivation",
+                    "style_endpoint_url": _IDECYL_GRID_WMS,
+                    "style_layer_name": catalog_remote_name,
+                    "style_bundle_sha256": style_bundle_sha256,
+                    "styles": deepcopy(_EUROSTAT_GRID_STYLES),
+                    "vector_transform": {
+                        "schema": "reference-masked-geopackage/v1",
+                        "mask_url": _IGN_CASTILLA_Y_LEON_MASK_URL,
+                        "mask_media_type": "application/json",
+                        "mask_max_bytes": 8 * 1024 * 1024,
+                        "mask_identity_sha256": (
+                            _IGN_CASTILLA_Y_LEON_MASK_IDENTITY_SHA256
+                        ),
+                        "source_layer": source_layer,
+                        "output_layer": f"{source_layer}_cyl",
+                        "selected_fields": [
+                            "GRD_ID",
+                            "X_LLC",
+                            "Y_LLC",
+                        ],
+                        "identifier_field": "GRD_ID",
+                        "cell_size_meters": int(resolution) * 1_000,
+                        "expected_feature_count": feature_count,
+                        "expected_identifier_sha256": identifier_sha256,
+                        "source_crs": "EPSG:3035",
+                        "mask_target_crs": "EPSG:3035",
+                        "predicate": "intersects",
+                        "geometry_mode": (
+                            "preserve-whole-source-features"
+                        ),
+                    },
+                },
+                equivalence={
+                    "scope": "castilla-y-leon-whole-intersecting-cells",
+                    "official_dataset": (
+                        f"Eurostat GISCO {resolution} km surface grid"
+                    ),
+                    "official_boundary": (
+                        "IGN administrative unit ES41, national level "
+                        "Comunidad autónoma"
+                    ),
+                    "selected_fields": ["GRD_ID", "X_LLC", "Y_LLC"],
+                    "population_fields_excluded": True,
+                    "raw_source_retained": False,
+                    "transient_source_processing": True,
+                    "whole_source_features_preserved": True,
+                    "expected_feature_count": feature_count,
+                    "expected_identifier_sha256": identifier_sha256,
+                    "expected_style_bundle_sha256": (
+                        style_bundle_sha256
+                    ),
+                    "expected_style_evidence": (
+                        _eurostat_grid_style_evidence(
+                            catalog_remote_name
+                        )
+                    ),
+                },
+            )
+        )
+    return tuple(sources)
+
+
 _INES_HISTORICAL_STYLE_REFERENCE = {
     "source_kind": "official-historical-pdf",
     "url": (
@@ -249,6 +420,7 @@ def _required_miteco_mvt_style_reference(
 _REVIEWED_DATASET_SOURCES = {
     (item.catalog_endpoint_url, item.catalog_remote_name): item
     for item in (
+        *_eurostat_grid_sources(),
         _ReviewedDatasetSource(
             profile="catastro-cadastral-parcels-castilla-y-leon-atom-v1",
             catalog_endpoint_url=_CATASTRO_CATALOG_ENDPOINT,
@@ -879,6 +1051,29 @@ def _reviewed_dataset_source_config(
     reviewed: _ReviewedDatasetSource,
 ) -> dict[str, Any]:
     config = deepcopy(reviewed.config)
+    style_evidence = _reviewed_style_evidence(
+        catalog_endpoint,
+        layer,
+    )
+    expected_style_evidence = reviewed.equivalence.get(
+        "expected_style_evidence"
+    )
+    if expected_style_evidence is not None:
+        if not isinstance(expected_style_evidence, dict):
+            raise SourceDiscoveryError(
+                "reviewed dataset style evidence is invalid",
+                code="reviewed_dataset_style_changed",
+            )
+        observed_expected = deepcopy(expected_style_evidence)
+        observed_expected["style_parity_status"] = style_evidence[
+            "style_parity_status"
+        ]
+        if observed_expected != style_evidence:
+            raise SourceDiscoveryError(
+                "reviewed dataset style identities no longer match the catalog",
+                code="reviewed_dataset_style_changed",
+            )
+        style_evidence = deepcopy(expected_style_evidence)
     config["reviewed_equivalence"] = {
         "schema": _REVIEWED_DATASET_SOURCE_SCHEMA,
         "profile": reviewed.profile,
@@ -890,12 +1085,56 @@ def _reviewed_dataset_source_config(
         "selected_remote_name": reviewed.remote_name,
         "target_kind": reviewed.target_kind,
         **deepcopy(reviewed.equivalence),
-        "style_evidence": _reviewed_style_evidence(
-            catalog_endpoint,
-            layer,
-        ),
+        "style_evidence": style_evidence,
     }
     return config
+
+
+def reviewed_cross_origin_style_source(
+    candidate: SourceCandidate,
+) -> bool:
+    """Prove a cross-origin style request against the immutable allowlist."""
+
+    raw_equivalence = candidate.config.get("reviewed_equivalence")
+    if not isinstance(raw_equivalence, dict):
+        return False
+    profile = raw_equivalence.get("profile")
+    if not isinstance(profile, str):
+        return False
+    reviewed = _REVIEWED_DATASET_SOURCES_BY_PROFILE.get(profile)
+    if reviewed is None:
+        return False
+    expected_style_evidence = reviewed.equivalence.get(
+        "expected_style_evidence"
+    )
+    if not isinstance(expected_style_evidence, dict):
+        return False
+    expected_equivalence = {
+        "schema": _REVIEWED_DATASET_SOURCE_SCHEMA,
+        "profile": reviewed.profile,
+        "catalog_protocol": "wms",
+        "catalog_endpoint_url": reviewed.catalog_endpoint_url,
+        "catalog_remote_name": reviewed.catalog_remote_name,
+        "selected_protocol": reviewed.protocol,
+        "selected_endpoint_url": reviewed.endpoint_url,
+        "selected_remote_name": reviewed.remote_name,
+        "target_kind": reviewed.target_kind,
+        **deepcopy(reviewed.equivalence),
+        "style_evidence": deepcopy(expected_style_evidence),
+    }
+    expected_candidate = _candidate(
+        protocol=reviewed.protocol,
+        target_kind=reviewed.target_kind,
+        endpoint_url=reviewed.endpoint_url,
+        remote_name=reviewed.remote_name,
+        sync_strategy=reviewed.sync_strategy,
+        priority=_REVIEWED_DATASET_SOURCE_PRIORITY,
+        config={
+            **deepcopy(reviewed.config),
+            "reviewed_equivalence": expected_equivalence,
+        },
+    )
+    return candidate == expected_candidate
 
 
 def _reviewed_style_evidence(
