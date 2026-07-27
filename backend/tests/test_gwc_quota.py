@@ -8,6 +8,7 @@ import pytest
 from app.core.config import Settings
 from app.reference_layers import gwc_quota as quota_module
 from app.reference_layers.geoserver_admin import (
+    GeoServerHealth,
     GeoWebCacheDiskQuota,
     GeoWebCacheFileBlobStore,
     expected_geowebcache_tile_blob_store,
@@ -16,7 +17,9 @@ from app.reference_layers.gwc_quota import (
     GeoWebCacheQuotaSafetyError,
     build_parser,
     cache_capacity_report,
+    cache_filesystem_block_size,
     quota_status,
+    runtime_contract_status,
 )
 
 GIB = 1024**3
@@ -56,8 +59,13 @@ class FakeAdmin:
         self.read_calls = 0
         self.read_blob_store_calls = 0
         self.ensure_blob_store_calls: list[int] = []
+        self.ensure_block_size_migration_calls: list[bool] = []
         self.configure_calls: list[dict[str, object]] = []
         self.call_order: list[str] = []
+
+    def health(self) -> GeoServerHealth:
+        self.call_order.append("health")
+        return GeoServerHealth(version="3.0.0")
 
     def read_geowebcache_file_blob_stores(
         self,
@@ -75,9 +83,13 @@ class FakeAdmin:
         self,
         *,
         file_system_block_size: int,
+        allow_file_system_block_size_migration: bool = False,
     ) -> GeoWebCacheFileBlobStore:
         self.call_order.append("ensure_blob_store")
         self.ensure_blob_store_calls.append(file_system_block_size)
+        self.ensure_block_size_migration_calls.append(
+            allow_file_system_block_size_migration
+        )
         return self.after_blob_store or expected_geowebcache_tile_blob_store(
             file_system_block_size=file_system_block_size,
         )
@@ -166,7 +178,7 @@ def test_quota_command_is_dry_run_by_default_and_reports_mismatch(
         client=admin,  # type: ignore[arg-type]
     )
 
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == 3
     assert result["mode"] == "dry-run"
     assert result["verified"] is False
     assert result["blob_store"]["verified"] is False  # type: ignore[index]
@@ -251,6 +263,7 @@ def test_quota_apply_checks_capacity_then_uses_exact_configuration(
     assert admin.ensure_blob_store_calls == [
         result["capacity"]["filesystem_block_size_bytes"]  # type: ignore[index]
     ]
+    assert admin.ensure_block_size_migration_calls == [False]
     assert admin.configure_calls == [
         {
             "quota_gib": 20,
@@ -264,6 +277,168 @@ def test_quota_apply_checks_capacity_then_uses_exact_configuration(
         "ensure_blob_store",
         "configure_quota",
     ]
+
+
+def test_quota_apply_audits_block_size_only_migration_on_empty_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.shutil.disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+    )
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.os.fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_bsize=8192,
+            f_frsize=8192,
+            f_files=10_000_000,
+            f_favail=10_000_000,
+        ),
+    )
+    old_store = expected_geowebcache_tile_blob_store(
+        file_system_block_size=4096,
+    )
+    new_store = expected_geowebcache_tile_blob_store(
+        file_system_block_size=8192,
+    )
+    admin = FakeAdmin(
+        before=quota(),
+        before_blob_stores=(old_store,),
+        after_blob_store=new_store,
+    )
+
+    result = quota_status(
+        cache_path=cache,
+        configured=configured(),
+        apply=True,
+        client=admin,  # type: ignore[arg-type]
+    )
+
+    blob_store = result["blob_store"]
+    assert blob_store["block_size_migration_required"] is True  # type: ignore[index]
+    assert blob_store["block_size_migration_permitted"] is True  # type: ignore[index]
+    assert blob_store["block_size_migrated"] is True  # type: ignore[index]
+    assert admin.ensure_blob_store_calls == [8192]
+    assert admin.ensure_block_size_migration_calls == [True]
+
+
+def test_quota_dry_run_never_permits_block_size_migration_with_tiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    (cache / "tile.png").write_bytes(b"tile")
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.shutil.disk_usage",
+        lambda _path: _ntuple_diskusage(100 * GIB, 25 * GIB, 75 * GIB),
+    )
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.os.fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_bsize=8192,
+            f_frsize=8192,
+            f_files=10_000_000,
+            f_favail=10_000_000,
+        ),
+    )
+    admin = FakeAdmin(
+        before=quota(),
+        before_blob_stores=(
+            expected_geowebcache_tile_blob_store(
+                file_system_block_size=4096,
+            ),
+        ),
+    )
+
+    result = quota_status(
+        cache_path=cache,
+        configured=configured(),
+        client=admin,  # type: ignore[arg-type]
+    )
+
+    blob_store = result["blob_store"]
+    assert blob_store["block_size_migration_required"] is True  # type: ignore[index]
+    assert blob_store["block_size_migration_permitted"] is False  # type: ignore[index]
+    assert blob_store["block_size_migrated"] is False  # type: ignore[index]
+
+
+def test_runtime_contract_actively_verifies_store_quota_and_block_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    monkeypatch.setattr(
+        "app.reference_layers.gwc_quota.os.fstatvfs",
+        lambda _descriptor: SimpleNamespace(
+            f_bsize=4096,
+            f_frsize=4096,
+        ),
+    )
+    expected = expected_geowebcache_tile_blob_store(
+        file_system_block_size=4096,
+    )
+    admin = FakeAdmin(
+        before=quota(),
+        before_blob_stores=(expected,),
+    )
+
+    report = runtime_contract_status(
+        cache_path=cache,
+        configured=configured(),
+        client=admin,  # type: ignore[arg-type]
+    )
+
+    assert report["verified"] is True
+    assert report["filesystem_block_size_bytes"] == 4096
+    assert admin.call_order == [
+        "health",
+        "read_blob_stores",
+        "read_quota",
+    ]
+
+    admin.before_blob_stores = ()
+    with pytest.raises(
+        GeoWebCacheQuotaSafetyError,
+        match="FileBlobStore contract",
+    ):
+        runtime_contract_status(
+            cache_path=cache,
+            configured=configured(),
+            client=admin,  # type: ignore[arg-type]
+        )
+
+
+def test_cache_filesystem_block_size_rejects_unstable_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "gwc"
+    cache.mkdir()
+    real_fstat = quota_module.os.fstat
+    calls = 0
+
+    def changed_fstat(descriptor: int):
+        nonlocal calls
+        metadata = real_fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            values = list(metadata)
+            values[1] = metadata.st_ino + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(quota_module.os, "fstat", changed_fstat)
+
+    with pytest.raises(
+        GeoWebCacheQuotaSafetyError,
+        match="unstable",
+    ):
+        cache_filesystem_block_size(cache)
 
 
 def test_quota_apply_fails_before_mutation_without_capacity_margin(

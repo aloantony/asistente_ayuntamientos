@@ -34,8 +34,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-      gwc-bootstrap:
-        condition: service_completed_successfully
+      gwc-gateway:
+        condition: service_healthy
         restart: true
 
   worker:
@@ -57,8 +57,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-      gwc-bootstrap:
-        condition: service_completed_successfully
+      gwc-gateway:
+        condition: service_healthy
         restart: true
 
   reference-worker:
@@ -78,8 +78,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      gwc-bootstrap:
-        condition: service_completed_successfully
+      gwc-gateway:
+        condition: service_healthy
         restart: true
 
   reference-scheduler:
@@ -100,8 +100,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      gwc-bootstrap:
-        condition: service_completed_successfully
+      gwc-gateway:
+        condition: service_healthy
         restart: true
 
   frontend:
@@ -138,8 +138,22 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  # Owns the private network namespace shared by GeoServer and its gate. The
+  # only host mapping targets gateway port 8081; GeoServer port 8080 is never
+  # published, so a stopped or unhealthy gateway fails closed.
+  geoserver-network:
+    image: alpine:3.21
+    user: "65534:65534"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    command: ["tail", "-f", "/dev/null"]
+    ports:
+      - "127.0.0.1:${GEOSERVER_PORT:-8081}:8081"
+
   geoserver:
     image: docker.osgeo.org/geoserver:3.0.0
+    network_mode: service:geoserver-network
     environment:
       GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
       GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
@@ -151,8 +165,6 @@ services:
       # This path stores persistent GWC configuration, not the tile cache.
       # The explicit FileBlobStore below points tiles at the separate v3 mount.
       GEOWEBCACHE_CACHE_DIR: /opt/geoserver_data/gwc
-    ports:
-      - "127.0.0.1:${GEOSERVER_PORT:-8081}:8080"
     volumes:
       - geoserver_data:/opt/geoserver_data
       # Versioned tile-only volume. The GWC REST bootstrap configures this
@@ -164,6 +176,9 @@ services:
           nocopy: true
       - reference_artifacts:/mnt/reference_artifacts:ro
     depends_on:
+      geoserver-network:
+        condition: service_started
+        restart: true
       postgres:
         condition: service_healthy
 
@@ -180,8 +195,11 @@ services:
   gwc-bootstrap:
     build:
       context: ./backend
-    environment: *gwc-admin-environment
-    network_mode: host
+    environment:
+      <<: *gwc-admin-environment
+      # Private loopback in the shared namespace; never published on the host.
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
+    network_mode: service:geoserver-network
     restart: "no"
     command:
       [
@@ -207,12 +225,62 @@ services:
         # restart chain above then restarts consumers only after success.
         restart: true
 
+  gwc-gateway:
+    build:
+      context: ./backend
+    user: "65534:${REFERENCE_STORAGE_GID:-2000}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      <<: *gwc-admin-environment
+      GWC_GATEWAY_PUBLIC_PORT: ${GEOSERVER_PORT:-8081}
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
+    network_mode: service:geoserver-network
+    restart: unless-stopped
+    command:
+      [
+        "uvicorn",
+        "app.reference_layers.gwc_gateway:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8081",
+        "--no-access-log",
+      ]
+    volumes:
+      - type: volume
+        source: geowebcache_tile_cache_v3
+        target: /var/lib/geowebcache
+        read_only: true
+        volume:
+          nocopy: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-m",
+          "app.reference_layers.gwc_gateway",
+          "--healthcheck",
+        ]
+      interval: 5s
+      timeout: 4s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      gwc-bootstrap:
+        condition: service_completed_successfully
+        restart: true
+
   gwc-ops:
     profiles: ["operations"]
     build:
       context: ./backend
-    environment: *gwc-admin-environment
-    network_mode: host
+    environment:
+      <<: *gwc-admin-environment
+      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
+    network_mode: service:geoserver-network
     command:
       [
         "python",
@@ -228,6 +296,9 @@ services:
         read_only: true
         volume:
           nocopy: true
+    depends_on:
+      geoserver:
+        condition: service_started
 
   siur-recovery:
     profiles: ["operations"]
