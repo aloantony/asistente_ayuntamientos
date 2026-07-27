@@ -32,6 +32,7 @@ from app.reference_layers.models import (
 )
 from test_reference_mirror_lifecycle import (
     _definition,
+    _physical_transition_verifier,
     _promote_cross_snapshot_versions,
     _seed_bootstrap,
 )
@@ -292,6 +293,7 @@ def test_rollback_dry_run_is_generation_fenced_and_never_appends_event(
         actor_user_id=actor.id,
         reason="renderer regression confirmed by operator",
         apply=False,
+        physical_verifier=_physical_transition_verifier,
     )
 
     assert result["mode"] == "dry-run"
@@ -342,6 +344,7 @@ def test_rollback_apply_records_active_actor_and_reason(
         actor_user_id=actor.id,
         reason=reason,
         apply=True,
+        physical_verifier=_physical_transition_verifier,
     )
 
     assert result["mode"] == "apply"
@@ -382,6 +385,7 @@ def test_transition_rejects_inactive_actor_before_lifecycle_mutation(
             actor_user_id=actor.id,
             reason="this must never be recorded",
             apply=True,
+            physical_verifier=_physical_transition_verifier,
         )
 
     db.rollback()
@@ -421,6 +425,7 @@ def test_reactivation_dry_run_recovers_only_a_previously_served_version(
         actor_user_id=actor.id,
         reason="recover validated pre-maintenance version",
         apply=False,
+        physical_verifier=_physical_transition_verifier,
     )
 
     assert result["transition"]["action"] == "reactivate"

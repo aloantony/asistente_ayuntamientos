@@ -1,9 +1,11 @@
 """Transactional lifecycle for locally mirrored reference-layer deliveries.
 
-This module deliberately stops at database coordination.  Workers perform
-network and storage I/O outside these short transactions, holding only an
-expiring lease token.  The token and the layer generation fence stale workers
-from finishing or publishing obsolete work.
+Acquisition workers perform network and storage I/O outside short database
+transactions, holding only an expiring lease token.  The token and the layer
+generation fence stale workers from finishing or publishing obsolete work.
+Operator rollback/reactivation is the deliberate exception: a required,
+bounded verifier rechecks retained local storage and the renderer while the
+layer transition is locked, so stale physical state cannot be activated.
 """
 
 from __future__ import annotations
@@ -247,12 +249,38 @@ class LocalMetadataTransitionVerification:
     document_size_bytes: int
 
 
+@dataclass(frozen=True)
+class DeliveryPhysicalTransitionVerification:
+    """Bounded proof that a stored delivery is still physically servable."""
+
+    version_id: int
+    primary_asset_id: int
+    primary_sha256: str
+    renderer: Literal["geoserver", "tile_archive"]
+    render_transport: Literal[
+        "direct_geoserver_wms",
+        "local_tile_archive",
+    ]
+    resource_name: str | None
+    verified_filesystem_asset_ids: tuple[int, ...]
+    rendered_style_names: tuple[str | None, ...]
+    rendered_tile_asset_ids: tuple[int, ...]
+
+
 class LocalMetadataTransitionVerifier(Protocol):
     def __call__(
         self,
         db: Session,
         version: ReferenceDeliveryVersion,
     ) -> LocalMetadataTransitionVerification: ...
+
+
+class DeliveryPhysicalTransitionVerifier(Protocol):
+    def __call__(
+        self,
+        db: Session,
+        version: ReferenceDeliveryVersion,
+    ) -> DeliveryPhysicalTransitionVerification: ...
 
 
 def build_mirror_bootstrap_plan(
@@ -1268,6 +1296,7 @@ def preview_rollback_delivery_version(
     expected_generation: int,
     reason: str,
     metadata_verifier: LocalMetadataTransitionVerifier,
+    physical_verifier: DeliveryPhysicalTransitionVerifier,
 ) -> DeliveryTransitionPreview:
     """Validate an operator rollback without appending an event.
 
@@ -1278,6 +1307,7 @@ def preview_rollback_delivery_version(
 
     _validate_expected_generation(expected_generation)
     _require_metadata_transition_verifier(metadata_verifier)
+    _require_physical_transition_verifier(physical_verifier)
     _bounded_required_text(reason, "reason", 10_000)
     try:
         state, _, version, metadata_asset = (
@@ -1294,6 +1324,11 @@ def preview_rollback_delivery_version(
             version=version,
             metadata_asset=metadata_asset,
             metadata_verifier=metadata_verifier,
+        )
+        _verify_transition_physical_delivery(
+            db,
+            version=version,
+            physical_verifier=physical_verifier,
         )
         return DeliveryTransitionPreview(
             provider_key=provider_key,
@@ -1317,6 +1352,7 @@ def rollback_delivery_version(
     expected_generation: int,
     reason: str,
     metadata_verifier: LocalMetadataTransitionVerifier,
+    physical_verifier: DeliveryPhysicalTransitionVerifier,
     actor_id: int | None = None,
     now: datetime | None = None,
 ) -> PromotionResult:
@@ -1325,6 +1361,7 @@ def rollback_delivery_version(
     moment = _moment(now)
     _validate_expected_generation(expected_generation)
     _require_metadata_transition_verifier(metadata_verifier)
+    _require_physical_transition_verifier(physical_verifier)
     reason = _bounded_required_text(reason, "reason", 10_000)
     try:
         state, latest, version, metadata_asset = (
@@ -1341,6 +1378,11 @@ def rollback_delivery_version(
             version=version,
             metadata_asset=metadata_asset,
             metadata_verifier=metadata_verifier,
+        )
+        _verify_transition_physical_delivery(
+            db,
+            version=version,
+            physical_verifier=physical_verifier,
         )
         promotion, generation = _append_promotion(
             db,
@@ -1446,11 +1488,13 @@ def preview_reactivate_delivery(
     expected_generation: int,
     reason: str,
     metadata_verifier: LocalMetadataTransitionVerifier,
+    physical_verifier: DeliveryPhysicalTransitionVerifier,
 ) -> DeliveryTransitionPreview:
     """Validate recovery of a disabled delivery without changing state."""
 
     _validate_expected_generation(expected_generation)
     _require_metadata_transition_verifier(metadata_verifier)
+    _require_physical_transition_verifier(physical_verifier)
     _bounded_required_text(reason, "reason", 10_000)
     try:
         _, _, version, _, metadata_asset = (
@@ -1467,6 +1511,11 @@ def preview_reactivate_delivery(
             version=version,
             metadata_asset=metadata_asset,
             metadata_verifier=metadata_verifier,
+        )
+        _verify_transition_physical_delivery(
+            db,
+            version=version,
+            physical_verifier=physical_verifier,
         )
         return DeliveryTransitionPreview(
             provider_key=provider_key,
@@ -1490,6 +1539,7 @@ def reactivate_delivery(
     expected_generation: int,
     reason: str,
     metadata_verifier: LocalMetadataTransitionVerifier,
+    physical_verifier: DeliveryPhysicalTransitionVerifier,
     actor_id: int | None = None,
     now: datetime | None = None,
 ) -> PromotionResult:
@@ -1504,6 +1554,7 @@ def reactivate_delivery(
     moment = _moment(now)
     _validate_expected_generation(expected_generation)
     _require_metadata_transition_verifier(metadata_verifier)
+    _require_physical_transition_verifier(physical_verifier)
     reason = _bounded_required_text(reason, "reason", 10_000)
     try:
         state, latest, version, source, metadata_asset = (
@@ -1520,6 +1571,11 @@ def reactivate_delivery(
             version=version,
             metadata_asset=metadata_asset,
             metadata_verifier=metadata_verifier,
+        )
+        _verify_transition_physical_delivery(
+            db,
+            version=version,
+            physical_verifier=physical_verifier,
         )
         source.enabled = True
         source.is_primary = True
@@ -2003,6 +2059,15 @@ def _require_metadata_transition_verifier(
         )
 
 
+def _require_physical_transition_verifier(
+    physical_verifier: DeliveryPhysicalTransitionVerifier,
+) -> None:
+    if not callable(physical_verifier):
+        raise MirrorPromotionConflict(
+            "delivery physical transition verifier is required"
+        )
+
+
 def _verify_transition_local_metadata(
     db: Session,
     *,
@@ -2028,6 +2093,142 @@ def _verify_transition_local_metadata(
     ):
         raise MirrorPromotionConflict(
             "delivery local metadata transition verification is invalid"
+        )
+
+
+def _verify_transition_physical_delivery(
+    db: Session,
+    *,
+    version: ReferenceDeliveryVersion,
+    physical_verifier: DeliveryPhysicalTransitionVerifier,
+) -> None:
+    assets = tuple(
+        db.scalars(
+            select(ReferenceDeliveryAsset)
+            .where(ReferenceDeliveryAsset.version_id == version.id)
+            .order_by(ReferenceDeliveryAsset.id)
+        )
+    )
+    primary_assets = tuple(asset for asset in assets if asset.is_primary)
+    if len(primary_assets) != 1:
+        raise MirrorPromotionConflict(
+            "delivery version has no unique primary physical asset"
+        )
+    primary = primary_assets[0]
+    expected_filesystem_ids = tuple(
+        asset.id
+        for asset in assets
+        if asset.storage_backend == "filesystem"
+    )
+    if any(
+        asset.storage_backend not in {"filesystem", "postgres"}
+        for asset in assets
+    ):
+        raise MirrorPromotionConflict(
+            "delivery version uses an unsupported physical backend"
+        )
+    if version.delivery_kind == "tiles":
+        renderer: Literal["geoserver", "tile_archive"] = "tile_archive"
+        render_transport = "local_tile_archive"
+        resource_name = None
+        rendered_style_names: tuple[str | None, ...] = ()
+        rendered_tile_asset_ids = tuple(
+            asset.id
+            for asset in assets
+            if asset.asset_kind == "tile_archive"
+        )
+        if (
+            not rendered_tile_asset_ids
+            or any(
+                asset.asset_kind == "tile_archive"
+                and (
+                    not isinstance(asset.metadata_json, dict)
+                    or asset.metadata_json.get("renderer")
+                    != "tile_archive"
+                )
+                for asset in assets
+            )
+        ):
+            raise MirrorPromotionConflict(
+                "delivery tile renderer identity is invalid"
+            )
+    else:
+        renderer = "geoserver"
+        render_transport = "direct_geoserver_wms"
+        rendered_tile_asset_ids = ()
+        metadata = primary.metadata_json
+        resource_name = (
+            metadata.get("layer_name")
+            if isinstance(metadata, dict)
+            else None
+        )
+        styles = metadata.get("styles") if isinstance(metadata, dict) else None
+        default_style = (
+            metadata.get("default_style_name")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if (
+            not isinstance(resource_name, str)
+            or not 1 <= len(resource_name) <= 255
+            or not isinstance(styles, dict)
+            or len(styles) > 256
+            or metadata.get("renderer") != "geoserver"
+        ):
+            raise MirrorPromotionConflict(
+                "delivery GeoServer renderer identity is invalid"
+            )
+        style_names: set[str] = set()
+        for style_id, style_name in styles.items():
+            if (
+                not isinstance(style_id, str)
+                or not style_id.isascii()
+                or not style_id.isdecimal()
+                or int(style_id) < 1
+                or not isinstance(style_name, str)
+                or not 1 <= len(style_name) <= 255
+            ):
+                raise MirrorPromotionConflict(
+                    "delivery GeoServer style identity is invalid"
+                )
+            style_names.add(style_name)
+        if style_names:
+            if default_style not in style_names:
+                raise MirrorPromotionConflict(
+                    "delivery GeoServer default style is invalid"
+                )
+            rendered_style_names = tuple(sorted(style_names))
+        else:
+            if default_style is not None:
+                raise MirrorPromotionConflict(
+                    "delivery GeoServer default style is invalid"
+                )
+            rendered_style_names = (None,)
+    try:
+        verification = physical_verifier(db, version)
+    except Exception as error:
+        raise MirrorPromotionConflict(
+            "delivery failed physical transition verification"
+        ) from error
+    if (
+        not isinstance(
+            verification,
+            DeliveryPhysicalTransitionVerification,
+        )
+        or verification.version_id != version.id
+        or verification.primary_asset_id != primary.id
+        or verification.primary_sha256 != primary.sha256
+        or verification.renderer != renderer
+        or verification.render_transport != render_transport
+        or verification.resource_name != resource_name
+        or verification.verified_filesystem_asset_ids
+        != expected_filesystem_ids
+        or verification.rendered_style_names != rendered_style_names
+        or verification.rendered_tile_asset_ids
+        != rendered_tile_asset_ids
+    ):
+        raise MirrorPromotionConflict(
+            "delivery physical transition verification is invalid"
         )
 
 
