@@ -5013,7 +5013,11 @@ def test_reconciliation_upgrade_has_bounded_schema_lock_wait(
             "upgrade",
             "head",
         )
-        stdout, stderr = migration_process.communicate(timeout=15)
+        # The migration's PostgreSQL lock timeout remains five seconds. Give
+        # the Alembic subprocess enough startup margin when the full suite is
+        # exercising PostGIS concurrently, while still bounding a missing
+        # lock-timeout regression.
+        stdout, stderr = migration_process.communicate(timeout=30)
 
         assert migration_process.returncode != 0, stdout
         assert "lock timeout" in stderr.lower()
