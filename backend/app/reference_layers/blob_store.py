@@ -87,6 +87,39 @@ class StagingCleanupPlan:
     skipped_count: int
 
 
+@dataclass(frozen=True)
+class ReferenceStorageCapacity:
+    """Point-in-time, read-only capacity evidence for the shared CAS."""
+
+    used_bytes: int
+    free_bytes: int
+    quota_bytes: int | None
+    min_free_bytes: int
+
+    @property
+    def quota_available_bytes(self) -> int | None:
+        if self.quota_bytes is None:
+            return None
+        return self.quota_bytes - self.used_bytes
+
+    @property
+    def disk_available_bytes(self) -> int:
+        return self.free_bytes - self.min_free_bytes
+
+    @property
+    def available_bytes(self) -> int:
+        quota_available = self.quota_available_bytes
+        if quota_available is None:
+            return self.disk_available_bytes
+        return min(quota_available, self.disk_available_bytes)
+
+    def margin_after(self, additional_bytes: int) -> int:
+        return self.available_bytes - _non_negative_integer(
+            additional_bytes,
+            "additional_bytes",
+        )
+
+
 class ReferenceBlobStore:
     """A content-addressed blob store rooted in one local filesystem."""
 
@@ -237,6 +270,16 @@ class ReferenceBlobStore:
             raise ReferenceBlobStoreError("blob store is closed")
         with self._exclusive_lock():
             self._ensure_write_capacity(amount)
+
+    def inspect_capacity(self) -> ReferenceStorageCapacity:
+        """Measure quota and filesystem headroom without reserving or writing."""
+
+        if self.read_only:
+            return self._capacity_snapshot()
+        if self._lock_fd is None:
+            raise ReferenceBlobStoreError("blob store is closed")
+        with self._exclusive_lock():
+            return self._capacity_snapshot()
 
     def commit_staged_file(
         self,
@@ -562,6 +605,21 @@ class ReferenceBlobStore:
             ) from error
         if free_bytes - additional_bytes < self.min_free_bytes:
             raise ReferenceStorageSpaceError("reference storage free space is too low")
+
+    def _capacity_snapshot(self) -> ReferenceStorageCapacity:
+        used_bytes = self._storage_usage_bytes()
+        try:
+            free_bytes = shutil.disk_usage(self.root).free
+        except OSError as error:
+            raise ReferenceStorageSpaceError(
+                "reference storage free space is unavailable"
+            ) from error
+        return ReferenceStorageCapacity(
+            used_bytes=used_bytes,
+            free_bytes=free_bytes,
+            quota_bytes=self.quota_bytes,
+            min_free_bytes=self.min_free_bytes,
+        )
 
     def _storage_usage_bytes(self) -> int:
         total = 0

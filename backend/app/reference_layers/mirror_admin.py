@@ -68,6 +68,12 @@ from app.reference_layers.models import (
     ReferenceSyncRun,
     ReferenceService,
 )
+from app.reference_layers.tile_capacity_preflight import (
+    TileCapacityPreflightInputError,
+    aggregate_tile_capacity_preflight,
+    tile_capacity_preflight_exit_code,
+)
+from app.reference_layers.tile_seed import DEFAULT_PREFLIGHT_SAMPLES
 from app.users.models import User
 
 
@@ -1033,6 +1039,30 @@ def _parser() -> argparse.ArgumentParser:
     enqueue_mode.add_argument("--dry-run", action="store_true")
     enqueue_mode.add_argument("--apply", action="store_true")
 
+    tile_preflight = commands.add_parser(
+        "tile-preflight",
+        help="project all current tile archives against aggregate CAS capacity",
+    )
+    tile_preflight.add_argument("--provider-key", default="siur")
+    tile_preflight.add_argument("--layer-id", type=int)
+    tile_preflight.add_argument("--source-id", type=int)
+    tile_preflight.add_argument("--source-key")
+    tile_preflight.add_argument(
+        "--sample-limit",
+        type=int,
+        default=DEFAULT_PREFLIGHT_SAMPLES,
+    )
+    tile_preflight.add_argument(
+        "--concurrency",
+        type=int,
+        default=settings.reference_tile_concurrency,
+    )
+    tile_preflight.add_argument(
+        "--dry-run",
+        action="store_true",
+        required=True,
+    )
+
     gc_parser = commands.add_parser(
         "staging-gc",
         help="inspect or delete stale unlocked staging partials only",
@@ -1069,6 +1099,7 @@ def _print_json(value: dict[str, Any]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    command_exit_code = 0
     try:
         if arguments.command == "staging-gc":
             result = staging_gc(
@@ -1083,6 +1114,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                         db,
                         provider_key=arguments.provider_key,
                         layer_id=arguments.layer_id,
+                    )
+                elif arguments.command == "tile-preflight":
+                    with ReferenceBlobStore(
+                        settings.reference_storage_root,
+                        max_blob_bytes=(
+                            settings.reference_blob_max_bytes
+                        ),
+                        quota_bytes=(
+                            settings.reference_storage_quota_bytes
+                        ),
+                        min_free_bytes=(
+                            settings.reference_storage_min_free_bytes
+                        ),
+                        read_only=True,
+                    ) as store:
+                        result = aggregate_tile_capacity_preflight(
+                            db,
+                            store,
+                            provider_key=arguments.provider_key,
+                            layer_id=arguments.layer_id,
+                            source_id=arguments.source_id,
+                            source_key=arguments.source_key,
+                            sample_limit=arguments.sample_limit,
+                            concurrency=arguments.concurrency,
+                            max_archive_bytes=(
+                                settings.reference_tile_archive_max_bytes
+                            ),
+                            max_tile_count=(
+                                settings.reference_tile_max_count
+                            ),
+                        )
+                    command_exit_code = tile_capacity_preflight_exit_code(
+                        result
                     )
                 elif arguments.command == "enqueue":
                     result = execute_manual_enqueue(
@@ -1130,8 +1194,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                             apply=arguments.apply,
                         )
         _print_json(result)
-        return 0
-    except (MirrorAdminInputError, MirrorLifecycleError) as error:
+        return command_exit_code
+    except (
+        MirrorAdminInputError,
+        MirrorLifecycleError,
+        TileCapacityPreflightInputError,
+    ) as error:
         _print_json(
             {
                 "ok": False,

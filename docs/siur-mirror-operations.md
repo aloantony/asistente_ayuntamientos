@@ -85,6 +85,34 @@ las filas en una sola transacción. Si cambia una fuente, un documento, una
 cadena o la huella del lote, no se aplica ninguna revisión. Repetir exactamente
 un lote ya aplicado es idempotente.
 
+## Preflight agregado de teselas
+
+Antes de descargar una pirámide completa se proyectan todas las estrategias
+primarias de teselas del snapshot vigente:
+
+```bash
+python -m app.reference_layers.mirror_admin tile-preflight \
+  --provider-key siur \
+  --sample-limit 64 \
+  --concurrency 4 \
+  --dry-run
+```
+
+Se puede acotar con `--layer-id`, `--source-id` o `--source-key`. No existe
+modo `--apply`: el comando no crea ejecuciones, artefactos ni versiones y no
+modifica `next_check_at`. Una fuente sin autorización vigente se informa como
+`unauthorized`; una revisión restrictiva o una fuente deshabilitada se informa
+como `blocked`, en ambos casos sin realizar ninguna petición de red.
+
+El recuento operativo es capa por estilo, no únicamente el número de
+estrategias. Por ejemplo, las 24 estrategias primarias actuales pueden producir
+más de 24 MBTiles si alguna capa tiene varios estilos horneados. El informe suma
+todas esas proyecciones y las contrasta una sola vez con la cuota y la reserva
+de espacio del mismo CAS. `capacity_margin_bytes` es el margen posterior a esa
+suma conservadora; un valor negativo o el fallo de cualquier fuente ya
+autorizada hace que el proceso termine con código 1. El cálculo no reserva
+espacio, por lo que debe repetirse justo antes de iniciar la descarga masiva.
+
 ## Sincronización manual acotada
 
 Para comprobar de inmediato una fuente concreta sin esperar a su programación

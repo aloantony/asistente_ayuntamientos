@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
@@ -389,6 +389,25 @@ def preflight_tile_archive(
         concurrency=workers,
     )
     return result
+
+
+def authorized_tile_fetcher(
+    *,
+    source_document: object,
+    allowed_origins: Iterable[str],
+) -> TileFetcher:
+    """Build the bounded HTTPS fetcher only for an explicitly allowed origin."""
+
+    descriptor = parse_tile_source_document(source_document)
+    authorized: set[str] = set()
+    for value in allowed_origins:
+        if not isinstance(value, str):
+            raise TileSeedError("authorized tile origin is invalid")
+        parts = _https_url(value, "authorized tile origin")
+        if parts.path not in {"", "/"} or parts.query:
+            raise TileSeedError("authorized tile origin is not canonical")
+        authorized.add(_origin(value))
+    return _https_fetcher(descriptor, allowed_origins=authorized)
 
 
 def sample_tile_source(
@@ -1343,9 +1362,15 @@ def _encode_wms_tile(
     return payload
 
 
-def _https_fetcher(descriptor: TileSourceDescriptor) -> TileFetcher:
+def _https_fetcher(
+    descriptor: TileSourceDescriptor,
+    *,
+    allowed_origins: set[str] | None = None,
+) -> TileFetcher:
     sample = tile_url(descriptor, next(iter_tile_coordinates(descriptor)))
     origin = _origin(sample)
+    if allowed_origins is not None and origin not in allowed_origins:
+        raise TileSeedError("tile URL is outside the authorized origins")
     downloader = SafeHTTPSDownloader(
         HTTPSDownloadPolicy(
             allowed_origins=(origin,),
