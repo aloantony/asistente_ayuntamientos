@@ -11,6 +11,13 @@ import type {
   AssistantStreamTranscriptFinal,
   AssistantStreamToolActivity,
   AssistantStreamVoiceState,
+  TownHall,
+  TownHallBlock,
+  TownHallBlockCreate,
+  TownHallBlockPlacement,
+  TownHallBlockUpdate,
+  TownHallProfile,
+  TownHallProfileUpdate,
   User,
 } from "../components/types";
 
@@ -166,6 +173,20 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El estado de la necesidad no permite editar su contenido.";
     case "Project does not belong to the requirement organization":
       return "El proyecto no pertenece a la organización de la necesidad.";
+    case "Block not found":
+      return "No se encontró el apartado del menú.";
+    case "A navigation section cannot have a parent":
+      return "Un apartado principal no puede colgar de otro apartado.";
+    case "A navigation item requires a parent section":
+      return "Un elemento del menú tiene que colgar de un apartado.";
+    case "Parent must be an active navigation section of the same organization":
+      return "El apartado de destino no es válido.";
+    case "Duplicate block in reorder payload":
+      return "No se pudo reordenar el menú: hay elementos repetidos.";
+    case "User has no organization":
+      return "Tu usuario no pertenece a ninguna organización.";
+    case "organization_id is required":
+      return "Indica la organización para ver su Ayuntamiento.";
     case "Organization not found":
       return "No se encontró la organización indicada.";
     case "Organization access denied":
@@ -377,6 +398,71 @@ export async function adminRequestWithTotal<T>(
       : 0;
 
   return { items, total };
+}
+
+// Ayuntamiento: perfil del municipio y árbol de navegación configurable. La
+// organización viaja opcionalmente; sin ella el backend usa la primera del
+// usuario, la misma convención que aplica el menú lateral.
+function townHallPath(path: string, organizationId?: number) {
+  return organizationId === undefined
+    ? path
+    : `${path}${path.includes("?") ? "&" : "?"}organization_id=${organizationId}`;
+}
+
+export function fetchTownHall(organizationId?: number) {
+  return adminRequest<TownHall>(
+    townHallPath("/town-hall", organizationId),
+    "",
+    "No se pudo cargar el Ayuntamiento.",
+  );
+}
+
+export function updateTownHallProfile(
+  changes: TownHallProfileUpdate,
+  organizationId?: number,
+) {
+  return adminRequest<TownHallProfile>(
+    townHallPath("/town-hall/profile", organizationId),
+    "",
+    "No se pudo guardar la configuración del Ayuntamiento.",
+    { method: "PATCH", body: JSON.stringify(changes) },
+  );
+}
+
+export function createTownHallBlock(
+  block: TownHallBlockCreate,
+  organizationId?: number,
+) {
+  return adminRequest<TownHallBlock>(
+    townHallPath("/town-hall/blocks", organizationId),
+    "",
+    "No se pudo crear el apartado del menú.",
+    { method: "POST", body: JSON.stringify(block) },
+  );
+}
+
+export function updateTownHallBlock(
+  blockId: number,
+  changes: TownHallBlockUpdate,
+) {
+  return adminRequest<TownHallBlock>(
+    `/town-hall/blocks/${blockId}`,
+    "",
+    "No se pudo actualizar el apartado del menú.",
+    { method: "PATCH", body: JSON.stringify(changes) },
+  );
+}
+
+export function reorderTownHallBlocks(
+  placements: TownHallBlockPlacement[],
+  organizationId?: number,
+) {
+  return adminRequest<TownHallBlock[]>(
+    townHallPath("/town-hall/blocks/reorder", organizationId),
+    "",
+    "No se pudo reordenar el menú.",
+    { method: "POST", body: JSON.stringify({ placements }) },
+  );
 }
 
 type AssistantStreamHandlers = {

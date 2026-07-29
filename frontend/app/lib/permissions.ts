@@ -23,6 +23,17 @@ export const ORDINANCE_PERMISSIONS = [
   "ordinances.manage",
 ];
 
+export const TOWN_HALL_PERMISSIONS = [
+  "town_hall.view",
+  "town_hall.edit",
+  "town_hall.manage",
+];
+
+export const TOWN_HALL_EDIT_PERMISSIONS = [
+  "town_hall.edit",
+  "town_hall.manage",
+];
+
 export const PROJECT_PERMISSIONS = [
   "projects.view_all",
   "projects.create",

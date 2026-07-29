@@ -3502,6 +3502,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .app-brand-name {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -3511,6 +3512,77 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   line-height: 1.1;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.app-sidebar-toggle {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.app-sidebar-toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface);
+}
+
+/* Barra lateral plegada: sólo iconos. Se limita a escritorio porque por
+ * debajo de 900px la barra ya es una cabecera horizontal con su propio menú
+ * desplegable, donde el plegado no aplica. */
+@media (min-width: 901px) {
+  .app-shell-collapsed {
+    grid-template-columns: 72px 1fr;
+  }
+
+  .app-shell-collapsed .app-sidebar {
+    padding-inline: 12px;
+    overflow-x: hidden;
+  }
+
+  .app-shell-collapsed .app-brand {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .app-shell-collapsed .app-brand-name,
+  .app-shell-collapsed .app-nav-section,
+  .app-shell-collapsed .app-nav-label,
+  .app-shell-collapsed .app-nav-badge,
+  .app-shell-collapsed .app-nav-beta,
+  .app-shell-collapsed .app-session-user,
+  .app-shell-collapsed .app-session-logout-label,
+  .app-shell-collapsed .app-theme-toggle span {
+    display: none;
+  }
+
+  .app-shell-collapsed .app-sidebar-toggle svg {
+    transform: rotate(180deg);
+  }
+
+  .app-shell-collapsed .app-nav-link,
+  .app-shell-collapsed .app-theme-toggle {
+    justify-content: center;
+    padding-inline: 9px;
+  }
+
+  .app-shell-collapsed .app-session-logout {
+    width: 100%;
+    padding-inline: 0;
+  }
+
+  .app-shell-collapsed .app-session-logout-icon {
+    display: block;
+  }
 }
 
 .app-theme-toggle {

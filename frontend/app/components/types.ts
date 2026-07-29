@@ -1343,3 +1343,63 @@ export function userHasPermission(user: User, permissionCode: string) {
     user.is_superuser || (user.permissions ?? []).includes(permissionCode)
   );
 }
+
+// Ayuntamiento: perfil del municipio y navegación configurable de su barra
+// superior. Los apartados y elementos son bloques del mismo árbol genérico
+// (ver ADR-022), por eso comparten forma.
+export type TownHallProfile = {
+  display_name: string | null;
+  weather_enabled: boolean;
+  weather_location: string | null;
+  has_shield: boolean;
+};
+
+export type TownHallNavItem = {
+  id: number;
+  title: string;
+  position: number;
+};
+
+export type TownHallNavSection = TownHallNavItem & {
+  items: TownHallNavItem[];
+};
+
+export type TownHall = {
+  organization_id: number;
+  organization_name: string;
+  profile: TownHallProfile;
+  nav: TownHallNavSection[];
+};
+
+export type TownHallProfileUpdate = {
+  display_name?: string | null;
+  weather_enabled?: boolean;
+  weather_location?: string | null;
+};
+
+export type TownHallBlockCreate = {
+  block_type: "nav_section" | "nav_item";
+  parent_id?: number | null;
+  title: string;
+};
+
+export type TownHallBlockUpdate = {
+  title?: string;
+  status?: "active" | "archived";
+};
+
+export type TownHallBlock = {
+  id: number;
+  organization_id: number;
+  parent_id: number | null;
+  block_type: string;
+  title: string;
+  position: number;
+  status: string;
+};
+
+export type TownHallBlockPlacement = {
+  id: number;
+  parent_id?: number | null;
+  position: number;
+};

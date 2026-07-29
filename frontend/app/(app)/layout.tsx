@@ -16,10 +16,12 @@ import {
   shouldShowAdminPanel,
   shouldShowProjectsPanel,
   shouldShowRequirementsPanel,
+  shouldShowTownHallPanel,
   useSession,
 } from "../lib/session";
 
 const ONBOARDING_STORAGE_PREFIX = "anacleto:onboarding:v1";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "anacleto:sidebar:collapsed";
 
 type OnboardingStepId = "theme" | "assistant" | "account";
 
@@ -50,6 +52,7 @@ function getMunicipalBrandName(user: User) {
 // Iconos del menú lateral (trazo fino, coherentes con el resto del shell).
 type NavIconName =
   | "home"
+  | "townhall"
   | "needs"
   | "map"
   | "projects"
@@ -77,6 +80,14 @@ function NavIcon({ name }: { name: NavIconName }) {
           <rect x="14" y="3" width="7" height="7" rx="1.5" />
           <rect x="3" y="14" width="7" height="7" rx="1.5" />
           <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        </svg>
+      );
+    case "townhall":
+      return (
+        <svg {...common}>
+          <path d="M3 21h18" />
+          <path d="M5 21V10l7-5 7 5v11" />
+          <path d="M9 21v-6h6v6" />
         </svg>
       );
     case "needs":
@@ -166,6 +177,40 @@ function useDarkMode() {
   return { dark, toggle };
 }
 
+// El plegado de la barra lateral sólo tiene sentido en escritorio: por debajo
+// de 900px la barra ya es horizontal y el CSS ignora el estado. Se lee tras
+// montar para no romper la hidratación, igual que el tema.
+function useSidebarCollapsed() {
+  const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    try {
+      setCollapsed(
+        window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1",
+      );
+    } catch {
+      // Almacenamiento bloqueado: la barra arranca desplegada cada sesión.
+    }
+  }, []);
+
+  const toggle = useCallback(() => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(
+          SIDEBAR_COLLAPSED_STORAGE_KEY,
+          next ? "1" : "0",
+        );
+      } catch {
+        // Sin persistencia el plegado dura sólo esta sesión.
+      }
+      return next;
+    });
+  }, []);
+
+  return { collapsed, toggle };
+}
+
 function getUserInitials(fullName: string) {
   const initials = fullName
     .trim()
@@ -197,6 +242,8 @@ export default function AppLayout({
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [activeOnboardingIndex, setActiveOnboardingIndex] = useState(0);
   const { dark, toggle: toggleTheme } = useDarkMode();
+  const { collapsed: isSidebarCollapsed, toggle: toggleSidebar } =
+    useSidebarCollapsed();
 
   // Conteo real de necesidades para el badge del menú. El layout (app) no se
   // desmonta al navegar entre secciones, así que se pide una sola vez por
@@ -361,6 +408,15 @@ export default function AppLayout({
       label: "Trabajo",
       items: [
         { href: "/", label: "Inicio", icon: "home", exact: true },
+        ...(shouldShowTownHallPanel(user)
+          ? [
+              {
+                href: "/ayuntamiento",
+                label: "Ayuntamiento",
+                icon: "townhall" as const,
+              },
+            ]
+          : []),
         ...(shouldShowRequirementsPanel(user)
           ? [
               {
@@ -449,8 +505,16 @@ export default function AppLayout({
       ? "app-content app-content-assistant"
       : "app-content app-content-wide";
 
+  const sidebarToggleLabel = isSidebarCollapsed
+    ? "Desplegar el menú lateral"
+    : "Plegar el menú lateral";
+
   return (
-    <div className="app-shell">
+    <div
+      className={
+        isSidebarCollapsed ? "app-shell app-shell-collapsed" : "app-shell"
+      }
+    >
       <aside className="app-sidebar">
         <div className="app-brand">
           <span className="app-brand-star" aria-hidden="true">
@@ -459,6 +523,28 @@ export default function AppLayout({
           <span className="app-brand-name" title={brandName}>
             {brandName}
           </span>
+          <button
+            aria-expanded={!isSidebarCollapsed}
+            aria-label={sidebarToggleLabel}
+            className="app-sidebar-toggle"
+            onClick={toggleSidebar}
+            title={sidebarToggleLabel}
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              fill="none"
+              height="16"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="1.6"
+              viewBox="0 0 24 24"
+              width="16"
+            >
+              <path d="M15 6l-6 6 6 6" />
+            </svg>
+          </button>
         </div>
         <button
           aria-expanded={isMenuOpen}
@@ -482,6 +568,9 @@ export default function AppLayout({
                     // Cierra también al pulsar la sección ya activa, donde el
                     // pathname no cambia y el efecto de navegación no se dispara.
                     onClick={() => setIsMenuOpen(false)}
+                    // Plegada, la barra sólo muestra iconos: el tooltip nativo
+                    // mantiene identificable cada destino.
+                    title={item.label}
                   >
                     <NavIcon name={item.icon} />
                     <span className="app-nav-label">{item.label}</span>
