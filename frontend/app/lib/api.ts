@@ -175,6 +175,16 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El proyecto no pertenece a la organización de la necesidad.";
     case "Block not found":
       return "No se encontró el apartado del menú.";
+    case "Shield not found":
+      return "Este municipio todavía no tiene escudo.";
+    case "Unsupported shield content type":
+      return "El escudo tiene que ser una imagen PNG, JPG, SVG o WebP.";
+    case "Shield exceeds maximum upload size":
+      return "La imagen del escudo supera el tamaño máximo permitido.";
+    case "Empty shield upload":
+      return "La imagen del escudo está vacía.";
+    case "Invalid shield storage key":
+      return "No se pudo guardar el escudo.";
     case "A navigation section cannot have a parent":
       return "Un apartado principal no puede colgar de otro apartado.";
     case "A navigation item requires a parent section":
@@ -451,6 +461,26 @@ export function updateTownHallBlock(
     "No se pudo actualizar el apartado del menú.",
     { method: "PATCH", body: JSON.stringify(changes) },
   );
+}
+
+export function uploadTownHallShield(file: File, organizationId?: number) {
+  const body = new FormData();
+  body.append("file", file);
+
+  return adminRequest<TownHallProfile>(
+    townHallPath("/town-hall/shield", organizationId),
+    "",
+    "No se pudo subir el escudo.",
+    { method: "POST", body },
+  );
+}
+
+// El escudo se pinta con <img>: la cookie de sesión viaja sola porque backend
+// y frontend comparten host (ADR-010). `version` fuerza a saltarse la caché
+// tras sustituirlo, ya que la URL es siempre la misma.
+export function townHallShieldUrl(version: number, organizationId?: number) {
+  const path = townHallPath("/town-hall/shield", organizationId);
+  return `${API_BASE_URL}${path}${path.includes("?") ? "&" : "?"}v=${version}`;
 }
 
 export function reorderTownHallBlocks(

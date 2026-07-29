@@ -2,6 +2,7 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect } from "react";
+import { townHallShieldUrl } from "../../lib/api";
 import { TownHallBar } from "../../components/TownHallBar";
 import { TownHallNavEditor } from "../../components/TownHallNavEditor";
 import type { TownHallNavSection, User } from "../../components/types";
@@ -137,6 +138,12 @@ function AyuntamientoContent() {
         fallbackName={fallbackName}
         onOpenEditor={() => setEditorOpen(true)}
         onSelect={handleSelect}
+        onShieldDrop={(file) => void townHallController.uploadShield(file)}
+        shieldUrl={
+          townHall.profile.has_shield
+            ? townHallShieldUrl(townHallController.shieldVersion)
+            : null
+        }
         townHall={townHall}
       />
 

@@ -5090,3 +5090,9 @@ html.dark .dashboard-ask input {
 .townhall-editor-done {
   align-self: flex-end;
 }
+
+.townhall-shield.targeted {
+  border-radius: 8px;
+  outline: 2px dashed var(--accent);
+  outline-offset: 3px;
+}

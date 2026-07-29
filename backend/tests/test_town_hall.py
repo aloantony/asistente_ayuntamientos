@@ -383,3 +383,119 @@ def test_superuser_must_name_the_organization(
 
 def test_town_hall_requires_authentication(client):
     assert client.get("/town-hall").status_code == 401
+
+
+PNG_BYTES = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+)
+
+
+def test_shield_round_trip(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    assert client.get("/town-hall/shield", headers=headers).status_code == 404
+
+    upload = client.post(
+        "/town-hall/shield",
+        files={"file": ("escudo.png", PNG_BYTES, "image/png")},
+        headers=headers,
+    )
+    download = client.get("/town-hall/shield", headers=headers)
+
+    assert upload.status_code == 200
+    assert upload.json()["has_shield"] is True
+    assert download.status_code == 200
+    assert download.content == PNG_BYTES
+    assert download.headers["content-type"].startswith("image/png")
+    assert client.get("/town-hall", headers=headers).json()["profile"][
+        "has_shield"
+    ] is True
+
+
+def test_shield_upload_requires_the_edit_permission(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view"])
+
+    response = client.post(
+        "/town-hall/shield",
+        files={"file": ("escudo.png", PNG_BYTES, "image/png")},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 403
+
+
+def test_shield_rejects_other_content_types_and_empty_files(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    pdf = client.post(
+        "/town-hall/shield",
+        files={"file": ("escudo.pdf", b"%PDF-1.4", "application/pdf")},
+        headers=headers,
+    )
+    empty = client.post(
+        "/town-hall/shield",
+        files={"file": ("escudo.png", b"", "image/png")},
+        headers=headers,
+    )
+
+    assert pdf.status_code == 415
+    assert empty.status_code == 400
+    assert client.get("/town-hall/shield", headers=headers).status_code == 404
+
+
+def test_shield_is_isolated_between_organizations(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    other_user = make_user()
+    organization = make_organization()
+    other_organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    grant_permissions(
+        other_user,
+        other_organization,
+        ["town_hall.view", "town_hall.edit"],
+    )
+    client.post(
+        "/town-hall/shield",
+        files={"file": ("escudo.png", PNG_BYTES, "image/png")},
+        headers=headers_for(other_user),
+    )
+    headers = headers_for(user)
+
+    own = client.get("/town-hall/shield", headers=headers)
+    foreign = client.get(
+        "/town-hall/shield",
+        params={"organization_id": other_organization.id},
+        headers=headers,
+    )
+
+    assert own.status_code == 404
+    assert foreign.status_code == 403

@@ -8,8 +8,10 @@ type TownHallBarProps = {
   activeId: number | null;
   canEdit: boolean;
   fallbackName: string;
+  shieldUrl: string | null;
   onSelect: (blockId: number) => void;
   onOpenEditor: () => void;
+  onShieldDrop: (file: File) => void;
 };
 
 function ChevronIcon() {
@@ -48,10 +50,13 @@ export function TownHallBar({
   activeId,
   canEdit,
   fallbackName,
+  shieldUrl,
   onSelect,
   onOpenEditor,
+  onShieldDrop,
 }: TownHallBarProps) {
   const [openSectionId, setOpenSectionId] = useState<number | null>(null);
+  const [isShieldTargeted, setIsShieldTargeted] = useState(false);
 
   const municipalityName =
     townHall.profile.display_name?.trim() || fallbackName;
@@ -66,11 +71,42 @@ export function TownHallBar({
     );
   }
 
+  function handleShieldDrop(event: React.DragEvent) {
+    event.preventDefault();
+    setIsShieldTargeted(false);
+
+    const file = event.dataTransfer.files?.[0];
+    if (canEdit && file && file.type.startsWith("image/")) {
+      onShieldDrop(file);
+    }
+  }
+
   return (
     <div className="townhall-bar">
       <div className="townhall-bar-brand">
-        <span className="townhall-shield" aria-hidden="true">
-          <img alt="" src="/brand/logo-principal.svg" />
+        <span
+          aria-hidden="true"
+          className={
+            isShieldTargeted
+              ? "townhall-shield targeted"
+              : "townhall-shield"
+          }
+          onDragLeave={() => setIsShieldTargeted(false)}
+          onDragOver={(event) => {
+            if (!canEdit) {
+              return;
+            }
+            event.preventDefault();
+            setIsShieldTargeted(true);
+          }}
+          onDrop={handleShieldDrop}
+          title={
+            canEdit
+              ? "Arrastra una imagen para cambiar el escudo"
+              : undefined
+          }
+        >
+          <img alt="" src={shieldUrl ?? "/brand/logo-principal.svg"} />
         </span>
         <span className="townhall-name" title={municipalityName}>
           {municipalityName}

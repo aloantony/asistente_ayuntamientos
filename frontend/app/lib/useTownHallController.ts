@@ -13,6 +13,7 @@ import {
   reorderTownHallBlocks,
   updateTownHallBlock,
   updateTownHallProfile,
+  uploadTownHallShield,
 } from "./api";
 
 type RequestErrorHandler = (
@@ -52,6 +53,8 @@ export function useTownHallController({
   const [isLoadingTownHall, setIsLoadingTownHall] = useState(false);
   const [townHallError, setTownHallError] = useState("");
   const [isSavingTownHall, setIsSavingTownHall] = useState(false);
+  // Se incrementa al sustituir el escudo para invalidar la caché del <img>.
+  const [shieldVersion, setShieldVersion] = useState(0);
 
   const loadTownHall = useCallback(async () => {
     setIsLoadingTownHall(true);
@@ -128,6 +131,19 @@ export function useTownHallController({
     );
   }
 
+  async function uploadShield(file: File) {
+    const uploaded = await runMutation(
+      () => uploadTownHallShield(file),
+      "No se pudo subir el escudo.",
+    );
+
+    if (uploaded) {
+      setShieldVersion((version) => version + 1);
+    }
+
+    return uploaded;
+  }
+
   // El arrastre necesita respuesta inmediata: se pinta el árbol nuevo y sólo
   // se revierte si el servidor rechaza la reordenación.
   async function reorderNav(nav: TownHallNavSection[]) {
@@ -158,7 +174,9 @@ export function useTownHallController({
     isLoadingTownHall,
     isSavingTownHall,
     townHallError,
+    shieldVersion,
     loadTownHall,
+    uploadShield,
     updateProfile,
     addSection,
     addItem,
