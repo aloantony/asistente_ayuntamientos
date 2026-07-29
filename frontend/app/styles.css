@@ -1755,10 +1755,10 @@ tr:last-child td {
 .assistant-page-shell {
   width: 100%;
   min-width: 0;
-  height: calc(100vh - 60px);
-  height: calc(100dvh - 60px);
-  min-height: calc(100vh - 60px);
-  min-height: calc(100dvh - 60px);
+  height: 100vh;
+  height: 100dvh;
+  min-height: 100vh;
+  min-height: 100dvh;
   overflow: hidden;
 }
 
@@ -3560,8 +3560,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   .app-shell-collapsed .app-nav-badge,
   .app-shell-collapsed .app-nav-beta,
   .app-shell-collapsed .app-session-user,
-  .app-shell-collapsed .app-session-logout-label,
-  .app-shell-collapsed .app-theme-toggle span {
+  .app-shell-collapsed .app-session-logout-label {
     display: none;
   }
 
@@ -3569,8 +3568,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     transform: rotate(180deg);
   }
 
-  .app-shell-collapsed .app-nav-link,
-  .app-shell-collapsed .app-theme-toggle {
+  .app-shell-collapsed .app-nav-link {
     justify-content: center;
     padding-inline: 9px;
   }
@@ -3585,30 +3583,22 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   }
 }
 
+/* Fila de tema del menú: hereda el aspecto de .app-nav-link y sólo anula el
+ * cromo propio de <button>. */
 .app-theme-toggle {
   width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 8px 10px;
-  color: var(--text-secondary);
+  border: 0;
   background: transparent;
+  cursor: pointer;
+  font-family: inherit;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 400;
+  text-align: left;
 }
 
 .app-theme-toggle:hover:not(:disabled) {
-  border-color: transparent;
   color: var(--text);
-  background: var(--fill-strong);
-}
-
-/* En escritorio el cambio de tema vive en la barra superior; en móvil (sin
- * barra superior) se mantiene aquí, en la barra lateral. */
-.app-session .app-theme-toggle {
-  display: none;
+  background: var(--fill);
 }
 
 .app-session-user {
@@ -3718,8 +3708,8 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .app-content-assistant {
   padding: 0;
-  height: calc(100vh - 60px);
-  height: calc(100dvh - 60px);
+  height: 100vh;
+  height: 100dvh;
   min-height: 0;
   overflow: hidden;
 }
@@ -3811,16 +3801,6 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     align-items: center;
     flex: none;
     gap: 12px;
-  }
-
-  .app-session .app-theme-toggle {
-    width: auto;
-    flex: none;
-    display: inline-flex;
-  }
-
-  .app-theme-toggle span {
-    display: none;
   }
 
   .app-content {
@@ -3936,156 +3916,6 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   font-weight: 600;
 }
 
-/* ---------------------------------------------------------------------------
- * Barra superior (búsqueda global centrada + acciones rápidas)
- * ------------------------------------------------------------------------ */
-
-.app-topbar {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  min-height: 60px;
-  border-bottom: 1px solid var(--border-strong);
-  padding: 12px 32px;
-  background: var(--surface-raised);
-}
-
-.app-topbar::before {
-  content: "";
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.app-topbar-search {
-  flex: 0 1 min(560px, 48vw);
-  width: min(560px, 48vw);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 560px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 0 12px;
-  color: var(--text-muted);
-  background: var(--surface-muted);
-}
-
-.app-topbar-search:focus-within {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.app-topbar-search input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  padding: 9px 0;
-  background: transparent;
-  font-size: 13px;
-}
-
-.app-topbar-search input:focus,
-.app-topbar-search input:focus-visible {
-  outline: 0;
-}
-
-html.dark .app-topbar-search,
-html.dark .dashboard-ask {
-  background: var(--surface-raised);
-}
-
-html.dark .app-topbar-search input,
-html.dark .dashboard-ask input {
-  background: transparent;
-}
-
-.app-topbar-actions {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-/* Botón cuadrado de tema (icono sol/luna), como en el prototipo. */
-.app-topbar-theme {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text-secondary);
-  background: var(--surface);
-}
-
-.app-topbar-theme:hover:not(:disabled) {
-  border-color: var(--text);
-  color: var(--text);
-  background: var(--surface);
-}
-
-/* Acceso rápido al asistente con contorno de acento. */
-.app-topbar-anacleto {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--accent);
-  border-radius: 9px;
-  color: var(--accent);
-  background: var(--surface);
-}
-
-.app-topbar-anacleto:hover:not(:disabled) {
-  color: var(--accent-contrast);
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.app-topbar-user {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  color: var(--text-secondary);
-  background: var(--fill);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.app-topbar-user:hover:not(:disabled) {
-  border-color: var(--text);
-  color: var(--text);
-  background: var(--surface);
-}
-
-.app-topbar.onboarding-active.onboarding-step-theme .app-topbar-theme,
-.app-topbar.onboarding-active.onboarding-step-assistant .app-topbar-anacleto,
-.app-topbar.onboarding-active.onboarding-step-account .app-topbar-user {
-  position: relative;
-  z-index: 32;
-  box-shadow:
-    0 0 0 4px color-mix(in srgb, var(--surface-raised) 82%, transparent),
-    0 18px 40px rgb(0 0 0 / 28%);
-}
-
 .app-onboarding-layer {
   position: fixed;
   inset: 0;
@@ -4195,34 +4025,36 @@ html.dark .dashboard-ask input {
   background: transparent;
 }
 
-.app-onboarding-note-theme {
-  top: 76px;
-  right: 112px;
+/* El globo se coloca junto a la fila resaltada del menú lateral; la posición
+ * exacta llega medida desde el layout, así que aquí sólo va la flecha. */
+.app-onboarding-note::before {
+  top: 22px;
+  left: -6px;
+  border-top: 0;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--border-strong) 72%, transparent);
 }
 
-.app-onboarding-note-theme::before,
-.app-onboarding-note-assistant::before,
-.app-onboarding-note-account::before {
-  top: -6px;
-  right: 24px;
+/* Respaldo cuando no hay fila visible que señalar (menú móvil cerrado). */
+.app-onboarding-note-centered {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
 }
 
-.app-onboarding-note-assistant {
-  top: 76px;
-  right: 64px;
+.app-onboarding-note-centered::before {
+  display: none;
 }
 
-.app-onboarding-note-account {
-  top: 76px;
-  right: 16px;
-}
-
-@media (max-width: 900px) {
-  /* En móvil manda la barra lateral colapsada + las cabeceras propias de cada
-   * página; la barra superior se oculta para no duplicar contexto. */
-  .app-topbar {
-    display: none;
-  }
+/* Fila del menú lateral resaltada por la ayuda inicial. */
+.app-nav-link.onboarding-target {
+  position: relative;
+  z-index: 32;
+  color: var(--text);
+  background: var(--surface-raised);
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--surface-raised) 82%, transparent),
+    0 18px 40px rgb(0 0 0 / 28%);
 }
 
 /* ---------------------------------------------------------------------------
