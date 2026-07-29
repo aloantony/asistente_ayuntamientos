@@ -1354,6 +1354,11 @@ export type TownHallProfile = {
   has_shield: boolean;
 };
 
+export type TownHallWeather = {
+  temperature_celsius: number;
+  location: string;
+};
+
 export type TownHallNavItem = {
   id: number;
   title: string;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { TownHall } from "./types";
+import type { TownHall, TownHallWeather } from "./types";
 
 type TownHallBarProps = {
   townHall: TownHall;
@@ -9,6 +9,7 @@ type TownHallBarProps = {
   canEdit: boolean;
   fallbackName: string;
   shieldUrl: string | null;
+  weather: TownHallWeather | null;
   onSelect: (blockId: number) => void;
   onOpenEditor: () => void;
   onShieldDrop: (file: File) => void;
@@ -51,6 +52,7 @@ export function TownHallBar({
   canEdit,
   fallbackName,
   shieldUrl,
+  weather,
   onSelect,
   onOpenEditor,
   onShieldDrop,
@@ -61,7 +63,7 @@ export function TownHallBar({
   const municipalityName =
     townHall.profile.display_name?.trim() || fallbackName;
   const weatherLabel =
-    townHall.profile.weather_location?.trim() || municipalityName;
+    weather?.location || townHall.profile.weather_location?.trim() || municipalityName;
 
   function handleSectionClick(sectionId: number, hasItems: boolean) {
     onSelect(sectionId);
@@ -173,7 +175,11 @@ export function TownHallBar({
         {townHall.profile.weather_enabled ? (
           <div
             className="townhall-weather"
-            title={`Sin fuente de datos meteorológicos para ${weatherLabel}`}
+            title={
+              weather
+                ? `Temperatura de hoy en ${weatherLabel}`
+                : `Temperatura no disponible para ${weatherLabel}`
+            }
           >
             <svg
               aria-hidden="true"
@@ -188,8 +194,13 @@ export function TownHallBar({
             >
               <path d="M6.5 18a4.5 4.5 0 0 1-.5-8.97A6 6 0 0 1 17.7 10.3 3.85 3.85 0 0 1 17 18H6.5Z" />
             </svg>
-            {/* Sin fuente configurada no se inventa una cifra. */}
-            <span className="townhall-weather-value">—</span>
+            {/* Si el proveedor no responde se muestra un guion, nunca una
+                cifra inventada. */}
+            <span className="townhall-weather-value">
+              {weather
+                ? `${Math.round(weather.temperature_celsius)}°C`
+                : "—"}
+            </span>
           </div>
         ) : null}
         {canEdit ? (

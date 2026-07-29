@@ -15,6 +15,7 @@ type TownHallNavEditorProps = {
   onClose: () => void;
   onRenameMunicipality: (name: string) => void;
   onToggleWeather: (enabled: boolean) => void;
+  onChangeWeatherLocation: (location: string) => void;
   onAddSection: () => void;
   onAddItem: (sectionId: number) => void;
   onRenameBlock: (blockId: number, title: string) => void;
@@ -117,6 +118,7 @@ export function TownHallNavEditor({
   onClose,
   onRenameMunicipality,
   onToggleWeather,
+  onChangeWeatherLocation,
   onAddSection,
   onAddItem,
   onRenameBlock,
@@ -125,6 +127,9 @@ export function TownHallNavEditor({
 }: TownHallNavEditorProps) {
   const [municipalityName, setMunicipalityName] = useState(
     townHall.profile.display_name ?? "",
+  );
+  const [weatherLocation, setWeatherLocation] = useState(
+    townHall.profile.weather_location ?? "",
   );
   const [titles, setTitles] = useState<Record<number, string>>({});
   const [dragged, setDragged] = useState<DraggedBlock | null>(null);
@@ -173,6 +178,16 @@ export function TownHallNavEditor({
     }
 
     onRenameBlock(blockId, draft);
+  }
+
+  function commitWeatherLocation() {
+    const draft = weatherLocation.trim();
+
+    if (draft === (townHall.profile.weather_location ?? "")) {
+      return;
+    }
+
+    onChangeWeatherLocation(draft);
   }
 
   function commitMunicipalityName() {
@@ -434,6 +449,30 @@ export function TownHallNavEditor({
             {townHall.profile.weather_enabled ? "Activado" : "Desactivado"}
           </button>
         </div>
+
+        {townHall.profile.weather_enabled ? (
+          <div className="townhall-editor-card">
+            <label
+              className="townhall-editor-label"
+              htmlFor="townhall-weather-location"
+            >
+              Localidad de la que se consulta la temperatura
+            </label>
+            <input
+              className="townhall-editor-item-input"
+              disabled={isSaving}
+              id="townhall-weather-location"
+              onBlur={commitWeatherLocation}
+              onChange={(event) => setWeatherLocation(event.target.value)}
+              placeholder={fallbackName}
+              value={weatherLocation}
+            />
+            <p className="muted">
+              Se consulta a Open-Meteo desde el servidor. Solo sale de aquí el
+              nombre de la localidad, una vez, para situarla en el mapa.
+            </p>
+          </div>
+        ) : null}
 
         <button
           className="accent-button townhall-editor-done"

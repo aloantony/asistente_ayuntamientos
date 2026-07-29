@@ -18,6 +18,7 @@ import type {
   TownHallBlockUpdate,
   TownHallProfile,
   TownHallProfileUpdate,
+  TownHallWeather,
   User,
 } from "../components/types";
 
@@ -175,6 +176,10 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El proyecto no pertenece a la organización de la necesidad.";
     case "Block not found":
       return "No se encontró el apartado del menú.";
+    case "Weather block is disabled":
+      return "El bloque de temperatura está desactivado.";
+    case "Weather provider unavailable":
+      return "No se pudo consultar la temperatura del municipio.";
     case "Shield not found":
       return "Este municipio todavía no tiene escudo.";
     case "Unsupported shield content type":
@@ -424,6 +429,16 @@ export function fetchTownHall(organizationId?: number) {
     townHallPath("/town-hall", organizationId),
     "",
     "No se pudo cargar el Ayuntamiento.",
+  );
+}
+
+// El bloque de temperatura se pide aparte de la pantalla para que una caída
+// del proveedor no impida cargar el Ayuntamiento.
+export function fetchTownHallWeather(organizationId?: number) {
+  return adminRequest<TownHallWeather>(
+    townHallPath("/town-hall/weather", organizationId),
+    "",
+    "No se pudo consultar la temperatura.",
   );
 }
 

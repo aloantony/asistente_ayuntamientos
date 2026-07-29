@@ -60,6 +60,18 @@ function AyuntamientoContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canView, user?.id]);
 
+  const weatherEnabled = townHallController.townHall?.profile.weather_enabled;
+  const weatherLocation = townHallController.townHall?.profile.weather_location;
+
+  useEffect(() => {
+    if (!canView || !weatherEnabled) {
+      return;
+    }
+
+    void townHallController.loadWeather();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canView, weatherEnabled, weatherLocation]);
+
   if (!user) {
     return null;
   }
@@ -145,6 +157,7 @@ function AyuntamientoContent() {
             : null
         }
         townHall={townHall}
+        weather={townHallController.weather}
       />
 
       {canEdit && isEditorOpen ? (
@@ -167,6 +180,11 @@ function AyuntamientoContent() {
           onRenameMunicipality={(name) =>
             void townHallController.updateProfile({
               display_name: name === "" ? null : name,
+            })
+          }
+          onChangeWeatherLocation={(location) =>
+            void townHallController.updateProfile({
+              weather_location: location === "" ? null : location,
             })
           }
           onReorder={(nav) => void townHallController.reorderNav(nav)}

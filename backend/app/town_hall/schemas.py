@@ -23,6 +23,11 @@ class MunicipalProfileUpdate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
 
+class MunicipalWeatherRead(BaseModel):
+    temperature_celsius: float
+    location: str
+
+
 class MunicipalNavItemRead(BaseModel):
     id: int
     title: str

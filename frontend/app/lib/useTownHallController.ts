@@ -6,10 +6,12 @@ import type {
   TownHallBlockPlacement,
   TownHallNavSection,
   TownHallProfileUpdate,
+  TownHallWeather,
 } from "../components/types";
 import {
   createTownHallBlock,
   fetchTownHall,
+  fetchTownHallWeather,
   reorderTownHallBlocks,
   updateTownHallBlock,
   updateTownHallProfile,
@@ -55,6 +57,7 @@ export function useTownHallController({
   const [isSavingTownHall, setIsSavingTownHall] = useState(false);
   // Se incrementa al sustituir el escudo para invalidar la caché del <img>.
   const [shieldVersion, setShieldVersion] = useState(0);
+  const [weather, setWeather] = useState<TownHallWeather | null>(null);
 
   const loadTownHall = useCallback(async () => {
     setIsLoadingTownHall(true);
@@ -131,6 +134,17 @@ export function useTownHallController({
     );
   }
 
+  // La temperatura es accesoria: si el proveedor falla o el bloque está
+  // apagado, se queda a null y la barra muestra un guion, sin molestar al
+  // usuario con un error.
+  const loadWeather = useCallback(async () => {
+    try {
+      setWeather(await fetchTownHallWeather());
+    } catch {
+      setWeather(null);
+    }
+  }, []);
+
   async function uploadShield(file: File) {
     const uploaded = await runMutation(
       () => uploadTownHallShield(file),
@@ -175,7 +189,9 @@ export function useTownHallController({
     isSavingTownHall,
     townHallError,
     shieldVersion,
+    weather,
     loadTownHall,
+    loadWeather,
     uploadShield,
     updateProfile,
     addSection,

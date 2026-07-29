@@ -21,6 +21,7 @@ from app.town_hall.access import (
     require_town_hall_view,
     resolve_organization,
 )
+from app.town_hall import weather
 from app.town_hall.models import MunicipalBlock, MunicipalProfile
 from app.town_hall.schemas import (
     MunicipalBlockCreate,
@@ -31,6 +32,7 @@ from app.town_hall.schemas import (
     MunicipalNavSectionRead,
     MunicipalProfileRead,
     MunicipalProfileUpdate,
+    MunicipalWeatherRead,
     TownHallRead,
 )
 from app.users.models import User
@@ -175,13 +177,77 @@ def update_profile(
         profile = MunicipalProfile(organization_id=organization.id)
         db.add(profile)
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    relocated = (
+        "weather_location" in changes
+        and changes["weather_location"] != profile.weather_location
+    )
+
+    for field, value in changes.items():
         setattr(profile, field, value)
     profile.updated_by_id = current_user.id
+
+    if relocated:
+        # Otra localidad, otras coordenadas: se vuelven a geocodificar en la
+        # siguiente lectura y la temperatura cacheada deja de valer.
+        profile.weather_latitude = None
+        profile.weather_longitude = None
+        weather.forget_cached_temperature(organization.id)
 
     db.commit()
     db.refresh(profile)
     return read_profile(profile)
+
+
+@router.get("/weather", response_model=MunicipalWeatherRead)
+def read_weather(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    organization_id: Annotated[int | None, Query(ge=1)] = None,
+) -> MunicipalWeatherRead:
+    organization = resolve_organization(db, current_user, organization_id)
+    require_town_hall_view(db, current_user, organization.id)
+
+    profile = get_profile(db, organization.id)
+    if profile is None or not profile.weather_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Weather block is disabled",
+        )
+
+    location = (
+        profile.weather_location
+        or profile.display_name
+        or organization.name
+    )
+
+    cached = weather.get_cached_temperature(organization.id)
+    if cached is not None:
+        return MunicipalWeatherRead(temperature_celsius=cached, location=location)
+
+    try:
+        if profile.weather_latitude is None or profile.weather_longitude is None:
+            # Se geocodifica una sola vez y se guarda: las cargas siguientes ya
+            # no vuelven a preguntar por el nombre del municipio.
+            coordinates = weather.geocode(location)
+            profile.weather_latitude = coordinates.latitude
+            profile.weather_longitude = coordinates.longitude
+            db.commit()
+        else:
+            coordinates = weather.Coordinates(
+                latitude=profile.weather_latitude,
+                longitude=profile.weather_longitude,
+            )
+
+        temperature = weather.fetch_temperature(coordinates)
+    except weather.WeatherUnavailableError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Weather provider unavailable",
+        ) from None
+
+    weather.cache_temperature(organization.id, temperature)
+    return MunicipalWeatherRead(temperature_celsius=temperature, location=location)
 
 
 @router.post("/shield", response_model=MunicipalProfileRead)

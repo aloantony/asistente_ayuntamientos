@@ -1,3 +1,6 @@
+import pytest
+
+from app.town_hall import weather
 from tests.conftest import headers_for
 
 
@@ -499,3 +502,158 @@ def test_shield_is_isolated_between_organizations(
 
     assert own.status_code == 404
     assert foreign.status_code == 403
+
+
+@pytest.fixture(autouse=True)
+def clear_weather_cache():
+    """La caché de temperatura es de proceso: no debe cruzarse entre tests."""
+    weather._temperature_cache.clear()
+    yield
+    weather._temperature_cache.clear()
+
+
+def enable_weather(client, headers, location="Fuentelcésped, Burgos"):
+    response = client.patch(
+        "/town-hall/profile",
+        json={"weather_enabled": True, "weather_location": location},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_weather_is_absent_until_the_block_is_enabled(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+
+    response = client.get("/town-hall/weather", headers=headers_for(user))
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Weather block is disabled"
+
+
+def test_weather_geocodes_once_and_then_caches(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+    enable_weather(client, headers)
+
+    geocoded: list[str] = []
+    measured: list[weather.Coordinates] = []
+
+    def fake_geocode(place_name):
+        geocoded.append(place_name)
+        return weather.Coordinates(latitude=41.65, longitude=-3.66)
+
+    def fake_fetch(coordinates):
+        measured.append(coordinates)
+        return 12.4
+
+    monkeypatch.setattr("app.town_hall.routes.weather.geocode", fake_geocode)
+    monkeypatch.setattr("app.town_hall.routes.weather.fetch_temperature", fake_fetch)
+
+    first = client.get("/town-hall/weather", headers=headers)
+    second = client.get("/town-hall/weather", headers=headers)
+
+    assert first.status_code == 200
+    assert first.json() == {
+        "temperature_celsius": 12.4,
+        "location": "Fuentelcésped, Burgos",
+    }
+    assert second.json() == first.json()
+    # Una sola llamada externa de cada tipo: la segunda lectura sale de la caché.
+    assert geocoded == ["Fuentelcésped, Burgos"]
+    assert len(measured) == 1
+
+    # Las coordenadas quedan guardadas, así que ya no se vuelve a geocodificar.
+    weather.forget_cached_temperature(organization.id)
+    client.get("/town-hall/weather", headers=headers)
+    assert geocoded == ["Fuentelcésped, Burgos"]
+    assert len(measured) == 2
+
+
+def test_changing_the_location_forgets_the_coordinates(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+    enable_weather(client, headers)
+
+    geocoded: list[str] = []
+    monkeypatch.setattr(
+        "app.town_hall.routes.weather.geocode",
+        lambda place_name: (
+            geocoded.append(place_name),
+            weather.Coordinates(latitude=41.65, longitude=-3.66),
+        )[1],
+    )
+    monkeypatch.setattr(
+        "app.town_hall.routes.weather.fetch_temperature",
+        lambda coordinates: 12.4,
+    )
+
+    client.get("/town-hall/weather", headers=headers)
+    enable_weather(client, headers, location="Aranda de Duero, Burgos")
+    response = client.get("/town-hall/weather", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["location"] == "Aranda de Duero, Burgos"
+    assert geocoded == ["Fuentelcésped, Burgos", "Aranda de Duero, Burgos"]
+
+
+def test_weather_reports_the_provider_being_unavailable(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+    monkeypatch,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+    enable_weather(client, headers)
+
+    def fail(*_args, **_kwargs):
+        raise weather.WeatherUnavailableError("Weather provider unavailable")
+
+    monkeypatch.setattr("app.town_hall.routes.weather.geocode", fail)
+
+    response = client.get("/town-hall/weather", headers=headers)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Weather provider unavailable"
+
+
+def test_weather_requires_the_view_permission(
+    client,
+    make_user,
+    make_organization,
+    add_member,
+):
+    user = make_user()
+    organization = make_organization()
+    add_member(user, organization)
+
+    response = client.get("/town-hall/weather", headers=headers_for(user))
+
+    assert response.status_code == 403
