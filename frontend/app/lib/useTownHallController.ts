@@ -26,6 +26,9 @@ type RequestErrorHandler = (
 
 type UseTownHallControllerArgs = {
   handleRequestError: RequestErrorHandler;
+  // Obligatoria: el espacio municipal ya sabe qué organización está
+  // seleccionada, y un superusuario no tiene "primera organización".
+  organizationId: number;
 };
 
 // Renumera un árbol recién manipulado para que las posiciones vuelvan a ser
@@ -50,6 +53,7 @@ export function toPlacements(nav: TownHallNavSection[]) {
 
 export function useTownHallController({
   handleRequestError,
+  organizationId,
 }: UseTownHallControllerArgs) {
   const [townHall, setTownHall] = useState<TownHall | null>(null);
   const [isLoadingTownHall, setIsLoadingTownHall] = useState(false);
@@ -64,7 +68,7 @@ export function useTownHallController({
     setTownHallError("");
 
     try {
-      setTownHall(await fetchTownHall());
+      setTownHall(await fetchTownHall(organizationId));
     } catch (requestError) {
       handleRequestError(
         requestError,
@@ -74,7 +78,7 @@ export function useTownHallController({
     } finally {
       setIsLoadingTownHall(false);
     }
-  }, [handleRequestError]);
+  }, [handleRequestError, organizationId]);
 
   // Toda mutación recarga el árbol completo: son operaciones puntuales del
   // editor, y releer evita divergencias entre cliente y servidor.
@@ -84,7 +88,7 @@ export function useTownHallController({
 
     try {
       await mutation();
-      setTownHall(await fetchTownHall());
+      setTownHall(await fetchTownHall(organizationId));
       return true;
     } catch (requestError) {
       handleRequestError(requestError, setTownHallError, fallback);
@@ -96,14 +100,14 @@ export function useTownHallController({
 
   function updateProfile(changes: TownHallProfileUpdate) {
     return runMutation(
-      () => updateTownHallProfile(changes),
+      () => updateTownHallProfile(changes, organizationId),
       "No se pudo guardar la configuración del Ayuntamiento.",
     );
   }
 
   function addSection(title: string) {
     return runMutation(
-      () => createTownHallBlock({ block_type: "nav_section", title }),
+      () => createTownHallBlock({ block_type: "nav_section", title }, organizationId),
       "No se pudo crear el apartado.",
     );
   }
@@ -115,7 +119,7 @@ export function useTownHallController({
           block_type: "nav_item",
           parent_id: sectionId,
           title,
-        }),
+        }, organizationId),
       "No se pudo crear el elemento.",
     );
   }
@@ -139,15 +143,15 @@ export function useTownHallController({
   // usuario con un error.
   const loadWeather = useCallback(async () => {
     try {
-      setWeather(await fetchTownHallWeather());
+      setWeather(await fetchTownHallWeather(organizationId));
     } catch {
       setWeather(null);
     }
-  }, []);
+  }, [organizationId]);
 
   async function uploadShield(file: File) {
     const uploaded = await runMutation(
-      () => uploadTownHallShield(file),
+      () => uploadTownHallShield(file, organizationId),
       "No se pudo subir el escudo.",
     );
 
@@ -170,7 +174,7 @@ export function useTownHallController({
     setTownHallError("");
 
     try {
-      await reorderTownHallBlocks(toPlacements(nav));
+      await reorderTownHallBlocks(toPlacements(nav), organizationId);
       return true;
     } catch (requestError) {
       setTownHall(previous);

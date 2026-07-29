@@ -1201,10 +1201,13 @@ export function MunicipalWorkspace() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("summary");
   const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
   const [isShieldTargeted, setIsShieldTargeted] = useState(false);
-  const townHallController = useTownHallController({ handleRequestError });
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
+  const townHallController = useTownHallController({
+    handleRequestError,
+    organizationId: selectedOrganizationId ?? 0,
+  });
   const [municipality, setMunicipality] = useState<Municipality | null>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
   const [ordinances, setOrdinances] = useState<
@@ -1279,13 +1282,13 @@ export function MunicipalWorkspace() {
   // Perfil del municipio y menú configurable: se cargan aparte de los módulos
   // operativos, para que un fallo en uno no arrastre al otro.
   useEffect(() => {
-    if (!user || !canViewMunicipalHub(user)) {
+    if (!user || !canViewMunicipalHub(user) || selectedOrganizationId === null) {
       return;
     }
 
     void townHallController.loadTownHall();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, [user?.id, selectedOrganizationId]);
 
   const weatherEnabled = townHallController.townHall?.profile.weather_enabled;
   const weatherLocation = townHallController.townHall?.profile.weather_location;
