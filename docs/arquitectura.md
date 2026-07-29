@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-07-16.
+Actualizado: 2026-07-29.
 
 Este documento describe la arquitectura **implementada**. La arquitectura
 objetivo, con una instancia operativa por ayuntamiento y un control de
@@ -26,6 +26,8 @@ La distinción central del dominio:
 - `MaintenanceOrder` representa trabajo humano programado sobre un activo municipal y `MaintenanceOrderEvent` conserva su historial inmutable. Organización y municipio se derivan del activo y quedan protegidos por claves compuestas; este dominio no reutiliza las tareas ejecutables de `agent_office`.
 - `Ordinance` es global, pertenece a un municipio y puede enlazar a un documento de un tenant; ese enlace exige que quien lo crea tenga acceso al documento.
 
+- `MunicipalProfile` y `MunicipalBlock` son el cromo editable del Ayuntamiento de cada organización: perfil (nombre mostrado, escudo, temperatura) y un árbol genérico de bloques con padre, posición y carga libre en JSON. Cuelgan de la organización, no del municipio, porque cada inquilino edita el suyo; hoy solo almacenan la navegación configurable y están preparados para absorber los epígrafes de contenido sin migración (ADR-030).
+
 ## Control de acceso
 
 - Autenticación: JWT HS256 de acceso (60 min, con `iat`) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia y exige sesión); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id, nunca recortadas; cambio self-service (`POST /auth/change-password`, reemite la cookie) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios); ambos revocan los tokens emitidos antes (`iat` vs `users.password_changed_at`, ADR-015). Rate limiting en memoria por cliente+cuenta en login y cambio de contraseña: solo los intentos fallidos consumen cupo.
@@ -34,6 +36,8 @@ La distinción central del dominio:
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
+- El Ayuntamiento añade permisos propios (`town_hall.view`, `town_hall.edit`, `town_hall.manage`). La organización viaja siempre explícita, y las mutaciones de bloques revalidan el permiso contra la organización del propio bloque, así que tenerlo en otra no basta.
+- El bloque de temperatura (`app/town_hall/weather.py`) es el único punto de egreso externo del proyecto que no es de IA: consulta Open-Meteo desde el servidor con el topónimo del municipio y sus coordenadas, y nada más (ADR-030).
 - El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con su visibilidad normal; los activos requieren además permisos de inventario y edición en ambos dominios para reubicarlos, de modo que la capa geográfica no filtre ni modifique trabajo inaccesible por otra ruta.
 - El mantenimiento usa permisos tenant-scoped propios (`maintenance.view|create|edit|complete|manage`) y exige además visibilidad del activo. Las transiciones de estado y su evento de auditoría se confirman en una única transacción bajo bloqueo de fila; los eventos no tienen API de edición ni borrado.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.

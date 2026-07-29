@@ -1,6 +1,6 @@
 # Requisitos
 
-Actualizado: 2026-07-13. Este documento enumera principalmente capacidades ya implementadas. La visión objetivo y sus límites están en `docs/vision-producto.md`; la fuente de detalle operativo es `README.md`.
+Actualizado: 2026-07-29. Este documento enumera principalmente capacidades ya implementadas. La visión objetivo y sus límites están en `docs/vision-producto.md`; la fuente de detalle operativo es `README.md`.
 
 ## Visión de producto
 
@@ -22,6 +22,8 @@ La captura de requisitos no es el propósito principal del asistente. Es una cap
 - Diálogo por voz web con Anacleto: si STT y TTS están configurados, el usuario puede activar `Modo voz`, hablar al micrófono, enviar automáticamente la transcripción como turno de voz y escuchar la respuesta en español. El modo manos libres añade parada por silencio, síntesis por frases durante el streaming, re-escucha automática configurable (`assistant.voice.handsfree`) y pausa al ocultar la pestaña. Sin configuración de voz, la web conserva el flujo de texto.
 - Memoria institucional controlada: el agente puede proponer conocimiento de organización, pero un responsable debe aprobarlo, editarlo, rechazarlo o bloquearlo antes de que sea reutilizable. La memoria oficial reside en PostgreSQL y se gobierna desde el backend propio, no en Hermes Agent. La revisión municipal se realiza en `/admin/memoria`, aislada por organización y protegida frente a ediciones concurrentes. Permisos: `assistant.memory.propose`, `assistant.memory.view`, `assistant.memory.review`.
 - Feedback de producto confirmado: el envío exige una confirmación explícita ligada al contenido exacto. El desarrollador lo revisa en la bandeja local `/admin/producto`, reservada a superusuarios. Esta bandeja piloto no anonimiza ni transmite todavía la información a un control central.
+
+- Ayuntamiento configurable: sobre el espacio municipal, cada organización pone el nombre a mostrar, sube el escudo arrastrando una imagen, activa un bloque con la temperatura de hoy y define apartados propios —crear, renombrar, reordenar por arrastre y eliminar— que aparecen como pestañas junto a las áreas fijas. El contenido de esos apartados queda pendiente. Permisos: `town_hall.view`, `town_hall.edit`, `town_hall.manage`.
 
 ## Requisitos técnicos
 
