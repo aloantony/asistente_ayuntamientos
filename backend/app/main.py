@@ -24,6 +24,7 @@ from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
 from app.telegram.routes import router as telegram_router
+from app.town_hall.routes import router as town_hall_router
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ for app_router in (
     geo_router,
     assets_router,
     maintenance_router,
+    town_hall_router,
     assistant_router,
     agent_office_router,
     telegram_router,
