@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-07-13.
+Actualizado: 2026-07-29.
 
 Este documento describe la arquitectura **implementada**. La arquitectura
 objetivo, con una instancia operativa por ayuntamiento y un control de
@@ -24,6 +24,7 @@ La distinción central del dominio:
 - `Project` (expediente/área de trabajo) y `Document` viven dentro de una organización. `Requirement` pertenece a una organización y opcionalmente a un proyecto.
 - `GeoLocation` y `EntityLocation` forman la capa geográfica compartida del mapa municipal: las ubicaciones pertenecen opcionalmente a una organización/municipio y se vinculan a entidades como necesidades o proyectos sin duplicar columnas `lat/lng` en cada módulo.
 - `Ordinance` es global, pertenece a un municipio y puede enlazar a un documento de un tenant; ese enlace exige que quien lo crea tenga acceso al documento.
+- `MunicipalProfile` y `MunicipalBlock` son la ficha del Ayuntamiento de cada organización: perfil (nombre mostrado, escudo, interruptor de temperatura) y un árbol genérico de bloques con padre, posición y carga libre en JSON. Cuelgan de la organización, no del municipio, porque cada inquilino edita la suya; hoy solo almacenan la navegación configurable de la barra del municipio y están preparados para absorber los epígrafes de contenido sin migración (ADR-022).
 
 ## Control de acceso
 
@@ -33,6 +34,7 @@ La distinción central del dominio:
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
+- El Ayuntamiento añade permisos propios (`town_hall.view`, `town_hall.edit`, `town_hall.manage`), evaluados en la organización resuelta; sin `organization_id` explícito se usa la primera organización del usuario y el superusuario debe indicarla. Las mutaciones de bloques revalidan el permiso contra la organización del propio bloque.
 - El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con la visibilidad normal de la necesidad/proyecto, para que la capa geográfica no filtre trabajo inaccesible por otra ruta.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.
 
@@ -40,6 +42,7 @@ La distinción central del dominio:
 
 - Los bytes se guardan en el sistema de archivos (`DOCUMENT_STORAGE_ROOT`, volumen Docker `document_storage`); PostgreSQL solo guarda metadatos, propiedad y estado.
 - Subida en streaming con lista blanca de tipos, límite de tamaño, sha256 y claves de almacenamiento generadas en servidor (defensa contra path traversal y colisiones).
+- El escudo del municipio comparte ese servicio de almacenamiento bajo el prefijo `organizations/<id>/brand/`, con lista blanca propia (solo imágenes) y tope propio (2 MiB), pero sin pasar por el modelo `Document`, que exige proyecto (ADR-022).
 - Archivado reversible vía estado; no hay borrado físico de documentos.
 
 ## IA (dirección)
@@ -62,10 +65,11 @@ La distinción central del dominio:
 
 ## Frontend
 
-- App Router multi-ruta con shell de navegación lateral: `/asistente`, `/requisitos`, `/proyectos`, `/mapa`, `/cuenta` y `/admin/{producto,memoria,usuarios,grupos,organizaciones,roles,municipios,ordenanzas}`. Los ítems del menú usan los mismos predicados de permisos que las rutas; producto exige superusuario, memoria exige `assistant.use` y `assistant.memory.review`, los permisos de solo lectura de ordenanzas no abren administración y `/proyectos` solo aparece con permisos de proyecto. Tras el login se aterriza en la primera sección visible.
+- App Router multi-ruta con shell de navegación lateral: `/ayuntamiento`, `/asistente`, `/requisitos`, `/proyectos`, `/mapa`, `/cuenta` y `/admin/{producto,memoria,usuarios,grupos,organizaciones,roles,municipios,ordenanzas}`. Los ítems del menú usan los mismos predicados de permisos que las rutas; producto exige superusuario, memoria exige `assistant.use` y `assistant.memory.review`, los permisos de solo lectura de ordenanzas no abren administración y `/proyectos` solo aparece con permisos de proyecto. Tras el login se aterriza en la primera sección visible.
 - La sesión vive en `SessionProvider` (layout raíz): usuario, embudo de 401 → logout, cierre de sesión. Guard client-side; sin `middleware.ts` por ahora.
 - Cada ruta monta solo su controlador de dominio y carga datos al entrar; las listas de otros dominios llegan por fetchers ligeros (`app/lib/fetchers.ts`). Los controladores de administración viven en `app/lib/admin/`; la revisión de memoria se mantiene fuera del controlador conversacional.
 - Selección, filtros y paginación viven en la URL (deep-links, refresh y botón atrás funcionan); los filtros de municipios, ordenanzas y requisitos se aplican en el servidor.
+- No hay barra superior global: el conmutador de tema es una fila del menú lateral, que además se pliega a solo iconos (persistido en `localStorage`). La barra del municipio —escudo, nombre y menú configurable— vive dentro de `/ayuntamiento` (ADR-022).
 - Convenciones: sin librerías de UI/estado, TS estricto, texto en español, CSS monocromo propio.
 
 ## Tests

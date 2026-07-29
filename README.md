@@ -36,6 +36,7 @@ All AI egress continues through the internal gateway. Contractually approved ext
 - `Document`: uploaded file linked to an organization and a project.
 - `Requirement`: structured functional or product need linked to an organization and optionally to a project.
 - `Ordinance`: structured municipal ordinance linked to a municipality and optionally to a document.
+- `MunicipalProfile` and `MunicipalBlock`: an organization's town hall page — display name, shield and weather switch, plus a generic parent/position block tree that currently holds the configurable municipal menu.
 - `User`, `Group`, `Role`, `Permission`: access control model used to assign capabilities to people and groups.
 
 ## 5. Implemented modules
@@ -49,6 +50,7 @@ All AI egress continues through the internal gateway. Contractually approved ext
 - Requirements: structured intake for needs, product ideas and stakeholder requests.
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
+- Town hall shell (`/ayuntamiento`): each organization configures its municipal bar — display name, a shield replaced by dropping an image on it, and a menu of sections and items created, renamed, reordered by drag and drop and deleted from its own editor. Section content is not implemented yet. Gated by `town_hall.view`, `town_hall.edit` and `town_hall.manage`. See ADR-022.
 - Ordinance import and comparison: official-source import jobs run through a Redis/RQ worker, create pending-review ordinances, split legal text into reviewable/vectorized chunks and expose a thematic comparison matrix between municipalities.
 - AI Requirements Intake Assistant: Anacleto is a model-first Spanish assistant that captures stakeholder needs as draft requirements. It streams web turns over SSE, calls the configured LLM runtime only through the Privacy/AI Gateway (`app/assistant/gateway.py`) and executes tools with the calling user's RBAC permissions. Requirements are always created as drafts with `source_type=conversation`, `create_requirement` requires a later human confirmation turn, and every tool call leaves an auditable JSON trail. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected runtime is configured.
 - Web voice dialogue with Anacleto: when OpenAI Realtime is approved and enabled, the browser uses WebRTC with an ephemeral credential while every user transcript, tool call, confirmation and final turn remains server-owned and auditable. Exact safety confirmations are accepted only after their complete audio playback. The existing backend STT/TTS flow remains as a fallback: `MediaRecorder` audio is transcribed through `/assistant/audio-transcriptions` and responses are synthesized through `/assistant/speech`.
@@ -79,6 +81,8 @@ Documents are stored on our own server in the current architecture. They are not
 `DOCUMENT_STORAGE_ROOT` controls the filesystem path used by the backend to store uploaded files. In Docker Compose, the `document_storage` volume is mounted at `/var/lib/asistente_ayuntamientos/documents`, which is the default path configured in `.env.example`.
 
 The `document_storage` Docker volume persists uploaded files across container rebuilds and restarts. PostgreSQL stores metadata only, not raw file bytes.
+
+Municipal shields share this volume under `organizations/<id>/brand/`, capped by `MUNICIPAL_SHIELD_MAX_UPLOAD_BYTES` (2 MiB by default) and restricted to images. They deliberately bypass the `Document` model, which requires a project.
 
 ## 8. Local development setup
 

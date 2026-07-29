@@ -1,6 +1,6 @@
 # Requisitos
 
-Actualizado: 2026-07-13. Este documento enumera principalmente capacidades ya implementadas. La visión objetivo y sus límites están en `docs/vision-producto.md`; la fuente de detalle operativo es `README.md`.
+Actualizado: 2026-07-29. Este documento enumera principalmente capacidades ya implementadas. La visión objetivo y sus límites están en `docs/vision-producto.md`; la fuente de detalle operativo es `README.md`.
 
 ## Visión de producto
 
@@ -11,13 +11,14 @@ La captura de requisitos no es el propósito principal del asistente. Es una cap
 ## Requisitos funcionales implementados
 
 - Autenticación JWT con restauración de sesión (`/auth/me`) y bootstrap del primer administrador.
-- Administración de usuarios, grupos, roles y permisos (RBAC de 29 códigos + superusuario).
+- Administración de usuarios, grupos, roles y permisos (RBAC de 49 códigos + superusuario).
 - Organizaciones como tenants que delimitan los datos operativos.
 - Proyectos (expedientes/áreas de trabajo) con miembros directos y por grupo.
 - Documentos por proyecto: subida, metadatos, descarga y archivado; bytes en disco propio, metadatos en PostgreSQL.
 - Requirements Intake: captura estructurada de necesidades con flujo de estados, prioridades e hilo de mensajes.
 - Municipios: datos de referencia globales de municipios reales.
 - Ordenanzas: registros estructurados vinculados a municipio y opcionalmente a un documento.
+- Ayuntamiento (cascarón): cada organización configura la barra de su municipio —nombre mostrado, escudo subible arrastrando una imagen y un menú de apartados y elementos que se crean, renombran, reordenan por arrastre y eliminan desde un editor propio—. El contenido de los apartados queda pendiente. Permisos: `town_hall.view`, `town_hall.edit`, `town_hall.manage`.
 - Asistente de IA conversacional Anacleto v2: el usuario conversa en español con un único asistente model-first, con streaming web y Markdown. El asistente consulta datos visibles, usa herramientas filtradas por permisos y puede crear requisitos solo como borradores supervisables. `create_requirement` exige confirmación humana en un turno posterior mediante guarda backend, no solo por prompt. Toda llamada a IA externa o runtime privado pasa por el gateway interno (ver restricciones). Puede ejecutarse con Anthropic o con Hermes Agent como aplicación/runtime privado. Permiso de acceso: `assistant.use`.
 - Diálogo por voz web con Anacleto: si STT y TTS están configurados, el usuario puede activar `Modo voz`, hablar al micrófono, enviar automáticamente la transcripción como turno de voz y escuchar la respuesta en español. El modo manos libres añade parada por silencio, síntesis por frases durante el streaming, re-escucha automática configurable (`assistant.voice.handsfree`) y pausa al ocultar la pestaña. Sin configuración de voz, la web conserva el flujo de texto.
 - Memoria institucional controlada: el agente puede proponer conocimiento de organización, pero un responsable debe aprobarlo, editarlo, rechazarlo o bloquearlo antes de que sea reutilizable. La memoria oficial reside en PostgreSQL y se gobierna desde el backend propio, no en Hermes Agent. La revisión municipal se realiza en `/admin/memoria`, aislada por organización y protegida frente a ediciones concurrentes. Permisos: `assistant.memory.propose`, `assistant.memory.view`, `assistant.memory.review`.
