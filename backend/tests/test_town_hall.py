@@ -657,3 +657,11 @@ def test_weather_requires_the_view_permission(
     response = client.get("/town-hall/weather", headers=headers_for(user))
 
     assert response.status_code == 403
+
+
+def test_geocoding_drops_the_province_suffix():
+    # Open-Meteo no entiende «Municipio, Provincia»: se consulta solo el
+    # topónimo, aunque la etiqueta que ve el usuario conserve la provincia.
+    assert weather.normalize_place_name("Fuentelcésped, Burgos") == "Fuentelcésped"
+    assert weather.normalize_place_name("  Aranda de Duero  ") == "Aranda de Duero"
+    assert weather.normalize_place_name(", Burgos") == ""

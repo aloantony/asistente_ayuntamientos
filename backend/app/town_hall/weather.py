@@ -92,11 +92,20 @@ def _request_json(endpoint: str, parameters: dict[str, object]) -> dict:
     return payload
 
 
+def normalize_place_name(place_name: str) -> str:
+    """Deja solo el topónimo: el buscador no entiende «Municipio, Provincia»."""
+    return place_name.split(",", 1)[0].strip()
+
+
 def geocode(place_name: str) -> Coordinates:
     """Resuelve un nombre de municipio a coordenadas, una sola vez."""
+    normalized = normalize_place_name(place_name)
+    if not normalized:
+        raise WeatherUnavailableError("Municipality could not be located")
+
     payload = _request_json(
         GEOCODING_ENDPOINT,
-        {"name": place_name, "count": 1, "language": "es", "format": "json"},
+        {"name": normalized, "count": 1, "language": "es", "format": "json"},
     )
     results = payload.get("results")
 
