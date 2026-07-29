@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect } from "react";
 import { TownHallBar } from "../../components/TownHallBar";
+import { TownHallNavEditor } from "../../components/TownHallNavEditor";
 import type { TownHallNavSection, User } from "../../components/types";
 import {
   canEditTownHall,
@@ -83,9 +84,28 @@ function AyuntamientoContent() {
   const rawSelection = searchParams.get("s");
   const parsedSelection = rawSelection === null ? Number.NaN : Number(rawSelection);
   const activeId = Number.isInteger(parsedSelection) ? parsedSelection : null;
+  const isEditorOpen = searchParams.get("editor") === "1";
+
+  function buildHref(selectedId: number | null, editorOpen: boolean) {
+    const params = new URLSearchParams();
+
+    if (selectedId !== null) {
+      params.set("s", String(selectedId));
+    }
+    if (editorOpen) {
+      params.set("editor", "1");
+    }
+
+    const query = params.toString();
+    return query ? `/ayuntamiento?${query}` : "/ayuntamiento";
+  }
 
   function handleSelect(blockId: number) {
-    router.push(`/ayuntamiento?s=${blockId}`, { scroll: false });
+    router.push(buildHref(blockId, isEditorOpen), { scroll: false });
+  }
+
+  function setEditorOpen(editorOpen: boolean) {
+    router.push(buildHref(activeId, editorOpen), { scroll: false });
   }
 
   if (townHall === null) {
@@ -103,20 +123,52 @@ function AyuntamientoContent() {
   }
 
   const activeTitle = findActiveTitle(townHall.nav, activeId);
+  const canEdit = canEditTownHall(user);
+  const fallbackName = getFallbackMunicipalityName(
+    user,
+    townHall.organization_name,
+  );
 
   return (
     <div className="townhall">
       <TownHallBar
         activeId={activeId}
-        canEdit={canEditTownHall(user)}
-        fallbackName={getFallbackMunicipalityName(
-          user,
-          townHall.organization_name,
-        )}
-        onOpenEditor={() => undefined}
+        canEdit={canEdit}
+        fallbackName={fallbackName}
+        onOpenEditor={() => setEditorOpen(true)}
         onSelect={handleSelect}
         townHall={townHall}
       />
+
+      {canEdit && isEditorOpen ? (
+        <TownHallNavEditor
+          fallbackName={fallbackName}
+          isSaving={townHallController.isSavingTownHall}
+          onAddItem={(sectionId) =>
+            void townHallController.addItem(sectionId, "Nuevo elemento")
+          }
+          onAddSection={() =>
+            void townHallController.addSection("Nuevo apartado")
+          }
+          onArchiveBlock={(blockId) =>
+            void townHallController.archiveBlock(blockId)
+          }
+          onClose={() => setEditorOpen(false)}
+          onRenameBlock={(blockId, title) =>
+            void townHallController.renameBlock(blockId, title)
+          }
+          onRenameMunicipality={(name) =>
+            void townHallController.updateProfile({
+              display_name: name === "" ? null : name,
+            })
+          }
+          onReorder={(nav) => void townHallController.reorderNav(nav)}
+          onToggleWeather={(enabled) =>
+            void townHallController.updateProfile({ weather_enabled: enabled })
+          }
+          townHall={townHall}
+        />
+      ) : null}
 
       {townHallError ? <p className="form-error">{townHallError}</p> : null}
 
