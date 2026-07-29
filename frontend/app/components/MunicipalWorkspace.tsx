@@ -16,6 +16,7 @@ import {
   Landmark,
   MapPin,
   RefreshCw,
+  Settings2,
   ShieldCheck,
   UserRound,
   Users,
@@ -27,6 +28,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type DragEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -38,12 +40,16 @@ import {
   fetchMunicipalOrganization,
   type MunicipalCollection,
 } from "../lib/municipalWorkspace";
+import { townHallShieldUrl } from "../lib/api";
 import { canViewMunicipalHub } from "../lib/permissions";
 import {
+  canEditTownHall,
   shouldShowProjectsPanel,
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
+import { useTownHallController } from "../lib/useTownHallController";
+import { TownHallNavEditor } from "./TownHallNavEditor";
 import styles from "./MunicipalWorkspace.module.css";
 import {
   formatOrdinanceStatus,
@@ -66,6 +72,19 @@ type WorkspaceTab =
   | "people"
   | "roadmap";
 
+// Las áreas fijas conservan sus claves literales; los apartados que el usuario
+// crea en el editor del menú se identifican con el id de su bloque (ADR-030).
+type CustomTab = `block-${number}`;
+type ActiveTab = WorkspaceTab | CustomTab;
+
+function isCustomTab(tab: string): tab is CustomTab {
+  return /^block-\d+$/.test(tab);
+}
+
+function customTabBlockId(tab: CustomTab) {
+  return Number(tab.slice("block-".length));
+}
+
 type MunicipalContext = {
   organization: OrganizationSummary;
   municipality: MunicipalitySummary;
@@ -78,7 +97,7 @@ type ResourceErrors = {
 };
 
 type TabDefinition = {
-  id: WorkspaceTab;
+  id: ActiveTab;
   label: string;
   icon: LucideIcon;
 };
@@ -1179,7 +1198,10 @@ function EmptyState({ user }: { user: User }) {
 
 export function MunicipalWorkspace() {
   const { user, handleRequestError } = useSession();
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("summary");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("summary");
+  const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
+  const [isShieldTargeted, setIsShieldTargeted] = useState(false);
+  const townHallController = useTownHallController({ handleRequestError });
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
@@ -1241,10 +1263,41 @@ export function MunicipalWorkspace() {
 
   useEffect(() => {
     const requestedTab = new URLSearchParams(window.location.search).get("tab");
-    if (TAB_DEFINITIONS.some(({ id }) => id === requestedTab)) {
-      setActiveTab(requestedTab as WorkspaceTab);
+    if (requestedTab === null) {
+      return;
+    }
+    // Los apartados propios se aceptan por forma: el árbol todavía no ha
+    // llegado cuando se lee la URL.
+    if (
+      TAB_DEFINITIONS.some(({ id }) => id === requestedTab) ||
+      isCustomTab(requestedTab)
+    ) {
+      setActiveTab(requestedTab as ActiveTab);
     }
   }, []);
+
+  // Perfil del municipio y menú configurable: se cargan aparte de los módulos
+  // operativos, para que un fallo en uno no arrastre al otro.
+  useEffect(() => {
+    if (!user || !canViewMunicipalHub(user)) {
+      return;
+    }
+
+    void townHallController.loadTownHall();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  const weatherEnabled = townHallController.townHall?.profile.weather_enabled;
+  const weatherLocation = townHallController.townHall?.profile.weather_location;
+
+  useEffect(() => {
+    if (!weatherEnabled) {
+      return;
+    }
+
+    void townHallController.loadWeather();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weatherEnabled, weatherLocation]);
 
   useEffect(() => {
     if (!user || !canViewMunicipalHub(user) || !selectedContext) {
@@ -1396,8 +1449,28 @@ export function MunicipalWorkspace() {
   }
 
   const isPaused = selectedContext.organization.status === "paused";
-  const activeTabDefinition =
-    TAB_DEFINITIONS.find((tab) => tab.id === activeTab) ?? TAB_DEFINITIONS[0];
+  const municipalityLabel =
+    townHallController.townHall?.profile.display_name?.trim() ||
+    selectedContext.municipality.name;
+  const townHall = townHallController.townHall;
+  const canEditMenu = canEditTownHall(user);
+
+  // Los apartados del editor se añaden como pestañas tras las áreas fijas, de
+  // modo que la tira de pestañas siga siendo una sola navegación.
+  const workspaceTabs: TabDefinition[] = [
+    ...TAB_DEFINITIONS,
+    ...(townHall?.nav ?? []).map((section) => ({
+      id: `block-${section.id}` as CustomTab,
+      label: section.title,
+      icon: Landmark,
+    })),
+  ];
+  const activeCustomSection =
+    townHall !== null && isCustomTab(activeTab)
+      ? townHall.nav.find(
+          (section) => section.id === customTabBlockId(activeTab),
+        ) ?? null
+      : null;
 
   function handleTabKeyDown(
     event: KeyboardEvent<HTMLButtonElement>,
@@ -1406,14 +1479,14 @@ export function MunicipalWorkspace() {
     let nextIndex: number | null = null;
 
     if (event.key === "ArrowRight") {
-      nextIndex = (currentIndex + 1) % TAB_DEFINITIONS.length;
+      nextIndex = (currentIndex + 1) % workspaceTabs.length;
     } else if (event.key === "ArrowLeft") {
       nextIndex =
-        (currentIndex - 1 + TAB_DEFINITIONS.length) % TAB_DEFINITIONS.length;
+        (currentIndex - 1 + workspaceTabs.length) % workspaceTabs.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
-      nextIndex = TAB_DEFINITIONS.length - 1;
+      nextIndex = workspaceTabs.length - 1;
     }
 
     if (nextIndex === null) {
@@ -1421,11 +1494,11 @@ export function MunicipalWorkspace() {
     }
 
     event.preventDefault();
-    selectWorkspaceTab(TAB_DEFINITIONS[nextIndex].id);
+    selectWorkspaceTab(workspaceTabs[nextIndex].id);
     tabButtonRefs.current[nextIndex]?.focus();
   }
 
-  function selectWorkspaceTab(tab: WorkspaceTab, moveFocus = false) {
+  function selectWorkspaceTab(tab: ActiveTab, moveFocus = false) {
     setActiveTab(tab);
     const url = new URL(window.location.href);
     if (tab === "summary") {
@@ -1436,7 +1509,7 @@ export function MunicipalWorkspace() {
     window.history.replaceState(window.history.state, "", url);
 
     if (moveFocus) {
-      const tabIndex = TAB_DEFINITIONS.findIndex(({ id }) => id === tab);
+      const tabIndex = workspaceTabs.findIndex(({ id }) => id === tab);
       window.requestAnimationFrame(() => {
         tabButtonRefs.current[tabIndex]?.focus();
       });
@@ -1461,22 +1534,94 @@ export function MunicipalWorkspace() {
     setLoadAttempt((value) => value + 1);
   }
 
+  function handleShieldDrop(event: DragEvent<HTMLSpanElement>) {
+    event.preventDefault();
+    setIsShieldTargeted(false);
+
+    const file = event.dataTransfer.files?.[0];
+    if (canEditMenu && file && file.type.startsWith("image/")) {
+      void townHallController.uploadShield(file);
+    }
+  }
+
   return (
     <section className={styles.workspace}>
       <header className={styles.masthead}>
         <div className={styles.identity}>
-          <span className={styles.municipalityMark} aria-hidden="true">
-            {getInitials(selectedContext.municipality.name)}
+          {/* El escudo sustituye a las iniciales cuando se ha subido uno; se
+              reemplaza soltando una imagen encima. */}
+          <span
+            aria-hidden="true"
+            className={`${styles.municipalityMark}${
+              isShieldTargeted ? ` ${styles.municipalityMarkTargeted}` : ""
+            }`}
+            onDragLeave={() => setIsShieldTargeted(false)}
+            onDragOver={(event) => {
+              if (!canEditMenu) {
+                return;
+              }
+              event.preventDefault();
+              setIsShieldTargeted(true);
+            }}
+            onDrop={handleShieldDrop}
+            title={
+              canEditMenu ? "Arrastra una imagen para cambiar el escudo" : undefined
+            }
+          >
+            {townHall?.profile.has_shield ? (
+              <img
+                alt=""
+                src={townHallShieldUrl(townHallController.shieldVersion)}
+              />
+            ) : (
+              getInitials(municipalityLabel)
+            )}
           </span>
           <div>
             <p>Espacio municipal</p>
-            <h1>{selectedContext.municipality.name}</h1>
+            <h1>{municipalityLabel}</h1>
             <span>
               {selectedContext.municipality.province} ·{" "}
               {selectedContext.municipality.autonomous_community}
             </span>
           </div>
         </div>
+
+        {townHall?.profile.weather_enabled || canEditMenu ? (
+          <div className={styles.municipalBar}>
+            {townHall?.profile.weather_enabled ? (
+              <span
+                className={styles.weatherBlock}
+                title={
+                  townHallController.weather
+                    ? `Temperatura de hoy en ${townHallController.weather.location}`
+                    : "Temperatura no disponible ahora mismo"
+                }
+              >
+                <CloudSun aria-hidden="true" size={18} strokeWidth={1.6} />
+                {/* Si el proveedor no responde se muestra un guion, nunca una
+                    cifra inventada. */}
+                <strong>
+                  {townHallController.weather
+                    ? `${Math.round(
+                        townHallController.weather.temperature_celsius,
+                      )}°C`
+                    : "—"}
+                </strong>
+              </span>
+            ) : null}
+            {canEditMenu ? (
+              <button
+                aria-label="Editar menú de navegación"
+                onClick={() => setIsMenuEditorOpen(true)}
+                title="Editar menú"
+                type="button"
+              >
+                <Settings2 aria-hidden="true" size={16} strokeWidth={1.7} />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className={styles.contextPanel}>
           <span>Organización activa</span>
@@ -1512,7 +1657,7 @@ export function MunicipalWorkspace() {
       ) : null}
 
       <nav aria-label="Áreas del ayuntamiento" className={styles.tabs} role="tablist">
-        {TAB_DEFINITIONS.map(({ id, label, icon: Icon }, index) => (
+        {workspaceTabs.map(({ id, label, icon: Icon }, index) => (
           <button
             aria-controls={`municipal-panel-${id}`}
             aria-selected={activeTab === id}
@@ -1534,8 +1679,8 @@ export function MunicipalWorkspace() {
       </nav>
 
       <div
-        aria-labelledby={`municipal-tab-${activeTabDefinition.id}`}
-        id={`municipal-panel-${activeTabDefinition.id}`}
+        aria-labelledby={`municipal-tab-${activeTab}`}
+        id={`municipal-panel-${activeTab}`}
         role="tabpanel"
       >
         {isLoading ? (
@@ -1602,6 +1747,18 @@ export function MunicipalWorkspace() {
           />
         ) : activeTab === "people" ? (
           <PeopleTab organization={organization} />
+        ) : activeCustomSection !== null ? (
+          <div className={styles.tabContent}>
+            <section className={`panel ${styles.pageState}`}>
+              <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
+              <p className="eyebrow">{activeCustomSection.title}</p>
+              <h1>Apartado sin contenido</h1>
+              <p className="muted">
+                Este apartado lo has creado tú desde el editor del menú. Su
+                contenido todavía no está implementado.
+              </p>
+            </section>
+          </div>
         ) : (
           <RoadmapTab
             assets={assets}
@@ -1613,6 +1770,41 @@ export function MunicipalWorkspace() {
           />
         )}
       </div>
+
+      {canEditMenu && isMenuEditorOpen && townHall !== null ? (
+        <TownHallNavEditor
+          fallbackName={selectedContext.municipality.name}
+          isSaving={townHallController.isSavingTownHall}
+          onAddItem={(sectionId) =>
+            void townHallController.addItem(sectionId, "Nuevo elemento")
+          }
+          onAddSection={() =>
+            void townHallController.addSection("Nuevo apartado")
+          }
+          onArchiveBlock={(blockId) =>
+            void townHallController.archiveBlock(blockId)
+          }
+          onChangeWeatherLocation={(location) =>
+            void townHallController.updateProfile({
+              weather_location: location === "" ? null : location,
+            })
+          }
+          onClose={() => setIsMenuEditorOpen(false)}
+          onRenameBlock={(blockId, title) =>
+            void townHallController.renameBlock(blockId, title)
+          }
+          onRenameMunicipality={(name) =>
+            void townHallController.updateProfile({
+              display_name: name === "" ? null : name,
+            })
+          }
+          onReorder={(nav) => void townHallController.reorderNav(nav)}
+          onToggleWeather={(enabled) =>
+            void townHallController.updateProfile({ weather_enabled: enabled })
+          }
+          townHall={townHall}
+        />
+      ) : null}
     </section>
   );
 }

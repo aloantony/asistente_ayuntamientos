@@ -11,6 +11,14 @@ import type {
   AssistantStreamTranscriptFinal,
   AssistantStreamToolActivity,
   AssistantStreamVoiceState,
+  TownHall,
+  TownHallBlock,
+  TownHallBlockCreate,
+  TownHallBlockPlacement,
+  TownHallBlockUpdate,
+  TownHallProfile,
+  TownHallProfileUpdate,
+  TownHallWeather,
   User,
 } from "../components/types";
 
@@ -169,6 +177,34 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El estado de la necesidad no permite editar su contenido.";
     case "Project does not belong to the requirement organization":
       return "El proyecto no pertenece a la organización de la necesidad.";
+    case "Block not found":
+      return "No se encontró el apartado del menú.";
+    case "A navigation section cannot have a parent":
+      return "Un apartado principal no puede colgar de otro apartado.";
+    case "A navigation item requires a parent section":
+      return "Un elemento del menú tiene que colgar de un apartado.";
+    case "Parent must be an active navigation section of the same organization":
+      return "El apartado de destino no es válido.";
+    case "Duplicate block in reorder payload":
+      return "No se pudo reordenar el menú: hay elementos repetidos.";
+    case "Weather block is disabled":
+      return "El bloque de temperatura está desactivado.";
+    case "Weather provider unavailable":
+      return "No se pudo consultar la temperatura del municipio.";
+    case "Shield not found":
+      return "Este municipio todavía no tiene escudo.";
+    case "Unsupported shield content type":
+      return "El escudo tiene que ser una imagen PNG, JPG, SVG o WebP.";
+    case "Shield exceeds maximum upload size":
+      return "La imagen del escudo supera el tamaño máximo permitido.";
+    case "Empty shield upload":
+      return "La imagen del escudo está vacía.";
+    case "Invalid shield storage key":
+      return "No se pudo guardar el escudo.";
+    case "User has no organization":
+      return "Tu usuario no pertenece a ninguna organización.";
+    case "organization_id is required":
+      return "Indica la organización para ver su Ayuntamiento.";
     case "Organization not found":
       return "No se encontró la organización indicada.";
     case "Organization access denied":
@@ -753,4 +789,99 @@ export function getErrorMessage(error: unknown, fallback: string) {
 
 export function isAuthError(error: unknown) {
   return error instanceof ApiRequestError && error.status === 401;
+}
+
+// Ayuntamiento: perfil del municipio y árbol de navegación configurable. La
+// organización viaja opcionalmente; sin ella el backend usa la primera del
+// usuario, la misma convención que aplica el menú lateral.
+function townHallPath(path: string, organizationId?: number) {
+  return organizationId === undefined
+    ? path
+    : `${path}${path.includes("?") ? "&" : "?"}organization_id=${organizationId}`;
+}
+
+export function fetchTownHall(organizationId?: number) {
+  return adminRequest<TownHall>(
+    townHallPath("/town-hall", organizationId),
+    "",
+    "No se pudo cargar el Ayuntamiento.",
+  );
+}
+
+// El bloque de temperatura se pide aparte de la pantalla para que una caída
+// del proveedor no impida cargar el Ayuntamiento.
+export function fetchTownHallWeather(organizationId?: number) {
+  return adminRequest<TownHallWeather>(
+    townHallPath("/town-hall/weather", organizationId),
+    "",
+    "No se pudo consultar la temperatura.",
+  );
+}
+
+export function updateTownHallProfile(
+  changes: TownHallProfileUpdate,
+  organizationId?: number,
+) {
+  return adminRequest<TownHallProfile>(
+    townHallPath("/town-hall/profile", organizationId),
+    "",
+    "No se pudo guardar la configuración del Ayuntamiento.",
+    { method: "PATCH", body: JSON.stringify(changes) },
+  );
+}
+
+export function createTownHallBlock(
+  block: TownHallBlockCreate,
+  organizationId?: number,
+) {
+  return adminRequest<TownHallBlock>(
+    townHallPath("/town-hall/blocks", organizationId),
+    "",
+    "No se pudo crear el apartado del menú.",
+    { method: "POST", body: JSON.stringify(block) },
+  );
+}
+
+export function updateTownHallBlock(
+  blockId: number,
+  changes: TownHallBlockUpdate,
+) {
+  return adminRequest<TownHallBlock>(
+    `/town-hall/blocks/${blockId}`,
+    "",
+    "No se pudo actualizar el apartado del menú.",
+    { method: "PATCH", body: JSON.stringify(changes) },
+  );
+}
+
+export function reorderTownHallBlocks(
+  placements: TownHallBlockPlacement[],
+  organizationId?: number,
+) {
+  return adminRequest<TownHallBlock[]>(
+    townHallPath("/town-hall/blocks/reorder", organizationId),
+    "",
+    "No se pudo reordenar el menú.",
+    { method: "POST", body: JSON.stringify({ placements }) },
+  );
+}
+
+export function uploadTownHallShield(file: File, organizationId?: number) {
+  const body = new FormData();
+  body.append("file", file);
+
+  return adminRequest<TownHallProfile>(
+    townHallPath("/town-hall/shield", organizationId),
+    "",
+    "No se pudo subir el escudo.",
+    { method: "POST", body },
+  );
+}
+
+// El escudo se pinta con <img>: la cookie de sesión viaja sola porque backend
+// y frontend comparten host (ADR-010). `version` fuerza a saltarse la caché
+// tras sustituirlo, ya que la URL es siempre la misma.
+export function townHallShieldUrl(version: number, organizationId?: number) {
+  const path = townHallPath("/town-hall/shield", organizationId);
+  return `${API_BASE_URL}${path}${path.includes("?") ? "&" : "?"}v=${version}`;
 }

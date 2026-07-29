@@ -24,6 +24,7 @@ import {
   canUseMemoryReview,
   canUseProductReview,
   PROJECT_PERMISSIONS,
+  TOWN_HALL_EDIT_PERMISSIONS,
 } from "./permissions";
 
 export const REQUIREMENT_PERMISSIONS = [
@@ -55,6 +56,10 @@ export function shouldShowRequirementsPanel(user: User) {
 
 export function shouldShowProjectsPanel(user: User) {
   return hasAnyPermission(user, PROJECT_PERMISSIONS);
+}
+
+export function canEditTownHall(user: User) {
+  return hasAnyPermission(user, TOWN_HALL_EDIT_PERMISSIONS);
 }
 
 // Sección de aterrizaje según los permisos del usuario; la usan el login
