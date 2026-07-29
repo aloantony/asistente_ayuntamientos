@@ -14,7 +14,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260713_0021"
+HEAD_REVISION = "20260729_0022"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
