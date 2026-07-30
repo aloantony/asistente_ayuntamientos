@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
+from app.core.rate_limit import (
+    ordinance_import_rate_limiter,
+    require_rate_limit_slot,
+)
 from app.core.jobs import get_default_queue
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
@@ -443,6 +447,13 @@ def enqueue_import_job(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> OrdinanceImportEnqueueRead:
     require_ordinance_permission(db, current_user, "ordinances.import")
+    # Cada importación descarga y trocea un boletín oficial completo y encola
+    # trabajos de embeddings: es la operación más cara del sistema (ADR-032).
+    require_rate_limit_slot(
+        ordinance_import_rate_limiter,
+        str(current_user.id),
+        detail="Too many ordinance imports",
+    )
     job = get_existing_import_job(db, job_id)
     if job.status in {"running", "queued"}:
         return OrdinanceImportEnqueueRead(

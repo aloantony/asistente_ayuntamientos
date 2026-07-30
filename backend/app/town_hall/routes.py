@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
+from app.core.rate_limit import require_rate_limit_slot, upload_rate_limiter
 from app.db.session import get_db
 from app.documents.storage import (
+    DEFAULT_EXTENSIONS_BY_CONTENT_TYPE,
     DocumentTooLargeError,
     EmptyDocumentError,
     InvalidStorageKeyError,
@@ -259,6 +261,11 @@ def upload_shield(
 ) -> MunicipalProfileRead:
     organization = resolve_organization(db, current_user, organization_id)
     require_town_hall_edit(db, current_user, organization.id)
+    require_rate_limit_slot(
+        upload_rate_limiter,
+        str(current_user.id),
+        detail="Too many uploads",
+    )
 
     try:
         stored_upload = storage_service.save_branding_file(
@@ -344,9 +351,23 @@ def download_shield(
             detail="Shield not found",
         )
 
+    # El escudo se sirve siempre como descarga, nunca inline. Un SVG servido
+    # inline se renderiza como documento en el origen de la API y puede
+    # ejecutar scripts con la cookie de sesión en alcance; dentro de un <img>
+    # (que es como lo pinta el frontend) no puede. Content-Disposition solo
+    # afecta a la navegación de primer nivel, así que la insignia sigue
+    # mostrándose con normalidad. Ver ADR-032.
+    #
+    # La extensión sale del content-type validado y no del nombre original: la
+    # del fichero almacenado la elige quien sube (build_stored_filename arrastra
+    # el sufijo del cliente), así que usarla dejaría la cabecera bajo su control.
+    content_type = profile.shield_content_type or "application/octet-stream"
+    suffix = DEFAULT_EXTENSIONS_BY_CONTENT_TYPE.get(content_type, "")
     return FileResponse(
         file_path,
-        media_type=profile.shield_content_type or "application/octet-stream",
+        media_type=content_type,
+        filename=f"escudo{suffix}",
+        content_disposition_type="attachment",
     )
 
 

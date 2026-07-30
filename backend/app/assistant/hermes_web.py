@@ -14,6 +14,7 @@ from urllib import request as urlrequest
 from urllib.parse import urlsplit
 
 from app.core.config import settings
+from app.core.http import urlopen_without_redirects
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class HermesWebClient:
         )
 
         try:
-            with urlrequest.urlopen(
+            with urlopen_without_redirects(
                 request,
                 timeout=settings.hermes_web_timeout_seconds,
             ) as response:

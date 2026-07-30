@@ -842,7 +842,9 @@ def test_realtime_session_creates_openai_client_secret(
         )
         return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
 
-    monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "app.assistant.realtime.urlopen_without_redirects", fake_urlopen
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -994,7 +996,9 @@ def test_realtime_session_history_marks_finished_actions_as_already_processed(
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
 
-    monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "app.assistant.realtime.urlopen_without_redirects", fake_urlopen
+    )
     session_response = client.post(
         f"/assistant/conversations/{conversation['id']}/realtime/session",
         headers=headers_for(user),

@@ -79,6 +79,11 @@ from app.assistant.speech import (
 from app.assistant.tools import get_available_tool_specs
 from app.auth.dependencies import get_current_user, require_superuser
 from app.core.config import settings
+from app.core.rate_limit import (
+    assistant_turn_rate_limiter,
+    require_rate_limit_slot,
+    speech_rate_limiter,
+)
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
@@ -160,6 +165,11 @@ async def transcribe_audio(
     file: Annotated[UploadFile, File()],
 ) -> AssistantAudioTranscriptionRead:
     require_assistant_use(db, current_user)
+    require_rate_limit_slot(
+        speech_rate_limiter,
+        str(current_user.id),
+        detail="Too many speech requests",
+    )
     audio = await file.read(settings.speech_transcription_max_bytes + 1)
     if len(audio) > settings.speech_transcription_max_bytes:
         raise HTTPException(
@@ -186,6 +196,11 @@ def synthesize_speech(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     require_assistant_use(db, current_user)
+    require_rate_limit_slot(
+        speech_rate_limiter,
+        str(current_user.id),
+        detail="Too many speech requests",
+    )
     if len(payload.text) > settings.speech_synthesis_max_chars:
         raise HTTPException(
             status_code=http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -730,6 +745,11 @@ def send_message(
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
 ) -> AssistantConversation:
     require_assistant_use(db, current_user)
+    require_rate_limit_slot(
+        assistant_turn_rate_limiter,
+        str(current_user.id),
+        detail="Too many assistant requests",
+    )
     conversation = get_own_conversation(db, current_user, conversation_id)
 
     if conversation.status != "active":
@@ -775,6 +795,11 @@ def send_message_stream(
     agent_gateway: Annotated[AIGateway, Depends(get_gateway)],
 ) -> StreamingResponse:
     require_assistant_use(db, current_user)
+    require_rate_limit_slot(
+        assistant_turn_rate_limiter,
+        str(current_user.id),
+        detail="Too many assistant requests",
+    )
     conversation = get_own_conversation(db, current_user, conversation_id)
 
     if conversation.status != "active":
@@ -834,6 +859,11 @@ async def send_voice_turn_stream(
     file: Annotated[UploadFile, File()],
 ) -> StreamingResponse:
     require_assistant_use(db, current_user)
+    require_rate_limit_slot(
+        assistant_turn_rate_limiter,
+        str(current_user.id),
+        detail="Too many assistant requests",
+    )
     conversation = get_own_conversation(db, current_user, conversation_id)
 
     if conversation.status != "active":

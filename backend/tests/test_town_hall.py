@@ -424,6 +424,35 @@ def test_shield_round_trip(
     ] is True
 
 
+def test_shield_is_served_as_an_attachment(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    """Un SVG servido inline se ejecutaría en el origen de la API (ADR-032)."""
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+    upload = client.post(
+        "/town-hall/shield",
+        # Nombre original hostil: no debe llegar a la cabecera de la descarga.
+        files={"file": ('x";evil.html', svg, "image/svg+xml")},
+        headers=headers,
+    )
+    download = client.get("/town-hall/shield", headers=headers)
+
+    assert upload.status_code == 200
+    assert download.status_code == 200
+    disposition = download.headers["content-disposition"]
+    assert disposition.startswith("attachment")
+    assert "evil.html" not in disposition
+    assert 'filename="escudo.svg"' in disposition
+
+
 def test_shield_upload_requires_the_edit_permission(
     client,
     make_user,

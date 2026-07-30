@@ -33,6 +33,7 @@ from app.assistant.safety import build_assistant_safety_identifier
 from app.assistant.tools import ToolContext, execute_tool, get_available_tool_specs
 from app.assistant.turn import build_history, tool_result_for_activity
 from app.core.config import settings
+from app.core.http import urlopen_without_redirects
 from app.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def create_realtime_client_secret(
     )
 
     try:
-        with urlrequest.urlopen(
+        with urlopen_without_redirects(
             request,
             timeout=settings.assistant_realtime_timeout_seconds,
         ) as response:

@@ -15,7 +15,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260729_0027"
+HEAD_REVISION = "20260730_0028"
 PROTOTYPE_TABLES = {
     "assistant_knowledge_proposals",
     "document_work_artifacts",
@@ -684,6 +684,38 @@ def assert_maintenance_trigger_absent(engine: Engine) -> None:
         ).scalar_one() is True
 
 
+def assert_security_events_trigger(engine: Engine) -> None:
+    """La traza de seguridad solo vale si la base impide reescribirla."""
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = 'trg_security_events_immutable'
+                      AND NOT tgisinternal
+                )
+                """
+            )
+        ).scalar_one() is True
+
+
+def assert_security_events_trigger_absent(engine: Engine) -> None:
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1
+                    FROM pg_proc
+                    WHERE proname = 'prevent_security_event_mutation'
+                )
+                """
+            )
+        ).scalar_one() is True
+
+
 @pytest.mark.parametrize("table_name", sorted(PROTOTYPE_TABLES))
 def test_cleanup_waits_for_and_preserves_concurrent_rows(
     migration_database_url: str,
@@ -761,6 +793,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(upgraded_inspector)
         assert_maintenance_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
+        assert_security_events_trigger(engine)
         assert_pgvector_extension(engine)
 
         with engine.connect() as connection:
@@ -787,6 +820,8 @@ def test_reconciles_deployed_revision_and_reversible_schema(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
+        assert "security_events" not in downgraded_inspector.get_table_names()
+        assert_security_events_trigger_absent(engine)
 
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
@@ -797,6 +832,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(reupgraded_inspector)
         assert_maintenance_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
+        assert_security_events_trigger(engine)
         assert_pgvector_extension(engine)
 
         with engine.connect() as connection:
@@ -928,6 +964,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+        assert_security_events_trigger(engine)
         assert_pgvector_extension(engine)
 
         run_alembic(migration_database_url, "downgrade", "20260713_0021")
@@ -939,6 +976,8 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
+        assert "security_events" not in downgraded_inspector.get_table_names()
+        assert_security_events_trigger_absent(engine)
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
@@ -949,6 +988,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+        assert_security_events_trigger(engine)
         assert_pgvector_extension(engine)
     finally:
         engine.dispose()
@@ -1083,6 +1123,7 @@ def test_maintenance_migration_is_reversible_and_events_are_immutable(
         run_alembic(migration_database_url, "check")
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+        assert_security_events_trigger(engine)
 
         with engine.begin() as connection:
             user_id = connection.execute(
@@ -1257,5 +1298,6 @@ def test_maintenance_migration_is_reversible_and_events_are_immutable(
         run_alembic(migration_database_url, "check")
         assert_maintenance_schema(inspect(engine))
         assert_maintenance_trigger(engine)
+        assert_security_events_trigger(engine)
     finally:
         engine.dispose()
