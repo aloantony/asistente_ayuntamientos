@@ -4,6 +4,7 @@ import {
   BookOpen,
   Building2,
   CheckCircle2,
+  ChevronDown,
   CircleAlert,
   ClipboardList,
   CloudSun,
@@ -62,6 +63,7 @@ import {
   type Organization,
   type OrganizationSummary,
   type Ordinance,
+  type TownHall,
   type User,
 } from "./types";
 
@@ -101,6 +103,31 @@ type TabDefinition = {
   label: string;
   icon: LucideIcon;
 };
+
+// Entrada de la píldora de navegación: las áreas fijas no llevan desplegable,
+// los apartados creados por el usuario cuelgan de él sus elementos.
+type PillEntry = TabDefinition & {
+  items: { id: CustomTab; label: string }[];
+};
+
+function findCustomBlock(townHall: TownHall | null, tab: ActiveTab) {
+  if (townHall === null || !isCustomTab(tab)) {
+    return null;
+  }
+
+  const blockId = customTabBlockId(tab);
+  for (const section of townHall.nav) {
+    if (section.id === blockId) {
+      return { title: section.title, parentTitle: null as string | null };
+    }
+    const item = section.items.find((candidate) => candidate.id === blockId);
+    if (item) {
+      return { title: item.title, parentTitle: section.title };
+    }
+  }
+
+  return null;
+}
 
 const TAB_DEFINITIONS: TabDefinition[] = [
   { id: "summary", label: "Resumen", icon: Landmark },
@@ -1201,6 +1228,7 @@ export function MunicipalWorkspace() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("summary");
   const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
   const [isShieldTargeted, setIsShieldTargeted] = useState(false);
+  const [openPillId, setOpenPillId] = useState<ActiveTab | null>(null);
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
@@ -1460,20 +1488,20 @@ export function MunicipalWorkspace() {
 
   // Los apartados del editor se añaden como pestañas tras las áreas fijas, de
   // modo que la tira de pestañas siga siendo una sola navegación.
-  const workspaceTabs: TabDefinition[] = [
-    ...TAB_DEFINITIONS,
+  const workspaceTabs: PillEntry[] = [
+    ...TAB_DEFINITIONS.map((tab) => ({ ...tab, items: [] })),
     ...(townHall?.nav ?? []).map((section) => ({
       id: `block-${section.id}` as CustomTab,
       label: section.title,
       icon: Landmark,
+      items: section.items.map((item) => ({
+        id: `block-${item.id}` as CustomTab,
+        label: item.title,
+      })),
     })),
   ];
-  const activeCustomSection =
-    townHall !== null && isCustomTab(activeTab)
-      ? townHall.nav.find(
-          (section) => section.id === customTabBlockId(activeTab),
-        ) ?? null
-      : null;
+  // Un apartado propio puede ser un apartado o uno de sus elementos.
+  const activeCustomBlock = findCustomBlock(townHall, activeTab);
 
   function handleTabKeyDown(
     event: KeyboardEvent<HTMLButtonElement>,
@@ -1581,7 +1609,6 @@ export function MunicipalWorkspace() {
             )}
           </span>
           <div>
-            <p>Espacio municipal</p>
             <h1>{municipalityLabel}</h1>
             <span>
               {selectedContext.municipality.province} ·{" "}
@@ -1590,7 +1617,77 @@ export function MunicipalWorkspace() {
           </div>
         </div>
 
-        {townHall?.profile.weather_enabled || canEditMenu ? (
+        {/* Píldora central de navegación del prototipo: las áreas fijas son
+            botones planos y los apartados propios abren sus elementos al pasar
+            el ratón. El relleno superior del ancla es la zona-puente que evita
+            perder el hover al bajar del botón al panel. */}
+        <nav
+          aria-label="Áreas del ayuntamiento"
+          className={styles.areaPill}
+          role="tablist"
+        >
+          {workspaceTabs.map(({ id, label, icon: Icon, items }, index) => {
+            const hasItems = items.length > 0;
+            const isOpen = hasItems && openPillId === id;
+            const isSelected =
+              activeTab === id || items.some((item) => item.id === activeTab);
+
+            return (
+              <div
+                className={styles.areaPillGroup}
+                key={id}
+                onMouseEnter={() => setOpenPillId(hasItems ? id : null)}
+                onMouseLeave={() => setOpenPillId(null)}
+              >
+                <button
+                  aria-controls={`municipal-panel-${id}`}
+                  aria-expanded={hasItems ? isOpen : undefined}
+                  aria-selected={isSelected}
+                  id={`municipal-tab-${id}`}
+                  onClick={() => {
+                    selectWorkspaceTab(id);
+                    setOpenPillId((current) =>
+                      hasItems && current !== id ? id : null,
+                    );
+                  }}
+                  onKeyDown={(event) => handleTabKeyDown(event, index)}
+                  ref={(element) => {
+                    tabButtonRefs.current[index] = element;
+                  }}
+                  role="tab"
+                  tabIndex={isSelected ? 0 : -1}
+                  type="button"
+                >
+                  <Icon aria-hidden="true" size={16} strokeWidth={1.6} />
+                  <span>{label}</span>
+                  {hasItems ? (
+                    <ChevronDown aria-hidden="true" size={12} strokeWidth={2} />
+                  ) : null}
+                </button>
+                {isOpen ? (
+                  <div className={styles.areaPillMenuAnchor}>
+                    <div className={styles.areaPillMenu}>
+                      {items.map((item) => (
+                        <button
+                          key={item.id}
+                          onClick={() => {
+                            selectWorkspaceTab(item.id);
+                            setOpenPillId(null);
+                          }}
+                          type="button"
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </nav>
+
+        <div className={styles.mastheadAside}>
           <div className={styles.municipalBar}>
             {townHall?.profile.weather_enabled ? (
               <span
@@ -1624,9 +1721,8 @@ export function MunicipalWorkspace() {
               </button>
             ) : null}
           </div>
-        ) : null}
 
-        <div className={styles.contextPanel}>
+          <div className={styles.contextPanel}>
           <span>Organización activa</span>
           {contexts.length > 1 ? (
             <select
@@ -1646,9 +1742,12 @@ export function MunicipalWorkspace() {
           ) : (
             <strong>{selectedContext.organization.name}</strong>
           )}
-          <small>
-            {isPaused ? "Modo de consulta · organización pausada" : "Datos en producción"}
-          </small>
+            <small>
+              {isPaused
+                ? "Modo de consulta · organización pausada"
+                : "Datos en producción"}
+            </small>
+          </div>
         </div>
       </header>
 
@@ -1658,28 +1757,6 @@ export function MunicipalWorkspace() {
           modo de consulta.
         </p>
       ) : null}
-
-      <nav aria-label="Áreas del ayuntamiento" className={styles.tabs} role="tablist">
-        {workspaceTabs.map(({ id, label, icon: Icon }, index) => (
-          <button
-            aria-controls={`municipal-panel-${id}`}
-            aria-selected={activeTab === id}
-            id={`municipal-tab-${id}`}
-            key={id}
-            onClick={() => selectWorkspaceTab(id)}
-            onKeyDown={(event) => handleTabKeyDown(event, index)}
-            ref={(element) => {
-              tabButtonRefs.current[index] = element;
-            }}
-            role="tab"
-            tabIndex={activeTab === id ? 0 : -1}
-            type="button"
-          >
-            <Icon aria-hidden="true" size={17} strokeWidth={1.6} />
-            <span>{label}</span>
-          </button>
-        ))}
-      </nav>
 
       <div
         aria-labelledby={`municipal-tab-${activeTab}`}
@@ -1750,15 +1827,19 @@ export function MunicipalWorkspace() {
           />
         ) : activeTab === "people" ? (
           <PeopleTab organization={organization} />
-        ) : activeCustomSection !== null ? (
+        ) : activeCustomBlock !== null ? (
           <div className={styles.tabContent}>
             <section className={`panel ${styles.pageState}`}>
               <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
-              <p className="eyebrow">{activeCustomSection.title}</p>
+              <p className="eyebrow">
+                {activeCustomBlock.parentTitle
+                  ? `${activeCustomBlock.parentTitle} · ${activeCustomBlock.title}`
+                  : activeCustomBlock.title}
+              </p>
               <h1>Apartado sin contenido</h1>
               <p className="muted">
                 Este apartado lo has creado tú desde el editor del menú. Su
-                contenido todavía no está implementado.
+                contenido llegará con los epígrafes del prototipo.
               </p>
             </section>
           </div>
