@@ -196,7 +196,7 @@ Run the backend test suite (PostgreSQL test database, fully isolated from dev da
 
 ```bash
 docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
-  sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q"
+  sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q -o cache_dir=/tmp/pytest_cache"
 ```
 
 The runtime backend image intentionally does not include `pytest`; the command
@@ -205,17 +205,68 @@ above installs dev-only dependencies in a disposable container. Unless
 `app_test_<uuid>` database and drops it after the run. Custom test databases
 must keep an `app_test` prefix.
 
-## 10. Operational cautions
+## 10. Production deployment
 
-- Never commit `.env`.
+The public deployment serves the frontend at `/` and the API under `/api` behind a
+single hostname, with Caddy terminating TLS. Two facts force that shape: the
+session cookie is `httpOnly`, `SameSite=Lax` and carries no `Domain`, so frontend
+and API must share a host (ADR-010); and the API cannot live at the root because
+the backend serves `/admin/roles`, `/admin/users`, `/admin/groups` and
+`/admin/permissions` while the frontend serves the pages `/admin`,
+`/admin/usuarios`, `/admin/grupos` and `/admin/roles` — `/admin/roles` collides.
+
+Full runbook (server hardening, DNS, secrets, bootstrap retirement, backups and
+restore drill): `docs/despliegue.md`. Decisions: ADR-031 (topology and TLS),
+ADR-032 (hardening), ADR-033 (backups). Data-protection posture and the gates that
+remain open before widening the pilot: `docs/proteccion-datos.md`.
+
+Production runs from a separate Compose file, so the local development workflow in
+section 8 is unchanged:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.production -f docker-compose.prod.yml exec backend alembic upgrade head
+```
+
+`.env.production.example` is the documented template; the real file lives only on
+the server, owned by root with mode 0600, and is gitignored. The backend refuses to
+boot in production with the placeholder `SECRET_KEY`, with non-https CORS origins,
+or with `ALLOWED_HOSTS=*`.
+
+`NEXT_PUBLIC_API_BASE_URL` is baked into the browser bundle at build time, so
+changing the domain requires rebuilding the frontend image.
+
+Backups and restore:
+
+```bash
+sudo ops/backup.sh                                  # nightly via systemd timer
+sudo ops/restore.sh --list
+sudo ops/restore.sh --from daily/<stamp>             # drill: restores to a scratch DB
+sudo ops/restore.sh --from daily/<stamp> --production --with-documents
+```
+
+Backups stay on the server, so the VPS provider's snapshots must be enabled — they
+are the only copy off the machine (ADR-033).
+
+Production shares the VPS with development (ADR-031), which imposes two operational
+rules on **everyone working on this machine**: never `down` the production stack
+(use `stop`/`start`, so its containers keep referencing their volumes), and never
+run `docker system prune -a --volumes` (use `docker builder prune`, which is where
+the reclaimable space actually is). Details in `docs/despliegue.md` §7 bis.
+
+## 11. Operational cautions
+
+- Never commit `.env` or `.env.production`.
 - Do not use `docker compose down -v` unless intentionally deleting volumes.
 - `document_storage` contains uploaded files and must be treated as persistent user data.
 - Run migrations after pulling backend changes that include Alembic or model updates.
-- Keep backend and frontend bound to localhost unless deployment is intentionally changed.
-- Do not expose PostgreSQL or Redis publicly.
+- In local development keep backend and frontend bound to localhost.
+- Never publish PostgreSQL or Redis; in production they sit on an internal network with no published ports.
+- Containers run as non-root. Reusing an existing `document_storage` volume needs a one-time `chown` to uid 10001 (see `docs/despliegue.md`); never delete the volume.
+- Retire `BOOTSTRAP_ADMIN_TOKEN` from the environment file once the first superuser exists.
 - Avoid destructive database or storage actions unless the data loss is intentional and understood.
 
-## 11. Current roadmap
+## 12. Current roadmap
 
 The roadmap follows the transition from the current supervised assistant to the product defined in `docs/vision-producto.md`:
 
@@ -228,7 +279,7 @@ The roadmap follows the transition from the current supervised assistant to the 
 - Build the anonymized improvement network and central fleet control plane.
 - Add owned model runtimes and a separate citizen assistant only in later phases.
 
-## 12. Developer handoff checklist
+## 13. Developer handoff checklist
 
 ```bash
 git pull

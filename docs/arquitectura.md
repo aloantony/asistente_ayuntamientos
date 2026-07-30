@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-07-29.
+Actualizado: 2026-07-30.
 
 Este documento describe la arquitectura **implementada**. La arquitectura
 objetivo, con una instancia operativa por ayuntamiento y un control de
@@ -13,7 +13,8 @@ Aplicación multi-tenant con cuatro servicios en Docker Compose:
 - `backend`: API HTTP FastAPI (puerto 127.0.0.1:8000), monolito modular.
 - `frontend`: Next.js App Router (puerto 127.0.0.1:3000), consola de administración y trabajo.
 - `postgres`: PostgreSQL 17, interno (sin puerto publicado), con volumen persistente.
-- `redis`: Redis 7, interno, reservado para colas/caché futuras (sin consumidor todavía).
+- `redis`: Redis 7, interno, cola RQ real (`app/core/jobs.py`): importación de
+  ordenanzas y tareas de la oficina de agentes la usan; el servicio `worker` las consume.
 
 ## Modelo de dominio y tenancy
 
@@ -82,10 +83,38 @@ La distinción central del dominio:
 - Base de datos PostgreSQL de test separada (`app_test*`); cada test corre dentro de una transacción externa con savepoints, y se hace rollback al terminar — aislamiento total sin tocar datos de desarrollo.
 - Cobertura prioritaria: matriz de permisos, aislamiento entre organizaciones y reglas de escalada (el núcleo de seguridad).
 
+## Despliegue en producción
+
+Un solo hostname sirve el frontend en `/` y la API bajo `/api`, detrás de Caddy
+con TLS automático. La topología la fuerzan la cookie de sesión sin `Domain`
+(frontend y API comparten host, ADR-010) y la colisión de `/admin/roles` entre las
+rutas del backend y las páginas del frontend. Los detalles operativos están en
+`docs/despliegue.md`; las decisiones, en ADR-031 (topología), ADR-032
+(endurecimiento) y ADR-033 (copias).
+
+Diferencias del stack de producción (`docker-compose.prod.yml`, fichero aparte del
+de desarrollo): sin `network_mode: host`, Postgres y Redis en una red interna sin
+salida a Internet y sin puertos publicados, `restart: unless-stopped` y healthcheck
+en todos los servicios, contenedores sin privilegios con raíz de solo lectura, y
+Postgres fijado por digest. El backend corre con `--proxy-headers` y
+`--forwarded-allow-ips` apuntando a la IP fija de Caddy, sin lo cual el limitador
+de login vería una sola IP para todos los clientes.
+
+Endurecimiento del backend: guardas de arranque que rechazan configuración de
+desarrollo en producción, documentación interactiva cerrada fuera de desarrollo,
+`TrustedHostMiddleware`, comprobación de `Origin` en las escrituras como segunda
+capa CSRF, cabeceras de seguridad y CSP, configuración de logging, `/ready` que
+comprueba base de datos y Redis, límites de tasa en los endpoints que cuestan
+dinero o CPU, y `security_events`: traza de auditoría inmutable por trigger que
+registra autenticación, cambios de privilegio y acceso a documentos.
+
 ## Carencias conocidas (deuda aceptada conscientemente)
 
 - Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
-- Los rate limiters (login, cambio de contraseña) son por proceso; al pasar a varios workers deben moverse a Redis (y valorar entonces un límite secundario por cuenta frente a password spraying, ADR-015).
-- El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
-- Sin pipeline de CI; validación local según README §9.
-- Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.
+- Los rate limiters siguen siendo **por proceso**; el despliegue mantiene un solo worker de uvicorn por esa razón. Pasar a varios workers exige moverlos a Redis antes (ADR-010, ADR-015, ADR-032).
+- El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar. Ese mismo `middleware.ts` es lo que falta para apretar la CSP a nonce y quitar `'unsafe-inline'` de `script-src` (ADR-032).
+- La CSP del frontend admite `script-src 'unsafe-inline'` porque Next.js App Router inyecta scripts inline para hidratar y el script de tema también lo es (ADR-032).
+- Retención de conversaciones, documentos y órdenes **no automatizada**: solo la traza de seguridad se purga sola (`docs/proteccion-datos.md`).
+- Sin cifrado en reposo a nivel de columna o base de datos; la postura es cifrado de disco del VPS (`docs/proteccion-datos.md`).
+- Las copias de seguridad viven en el mismo servidor: un compromiso o borrado del servidor se las lleva. Los snapshots del proveedor son la única red externa (ADR-033).
+- El planificador horario de las rutinas de la oficina de agentes sigue pendiente; se disparan a mano (`docs/oficina-agentes.md`).
