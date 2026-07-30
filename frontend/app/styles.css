@@ -5539,3 +5539,88 @@ html.dark .dashboard-ask input {
 .townhall-editor-done {
   align-self: flex-end;
 }
+
+/* ---------------------------------------------------------------------------
+ * Contenido de un apartado del Ayuntamiento (Fase B1)
+ * ------------------------------------------------------------------------ */
+
+.townhall-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 900px;
+}
+
+.townhall-content-head h2 {
+  margin: 2px 0 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.townhall-content-items {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.townhall-content-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 14px 16px;
+  background: var(--surface);
+}
+
+.townhall-content-item h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.townhall-content-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.townhall-content-title-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: transparent;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.townhall-content-title-input:hover:not(:disabled),
+.townhall-content-title-input:focus {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+}
+
+.townhall-content-body-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.townhall-content-body {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}

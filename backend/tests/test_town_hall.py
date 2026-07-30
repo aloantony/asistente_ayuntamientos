@@ -694,3 +694,174 @@ def test_geocoding_drops_the_province_suffix():
     assert weather.normalize_place_name("Fuentelcésped, Burgos") == "Fuentelcésped"
     assert weather.normalize_place_name("  Aranda de Duero  ") == "Aranda de Duero"
     assert weather.normalize_place_name(", Burgos") == ""
+
+
+def create_content_item(client, headers, parent_id, title):
+    response = client.post(
+        "/town-hall/blocks",
+        json={"block_type": "item", "parent_id": parent_id, "title": title},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_content_items_hang_from_a_navigation_item(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Información general")
+    apartado = create_item(client, headers, section["id"], "Historia")
+    first = create_content_item(client, headers, apartado["id"], "Orígenes")
+    create_content_item(client, headers, apartado["id"], "Siglo XX")
+
+    client.patch(
+        f"/town-hall/blocks/{first['id']}",
+        json={"body": "  Fundado en el siglo XII.  "},
+        headers=headers,
+    )
+    content = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    )
+
+    assert content.status_code == 200
+    payload = content.json()
+    assert payload["title"] == "Historia"
+    assert payload["parent_title"] == "Información general"
+    assert [item["title"] for item in payload["items"]] == ["Orígenes", "Siglo XX"]
+    # El cuerpo se guarda recortado.
+    assert payload["items"][0]["body"] == "Fundado en el siglo XII."
+    assert payload["items"][1]["body"] is None
+
+
+def test_content_hierarchy_is_enforced(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Información general")
+    apartado = create_item(client, headers, section["id"], "Historia")
+
+    # Un elemento no puede colgar del epígrafe, solo del apartado.
+    on_section = client.post(
+        "/town-hall/blocks",
+        json={"block_type": "item", "parent_id": section["id"], "title": "x"},
+        headers=headers,
+    )
+    orphan = client.post(
+        "/town-hall/blocks",
+        json={"block_type": "item", "title": "x"},
+        headers=headers,
+    )
+    # Un apartado tampoco puede colgar de un elemento.
+    leaf = create_content_item(client, headers, apartado["id"], "Orígenes")
+    under_leaf = client.post(
+        "/town-hall/blocks",
+        json={"block_type": "nav_item", "parent_id": leaf["id"], "title": "x"},
+        headers=headers,
+    )
+
+    assert on_section.status_code == 422
+    assert orphan.status_code == 422
+    assert under_leaf.status_code == 422
+
+
+def test_only_content_items_carry_a_body(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Información general")
+
+    response = client.patch(
+        f"/town-hall/blocks/{section['id']}",
+        json={"body": "texto"},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Only content items carry a body"
+
+
+def test_archiving_cascades_through_the_whole_branch(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Información general")
+    apartado = create_item(client, headers, section["id"], "Historia")
+    create_content_item(client, headers, apartado["id"], "Orígenes")
+
+    client.patch(
+        f"/town-hall/blocks/{section['id']}",
+        json={"status": "archived"},
+        headers=headers,
+    )
+
+    assert client.get("/town-hall", headers=headers).json()["nav"] == []
+    # El apartado archivado ya no expone contenido.
+    assert (
+        client.get(
+            f"/town-hall/blocks/{apartado['id']}/content",
+            headers=headers,
+        ).status_code
+        == 404
+    )
+
+
+def test_content_is_isolated_between_organizations(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    other_user = make_user()
+    organization = make_organization()
+    other_organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    grant_permissions(
+        other_user,
+        other_organization,
+        ["town_hall.view", "town_hall.edit"],
+    )
+    foreign_section = create_section(client, headers_for(other_user), "Ajena")
+    foreign_item = create_item(
+        client,
+        headers_for(other_user),
+        foreign_section["id"],
+        "Historia",
+    )
+
+    response = client.get(
+        f"/town-hall/blocks/{foreign_item['id']}/content",
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 403

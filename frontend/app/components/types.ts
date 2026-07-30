@@ -1626,13 +1626,14 @@ export type TownHallProfileUpdate = {
 };
 
 export type TownHallBlockCreate = {
-  block_type: "nav_section" | "nav_item";
+  block_type: "nav_section" | "nav_item" | "item";
   parent_id?: number | null;
   title: string;
 };
 
 export type TownHallBlockUpdate = {
   title?: string;
+  body?: string | null;
   status?: "active" | "archived";
 };
 
@@ -1650,4 +1651,20 @@ export type TownHallBlockPlacement = {
   id: number;
   parent_id?: number | null;
   position: number;
+};
+
+// Contenido de un apartado: la lista de elementos con su cuerpo (Fase B1 del
+// prototipo, ver docs/diseno-ayuntamiento-prototipo.md).
+export type TownHallContentItem = {
+  id: number;
+  title: string;
+  body: string | null;
+  position: number;
+};
+
+export type TownHallContent = {
+  block_id: number;
+  title: string;
+  parent_title: string | null;
+  items: TownHallContentItem[];
 };

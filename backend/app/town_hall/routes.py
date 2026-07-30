@@ -26,10 +26,13 @@ from app.town_hall.access import (
 from app.town_hall import weather
 from app.town_hall.models import MunicipalBlock, MunicipalProfile
 from app.town_hall.schemas import (
+    BLOCK_PARENT_TYPES,
     MunicipalBlockCreate,
     MunicipalBlockRead,
     MunicipalBlockReorder,
     MunicipalBlockUpdate,
+    MunicipalContentItemRead,
+    MunicipalContentRead,
     MunicipalNavItemRead,
     MunicipalNavSectionRead,
     MunicipalProfileRead,
@@ -104,6 +107,27 @@ def build_nav(db: Session, organization_id: int) -> list[MunicipalNavSectionRead
     return list(sections.values())
 
 
+def archive_descendants(
+    db: Session,
+    block: MunicipalBlock,
+    actor_id: int,
+) -> None:
+    """Archiva en cascada: un apartado se lleva sus elementos por delante."""
+    children = list(
+        db.scalars(
+            select(MunicipalBlock).where(
+                MunicipalBlock.parent_id == block.id,
+                MunicipalBlock.status == "active",
+            )
+        )
+    )
+
+    for child in children:
+        child.status = "archived"
+        child.updated_by_id = actor_id
+        archive_descendants(db, child, actor_id)
+
+
 def get_owned_block(db: Session, block_id: int) -> MunicipalBlock:
     block = db.get(MunicipalBlock, block_id)
     if block is None:
@@ -128,16 +152,17 @@ def next_position(db: Session, organization_id: int, parent_id: int | None) -> i
     return 0 if highest is None else highest + 1
 
 
-def require_parent_section(
+def require_parent_block(
     db: Session,
     organization_id: int,
     parent_id: int,
+    expected_type: str,
 ) -> MunicipalBlock:
     parent = db.get(MunicipalBlock, parent_id)
     if (
         parent is None
         or parent.organization_id != organization_id
-        or parent.block_type != "nav_section"
+        or parent.block_type != expected_type
         or parent.status != "active"
     ):
         raise HTTPException(
@@ -145,6 +170,32 @@ def require_parent_section(
             detail="Parent must be an active navigation section of the same organization",
         )
     return parent
+
+
+def resolve_parent(
+    db: Session,
+    organization_id: int,
+    block_type: str,
+    parent_id: int | None,
+) -> int | None:
+    """Aplica la jerarquía epígrafe → apartado → elemento."""
+    expected_type = BLOCK_PARENT_TYPES[block_type]
+
+    if expected_type is None:
+        if parent_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A navigation section cannot have a parent",
+            )
+        return None
+
+    if parent_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A navigation item requires a parent section",
+        )
+
+    return require_parent_block(db, organization_id, parent_id, expected_type).id
 
 
 @router.get("", response_model=TownHallRead)
@@ -385,20 +436,12 @@ def create_block(
     organization = resolve_organization(db, current_user, organization_id)
     require_town_hall_edit(db, current_user, organization.id)
 
-    if payload.block_type == "nav_section":
-        if payload.parent_id is not None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="A navigation section cannot have a parent",
-            )
-        parent_id = None
-    else:
-        if payload.parent_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="A navigation item requires a parent section",
-            )
-        parent_id = require_parent_section(db, organization.id, payload.parent_id).id
+    parent_id = resolve_parent(
+        db,
+        organization.id,
+        payload.block_type,
+        payload.parent_id,
+    )
 
     block = MunicipalBlock(
         organization_id=organization.id,
@@ -453,30 +496,55 @@ def reorder_blocks(
             )
 
         placement = placements[block.id]
-        if block.block_type == "nav_section":
-            if placement.parent_id is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="A navigation section cannot have a parent",
-                )
-            block.parent_id = None
-        else:
-            if placement.parent_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="A navigation item requires a parent section",
-                )
-            block.parent_id = require_parent_section(
-                db,
-                organization.id,
-                placement.parent_id,
-            ).id
-
+        block.parent_id = resolve_parent(
+            db,
+            organization.id,
+            block.block_type,
+            placement.parent_id,
+        )
         block.position = placement.position
         block.updated_by_id = current_user.id
 
     db.commit()
     return [MunicipalBlockRead.model_validate(block) for block in blocks]
+
+
+@router.get("/blocks/{block_id}/content", response_model=MunicipalContentRead)
+def read_block_content(
+    block_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MunicipalContentRead:
+    block = get_owned_block(db, block_id)
+    require_town_hall_view(db, current_user, block.organization_id)
+
+    if block.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Block not found",
+        )
+
+    items = db.scalars(
+        select(MunicipalBlock)
+        .where(
+            MunicipalBlock.parent_id == block.id,
+            MunicipalBlock.status == "active",
+            MunicipalBlock.block_type == "item",
+        )
+        .order_by(MunicipalBlock.position, MunicipalBlock.id)
+    )
+    parent = (
+        db.get(MunicipalBlock, block.parent_id)
+        if block.parent_id is not None
+        else None
+    )
+
+    return MunicipalContentRead(
+        block_id=block.id,
+        title=block.title,
+        parent_title=parent.title if parent is not None else None,
+        items=[MunicipalContentItemRead.model_validate(item) for item in items],
+    )
 
 
 @router.patch("/blocks/{block_id}", response_model=MunicipalBlockRead)
@@ -492,19 +560,20 @@ def update_block(
     fields = payload.model_dump(exclude_unset=True)
     if "title" in fields:
         block.title = fields["title"]
+    if "body" in fields:
+        if block.block_type != "item":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only content items carry a body",
+            )
+        body = fields["body"]
+        block.body = body.strip() or None if body is not None else None
     if "status" in fields:
         block.status = fields["status"]
-        # Archivar un apartado archiva sus elementos: preferimos el borrado
-        # lógico al físico, pero sin dejar elementos huérfanos reordenables.
-        if block.status == "archived" and block.block_type == "nav_section":
-            for child in db.scalars(
-                select(MunicipalBlock).where(
-                    MunicipalBlock.parent_id == block.id,
-                    MunicipalBlock.status == "active",
-                )
-            ):
-                child.status = "archived"
-                child.updated_by_id = current_user.id
+        # Archivar arrastra la descendencia: preferimos el borrado lógico al
+        # físico, pero sin dejar bloques huérfanos reordenables.
+        if block.status == "archived":
+            archive_descendants(db, block, current_user.id)
 
     block.updated_by_id = current_user.id
     db.commit()

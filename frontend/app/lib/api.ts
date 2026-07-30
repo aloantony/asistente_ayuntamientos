@@ -17,6 +17,7 @@ import type {
   TownHallBlockPlacement,
   TownHallBlockUpdate,
   TownHallProfile,
+  TownHallContent,
   TownHallProfileUpdate,
   TownHallWeather,
   User,
@@ -177,6 +178,8 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El estado de la necesidad no permite editar su contenido.";
     case "Project does not belong to the requirement organization":
       return "El proyecto no pertenece a la organización de la necesidad.";
+    case "Only content items carry a body":
+      return "Solo los elementos pueden tener texto.";
     case "Block not found":
       return "No se encontró el apartado del menú.";
     case "A navigation section cannot have a parent":
@@ -863,6 +866,14 @@ export function reorderTownHallBlocks(
     "",
     "No se pudo reordenar el menú.",
     { method: "POST", body: JSON.stringify({ placements }) },
+  );
+}
+
+export function fetchTownHallContent(blockId: number) {
+  return adminRequest<TownHallContent>(
+    `/town-hall/blocks/${blockId}/content`,
+    "",
+    "No se pudo cargar el contenido del apartado.",
   );
 }
 

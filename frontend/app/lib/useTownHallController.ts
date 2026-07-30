@@ -5,12 +5,14 @@ import type {
   TownHall,
   TownHallBlockPlacement,
   TownHallNavSection,
+  TownHallContent,
   TownHallProfileUpdate,
   TownHallWeather,
 } from "../components/types";
 import {
   createTownHallBlock,
   fetchTownHall,
+  fetchTownHallContent,
   fetchTownHallWeather,
   reorderTownHallBlocks,
   updateTownHallBlock,
@@ -62,6 +64,8 @@ export function useTownHallController({
   // Se incrementa al sustituir el escudo para invalidar la caché del <img>.
   const [shieldVersion, setShieldVersion] = useState(0);
   const [weather, setWeather] = useState<TownHallWeather | null>(null);
+  const [content, setContent] = useState<TownHallContent | null>(null);
+  const [isLoadingContent, setIsLoadingContent] = useState(false);
 
   const loadTownHall = useCallback(async () => {
     setIsLoadingTownHall(true);
@@ -149,6 +153,80 @@ export function useTownHallController({
     }
   }, [organizationId]);
 
+  // Contenido del apartado abierto. Se pide aparte del árbol porque cambia
+  // con la navegación, no con el menú.
+  const loadContent = useCallback(
+    async (blockId: number) => {
+      setIsLoadingContent(true);
+      try {
+        setContent(await fetchTownHallContent(blockId));
+      } catch (requestError) {
+        setContent(null);
+        handleRequestError(
+          requestError,
+          setTownHallError,
+          "No se pudo cargar el contenido del apartado.",
+        );
+      } finally {
+        setIsLoadingContent(false);
+      }
+    },
+    [handleRequestError],
+  );
+
+  // Las mutaciones de contenido releen solo el apartado, no el árbol entero.
+  async function runContentMutation(
+    blockId: number,
+    mutation: () => Promise<unknown>,
+    fallback: string,
+  ) {
+    setIsSavingTownHall(true);
+    setTownHallError("");
+
+    try {
+      await mutation();
+      setContent(await fetchTownHallContent(blockId));
+      return true;
+    } catch (requestError) {
+      handleRequestError(requestError, setTownHallError, fallback);
+      return false;
+    } finally {
+      setIsSavingTownHall(false);
+    }
+  }
+
+  function addContentItem(blockId: number, title: string) {
+    return runContentMutation(
+      blockId,
+      () =>
+        createTownHallBlock(
+          { block_type: "item", parent_id: blockId, title },
+          organizationId,
+        ),
+      "No se pudo crear el elemento.",
+    );
+  }
+
+  function saveContentItem(
+    blockId: number,
+    itemId: number,
+    changes: { title?: string; body?: string | null },
+  ) {
+    return runContentMutation(
+      blockId,
+      () => updateTownHallBlock(itemId, changes),
+      "No se pudo guardar el elemento.",
+    );
+  }
+
+  function archiveContentItem(blockId: number, itemId: number) {
+    return runContentMutation(
+      blockId,
+      () => updateTownHallBlock(itemId, { status: "archived" }),
+      "No se pudo eliminar el elemento.",
+    );
+  }
+
   async function uploadShield(file: File) {
     const uploaded = await runMutation(
       () => uploadTownHallShield(file, organizationId),
@@ -194,7 +272,13 @@ export function useTownHallController({
     townHallError,
     shieldVersion,
     weather,
+    content,
+    isLoadingContent,
     loadTownHall,
+    loadContent,
+    addContentItem,
+    saveContentItem,
+    archiveContentItem,
     loadWeather,
     uploadShield,
     updateProfile,

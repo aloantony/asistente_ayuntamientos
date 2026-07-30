@@ -50,6 +50,7 @@ import {
   useSession,
 } from "../lib/session";
 import { useTownHallController } from "../lib/useTownHallController";
+import { TownHallContentPanel } from "./TownHallContentPanel";
 import { TownHallNavEditor } from "./TownHallNavEditor";
 import styles from "./MunicipalWorkspace.module.css";
 import {
@@ -1330,6 +1331,20 @@ export function MunicipalWorkspace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weatherEnabled, weatherLocation]);
 
+  const contentBlockId =
+    isCustomTab(activeTab) && townHallController.townHall !== null
+      ? customTabBlockId(activeTab)
+      : null;
+
+  useEffect(() => {
+    if (contentBlockId === null) {
+      return;
+    }
+
+    void townHallController.loadContent(contentBlockId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contentBlockId]);
+
   useEffect(() => {
     if (!user || !canViewMunicipalHub(user) || !selectedContext) {
       requestSequenceRef.current += 1;
@@ -1502,6 +1517,12 @@ export function MunicipalWorkspace() {
   ];
   // Un apartado propio puede ser un apartado o uno de sus elementos.
   const activeCustomBlock = findCustomBlock(townHall, activeTab);
+  // Solo los apartados (los que cuelgan de un epígrafe) tienen contenido; un
+  // epígrafe se navega por sus apartados, que ya viven en el desplegable.
+  const activeContentBlockId =
+    activeCustomBlock !== null && activeCustomBlock.parentTitle !== null
+      ? customTabBlockId(activeTab as CustomTab)
+      : null;
 
   function handleTabKeyDown(
     event: KeyboardEvent<HTMLButtonElement>,
@@ -1827,19 +1848,56 @@ export function MunicipalWorkspace() {
           />
         ) : activeTab === "people" ? (
           <PeopleTab organization={organization} />
+        ) : activeContentBlockId !== null &&
+          townHallController.content !== null &&
+          townHallController.content.block_id === activeContentBlockId ? (
+          <div className={styles.tabContent}>
+            <TownHallContentPanel
+              canEdit={canEditMenu}
+              content={townHallController.content}
+              isSaving={townHallController.isSavingTownHall}
+              onAdd={() =>
+                void townHallController.addContentItem(
+                  activeContentBlockId,
+                  "Nuevo elemento",
+                )
+              }
+              onArchive={(itemId) =>
+                void townHallController.archiveContentItem(
+                  activeContentBlockId,
+                  itemId,
+                )
+              }
+              onSaveBody={(itemId, body) =>
+                void townHallController.saveContentItem(
+                  activeContentBlockId,
+                  itemId,
+                  { body: body.trim() === "" ? null : body },
+                )
+              }
+              onSaveTitle={(itemId, title) =>
+                void townHallController.saveContentItem(
+                  activeContentBlockId,
+                  itemId,
+                  { title },
+                )
+              }
+            />
+          </div>
         ) : activeCustomBlock !== null ? (
           <div className={styles.tabContent}>
             <section className={`panel ${styles.pageState}`}>
               <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
-              <p className="eyebrow">
-                {activeCustomBlock.parentTitle
-                  ? `${activeCustomBlock.parentTitle} · ${activeCustomBlock.title}`
-                  : activeCustomBlock.title}
-              </p>
-              <h1>Apartado sin contenido</h1>
+              <p className="eyebrow">{activeCustomBlock.title}</p>
+              <h1>
+                {townHallController.isLoadingContent
+                  ? "Cargando"
+                  : "Elige un apartado"}
+              </h1>
               <p className="muted">
-                Este apartado lo has creado tú desde el editor del menú. Su
-                contenido llegará con los epígrafes del prototipo.
+                {townHallController.isLoadingContent
+                  ? "Recuperando el contenido."
+                  : "Este epígrafe se recorre por sus apartados, en el desplegable de la barra."}
               </p>
             </section>
           </div>
