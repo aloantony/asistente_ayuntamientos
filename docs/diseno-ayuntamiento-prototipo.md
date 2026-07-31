@@ -121,9 +121,12 @@ de cada apartado se muestran por primera vez: hasta ahora se guardaban y editaba
 Reutiliza `municipal_blocks` con `epigraph`/`section`/`item` (sin migración) más `body` y `data_json`.
 Orden propuesto, de menor a mayor riesgo:
 
-- **B1 Información general** — árbol de apartados y elementos con texto. Establece el patrón de
-  edición, reordenación y menú contextual que reutilizan los demás. *Cierra la decisión 2.*
-- **B2 Teléfonos** — tres pestañas de listas editables. Valida el patrón con poco riesgo.
+- **B1 Información general** — HECHA (`a9877c6`). Jerarquía epígrafe → apartado → elemento sobre el
+  árbol de bloques, sin migración. *Cerró la decisión 2*: campos normales con guardado al perder el
+  foco, nada de `contenteditable`.
+- **B2 Teléfonos** — HECHA (`0d1958d`). Los apartados ganan un **formato** guardado en `data_json`
+  (`text` | `contacts`), también sin migración. El elemento no cambia de forma: `title` es la
+  etiqueta y `body` el valor, que en `contacts` se pinta como número marcable.
 - **B3 Corporación y Estructura de gobierno** — niveles, miembros y campos añadidos por el usuario.
 - **B4 Archivo** — adjuntos (PDF, imágenes, audio), visor de fotos, crónicas. *Cierra la decisión 3.*
 - **B5 Datos del municipio** — General y Patrimonio primero; Demografía, Clima y Agua después, con las
@@ -158,10 +161,10 @@ Orden propuesto, de menor a mayor riesgo:
 
 ## 6. Cómo retomar
 
-Estado a 2026-07-30: hecho el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
+Estado a 2026-07-30: hechas las fases A, B1 y B2. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
 ya en la historia de `feat/despliegue-produccion`) y hecha la **Fase A** (`279e2a5`). Las fases B y C
 están sin empezar.
 
-Al retomar: la siguiente es **B1 (Información general)**, que fija el patrón de edición, reordenación y
-menú contextual que reutilizan los demás epígrafes, y cierra la decisión 2 (edición en línea). Antes de
-teclear, cerrar esa decisión.
+Al retomar: la siguiente es **B3 (Corporación y Estructura de gobierno)**, que necesita miembros con
+campos añadidos por el usuario; el mecanismo de formato de B2 es el sitio natural para ello. Después
+**B4 (Archivo)**, que cierra la decisión 3 (adjuntos).
