@@ -5,6 +5,10 @@
 .env.production.local
 # Copias de seguridad, si alguien las deja caer dentro del repo por error.
 backups/
+# Repuntes locales de Compose (por ejemplo, una base de datos de demo). Nunca
+# deben viajar: esta máquina hospeda también la producción, y un override
+# fusionado cambiaría en silencio la base de datos de quien levante el stack.
+docker-compose.override.yml
 
 __pycache__/
 *.py[cod]
