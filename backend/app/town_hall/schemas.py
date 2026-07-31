@@ -8,6 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field
 CreatableBlockType = Literal["nav_section", "nav_item", "item"]
 BlockStatus = Literal["active", "archived"]
 
+# Cómo se presenta el contenido de un apartado. `text` es la prosa por defecto;
+# `contacts` son listas de nombre y número, como los teléfonos del prototipo.
+# En ambos casos el elemento guarda la etiqueta en `title` y el valor en `body`.
+SectionLayout = Literal["text", "contacts"]
+
 # Qué puede colgar de qué. El elemento es hoja: no admite hijos.
 BLOCK_PARENT_TYPES: dict[str, str | None] = {
     "nav_section": None,
@@ -69,6 +74,7 @@ class MunicipalContentRead(BaseModel):
     block_id: int
     title: str
     parent_title: str | None = None
+    layout: SectionLayout = "text"
     items: list[MunicipalContentItemRead] = []
 
 
@@ -84,6 +90,8 @@ class MunicipalBlockUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     # El cuerpo solo lo llevan los elementos; vacío se guarda como nulo.
     body: str | None = None
+    # El formato solo lo llevan los apartados.
+    layout: SectionLayout | None = None
     status: BlockStatus | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)

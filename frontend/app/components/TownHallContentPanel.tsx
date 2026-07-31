@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
-import type { TownHallContent } from "./types";
+import type { TownHallContent, TownHallSectionLayout } from "./types";
 
 type TownHallContentPanelProps = {
   content: TownHallContent;
@@ -12,6 +12,7 @@ type TownHallContentPanelProps = {
   onSaveTitle: (itemId: number, title: string) => void;
   onSaveBody: (itemId: number, body: string) => void;
   onArchive: (itemId: number) => void;
+  onChangeLayout: (layout: TownHallSectionLayout) => void;
 };
 
 /**
@@ -28,6 +29,7 @@ export function TownHallContentPanel({
   onSaveTitle,
   onSaveBody,
   onArchive,
+  onChangeLayout,
 }: TownHallContentPanelProps) {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [bodies, setBodies] = useState<Record<number, string>>({});
@@ -61,15 +63,38 @@ export function TownHallContentPanel({
     save(itemId, draft);
   }
 
+  const isContacts = content.layout === "contacts";
+
   return (
-    <article className="townhall-content">
+    <article
+      className={
+        isContacts ? "townhall-content townhall-content-contacts" : "townhall-content"
+      }
+    >
       <header className="townhall-content-head">
         <p className="eyebrow">
           {content.parent_title
             ? `${content.parent_title} · ${content.title}`
             : content.title}
         </p>
-        <h2>{content.title}</h2>
+        <div className="townhall-content-head-row">
+          <h2>{content.title}</h2>
+          {canEdit ? (
+            <label className="townhall-content-layout">
+              Formato
+              <select
+                disabled={isSaving}
+                onChange={(event) =>
+                  onChangeLayout(event.target.value as TownHallSectionLayout)
+                }
+                value={content.layout}
+              >
+                <option value="text">Texto</option>
+                <option value="contacts">Teléfonos</option>
+              </select>
+            </label>
+          ) : null}
+        </div>
       </header>
 
       {content.items.length === 0 ? (
@@ -140,6 +165,37 @@ export function TownHallContentPanel({
             )}
 
             {canEdit ? (
+              isContacts ? (
+                <input
+                  aria-label={`Teléfono de ${item.title}`}
+                  className="townhall-content-phone-input"
+                  disabled={isSaving}
+                  inputMode="tel"
+                  onBlur={() =>
+                    commit(
+                      item.id,
+                      bodies[item.id],
+                      item.body ?? "",
+                      onSaveBody,
+                      () =>
+                        setBodies((current) => {
+                          const next = { ...current };
+                          delete next[item.id];
+                          return next;
+                        }),
+                    )
+                  }
+                  onChange={(event) =>
+                    setBodies((current) => ({
+                      ...current,
+                      [item.id]: event.target.value,
+                    }))
+                  }
+                  placeholder="947 00 00 00"
+                  type="tel"
+                  value={bodies[item.id] ?? item.body ?? ""}
+                />
+              ) : (
               <textarea
                 aria-label={`Texto de ${item.title}`}
                 className="townhall-content-body-input"
@@ -168,6 +224,12 @@ export function TownHallContentPanel({
                 rows={4}
                 value={bodies[item.id] ?? item.body ?? ""}
               />
+              )
+            ) : isContacts && item.body ? (
+              // Un número marcable: en el móvil del alcalde esto importa.
+              <a className="townhall-content-phone" href={`tel:${item.body.replace(/\s+/g, "")}`}>
+                {item.body}
+              </a>
             ) : (
               <p className="townhall-content-body">
                 {item.body || "Sin contenido todavía."}
@@ -184,7 +246,7 @@ export function TownHallContentPanel({
           onClick={onAdd}
           type="button"
         >
-          Añadir elemento
+          {isContacts ? "Añadir teléfono" : "Añadir elemento"}
         </button>
       ) : null}
 

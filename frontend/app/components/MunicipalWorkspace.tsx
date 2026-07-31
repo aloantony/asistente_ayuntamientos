@@ -1875,6 +1875,12 @@ export function MunicipalWorkspace() {
                   { body: body.trim() === "" ? null : body },
                 )
               }
+              onChangeLayout={(layout) =>
+                void townHallController.setSectionLayout(
+                  activeContentBlockId,
+                  layout,
+                )
+              }
               onSaveTitle={(itemId, title) =>
                 void townHallController.saveContentItem(
                   activeContentBlockId,

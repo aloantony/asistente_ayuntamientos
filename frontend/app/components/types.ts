@@ -1634,6 +1634,7 @@ export type TownHallBlockCreate = {
 export type TownHallBlockUpdate = {
   title?: string;
   body?: string | null;
+  layout?: TownHallSectionLayout;
   status?: "active" | "archived";
 };
 
@@ -1655,6 +1656,11 @@ export type TownHallBlockPlacement = {
 
 // Contenido de un apartado: la lista de elementos con su cuerpo (Fase B1 del
 // prototipo, ver docs/diseno-ayuntamiento-prototipo.md).
+// Cómo se presenta un apartado: prosa por defecto, o listas de nombre y
+// número como los teléfonos del prototipo. En ambos el elemento guarda la
+// etiqueta en `title` y el valor en `body`.
+export type TownHallSectionLayout = "text" | "contacts";
+
 export type TownHallContentItem = {
   id: number;
   title: string;
@@ -1666,5 +1672,6 @@ export type TownHallContent = {
   block_id: number;
   title: string;
   parent_title: string | null;
+  layout: TownHallSectionLayout;
   items: TownHallContentItem[];
 };

@@ -1,3 +1,4 @@
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -105,6 +106,34 @@ def build_nav(db: Session, organization_id: int) -> list[MunicipalNavSectionRead
         )
 
     return list(sections.values())
+
+
+def read_layout(block: MunicipalBlock) -> str:
+    """Formato guardado en `data_json`; `text` ante cualquier dato ilegible."""
+    if not block.data_json:
+        return "text"
+
+    try:
+        payload = json.loads(block.data_json)
+    except ValueError:
+        return "text"
+
+    layout = payload.get("layout") if isinstance(payload, dict) else None
+    return layout if layout in ("text", "contacts") else "text"
+
+
+def write_layout(block: MunicipalBlock, layout: str) -> None:
+    payload: dict[str, object] = {}
+    if block.data_json:
+        try:
+            loaded = json.loads(block.data_json)
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, dict):
+            payload = loaded
+
+    payload["layout"] = layout
+    block.data_json = json.dumps(payload, ensure_ascii=False)
 
 
 def archive_descendants(
@@ -543,6 +572,7 @@ def read_block_content(
         block_id=block.id,
         title=block.title,
         parent_title=parent.title if parent is not None else None,
+        layout=read_layout(block),  # type: ignore[arg-type]
         items=[MunicipalContentItemRead.model_validate(item) for item in items],
     )
 
@@ -568,6 +598,13 @@ def update_block(
             )
         body = fields["body"]
         block.body = body.strip() or None if body is not None else None
+    if "layout" in fields:
+        if block.block_type != "nav_item":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only sections carry a layout",
+            )
+        write_layout(block, fields["layout"])
     if "status" in fields:
         block.status = fields["status"]
         # Archivar arrastra la descendencia: preferimos el borrado lógico al

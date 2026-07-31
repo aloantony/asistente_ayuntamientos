@@ -7,6 +7,7 @@ import type {
   TownHallNavSection,
   TownHallContent,
   TownHallProfileUpdate,
+  TownHallSectionLayout,
   TownHallWeather,
 } from "../components/types";
 import {
@@ -219,6 +220,14 @@ export function useTownHallController({
     );
   }
 
+  function setSectionLayout(blockId: number, layout: TownHallSectionLayout) {
+    return runContentMutation(
+      blockId,
+      () => updateTownHallBlock(blockId, { layout }),
+      "No se pudo cambiar el formato del apartado.",
+    );
+  }
+
   function archiveContentItem(blockId: number, itemId: number) {
     return runContentMutation(
       blockId,
@@ -278,6 +287,7 @@ export function useTownHallController({
     loadContent,
     addContentItem,
     saveContentItem,
+    setSectionLayout,
     archiveContentItem,
     loadWeather,
     uploadShield,

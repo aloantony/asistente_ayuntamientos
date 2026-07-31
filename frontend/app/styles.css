@@ -5624,3 +5624,71 @@ html.dark .dashboard-ask input {
   line-height: 1.6;
   white-space: pre-wrap;
 }
+
+.townhall-content-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.townhall-content-layout {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.townhall-content-layout select {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 5px 8px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-family: var(--font-ibm-plex-sans), system-ui, sans-serif;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+/* Formato de contactos: cada elemento es una fila compacta de nombre y
+   número, no un bloque de prosa. */
+.townhall-content-contacts .townhall-content-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 220px);
+  align-items: center;
+  gap: 10px 16px;
+  padding: 8px 12px;
+}
+
+.townhall-content-phone-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 13.5px;
+  letter-spacing: 0.02em;
+}
+
+.townhall-content-phone {
+  justify-self: start;
+  color: var(--accent);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+@media (max-width: 560px) {
+  .townhall-content-contacts .townhall-content-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

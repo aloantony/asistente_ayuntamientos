@@ -865,3 +865,128 @@ def test_content_is_isolated_between_organizations(
     )
 
     assert response.status_code == 403
+
+
+def test_sections_carry_a_layout(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Teléfonos")
+    apartado = create_item(client, headers, section["id"], "Servicios")
+
+    default_layout = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    ).json()["layout"]
+
+    client.patch(
+        f"/town-hall/blocks/{apartado['id']}",
+        json={"layout": "contacts"},
+        headers=headers,
+    )
+    content = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert default_layout == "text"
+    assert content["layout"] == "contacts"
+
+
+def test_layout_survives_a_rename(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Teléfonos")
+    apartado = create_item(client, headers, section["id"], "Servicios")
+    client.patch(
+        f"/town-hall/blocks/{apartado['id']}",
+        json={"layout": "contacts"},
+        headers=headers,
+    )
+    client.patch(
+        f"/town-hall/blocks/{apartado['id']}",
+        json={"title": "Servicios de emergencia"},
+        headers=headers,
+    )
+
+    content = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert content["title"] == "Servicios de emergencia"
+    assert content["layout"] == "contacts"
+
+
+def test_only_sections_carry_a_layout(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Teléfonos")
+
+    response = client.patch(
+        f"/town-hall/blocks/{section['id']}",
+        json={"layout": "contacts"},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Only sections carry a layout"
+
+
+def test_unknown_layout_is_rejected_and_broken_data_falls_back(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    from app.town_hall.models import MunicipalBlock
+
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Teléfonos")
+    apartado = create_item(client, headers, section["id"], "Servicios")
+
+    rejected = client.patch(
+        f"/town-hall/blocks/{apartado['id']}",
+        json={"layout": "carrusel"},
+        headers=headers,
+    )
+
+    # Un data_json corrupto no debe romper la pantalla: se cae a `text`.
+    stored = db.get(MunicipalBlock, apartado["id"])
+    stored.data_json = "{no es json"
+    db.commit()
+    content = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert rejected.status_code == 422
+    assert content["layout"] == "text"
