@@ -10,11 +10,12 @@ BlockStatus = Literal["active", "archived"]
 
 # Cómo se presenta el contenido de un apartado. `text` es la prosa por defecto;
 # `contacts` son listas de nombre y número, como los teléfonos del prototipo;
+# `data` son pares dato/valor en rejilla, como la ficha general del municipio;
 # `people` son personas con cargo, partido y los campos que añada el usuario,
 # como la corporación y la estructura de gobierno. En `text` y `contacts` el
 # elemento guarda la etiqueta en `title` y el valor en `body`; en `people` el
 # nombre va en `title` y los campos en `fields`.
-SectionLayout = Literal["text", "contacts", "people", "files"]
+SectionLayout = Literal["text", "contacts", "people", "files", "data"]
 SECTION_LAYOUTS: tuple[str, ...] = get_args(SectionLayout)
 
 # Cota de adjuntos por elemento, por la misma razón que la de campos.

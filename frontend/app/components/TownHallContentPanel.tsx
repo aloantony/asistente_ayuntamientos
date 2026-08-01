@@ -87,6 +87,7 @@ export function TownHallContentPanel({
   const isContacts = content.layout === "contacts";
   const isPeople = content.layout === "people";
   const isFiles = content.layout === "files";
+  const isData = content.layout === "data";
 
   return (
     <article
@@ -97,7 +98,9 @@ export function TownHallContentPanel({
             ? "townhall-content townhall-content-people"
             : isFiles
               ? "townhall-content townhall-content-files"
-              : "townhall-content"
+              : isData
+                ? "townhall-content townhall-content-data"
+                : "townhall-content"
       }
     >
       <header className="townhall-content-head">
@@ -122,6 +125,7 @@ export function TownHallContentPanel({
                 <option value="contacts">Teléfonos</option>
                 <option value="people">Personas</option>
                 <option value="files">Archivo</option>
+                <option value="data">Datos</option>
               </select>
             </label>
           ) : null}
@@ -195,7 +199,38 @@ export function TownHallContentPanel({
               <h3>{item.title}</h3>
             )}
 
-            {isPeople ? (
+            {isData ? (
+              canEdit ? (
+                <input
+                  aria-label={`Valor de ${item.title}`}
+                  className="townhall-content-value-input"
+                  disabled={isSaving}
+                  onBlur={() =>
+                    commit(
+                      item.id,
+                      bodies[item.id],
+                      item.body ?? "",
+                      onSaveBody,
+                      () =>
+                        setBodies((current) => {
+                          const next = { ...current };
+                          delete next[item.id];
+                          return next;
+                        }),
+                    )
+                  }
+                  onChange={(event) =>
+                    setBodies((current) => ({
+                      ...current,
+                      [item.id]: event.target.value,
+                    }))
+                  }
+                  value={bodies[item.id] ?? item.body ?? ""}
+                />
+              ) : (
+                <span className="townhall-content-value">{item.body || "—"}</span>
+              )
+            ) : isPeople ? (
               <div className="townhall-content-fields">
                 {item.fields.map((field, index) => (
                   <div className="townhall-content-field" key={`${item.id}-${index}`}>
@@ -375,12 +410,27 @@ export function TownHallContentPanel({
               <div className="townhall-attachments">
                 {item.attachments.map((attachment) => (
                   <div className="townhall-attachment" key={attachment.index}>
+                    {attachment.content_type.startsWith("image/") ? (
+                      // Content-Disposition solo afecta a la navegación de
+                      // primer nivel, así que dentro de <img> se ve igual.
+                      <a
+                        className="townhall-attachment-preview"
+                        href={townHallAttachmentUrl(item.id, attachment.index)}
+                      >
+                        <img
+                          alt={attachment.name}
+                          src={townHallAttachmentUrl(item.id, attachment.index)}
+                        />
+                        <span>{attachment.name}</span>
+                      </a>
+                    ) : (
                     <a
                       download
                       href={townHallAttachmentUrl(item.id, attachment.index)}
                     >
                       {attachment.name}
                     </a>
+                    )}
                     <span>{formatSize(attachment.size_bytes)}</span>
                     {canEdit ? (
                       <button
@@ -449,7 +499,9 @@ export function TownHallContentPanel({
               ? "Añadir persona"
               : isFiles
                 ? "Añadir entrada"
-                : "Añadir elemento"}
+                : isData
+                  ? "Añadir dato"
+                  : "Añadir elemento"}
         </button>
       ) : null}
 

@@ -5803,3 +5803,63 @@ html.dark .dashboard-ask input {
 .townhall-attachment-add input {
   display: none;
 }
+
+/* Formato datos: rejilla de pares dato/valor, como la ficha general del
+   municipio en el prototipo. */
+.townhall-content-data .townhall-content-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.townhall-content-data .townhall-content-item {
+  gap: 6px;
+  background: var(--surface-muted);
+}
+
+.townhall-content-value-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-size: 14px;
+}
+
+.townhall-content-value {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* Vista previa de las imágenes adjuntas: la fototeca y las fichas de
+   patrimonio se ven, no se descargan a ciegas. */
+.townhall-attachment-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  text-decoration: none;
+}
+
+.townhall-attachment-preview img {
+  width: 56px;
+  height: 42px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface-muted);
+}
+
+.townhall-attachment-preview span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

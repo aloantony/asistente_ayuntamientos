@@ -1334,3 +1334,34 @@ def test_attachments_only_hang_from_content_items(
     )
 
     assert response.status_code == 404
+
+
+def test_every_declared_layout_is_accepted(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    """La lista de formatos se deriva del esquema: ninguno debe quedarse fuera."""
+    from app.town_hall.schemas import SECTION_LAYOUTS
+
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Datos")
+    apartado = create_item(client, headers, section["id"], "General")
+
+    for layout in SECTION_LAYOUTS:
+        applied = client.patch(
+            f"/town-hall/blocks/{apartado['id']}",
+            json={"layout": layout},
+            headers=headers,
+        )
+        assert applied.status_code == 200, layout
+        content = client.get(
+            f"/town-hall/blocks/{apartado['id']}/content",
+            headers=headers,
+        ).json()
+        assert content["layout"] == layout
