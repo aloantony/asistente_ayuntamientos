@@ -79,10 +79,9 @@ por arrastre. **Ninguno está implementado.**
 2. **Edición en línea.** El prototipo usa `contenteditable` (`gov-edit`). Recomendación: **no**
    replicarlo; usar `input`/`textarea` con guardado al perder el foco, como el editor de menú ya hace.
    Es más accesible, más fácil de validar y coherente con el resto del proyecto.
-3. **Adjuntos de los epígrafes** (Archivo, Agua, Patrimonio, Normativa). `documents` exige
-   `project_id`. Opciones: extender el patrón del escudo con prefijos por bloque, o hacer
-   `documents.project_id` nullable y adaptar su control de acceso. **Recomendación: la primera** para
-   los primeros epígrafes, y evaluar la segunda cuando el volumen lo justifique.
+3. **Adjuntos de los epígrafes** — **CERRADA** (2026-07-30, Anthony): cajón propio, como el escudo.
+   Si con el uso se ve que las fotos y crónicas deberían estar en el archivador general, se migra
+   entonces con criterio.
 4. **Gráficas.** Padrón, clima y agua necesitan series temporales y dibujo. El proyecto no tiene
    librería de gráficas y su convención es «sin librerías de UI». Decidir: SVG propio (coherente pero
    más trabajo) o introducir una dependencia con ADR.
@@ -130,7 +129,10 @@ Orden propuesto, de menor a mayor riesgo:
 - **B3 Corporación y Estructura de gobierno** — HECHA (`9014721`). Formato `people`: el nombre en el
   título y una lista ordenada de campos libres por persona en su `data_json`, con tope de 20. Los
   «cargo, nombre, partido» del prototipo son simplemente los campos que se crean de inicio.
-- **B4 Archivo** — adjuntos (PDF, imágenes, audio), visor de fotos, crónicas. *Cierra la decisión 3.*
+- **B4 Archivo** — HECHA (`db3c71a`). *Cerró la decisión 3* por la primera opción: cajón propio bajo
+  `organizations/<id>/archive/`, con lista blanca (PDF, imágenes, MP3/OGG), tope propio, límite de
+  subida y descarga siempre como adjunto. Los ficheros **no** aparecen en el listado general de
+  documentos: es la contrapartida aceptada. Visor de fotos y editor de crónicas siguen pendientes.
 - **B5 Datos del municipio** — General y Patrimonio primero; Demografía, Clima y Agua después, con las
   gráficas. *Cierra la decisión 4.* El padrón puede apoyarse en `municipalities.population` y su
   procedencia INE, ya existentes.
@@ -163,9 +165,10 @@ Orden propuesto, de menor a mayor riesgo:
 
 ## 6. Cómo retomar
 
-Estado a 2026-07-30: hechas las fases A, B1, B2 y B3. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
+Estado a 2026-07-30: hechas las fases A, B1, B2, B3 y B4. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
 ya en la historia de `feat/despliegue-produccion`) y hecha la **Fase A** (`279e2a5`). Las fases B y C
 están sin empezar.
 
-Al retomar: la siguiente es **B4 (Archivo)**, y **exige cerrar antes la decisión 3** (adjuntos), que es
-la primera que no se puede esquivar con el árbol de bloques: hacen falta ficheros.
+Al retomar: la siguiente es **B5 (Datos del municipio)**, y **exige cerrar antes la decisión 4** (las
+gráficas de padrón y clima). General y Patrimonio se pueden hacer ya con los formatos existentes;
+Demografía, Clima y Agua necesitan dibujar series.
