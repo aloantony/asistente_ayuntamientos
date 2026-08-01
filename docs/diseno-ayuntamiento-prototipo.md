@@ -82,9 +82,13 @@ por arrastre. **Ninguno está implementado.**
 3. **Adjuntos de los epígrafes** — **CERRADA** (2026-07-30, Anthony): cajón propio, como el escudo.
    Si con el uso se ve que las fotos y crónicas deberían estar en el archivador general, se migra
    entonces con criterio.
-4. **Gráficas.** Padrón, clima y agua necesitan series temporales y dibujo. El proyecto no tiene
-   librería de gráficas y su convención es «sin librerías de UI». Decidir: SVG propio (coherente pero
-   más trabajo) o introducir una dependencia con ADR.
+4. **Gráficas** — **CERRADA** (2026-07-30, Anthony): SVG propio, sin dependencia. Gana en las dos
+   cosas que se pedían: menos problemas (ni ADR, ni cadena de dependencias que auditar en un servicio
+   público) y mejor aspecto, porque usa los tokens del proyecto en vez de traer su propia estética.
+   **Paleta validada con `scripts/validate_palette.js` de la guía de visualización**, para las dos
+   superficies: claro `#eb6834 / #3caf8c / #2a78d6` sobre `#fbf9f3`; oscuro `#d95926 / #199e70 /
+   #3987e5` sobre `#2a2928`. En claro el turquesa queda bajo 3:1, lo que obliga a etiqueta visible:
+   por eso hay leyenda y vista de tabla siempre.
 5. **Modelo de capas cartográficas.** Dos caminos: (a) tabla de capas + features con GeoJSON en
    PostgreSQL; (b) capas como ficheros GeoJSON en el volumen de almacenamiento, con metadatos en
    PostgreSQL. **Recomendación: (b)** — son ficheros grandes y estáticos, y evita meter geometría en
@@ -133,11 +137,12 @@ Orden propuesto, de menor a mayor riesgo:
   `organizations/<id>/archive/`, con lista blanca (PDF, imágenes, MP3/OGG), tope propio, límite de
   subida y descarga siempre como adjunto. Los ficheros **no** aparecen en el listado general de
   documentos: es la contrapartida aceptada. Visor de fotos y editor de crónicas siguen pendientes.
-- **B5 Datos del municipio** — PARCIAL. Hechos (`c06666d`) el formato `data` (rejilla de pares
-  dato/valor) para la pestaña General, y la vista previa de las imágenes adjuntas, que es lo que
-  necesitaban Patrimonio y la Fototeca. **Pendientes Demografía, Clima y Agua**, que necesitan
-  gráficas: *no cerrar sin la decisión 4*. El padrón puede apoyarse en `municipalities.population` y
-  su procedencia INE, ya existentes.
+- **B5 Datos del municipio** — HECHA. `c06666d` trajo el formato `data` (rejilla de pares dato/valor)
+  y la vista previa de imágenes, que es lo que necesitaban General, Patrimonio y la Fototeca.
+  `e85ec87` añade el formato `series`: cada elemento es una serie con su unidad y sus puntos, y
+  **la unidad decide la gráfica**, de modo que el doble eje del prototipo es imposible por
+  construcción y no por disciplina. Con esto quedan cubiertas Demografía, Clima y la evolución de
+  parámetros del agua; los PDF de los análisis ya los cubría el formato `files` de B4.
 - **B6 Normativa** — HECHA (`6ab66b6`), y mucho menor de lo previsto: la pestaña del workspace ya
   mostraba tipo, título, estado, resumen, materia, fecha, boletín y enlace a la fuente oficial. Solo
   faltaba la agrupación por categoría, que ahora usa `topic`. **No** se duplicó la búsqueda: la real,
@@ -173,15 +178,14 @@ Orden propuesto, de menor a mayor riesgo:
 
 ## 6. Cómo retomar
 
-Estado a 2026-07-30: hechas las fases A, B1, B2, B3, B4, media B5, B6 y la parte independiente de C4. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
+Estado a 2026-07-30: hechas las fases A, B1, B2, B3, B4, B5, B6 y la parte independiente de C4. El cuerpo del Ayuntamiento está completo. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
 ya en la historia de `feat/despliegue-produccion`) y hecha la **Fase A** (`279e2a5`). Las fases B y C
 están sin empezar.
 
-**Se acabó lo que se podía hacer sin abrir decisiones.** Quedan dos frentes, ambos bloqueados:
-- **Terminar B5** (Demografía, Clima y Agua) exige cerrar la **decisión 4**: gráficas con SVG propio o
-  con una librería y su ADR.
-- **Fase C (Instalaciones)** exige cerrar las **decisiones 5 a 8**: modelo de capas, mapas base
-  externos y su egreso, el `geoserver` huérfano y dónde viven los GeoJSON.
+**El cuerpo del Ayuntamiento está terminado**: la barra y los siete epígrafes. De la Fase C está hecha
+la parte de C4 que no dependía del mapa.
 
-**C4 ya está hecha** en lo que no dependía del mapa, así que no queda nada que avanzar sin decidir.
-El siguiente paso obligatorio es cerrar la decisión 4 (gráficas) o las 5 a 8 (cartografía).
+Lo único que queda es la **cartografía**, y sigue bloqueada por las **decisiones 5 a 8**: modelo de
+capas, mapas base externos y su egreso, el `geoserver` huérfano y dónde viven los GeoJSON. Conviene
+cerrarlas juntas, porque se condicionan entre sí: si se adopta el `geoserver` (7), resuelve de paso
+dónde vive la geometría (5) y probablemente cómo se sirven los mapas base (6).
