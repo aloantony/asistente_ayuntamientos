@@ -33,6 +33,8 @@ from app.town_hall.schemas import (
     MunicipalBlockRead,
     MunicipalBlockReorder,
     MunicipalBlockUpdate,
+    MAX_ITEM_ATTACHMENTS,
+    MunicipalAttachmentRead,
     MunicipalContentField,
     MunicipalContentItemRead,
     MunicipalContentRead,
@@ -179,6 +181,107 @@ def write_fields(
 
     payload["fields"] = [field.model_dump() for field in fields]
     block.data_json = json.dumps(payload, ensure_ascii=False)
+
+
+def read_attachments(block: MunicipalBlock) -> list[dict]:
+    """Adjuntos crudos del elemento; lista vacía ante cualquier dato ilegible."""
+    if not block.data_json:
+        return []
+
+    try:
+        payload = json.loads(block.data_json)
+    except ValueError:
+        return []
+
+    raw = payload.get("attachments") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+
+    return [
+        entry
+        for entry in raw
+        if isinstance(entry, dict)
+        and isinstance(entry.get("storage_key"), str)
+        and isinstance(entry.get("name"), str)
+    ]
+
+
+def write_attachments(block: MunicipalBlock, attachments: list[dict]) -> None:
+    payload: dict[str, object] = {}
+    if block.data_json:
+        try:
+            loaded = json.loads(block.data_json)
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, dict):
+            payload = loaded
+
+    payload["attachments"] = attachments
+    block.data_json = json.dumps(payload, ensure_ascii=False)
+
+
+def public_attachments(block: MunicipalBlock) -> list[MunicipalAttachmentRead]:
+    """Vista publicable: nunca sale la clave de almacenamiento."""
+    return [
+        MunicipalAttachmentRead(
+            index=index,
+            name=entry["name"],
+            content_type=entry.get("content_type", "application/octet-stream"),
+            size_bytes=entry.get("size_bytes", 0),
+        )
+        for index, entry in enumerate(read_attachments(block))
+    ]
+
+
+def require_parent_of(db: Session, item: MunicipalBlock) -> MunicipalBlock:
+    """Apartado al que pertenece un elemento, para reconstruir su contenido."""
+    parent = (
+        db.get(MunicipalBlock, item.parent_id)
+        if item.parent_id is not None
+        else None
+    )
+    if parent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Block not found",
+        )
+    return parent
+
+
+def build_content(db: Session, block: MunicipalBlock) -> MunicipalContentRead:
+    """Contenido publicable de un apartado, ya ordenado."""
+    items = db.scalars(
+        select(MunicipalBlock)
+        .where(
+            MunicipalBlock.parent_id == block.id,
+            MunicipalBlock.status == "active",
+            MunicipalBlock.block_type == "item",
+        )
+        .order_by(MunicipalBlock.position, MunicipalBlock.id)
+    )
+    parent = (
+        db.get(MunicipalBlock, block.parent_id)
+        if block.parent_id is not None
+        else None
+    )
+
+    return MunicipalContentRead(
+        block_id=block.id,
+        title=block.title,
+        parent_title=parent.title if parent is not None else None,
+        layout=read_layout(block),  # type: ignore[arg-type]
+        items=[
+            MunicipalContentItemRead(
+                id=item.id,
+                title=item.title,
+                body=item.body,
+                position=item.position,
+                fields=read_fields(item),
+                attachments=public_attachments(item),
+            )
+            for item in items
+        ],
+    )
 
 
 def archive_descendants(
@@ -496,6 +599,162 @@ def download_shield(
     )
 
 
+def require_content_item(db: Session, block_id: int) -> MunicipalBlock:
+    block = get_owned_block(db, block_id)
+    if block.block_type != "item" or block.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Block not found",
+        )
+    return block
+
+
+@router.post("/blocks/{block_id}/attachments", response_model=MunicipalContentRead)
+def upload_attachment(
+    block_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    file: Annotated[UploadFile, File()],
+) -> MunicipalContentRead:
+    block = require_content_item(db, block_id)
+    require_town_hall_edit(db, current_user, block.organization_id)
+    require_rate_limit_slot(
+        upload_rate_limiter,
+        str(current_user.id),
+        detail="Too many uploads",
+    )
+
+    attachments = read_attachments(block)
+    if len(attachments) >= MAX_ITEM_ATTACHMENTS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Too many attachments",
+        )
+
+    try:
+        stored_upload = storage_service.save_archive_file(
+            file,
+            organization_id=block.organization_id,
+            max_bytes=settings.municipal_attachment_max_upload_bytes,
+        )
+    except UnsupportedDocumentContentTypeError:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Unsupported attachment content type",
+        ) from None
+    except DocumentTooLargeError:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Attachment exceeds maximum upload size",
+        ) from None
+    except EmptyDocumentError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty attachment upload",
+        ) from None
+    except InvalidStorageKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid attachment storage key",
+        ) from None
+
+    attachments.append(
+        {
+            "storage_key": stored_upload.storage_key,
+            "name": stored_upload.original_filename,
+            "content_type": stored_upload.content_type,
+            "size_bytes": stored_upload.size_bytes,
+        }
+    )
+    write_attachments(block, attachments)
+    block.updated_by_id = current_user.id
+
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        storage_service.delete_file(stored_upload.storage_key)
+        raise
+
+    return build_content(db, require_parent_of(db, block))
+
+
+@router.get("/blocks/{block_id}/attachments/{index}")
+def download_attachment(
+    block_id: int,
+    index: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> FileResponse:
+    block = require_content_item(db, block_id)
+    require_town_hall_view(db, current_user, block.organization_id)
+
+    attachments = read_attachments(block)
+    if index < 0 or index >= len(attachments):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attachment not found",
+        )
+
+    entry = attachments[index]
+    try:
+        file_path = storage_service.resolve_storage_key(entry["storage_key"])
+    except InvalidStorageKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attachment not found",
+        ) from None
+
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attachment not found",
+        )
+
+    # Siempre como descarga, por la misma razón que el escudo (ADR-032): un
+    # fichero servido inline se renderiza en el origen de la API. El nombre sale
+    # del content-type validado, no del que eligió quien subió.
+    content_type = entry.get("content_type", "application/octet-stream")
+    suffix = DEFAULT_EXTENSIONS_BY_CONTENT_TYPE.get(content_type, "")
+    return FileResponse(
+        file_path,
+        media_type=content_type,
+        filename=f"adjunto-{index + 1}{suffix}",
+        content_disposition_type="attachment",
+    )
+
+
+@router.delete(
+    "/blocks/{block_id}/attachments/{index}",
+    response_model=MunicipalContentRead,
+)
+def delete_attachment(
+    block_id: int,
+    index: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MunicipalContentRead:
+    block = require_content_item(db, block_id)
+    require_town_hall_edit(db, current_user, block.organization_id)
+
+    attachments = read_attachments(block)
+    if index < 0 or index >= len(attachments):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attachment not found",
+        )
+
+    removed = attachments.pop(index)
+    write_attachments(block, attachments)
+    block.updated_by_id = current_user.id
+    db.commit()
+
+    # El fichero se borra después de confirmar: si el commit falla, sigue ahí.
+    storage_service.delete_file(removed["storage_key"])
+
+    return build_content(db, require_parent_of(db, block))
+
+
 @router.post(
     "/blocks",
     response_model=MunicipalBlockRead,
@@ -598,37 +857,7 @@ def read_block_content(
             detail="Block not found",
         )
 
-    items = db.scalars(
-        select(MunicipalBlock)
-        .where(
-            MunicipalBlock.parent_id == block.id,
-            MunicipalBlock.status == "active",
-            MunicipalBlock.block_type == "item",
-        )
-        .order_by(MunicipalBlock.position, MunicipalBlock.id)
-    )
-    parent = (
-        db.get(MunicipalBlock, block.parent_id)
-        if block.parent_id is not None
-        else None
-    )
-
-    return MunicipalContentRead(
-        block_id=block.id,
-        title=block.title,
-        parent_title=parent.title if parent is not None else None,
-        layout=read_layout(block),  # type: ignore[arg-type]
-        items=[
-            MunicipalContentItemRead(
-                id=item.id,
-                title=item.title,
-                body=item.body,
-                position=item.position,
-                fields=read_fields(item),
-            )
-            for item in items
-        ],
-    )
+    return build_content(db, block)
 
 
 @router.patch("/blocks/{block_id}", response_model=MunicipalBlockRead)

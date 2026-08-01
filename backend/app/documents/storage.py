@@ -28,12 +28,26 @@ ALLOWED_BRAND_IMAGE_CONTENT_TYPES = {
     "image/webp",
 }
 
+# Archivo del Ayuntamiento: fototeca, crónicas, himno y documentos históricos.
+# Comparte el volumen bajo su propio prefijo, sin pasar por el modelo Document,
+# que exige proyecto. Ver ADR-034.
+ALLOWED_ARCHIVE_CONTENT_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "audio/mpeg",
+    "audio/ogg",
+}
+
 DEFAULT_EXTENSIONS_BY_CONTENT_TYPE = {
     "application/pdf": ".pdf",
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/svg+xml": ".svg",
     "image/webp": ".webp",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
     "text/plain": ".txt",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/msword": ".doc",
@@ -108,6 +122,20 @@ class LocalStorageService:
             upload_file,
             allowed_content_types=ALLOWED_BRAND_IMAGE_CONTENT_TYPES,
             key_prefix=f"organizations/{organization_id}/brand",
+            max_bytes=max_bytes,
+        )
+
+    def save_archive_file(
+        self,
+        upload_file: UploadFile,
+        *,
+        organization_id: int,
+        max_bytes: int,
+    ) -> StoredUpload:
+        return self._save_upload(
+            upload_file,
+            allowed_content_types=ALLOWED_ARCHIVE_CONTENT_TYPES,
+            key_prefix=f"organizations/{organization_id}/archive",
             max_bytes=max_bytes,
         )
 

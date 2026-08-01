@@ -1875,6 +1875,20 @@ export function MunicipalWorkspace() {
                   { body: body.trim() === "" ? null : body },
                 )
               }
+              onAddAttachment={(itemId, file) =>
+                void townHallController.addAttachment(
+                  activeContentBlockId,
+                  itemId,
+                  file,
+                )
+              }
+              onRemoveAttachment={(itemId, index) =>
+                void townHallController.removeAttachment(
+                  activeContentBlockId,
+                  itemId,
+                  index,
+                )
+              }
               onSaveFields={(itemId, fields) =>
                 void townHallController.saveContentFields(
                   activeContentBlockId,

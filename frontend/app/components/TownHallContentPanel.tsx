@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { townHallAttachmentUrl } from "../lib/api";
 import { ConfirmDialog } from "./ConfirmDialog";
 import type {
   TownHallContentField,
@@ -18,6 +19,8 @@ type TownHallContentPanelProps = {
   onArchive: (itemId: number) => void;
   onChangeLayout: (layout: TownHallSectionLayout) => void;
   onSaveFields: (itemId: number, fields: TownHallContentField[]) => void;
+  onAddAttachment: (itemId: number, file: File) => void;
+  onRemoveAttachment: (itemId: number, index: number) => void;
 };
 
 /**
@@ -26,6 +29,16 @@ type TownHallContentPanelProps = {
  * `contenteditable` como el prototipo (decisión 2 de
  * docs/diseno-ayuntamiento-prototipo.md).
  */
+function formatSize(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function TownHallContentPanel({
   content,
   canEdit,
@@ -36,6 +49,8 @@ export function TownHallContentPanel({
   onArchive,
   onChangeLayout,
   onSaveFields,
+  onAddAttachment,
+  onRemoveAttachment,
 }: TownHallContentPanelProps) {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [bodies, setBodies] = useState<Record<number, string>>({});
@@ -71,6 +86,7 @@ export function TownHallContentPanel({
 
   const isContacts = content.layout === "contacts";
   const isPeople = content.layout === "people";
+  const isFiles = content.layout === "files";
 
   return (
     <article
@@ -79,7 +95,9 @@ export function TownHallContentPanel({
           ? "townhall-content townhall-content-contacts"
           : isPeople
             ? "townhall-content townhall-content-people"
-            : "townhall-content"
+            : isFiles
+              ? "townhall-content townhall-content-files"
+              : "townhall-content"
       }
     >
       <header className="townhall-content-head">
@@ -103,6 +121,7 @@ export function TownHallContentPanel({
                 <option value="text">Texto</option>
                 <option value="contacts">Teléfonos</option>
                 <option value="people">Personas</option>
+                <option value="files">Archivo</option>
               </select>
             </label>
           ) : null}
@@ -352,6 +371,67 @@ export function TownHallContentPanel({
                 {item.body || "Sin contenido todavía."}
               </p>
             )}
+            {isFiles ? (
+              <div className="townhall-attachments">
+                {item.attachments.map((attachment) => (
+                  <div className="townhall-attachment" key={attachment.index}>
+                    <a
+                      download
+                      href={townHallAttachmentUrl(item.id, attachment.index)}
+                    >
+                      {attachment.name}
+                    </a>
+                    <span>{formatSize(attachment.size_bytes)}</span>
+                    {canEdit ? (
+                      <button
+                        aria-label={`Eliminar ${attachment.name}`}
+                        className="townhall-editor-delete small"
+                        disabled={isSaving}
+                        onClick={() =>
+                          onRemoveAttachment(item.id, attachment.index)
+                        }
+                        type="button"
+                      >
+                        <svg
+                          aria-hidden="true"
+                          fill="none"
+                          height="12"
+                          stroke="currentColor"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="1.8"
+                          viewBox="0 0 24 24"
+                          width="12"
+                        >
+                          <path d="M6 6l12 12M18 6 6 18" />
+                        </svg>
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+                {item.attachments.length === 0 && !canEdit ? (
+                  <p className="muted">Sin adjuntos.</p>
+                ) : null}
+                {canEdit ? (
+                  <label className="townhall-attachment-add">
+                    Añadir archivo
+                    <input
+                      accept=".pdf,.png,.jpg,.jpeg,.webp,.mp3,.ogg"
+                      disabled={isSaving}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) {
+                          onAddAttachment(item.id, file);
+                        }
+                        // Permite volver a elegir el mismo fichero.
+                        event.target.value = "";
+                      }}
+                      type="file"
+                    />
+                  </label>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         ))}
       </div>
@@ -367,7 +447,9 @@ export function TownHallContentPanel({
             ? "Añadir teléfono"
             : isPeople
               ? "Añadir persona"
-              : "Añadir elemento"}
+              : isFiles
+                ? "Añadir entrada"
+                : "Añadir elemento"}
         </button>
       ) : null}
 

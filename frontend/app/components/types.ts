@@ -1660,7 +1660,14 @@ export type TownHallBlockPlacement = {
 // Cómo se presenta un apartado: prosa por defecto, o listas de nombre y
 // número como los teléfonos del prototipo. En ambos el elemento guarda la
 // etiqueta en `title` y el valor en `body`.
-export type TownHallSectionLayout = "text" | "contacts" | "people";
+export type TownHallSectionLayout = "text" | "contacts" | "people" | "files";
+
+export type TownHallAttachment = {
+  index: number;
+  name: string;
+  content_type: string;
+  size_bytes: number;
+};
 
 export type TownHallContentField = {
   label: string;
@@ -1673,6 +1680,7 @@ export type TownHallContentItem = {
   body: string | null;
   position: number;
   fields: TownHallContentField[];
+  attachments: TownHallAttachment[];
 };
 
 export type TownHallContent = {

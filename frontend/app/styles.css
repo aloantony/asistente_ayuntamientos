@@ -5745,3 +5745,61 @@ html.dark .dashboard-ask input {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 }
+
+/* Formato archivo: cada entrada lleva sus adjuntos (PDF, imágenes, audio). */
+.townhall-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.townhall-attachment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: var(--surface-raised);
+}
+
+.townhall-attachment a {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.townhall-attachment span {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+}
+
+.townhall-attachment-add {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 9px;
+  padding: 7px 12px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.townhall-attachment-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.townhall-attachment-add input {
+  display: none;
+}

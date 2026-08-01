@@ -18,7 +18,9 @@ import {
   fetchTownHallWeather,
   reorderTownHallBlocks,
   updateTownHallBlock,
+  deleteTownHallAttachment,
   updateTownHallProfile,
+  uploadTownHallAttachment,
   uploadTownHallShield,
 } from "./api";
 
@@ -233,6 +235,22 @@ export function useTownHallController({
     );
   }
 
+  function addAttachment(blockId: number, itemId: number, file: File) {
+    return runContentMutation(
+      blockId,
+      () => uploadTownHallAttachment(itemId, file),
+      "No se pudo subir el adjunto.",
+    );
+  }
+
+  function removeAttachment(blockId: number, itemId: number, index: number) {
+    return runContentMutation(
+      blockId,
+      () => deleteTownHallAttachment(itemId, index),
+      "No se pudo eliminar el adjunto.",
+    );
+  }
+
   function setSectionLayout(blockId: number, layout: TownHallSectionLayout) {
     return runContentMutation(
       blockId,
@@ -301,6 +319,8 @@ export function useTownHallController({
     addContentItem,
     saveContentItem,
     saveContentFields,
+    addAttachment,
+    removeAttachment,
     setSectionLayout,
     archiveContentItem,
     loadWeather,

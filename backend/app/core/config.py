@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     document_storage_root: str = "/var/lib/asistente_ayuntamientos/documents"
     document_max_upload_bytes: int = 25 * 1024 * 1024
     municipal_shield_max_upload_bytes: int = 2 * 1024 * 1024
+    municipal_attachment_max_upload_bytes: int = 25 * 1024 * 1024
     municipal_weather_timeout_seconds: float = 5.0
     municipal_weather_cache_seconds: int = 1800
     assistant_runtime: str = "anthropic"

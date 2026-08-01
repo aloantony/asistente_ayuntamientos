@@ -14,8 +14,11 @@ BlockStatus = Literal["active", "archived"]
 # como la corporación y la estructura de gobierno. En `text` y `contacts` el
 # elemento guarda la etiqueta en `title` y el valor en `body`; en `people` el
 # nombre va en `title` y los campos en `fields`.
-SectionLayout = Literal["text", "contacts", "people"]
+SectionLayout = Literal["text", "contacts", "people", "files"]
 SECTION_LAYOUTS: tuple[str, ...] = get_args(SectionLayout)
+
+# Cota de adjuntos por elemento, por la misma razón que la de campos.
+MAX_ITEM_ATTACHMENTS = 30
 
 # Cota de los campos libres por persona: evita que un `data_json` crezca sin
 # medida desde el formulario.
@@ -76,12 +79,20 @@ class MunicipalContentField(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
 
+class MunicipalAttachmentRead(BaseModel):
+    index: int
+    name: str
+    content_type: str
+    size_bytes: int
+
+
 class MunicipalContentItemRead(BaseModel):
     id: int
     title: str
     body: str | None
     position: int
     fields: list[MunicipalContentField] = []
+    attachments: list[MunicipalAttachmentRead] = []
 
 
 class MunicipalContentRead(BaseModel):

@@ -178,6 +178,18 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El estado de la necesidad no permite editar su contenido.";
     case "Project does not belong to the requirement organization":
       return "El proyecto no pertenece a la organización de la necesidad.";
+    case "Attachment not found":
+      return "No se encontró el adjunto.";
+    case "Unsupported attachment content type":
+      return "Ese tipo de archivo no está permitido: PDF, imagen o audio.";
+    case "Attachment exceeds maximum upload size":
+      return "El archivo supera el tamaño máximo permitido.";
+    case "Empty attachment upload":
+      return "El archivo está vacío.";
+    case "Invalid attachment storage key":
+      return "No se pudo guardar el adjunto.";
+    case "Too many attachments":
+      return "Este elemento ya tiene demasiados adjuntos.";
     case "Only content items carry fields":
       return "Solo los elementos pueden tener campos.";
     case "Only sections carry a layout":
@@ -879,6 +891,33 @@ export function fetchTownHallContent(blockId: number) {
     "",
     "No se pudo cargar el contenido del apartado.",
   );
+}
+
+export function uploadTownHallAttachment(blockId: number, file: File) {
+  const body = new FormData();
+  body.append("file", file);
+
+  return adminRequest<TownHallContent>(
+    `/town-hall/blocks/${blockId}/attachments`,
+    "",
+    "No se pudo subir el adjunto.",
+    { method: "POST", body },
+  );
+}
+
+export function deleteTownHallAttachment(blockId: number, index: number) {
+  return adminRequest<TownHallContent>(
+    `/town-hall/blocks/${blockId}/attachments/${index}`,
+    "",
+    "No se pudo eliminar el adjunto.",
+    { method: "DELETE" },
+  );
+}
+
+// Descarga directa: la cookie de sesión viaja sola porque backend y frontend
+// comparten host (ADR-010).
+export function townHallAttachmentUrl(blockId: number, index: number) {
+  return `${API_BASE_URL}/town-hall/blocks/${blockId}/attachments/${index}`;
 }
 
 export function uploadTownHallShield(file: File, organizationId?: number) {

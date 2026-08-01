@@ -1161,3 +1161,176 @@ def test_too_many_fields_are_rejected(
     )
 
     assert response.status_code == 422
+
+
+JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01" + b"\x00" * 32
+
+
+def make_archive_section(client, headers):
+    section = create_section(client, headers, "Archivo")
+    apartado = create_item(client, headers, section["id"], "Fototeca")
+    client.patch(
+        f"/town-hall/blocks/{apartado['id']}",
+        json={"layout": "files"},
+        headers=headers,
+    )
+    return apartado
+
+
+def test_attachment_round_trip(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    apartado = make_archive_section(client, headers)
+    foto = create_content_item(client, headers, apartado["id"], "Plaza Mayor, 1965")
+
+    upload = client.post(
+        f"/town-hall/blocks/{foto['id']}/attachments",
+        files={"file": ("plaza.jpg", JPEG_BYTES, "image/jpeg")},
+        headers=headers,
+    )
+    download = client.get(
+        f"/town-hall/blocks/{foto['id']}/attachments/0",
+        headers=headers,
+    )
+
+    assert upload.status_code == 200
+    attachment = upload.json()["items"][0]["attachments"][0]
+    assert attachment["name"] == "plaza.jpg"
+    assert attachment["content_type"] == "image/jpeg"
+    assert attachment["size_bytes"] == len(JPEG_BYTES)
+    # La clave de almacenamiento nunca sale al cliente.
+    assert "storage_key" not in attachment
+    assert download.status_code == 200
+    assert download.content == JPEG_BYTES
+    # Siempre como descarga, nunca inline (ADR-032).
+    assert "attachment" in download.headers["content-disposition"]
+
+
+def test_attachments_reject_other_content_types(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    apartado = make_archive_section(client, headers)
+    foto = create_content_item(client, headers, apartado["id"], "Plaza Mayor")
+
+    response = client.post(
+        f"/town-hall/blocks/{foto['id']}/attachments",
+        files={"file": ("virus.exe", b"MZ", "application/x-msdownload")},
+        headers=headers,
+    )
+
+    assert response.status_code == 415
+
+
+def test_deleting_an_attachment_removes_it(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    apartado = make_archive_section(client, headers)
+    foto = create_content_item(client, headers, apartado["id"], "Plaza Mayor")
+    for name in ("una.jpg", "otra.jpg"):
+        client.post(
+            f"/town-hall/blocks/{foto['id']}/attachments",
+            files={"file": (name, JPEG_BYTES, "image/jpeg")},
+            headers=headers,
+        )
+
+    deleted = client.delete(
+        f"/town-hall/blocks/{foto['id']}/attachments/0",
+        headers=headers,
+    )
+
+    assert deleted.status_code == 200
+    remaining = deleted.json()["items"][0]["attachments"]
+    assert [entry["name"] for entry in remaining] == ["otra.jpg"]
+    # El índice se recalcula: el que queda pasa a ser el 0.
+    assert remaining[0]["index"] == 0
+    assert (
+        client.get(
+            f"/town-hall/blocks/{foto['id']}/attachments/1",
+            headers=headers,
+        ).status_code
+        == 404
+    )
+
+
+def test_attachments_require_the_edit_permission_and_own_organization(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    reader = make_user()
+    other_user = make_user()
+    organization = make_organization()
+    other_organization = make_organization()
+    grant_permissions(reader, organization, ["town_hall.view"])
+    grant_permissions(
+        other_user,
+        other_organization,
+        ["town_hall.view", "town_hall.edit"],
+    )
+    foreign = make_archive_section(client, headers_for(other_user))
+    foreign_item = create_content_item(
+        client,
+        headers_for(other_user),
+        foreign["id"],
+        "Ajena",
+    )
+
+    without_edit = client.post(
+        f"/town-hall/blocks/{foreign_item['id']}/attachments",
+        files={"file": ("x.jpg", JPEG_BYTES, "image/jpeg")},
+        headers=headers_for(reader),
+    )
+    foreign_read = client.get(
+        f"/town-hall/blocks/{foreign_item['id']}/attachments/0",
+        headers=headers_for(reader),
+    )
+
+    assert without_edit.status_code == 403
+    assert foreign_read.status_code == 403
+
+
+def test_attachments_only_hang_from_content_items(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    apartado = make_archive_section(client, headers)
+
+    response = client.post(
+        f"/town-hall/blocks/{apartado['id']}/attachments",
+        files={"file": ("x.jpg", JPEG_BYTES, "image/jpeg")},
+        headers=headers,
+    )
+
+    assert response.status_code == 404
