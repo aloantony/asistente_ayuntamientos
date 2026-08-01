@@ -127,7 +127,9 @@ Orden propuesto, de menor a mayor riesgo:
 - **B2 Teléfonos** — HECHA (`0d1958d`). Los apartados ganan un **formato** guardado en `data_json`
   (`text` | `contacts`), también sin migración. El elemento no cambia de forma: `title` es la
   etiqueta y `body` el valor, que en `contacts` se pinta como número marcable.
-- **B3 Corporación y Estructura de gobierno** — niveles, miembros y campos añadidos por el usuario.
+- **B3 Corporación y Estructura de gobierno** — HECHA (`9014721`). Formato `people`: el nombre en el
+  título y una lista ordenada de campos libres por persona en su `data_json`, con tope de 20. Los
+  «cargo, nombre, partido» del prototipo son simplemente los campos que se crean de inicio.
 - **B4 Archivo** — adjuntos (PDF, imágenes, audio), visor de fotos, crónicas. *Cierra la decisión 3.*
 - **B5 Datos del municipio** — General y Patrimonio primero; Demografía, Clima y Agua después, con las
   gráficas. *Cierra la decisión 4.* El padrón puede apoyarse en `municipalities.population` y su
@@ -161,10 +163,9 @@ Orden propuesto, de menor a mayor riesgo:
 
 ## 6. Cómo retomar
 
-Estado a 2026-07-30: hechas las fases A, B1 y B2. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
+Estado a 2026-07-30: hechas las fases A, B1, B2 y B3. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
 ya en la historia de `feat/despliegue-produccion`) y hecha la **Fase A** (`279e2a5`). Las fases B y C
 están sin empezar.
 
-Al retomar: la siguiente es **B3 (Corporación y Estructura de gobierno)**, que necesita miembros con
-campos añadidos por el usuario; el mecanismo de formato de B2 es el sitio natural para ello. Después
-**B4 (Archivo)**, que cierra la decisión 3 (adjuntos).
+Al retomar: la siguiente es **B4 (Archivo)**, y **exige cerrar antes la decisión 3** (adjuntos), que es
+la primera que no se puede esquivar con el árbol de bloques: hacen falta ficheros.
