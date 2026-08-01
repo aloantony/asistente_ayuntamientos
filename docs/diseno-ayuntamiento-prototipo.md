@@ -150,8 +150,10 @@ Orden propuesto, de menor a mayor riesgo:
   propios (`map.import` ya está sembrado y hoy no tiene endpoint), tenancy y tests.
 - **C2 Importación de los GeoJSON de Fuentelcésped** — *cierra la decisión 8*.
 - **C3 Panel de 5 pestañas, leyenda y búsqueda** — sobre `MunicipalMap`.
-- **C4 Fichas y mantenimiento** — vista del prototipo **consumiendo `assets` y `maintenance`**, con
-  sus filtros de vencimiento. Es la sub-fase con mejor relación resultado/esfuerzo de la Fase C.
+- **C4 Fichas y mantenimiento** — HECHA (`305e43c`) en su parte independiente: filtro de vencimiento
+  (todas / ≤30 días / vencidas) resuelto **en el servidor** con `scheduled_to`, y aviso en rojo de las
+  órdenes pasadas de fecha. Consume `assets` y `maintenance`, sin almacén propio. Queda pendiente lo
+  que sí depende del mapa: los paneles por capa y la búsqueda de elementos sobre la cartografía.
 - **C5 Mapas base y ortofotos** — *cierra las decisiones 6 y 7*, con su ADR de egreso.
 - **C6 Exportación del recorte** a PNG/JPG/PDF.
 - Herramientas de análisis: fuera de alcance.
@@ -171,7 +173,7 @@ Orden propuesto, de menor a mayor riesgo:
 
 ## 6. Cómo retomar
 
-Estado a 2026-07-30: hechas las fases A, B1, B2, B3, B4, media B5 y B6. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
+Estado a 2026-07-30: hechas las fases A, B1, B2, B3, B4, media B5, B6 y la parte independiente de C4. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
 ya en la historia de `feat/despliegue-produccion`) y hecha la **Fase A** (`279e2a5`). Las fases B y C
 están sin empezar.
 
@@ -181,6 +183,5 @@ están sin empezar.
 - **Fase C (Instalaciones)** exige cerrar las **decisiones 5 a 8**: modelo de capas, mapas base
   externos y su egreso, el `geoserver` huérfano y dónde viven los GeoJSON.
 
-De la Fase C, la sub-fase con mejor relación resultado/esfuerzo sigue siendo **C4 (fichas y
-mantenimiento)**, porque consume `assets` y `maintenance`, que ya existen, y **no depende de ninguna
-de esas decisiones**. Es por donde conviene entrar.
+**C4 ya está hecha** en lo que no dependía del mapa, así que no queda nada que avanzar sin decidir.
+El siguiente paso obligatorio es cerrar la decisión 4 (gráficas) o las 5 a 8 (cartografía).
