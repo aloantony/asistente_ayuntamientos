@@ -34,6 +34,7 @@ import {
   type ReactNode,
 } from "react";
 import { fetchMunicipality } from "../lib/fetchers";
+import { fetchMaintenanceOrders } from "../lib/maintenance";
 import {
   fetchMunicipalAssetSummary,
   fetchMunicipalMaintenanceSummary,
@@ -299,6 +300,25 @@ function groupOrdinancesByTopic(ordinances: Ordinance[]) {
   return [...groups.entries()].sort(([left], [right]) =>
     left.localeCompare(right, "es"),
   );
+}
+
+type DueFilter = "all" | "soon" | "overdue";
+
+const DUE_FILTERS: { id: DueFilter; label: string }[] = [
+  { id: "all", label: "Todas" },
+  { id: "soon", label: "Vence pronto (≤30 días)" },
+  { id: "overdue", label: "Solo vencidas" },
+];
+
+/** Una orden abierta cuya fecha prevista ya pasó. */
+function isOverdue(order: MaintenanceOrder) {
+  if (!order.scheduled_for) {
+    return false;
+  }
+  if (order.status === "completed" || order.status === "cancelled") {
+    return false;
+  }
+  return order.scheduled_for < new Date().toISOString().slice(0, 10);
 }
 
 function getInitials(value: string) {
@@ -819,6 +839,50 @@ function FacilitiesTab({
   const maintenanceHref = withOrganization("/mantenimiento", organizationId);
   const mapHref = withOrganization("/mapa", organizationId);
 
+  // Filtro de vencimiento del prototipo. Se resuelve en el servidor, no sobre
+  // la página ya cargada: si no, "solo vencidas" mentiría en cuanto hubiera
+  // más órdenes de las que caben en la primera página.
+  const [dueFilter, setDueFilter] = useState<DueFilter>("all");
+  const [dueOrders, setDueOrders] = useState<MaintenanceOrder[] | null>(null);
+  const [dueError, setDueError] = useState("");
+
+  useEffect(() => {
+    if (!canViewMaintenance || dueFilter === "all") {
+      setDueOrders(null);
+      setDueError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    const today = new Date();
+    const bound = new Date(today);
+    if (dueFilter === "soon") {
+      bound.setDate(bound.getDate() + 30);
+    }
+
+    fetchMaintenanceOrders(
+      {
+        organizationId,
+        scheduledTo: bound.toISOString().slice(0, 10),
+        includeClosed: false,
+        limit: 50,
+      },
+      controller.signal,
+    )
+      .then((page) => setDueOrders(page.items))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setDueOrders([]);
+          setDueError("No se pudo filtrar el mantenimiento por vencimiento.");
+        }
+      });
+
+    return () => controller.abort();
+  }, [canViewMaintenance, dueFilter, organizationId]);
+
+  const shownOrders =
+    dueFilter === "all" ? (maintenance?.items ?? []) : (dueOrders ?? []);
+
   return (
     <div className={styles.tabContent}>
       <SectionHeading
@@ -984,9 +1048,27 @@ function FacilitiesTab({
               title="Mantenimiento no disponible"
               tone="error"
             />
-          ) : maintenance && maintenance.items.length > 0 ? (
+          ) : (
+            <>
+            <div className={styles.dueFilter} role="group" aria-label="Vencimiento">
+              {DUE_FILTERS.map(({ id, label }) => (
+                <button
+                  aria-pressed={dueFilter === id}
+                  key={id}
+                  onClick={() => setDueFilter(id)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {dueError ? <p className="form-error">{dueError}</p> : null}
+            </>
+          )}
+          {!canViewMaintenance || errors.maintenance ? null : shownOrders.length >
+            0 ? (
             <div className={styles.maintenanceList}>
-              {maintenance.items.slice(0, 6).map((order) => (
+              {shownOrders.slice(0, 6).map((order) => (
                 <article key={order.id}>
                   <div className={styles.itemHeading}>
                     <div>
@@ -1002,9 +1084,13 @@ function FacilitiesTab({
                   </div>
                   <p>{order.asset.name}</p>
                   <div className={styles.itemMeta}>
-                    <span>
+                    <span
+                      className={
+                        isOverdue(order) ? styles.overdueDate : undefined
+                      }
+                    >
                       {order.scheduled_for
-                        ? `Prevista: ${formatDate(order.scheduled_for)}`
+                        ? `${isOverdue(order) ? "Vencida" : "Prevista"}: ${formatDate(order.scheduled_for)}`
                         : "Pendiente de programar"}
                     </span>
                     {order.assigned_to ? (
@@ -1023,7 +1109,13 @@ function FacilitiesTab({
                   Abrir mantenimiento
                 </Link>
               }
-              description="No hay órdenes planificadas, programadas o en curso. Las nuevas actuaciones aparecerán aquí vinculadas a su activo."
+              description={
+                dueFilter === "overdue"
+                  ? "Ninguna orden abierta ha pasado de su fecha prevista."
+                  : dueFilter === "soon"
+                    ? "Ninguna orden abierta vence en los próximos 30 días."
+                    : "No hay órdenes planificadas, programadas o en curso. Las nuevas actuaciones aparecerán aquí vinculadas a su activo."
+              }
               icon={CheckCircle2}
               title="Sin mantenimiento pendiente"
             />

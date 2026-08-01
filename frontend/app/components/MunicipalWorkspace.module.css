@@ -1365,3 +1365,39 @@
   font-size: 0.7rem;
   font-weight: 600;
 }
+
+/* Filtro de vencimiento del mantenimiento, como el del prototipo. */
+.dueFilter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.dueFilter button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.dueFilter button:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.dueFilter button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+  background: var(--accent);
+}
+
+/* Una fecha ya pasada se lee de un vistazo. */
+.overdueDate {
+  color: var(--danger-fg);
+  font-weight: 700;
+}
