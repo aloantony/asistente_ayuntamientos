@@ -138,8 +138,12 @@ Orden propuesto, de menor a mayor riesgo:
   necesitaban Patrimonio y la Fototeca. **Pendientes Demografía, Clima y Agua**, que necesitan
   gráficas: *no cerrar sin la decisión 4*. El padrón puede apoyarse en `municipalities.population` y
   su procedencia INE, ya existentes.
-- **B6 Normativa** — vista de categorías y documentos **sobre el módulo `ordinances` existente**, no
-  un almacén nuevo.
+- **B6 Normativa** — HECHA (`6ab66b6`), y mucho menor de lo previsto: la pestaña del workspace ya
+  mostraba tipo, título, estado, resumen, materia, fecha, boletín y enlace a la fuente oficial. Solo
+  faltaba la agrupación por categoría, que ahora usa `topic`. **No** se duplicó la búsqueda: la real,
+  con filtros y coincidencia semántica, ya vive en `/ordenanzas`. Quedan sin construir los adjuntos
+  por documento y las versiones anteriores archivables: no existen en el modelo de `Ordinance` e
+  inventarlos aquí bifurcaría el dominio.
 
 ### Fase C — Instalaciones (la mayor)
 - **C1 Modelo de capas** — metadatos en PostgreSQL, geometría según la decisión 5, con permisos
@@ -167,13 +171,16 @@ Orden propuesto, de menor a mayor riesgo:
 
 ## 6. Cómo retomar
 
-Estado a 2026-07-30: hechas las fases A, B1, B2, B3, B4 y media B5. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
+Estado a 2026-07-30: hechas las fases A, B1, B2, B3, B4, media B5 y B6. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
 ya en la historia de `feat/despliegue-produccion`) y hecha la **Fase A** (`279e2a5`). Las fases B y C
 están sin empezar.
 
-Al retomar, dos caminos posibles:
-- **B6 (Normativa)**, que no necesita decisiones nuevas: es una vista sobre el módulo `ordinances` que
-  ya existe. Es el último epígrafe que se puede hacer sin abrir nada.
-- **Cerrar la decisión 4** y terminar B5 con Demografía, Clima y Agua.
+**Se acabó lo que se podía hacer sin abrir decisiones.** Quedan dos frentes, ambos bloqueados:
+- **Terminar B5** (Demografía, Clima y Agua) exige cerrar la **decisión 4**: gráficas con SVG propio o
+  con una librería y su ADR.
+- **Fase C (Instalaciones)** exige cerrar las **decisiones 5 a 8**: modelo de capas, mapas base
+  externos y su egreso, el `geoserver` huérfano y dónde viven los GeoJSON.
 
-Después de eso solo queda la **Fase C (Instalaciones)**, con sus cinco decisiones abiertas (5 a 8).
+De la Fase C, la sub-fase con mejor relación resultado/esfuerzo sigue siendo **C4 (fichas y
+mantenimiento)**, porque consume `assets` y `maintenance`, que ya existen, y **no depende de ninguna
+de esas decisiones**. Es por donde conviene entrar.
