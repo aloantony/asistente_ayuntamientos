@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-07-16.
+Actualizado: 2026-07-30.
 
 Este documento describe la arquitectura **implementada**. La arquitectura
 objetivo, con una instancia operativa por ayuntamiento y un control de
@@ -13,7 +13,8 @@ Aplicación multi-tenant con cuatro servicios en Docker Compose:
 - `backend`: API HTTP FastAPI (puerto 127.0.0.1:8000), monolito modular.
 - `frontend`: Next.js App Router (puerto 127.0.0.1:3000), consola de administración y trabajo.
 - `postgres`: PostgreSQL 17, interno (sin puerto publicado), con volumen persistente.
-- `redis`: Redis 7, interno, reservado para colas/caché futuras (sin consumidor todavía).
+- `redis`: Redis 7, interno, cola RQ real (`app/core/jobs.py`): importación de
+  ordenanzas y tareas de la oficina de agentes la usan; el servicio `worker` las consume.
 
 ## Modelo de dominio y tenancy
 
@@ -26,6 +27,8 @@ La distinción central del dominio:
 - `MaintenanceOrder` representa trabajo humano programado sobre un activo municipal y `MaintenanceOrderEvent` conserva su historial inmutable. Organización y municipio se derivan del activo y quedan protegidos por claves compuestas; este dominio no reutiliza las tareas ejecutables de `agent_office`.
 - `Ordinance` es global, pertenece a un municipio y puede enlazar a un documento de un tenant; ese enlace exige que quien lo crea tenga acceso al documento.
 
+- `MunicipalProfile` y `MunicipalBlock` son el cromo editable del Ayuntamiento de cada organización: perfil (nombre mostrado, escudo, temperatura) y un árbol genérico de bloques con padre, posición y carga libre en JSON. Cuelgan de la organización, no del municipio, porque cada inquilino edita el suyo; hoy solo almacenan la navegación configurable y están preparados para absorber los epígrafes de contenido sin migración (ADR-034).
+
 ## Control de acceso
 
 - Autenticación: JWT HS256 de acceso (60 min, con `iat`) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia y exige sesión); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id, nunca recortadas; cambio self-service (`POST /auth/change-password`, reemite la cookie) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios); ambos revocan los tokens emitidos antes (`iat` vs `users.password_changed_at`, ADR-015). Rate limiting en memoria por cliente+cuenta en login y cambio de contraseña: solo los intentos fallidos consumen cupo.
@@ -34,6 +37,8 @@ La distinción central del dominio:
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
 - `users.manage` está delimitado por organización: un administrador solo gestiona usuarios que comparten alguna organización donde él tiene el permiso.
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
+- El Ayuntamiento añade permisos propios (`town_hall.view`, `town_hall.edit`, `town_hall.manage`). La organización viaja siempre explícita, y las mutaciones de bloques revalidan el permiso contra la organización del propio bloque, así que tenerlo en otra no basta.
+- El bloque de temperatura (`app/town_hall/weather.py`) es el único punto de egreso externo del proyecto que no es de IA: consulta Open-Meteo desde el servidor con el topónimo del municipio y sus coordenadas, y nada más (ADR-034).
 - El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con su visibilidad normal; los activos requieren además permisos de inventario y edición en ambos dominios para reubicarlos, de modo que la capa geográfica no filtre ni modifique trabajo inaccesible por otra ruta.
 - El mantenimiento usa permisos tenant-scoped propios (`maintenance.view|create|edit|complete|manage`) y exige además visibilidad del activo. Las transiciones de estado y su evento de auditoría se confirman en una única transacción bajo bloqueo de fila; los eventos no tienen API de edición ni borrado.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.
@@ -78,10 +83,38 @@ La distinción central del dominio:
 - Base de datos PostgreSQL de test separada (`app_test*`); cada test corre dentro de una transacción externa con savepoints, y se hace rollback al terminar — aislamiento total sin tocar datos de desarrollo.
 - Cobertura prioritaria: matriz de permisos, aislamiento entre organizaciones y reglas de escalada (el núcleo de seguridad).
 
+## Despliegue en producción
+
+Un solo hostname sirve el frontend en `/` y la API bajo `/api`, detrás de Caddy
+con TLS automático. La topología la fuerzan la cookie de sesión sin `Domain`
+(frontend y API comparten host, ADR-010) y la colisión de `/admin/roles` entre las
+rutas del backend y las páginas del frontend. Los detalles operativos están en
+`docs/despliegue.md`; las decisiones, en ADR-035 (topología), ADR-036
+(endurecimiento) y ADR-037 (copias).
+
+Diferencias del stack de producción (`docker-compose.prod.yml`, fichero aparte del
+de desarrollo): sin `network_mode: host`, Postgres y Redis en una red interna sin
+salida a Internet y sin puertos publicados, `restart: unless-stopped` y healthcheck
+en todos los servicios, contenedores sin privilegios con raíz de solo lectura, y
+Postgres fijado por digest. El backend corre con `--proxy-headers` y
+`--forwarded-allow-ips` apuntando a la IP fija de Caddy, sin lo cual el limitador
+de login vería una sola IP para todos los clientes.
+
+Endurecimiento del backend: guardas de arranque que rechazan configuración de
+desarrollo en producción, documentación interactiva cerrada fuera de desarrollo,
+`TrustedHostMiddleware`, comprobación de `Origin` en las escrituras como segunda
+capa CSRF, cabeceras de seguridad y CSP, configuración de logging, `/ready` que
+comprueba base de datos y Redis, límites de tasa en los endpoints que cuestan
+dinero o CPU, y `security_events`: traza de auditoría inmutable por trigger que
+registra autenticación, cambios de privilegio y acceso a documentos.
+
 ## Carencias conocidas (deuda aceptada conscientemente)
 
 - Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
-- Los rate limiters (login, cambio de contraseña) son por proceso; al pasar a varios workers deben moverse a Redis (y valorar entonces un límite secundario por cuenta frente a password spraying, ADR-015).
-- El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
-- Sin pipeline de CI; validación local según README §9.
-- Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.
+- Los rate limiters siguen siendo **por proceso**; el despliegue mantiene un solo worker de uvicorn por esa razón. Pasar a varios workers exige moverlos a Redis antes (ADR-010, ADR-015, ADR-036).
+- El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar. Ese mismo `middleware.ts` es lo que falta para apretar la CSP a nonce y quitar `'unsafe-inline'` de `script-src` (ADR-036).
+- La CSP del frontend admite `script-src 'unsafe-inline'` porque Next.js App Router inyecta scripts inline para hidratar y el script de tema también lo es (ADR-036).
+- Retención de conversaciones, documentos y órdenes **no automatizada**: solo la traza de seguridad se purga sola (`docs/proteccion-datos.md`).
+- Sin cifrado en reposo a nivel de columna o base de datos; la postura es cifrado de disco del VPS (`docs/proteccion-datos.md`).
+- Las copias de seguridad viven en el mismo servidor: un compromiso o borrado del servidor se las lleva. Los snapshots del proveedor son la única red externa (ADR-037).
+- El planificador horario de las rutinas de la oficina de agentes sigue pendiente; se disparan a mano (`docs/oficina-agentes.md`).

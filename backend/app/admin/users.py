@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -29,6 +29,13 @@ from app.api.routes.auth import set_session_cookie
 from app.core.security import create_access_token, hash_password
 from app.rbac.permissions import has_permission
 from app.users.crud import create_user
+from app.security.events import (
+    ADMIN_PASSWORD_RESET,
+    SUPERUSER_GRANTED,
+    SUPERUSER_REVOKED,
+    USER_DELETED,
+    record_security_event,
+)
 from app.users.models import User
 
 router = APIRouter(
@@ -133,6 +140,7 @@ def get_admin_user(
 def update_admin_user(
     user_id: int,
     payload: AdminUserUpdate,
+    request: Request,
     response: Response,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
@@ -173,6 +181,15 @@ def update_admin_user(
         # Revoke tokens issued before the reset (e.g. the sessions of a
         # compromised account whose password is being rotated).
         user.password_changed_at = datetime.now(UTC)
+        record_security_event(
+            db,
+            event_type=ADMIN_PASSWORD_RESET,
+            request=request,
+            user_id=current_user.id,
+            actor_label=current_user.email,
+            target_type="user",
+            target_id=user.id,
+        )
         if user.id == current_user.id:
             # An admin resetting their own password from the users table
             # would revoke their own session mid-flight; refresh the cookie
@@ -214,6 +231,20 @@ def update_admin_user(
                 detail="Cannot demote the last active superuser",
             )
 
+    if "is_superuser" in updates and updates["is_superuser"] != user.is_superuser:
+        # Escalada o retirada de privilegio total: se audita siempre.
+        record_security_event(
+            db,
+            event_type=(
+                SUPERUSER_GRANTED if updates["is_superuser"] else SUPERUSER_REVOKED
+            ),
+            request=request,
+            user_id=current_user.id,
+            actor_label=current_user.email,
+            target_type="user",
+            target_id=user.id,
+        )
+
     for field, value in updates.items():
         setattr(user, field, value)
 
@@ -225,6 +256,7 @@ def update_admin_user(
 @router.delete("/{user_id}", response_model=AdminUserDeleteResponse)
 def delete_admin_user(
     user_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AdminUserDeleteResponse:
@@ -273,6 +305,15 @@ def delete_admin_user(
     db.execute(delete(project_users).where(project_users.c.user_id == user.id))
     db.execute(
         delete(organization_users).where(organization_users.c.user_id == user.id)
+    )
+    record_security_event(
+        db,
+        event_type=USER_DELETED,
+        request=request,
+        user_id=current_user.id,
+        actor_label=current_user.email,
+        target_type="user",
+        target_id=user.id,
     )
     db.delete(user)
     try:

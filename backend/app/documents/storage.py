@@ -18,10 +18,36 @@ ALLOWED_DOCUMENT_CONTENT_TYPES = {
     "application/vnd.ms-excel",
 }
 
+# Imágenes de marca (escudo del municipio). Van al mismo almacén que los
+# documentos pero bajo su propio prefijo, sin pasar por el modelo Document:
+# éste exige proyecto y su control de acceso es el del proyecto.
+ALLOWED_BRAND_IMAGE_CONTENT_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/svg+xml",
+    "image/webp",
+}
+
+# Archivo del Ayuntamiento: fototeca, crónicas, himno y documentos históricos.
+# Comparte el volumen bajo su propio prefijo, sin pasar por el modelo Document,
+# que exige proyecto. Ver ADR-034.
+ALLOWED_ARCHIVE_CONTENT_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "audio/mpeg",
+    "audio/ogg",
+}
+
 DEFAULT_EXTENSIONS_BY_CONTENT_TYPE = {
     "application/pdf": ".pdf",
     "image/png": ".png",
     "image/jpeg": ".jpg",
+    "image/svg+xml": ".svg",
+    "image/webp": ".webp",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
     "text/plain": ".txt",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/msword": ".doc",
@@ -78,15 +104,57 @@ class LocalStorageService:
         project_id: int,
         max_bytes: int,
     ) -> StoredUpload:
+        return self._save_upload(
+            upload_file,
+            allowed_content_types=ALLOWED_DOCUMENT_CONTENT_TYPES,
+            key_prefix=f"organizations/{organization_id}/projects/{project_id}",
+            max_bytes=max_bytes,
+        )
+
+    def save_branding_file(
+        self,
+        upload_file: UploadFile,
+        *,
+        organization_id: int,
+        max_bytes: int,
+    ) -> StoredUpload:
+        return self._save_upload(
+            upload_file,
+            allowed_content_types=ALLOWED_BRAND_IMAGE_CONTENT_TYPES,
+            key_prefix=f"organizations/{organization_id}/brand",
+            max_bytes=max_bytes,
+        )
+
+    def save_archive_file(
+        self,
+        upload_file: UploadFile,
+        *,
+        organization_id: int,
+        max_bytes: int,
+    ) -> StoredUpload:
+        return self._save_upload(
+            upload_file,
+            allowed_content_types=ALLOWED_ARCHIVE_CONTENT_TYPES,
+            key_prefix=f"organizations/{organization_id}/archive",
+            max_bytes=max_bytes,
+        )
+
+    def _save_upload(
+        self,
+        upload_file: UploadFile,
+        *,
+        allowed_content_types: set[str],
+        key_prefix: str,
+        max_bytes: int,
+    ) -> StoredUpload:
         content_type = normalize_content_type(upload_file.content_type)
-        if content_type not in ALLOWED_DOCUMENT_CONTENT_TYPES:
+        if content_type not in allowed_content_types:
             raise UnsupportedDocumentContentTypeError(content_type)
 
         original_filename = normalize_original_filename(upload_file.filename)
         stored_filename = build_stored_filename(original_filename, content_type)
         storage_key = build_storage_key(
-            organization_id=organization_id,
-            project_id=project_id,
+            key_prefix=key_prefix,
             stored_filename=stored_filename,
         )
         destination = self.resolve_storage_key(storage_key)
@@ -167,17 +235,9 @@ def build_stored_filename(original_filename: str, content_type: str) -> str:
     return f"{uuid4().hex}{suffix}"
 
 
-def build_storage_key(
-    *,
-    organization_id: int,
-    project_id: int,
-    stored_filename: str,
-) -> str:
+def build_storage_key(*, key_prefix: str, stored_filename: str) -> str:
     safe_stored_filename = PurePosixPath(stored_filename).name
     if safe_stored_filename != stored_filename or not safe_stored_filename:
         raise InvalidStorageKeyError(stored_filename)
 
-    return (
-        f"organizations/{organization_id}/projects/{project_id}/"
-        f"{safe_stored_filename}"
-    )
+    return f"{key_prefix}/{safe_stored_filename}"

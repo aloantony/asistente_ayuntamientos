@@ -4,6 +4,7 @@ import {
   BookOpen,
   Building2,
   CheckCircle2,
+  ChevronDown,
   CircleAlert,
   ClipboardList,
   CloudSun,
@@ -16,6 +17,7 @@ import {
   Landmark,
   MapPin,
   RefreshCw,
+  Settings2,
   ShieldCheck,
   UserRound,
   Users,
@@ -27,10 +29,12 @@ import {
   useEffect,
   useRef,
   useState,
+  type DragEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { fetchMunicipality } from "../lib/fetchers";
+import { fetchMaintenanceOrders } from "../lib/maintenance";
 import {
   fetchMunicipalAssetSummary,
   fetchMunicipalMaintenanceSummary,
@@ -38,12 +42,17 @@ import {
   fetchMunicipalOrganization,
   type MunicipalCollection,
 } from "../lib/municipalWorkspace";
+import { townHallShieldUrl } from "../lib/api";
 import { canViewMunicipalHub } from "../lib/permissions";
 import {
+  canEditTownHall,
   shouldShowProjectsPanel,
   shouldShowRequirementsPanel,
   useSession,
 } from "../lib/session";
+import { useTownHallController } from "../lib/useTownHallController";
+import { TownHallContentPanel } from "./TownHallContentPanel";
+import { TownHallNavEditor } from "./TownHallNavEditor";
 import styles from "./MunicipalWorkspace.module.css";
 import {
   formatOrdinanceStatus,
@@ -56,6 +65,7 @@ import {
   type Organization,
   type OrganizationSummary,
   type Ordinance,
+  type TownHall,
   type User,
 } from "./types";
 
@@ -65,6 +75,19 @@ type WorkspaceTab =
   | "facilities"
   | "people"
   | "roadmap";
+
+// Las áreas fijas conservan sus claves literales; los apartados que el usuario
+// crea en el editor del menú se identifican con el id de su bloque (ADR-034).
+type CustomTab = `block-${number}`;
+type ActiveTab = WorkspaceTab | CustomTab;
+
+function isCustomTab(tab: string): tab is CustomTab {
+  return /^block-\d+$/.test(tab);
+}
+
+function customTabBlockId(tab: CustomTab) {
+  return Number(tab.slice("block-".length));
+}
 
 type MunicipalContext = {
   organization: OrganizationSummary;
@@ -78,10 +101,35 @@ type ResourceErrors = {
 };
 
 type TabDefinition = {
-  id: WorkspaceTab;
+  id: ActiveTab;
   label: string;
   icon: LucideIcon;
 };
+
+// Entrada de la píldora de navegación: las áreas fijas no llevan desplegable,
+// los apartados creados por el usuario cuelgan de él sus elementos.
+type PillEntry = TabDefinition & {
+  items: { id: CustomTab; label: string }[];
+};
+
+function findCustomBlock(townHall: TownHall | null, tab: ActiveTab) {
+  if (townHall === null || !isCustomTab(tab)) {
+    return null;
+  }
+
+  const blockId = customTabBlockId(tab);
+  for (const section of townHall.nav) {
+    if (section.id === blockId) {
+      return { title: section.title, parentTitle: null as string | null };
+    }
+    const item = section.items.find((candidate) => candidate.id === blockId);
+    if (item) {
+      return { title: item.title, parentTitle: section.title };
+    }
+  }
+
+  return null;
+}
 
 const TAB_DEFINITIONS: TabDefinition[] = [
   { id: "summary", label: "Resumen", icon: Landmark },
@@ -232,6 +280,66 @@ function formatUpdatedAt(value: string) {
     hour12: false,
     timeZone: "Europe/Madrid",
   }).format(date);
+}
+
+/** Agrupa por materia, que es la «categoría» del prototipo, en orden alfabético
+ *  y conservando dentro el orden que trae el repositorio. */
+function groupOrdinancesByTopic(ordinances: Ordinance[]) {
+  const groups = new Map<string, Ordinance[]>();
+
+  for (const ordinance of ordinances) {
+    const topic = ordinance.topic?.trim() || "Sin materia";
+    const group = groups.get(topic);
+    if (group) {
+      group.push(ordinance);
+    } else {
+      groups.set(topic, [ordinance]);
+    }
+  }
+
+  return [...groups.entries()].sort(([left], [right]) =>
+    left.localeCompare(right, "es"),
+  );
+}
+
+type DueFilter = "all" | "soon" | "overdue";
+
+const DUE_FILTERS: { id: DueFilter; label: string }[] = [
+  { id: "all", label: "Todas" },
+  { id: "soon", label: "Vence pronto (≤30 días)" },
+  { id: "overdue", label: "Solo vencidas" },
+];
+
+/** Una orden abierta cuya fecha prevista ya pasó. */
+function isOverdue(order: MaintenanceOrder) {
+  if (!order.scheduled_for) {
+    return false;
+  }
+  if (order.status === "completed" || order.status === "cancelled") {
+    return false;
+  }
+  return order.scheduled_for < new Date().toISOString().slice(0, 10);
+}
+
+/** «1950: 812» por línea. Se ignora lo que no cuadre en vez de fallar: quien
+ *  escribe una serie a mano deja líneas a medias, y perder las buenas por una
+ *  mala sería peor que descartar esa. */
+function parseSeriesPoints(raw: string) {
+  const points: { x: string; y: number }[] = [];
+
+  for (const line of raw.split("\n")) {
+    const separator = line.lastIndexOf(":");
+    if (separator === -1) {
+      continue;
+    }
+    const x = line.slice(0, separator).trim();
+    const y = Number(line.slice(separator + 1).trim().replace(",", "."));
+    if (x && Number.isFinite(y)) {
+      points.push({ x, y });
+    }
+  }
+
+  return points;
 }
 
 function getInitials(value: string) {
@@ -643,8 +751,16 @@ function OrdinancesTab({
               Se muestran {ordinances.items.length} de {ordinances.total}.
             </p>
           </div>
+          {groupOrdinancesByTopic(ordinances.items).map(([topic, group]) => (
+          <div className={styles.ordinanceGroup} key={topic}>
+            <h3 className={styles.ordinanceGroupHeading}>
+              <span>{topic}</span>
+              <small>
+                {group.length} {group.length === 1 ? "documento" : "documentos"}
+              </small>
+            </h3>
           <div className={styles.ordinanceList}>
-            {ordinances.items.map((ordinance) => (
+            {group.map((ordinance) => (
               <article key={ordinance.id}>
                 <div className={styles.ordinanceIcon}>
                   <FileText aria-hidden="true" size={20} strokeWidth={1.6} />
@@ -667,7 +783,6 @@ function OrdinancesTab({
                       "El repositorio no incluye todavía un resumen de este documento."}
                   </p>
                   <div className={styles.itemMeta}>
-                    <span>{ordinance.topic}</span>
                     {ordinance.subtopic ? <span>{ordinance.subtopic}</span> : null}
                     <span>
                       Publicación: {formatDate(ordinance.publication_date)}
@@ -694,6 +809,8 @@ function OrdinancesTab({
               </article>
             ))}
           </div>
+          </div>
+          ))}
         </section>
       ) : (
         <ResourceState
@@ -742,6 +859,50 @@ function FacilitiesTab({
   const inventoryHref = withOrganization("/inventario", organizationId);
   const maintenanceHref = withOrganization("/mantenimiento", organizationId);
   const mapHref = withOrganization("/mapa", organizationId);
+
+  // Filtro de vencimiento del prototipo. Se resuelve en el servidor, no sobre
+  // la página ya cargada: si no, "solo vencidas" mentiría en cuanto hubiera
+  // más órdenes de las que caben en la primera página.
+  const [dueFilter, setDueFilter] = useState<DueFilter>("all");
+  const [dueOrders, setDueOrders] = useState<MaintenanceOrder[] | null>(null);
+  const [dueError, setDueError] = useState("");
+
+  useEffect(() => {
+    if (!canViewMaintenance || dueFilter === "all") {
+      setDueOrders(null);
+      setDueError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    const today = new Date();
+    const bound = new Date(today);
+    if (dueFilter === "soon") {
+      bound.setDate(bound.getDate() + 30);
+    }
+
+    fetchMaintenanceOrders(
+      {
+        organizationId,
+        scheduledTo: bound.toISOString().slice(0, 10),
+        includeClosed: false,
+        limit: 50,
+      },
+      controller.signal,
+    )
+      .then((page) => setDueOrders(page.items))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setDueOrders([]);
+          setDueError("No se pudo filtrar el mantenimiento por vencimiento.");
+        }
+      });
+
+    return () => controller.abort();
+  }, [canViewMaintenance, dueFilter, organizationId]);
+
+  const shownOrders =
+    dueFilter === "all" ? (maintenance?.items ?? []) : (dueOrders ?? []);
 
   return (
     <div className={styles.tabContent}>
@@ -908,9 +1069,27 @@ function FacilitiesTab({
               title="Mantenimiento no disponible"
               tone="error"
             />
-          ) : maintenance && maintenance.items.length > 0 ? (
+          ) : (
+            <>
+            <div className={styles.dueFilter} role="group" aria-label="Vencimiento">
+              {DUE_FILTERS.map(({ id, label }) => (
+                <button
+                  aria-pressed={dueFilter === id}
+                  key={id}
+                  onClick={() => setDueFilter(id)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {dueError ? <p className="form-error">{dueError}</p> : null}
+            </>
+          )}
+          {!canViewMaintenance || errors.maintenance ? null : shownOrders.length >
+            0 ? (
             <div className={styles.maintenanceList}>
-              {maintenance.items.slice(0, 6).map((order) => (
+              {shownOrders.slice(0, 6).map((order) => (
                 <article key={order.id}>
                   <div className={styles.itemHeading}>
                     <div>
@@ -926,9 +1105,13 @@ function FacilitiesTab({
                   </div>
                   <p>{order.asset.name}</p>
                   <div className={styles.itemMeta}>
-                    <span>
+                    <span
+                      className={
+                        isOverdue(order) ? styles.overdueDate : undefined
+                      }
+                    >
                       {order.scheduled_for
-                        ? `Prevista: ${formatDate(order.scheduled_for)}`
+                        ? `${isOverdue(order) ? "Vencida" : "Prevista"}: ${formatDate(order.scheduled_for)}`
                         : "Pendiente de programar"}
                     </span>
                     {order.assigned_to ? (
@@ -947,7 +1130,13 @@ function FacilitiesTab({
                   Abrir mantenimiento
                 </Link>
               }
-              description="No hay órdenes planificadas, programadas o en curso. Las nuevas actuaciones aparecerán aquí vinculadas a su activo."
+              description={
+                dueFilter === "overdue"
+                  ? "Ninguna orden abierta ha pasado de su fecha prevista."
+                  : dueFilter === "soon"
+                    ? "Ninguna orden abierta vence en los próximos 30 días."
+                    : "No hay órdenes planificadas, programadas o en curso. Las nuevas actuaciones aparecerán aquí vinculadas a su activo."
+              }
               icon={CheckCircle2}
               title="Sin mantenimiento pendiente"
             />
@@ -1179,10 +1368,17 @@ function EmptyState({ user }: { user: User }) {
 
 export function MunicipalWorkspace() {
   const { user, handleRequestError } = useSession();
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("summary");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("summary");
+  const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
+  const [isShieldTargeted, setIsShieldTargeted] = useState(false);
+  const [openPillId, setOpenPillId] = useState<ActiveTab | null>(null);
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
+  const townHallController = useTownHallController({
+    handleRequestError,
+    organizationId: selectedOrganizationId ?? 0,
+  });
   const [municipality, setMunicipality] = useState<Municipality | null>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
   const [ordinances, setOrdinances] = useState<
@@ -1241,10 +1437,55 @@ export function MunicipalWorkspace() {
 
   useEffect(() => {
     const requestedTab = new URLSearchParams(window.location.search).get("tab");
-    if (TAB_DEFINITIONS.some(({ id }) => id === requestedTab)) {
-      setActiveTab(requestedTab as WorkspaceTab);
+    if (requestedTab === null) {
+      return;
+    }
+    // Los apartados propios se aceptan por forma: el árbol todavía no ha
+    // llegado cuando se lee la URL.
+    if (
+      TAB_DEFINITIONS.some(({ id }) => id === requestedTab) ||
+      isCustomTab(requestedTab)
+    ) {
+      setActiveTab(requestedTab as ActiveTab);
     }
   }, []);
+
+  // Perfil del municipio y menú configurable: se cargan aparte de los módulos
+  // operativos, para que un fallo en uno no arrastre al otro.
+  useEffect(() => {
+    if (!user || !canViewMunicipalHub(user) || selectedOrganizationId === null) {
+      return;
+    }
+
+    void townHallController.loadTownHall();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, selectedOrganizationId]);
+
+  const weatherEnabled = townHallController.townHall?.profile.weather_enabled;
+  const weatherLocation = townHallController.townHall?.profile.weather_location;
+
+  useEffect(() => {
+    if (!weatherEnabled) {
+      return;
+    }
+
+    void townHallController.loadWeather();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weatherEnabled, weatherLocation]);
+
+  const contentBlockId =
+    isCustomTab(activeTab) && townHallController.townHall !== null
+      ? customTabBlockId(activeTab)
+      : null;
+
+  useEffect(() => {
+    if (contentBlockId === null) {
+      return;
+    }
+
+    void townHallController.loadContent(contentBlockId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contentBlockId]);
 
   useEffect(() => {
     if (!user || !canViewMunicipalHub(user) || !selectedContext) {
@@ -1396,8 +1637,34 @@ export function MunicipalWorkspace() {
   }
 
   const isPaused = selectedContext.organization.status === "paused";
-  const activeTabDefinition =
-    TAB_DEFINITIONS.find((tab) => tab.id === activeTab) ?? TAB_DEFINITIONS[0];
+  const municipalityLabel =
+    townHallController.townHall?.profile.display_name?.trim() ||
+    selectedContext.municipality.name;
+  const townHall = townHallController.townHall;
+  const canEditMenu = canEditTownHall(user);
+
+  // Los apartados del editor se añaden como pestañas tras las áreas fijas, de
+  // modo que la tira de pestañas siga siendo una sola navegación.
+  const workspaceTabs: PillEntry[] = [
+    ...TAB_DEFINITIONS.map((tab) => ({ ...tab, items: [] })),
+    ...(townHall?.nav ?? []).map((section) => ({
+      id: `block-${section.id}` as CustomTab,
+      label: section.title,
+      icon: Landmark,
+      items: section.items.map((item) => ({
+        id: `block-${item.id}` as CustomTab,
+        label: item.title,
+      })),
+    })),
+  ];
+  // Un apartado propio puede ser un apartado o uno de sus elementos.
+  const activeCustomBlock = findCustomBlock(townHall, activeTab);
+  // Solo los apartados (los que cuelgan de un epígrafe) tienen contenido; un
+  // epígrafe se navega por sus apartados, que ya viven en el desplegable.
+  const activeContentBlockId =
+    activeCustomBlock !== null && activeCustomBlock.parentTitle !== null
+      ? customTabBlockId(activeTab as CustomTab)
+      : null;
 
   function handleTabKeyDown(
     event: KeyboardEvent<HTMLButtonElement>,
@@ -1406,14 +1673,14 @@ export function MunicipalWorkspace() {
     let nextIndex: number | null = null;
 
     if (event.key === "ArrowRight") {
-      nextIndex = (currentIndex + 1) % TAB_DEFINITIONS.length;
+      nextIndex = (currentIndex + 1) % workspaceTabs.length;
     } else if (event.key === "ArrowLeft") {
       nextIndex =
-        (currentIndex - 1 + TAB_DEFINITIONS.length) % TAB_DEFINITIONS.length;
+        (currentIndex - 1 + workspaceTabs.length) % workspaceTabs.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
-      nextIndex = TAB_DEFINITIONS.length - 1;
+      nextIndex = workspaceTabs.length - 1;
     }
 
     if (nextIndex === null) {
@@ -1421,11 +1688,11 @@ export function MunicipalWorkspace() {
     }
 
     event.preventDefault();
-    selectWorkspaceTab(TAB_DEFINITIONS[nextIndex].id);
+    selectWorkspaceTab(workspaceTabs[nextIndex].id);
     tabButtonRefs.current[nextIndex]?.focus();
   }
 
-  function selectWorkspaceTab(tab: WorkspaceTab, moveFocus = false) {
+  function selectWorkspaceTab(tab: ActiveTab, moveFocus = false) {
     setActiveTab(tab);
     const url = new URL(window.location.href);
     if (tab === "summary") {
@@ -1436,7 +1703,7 @@ export function MunicipalWorkspace() {
     window.history.replaceState(window.history.state, "", url);
 
     if (moveFocus) {
-      const tabIndex = TAB_DEFINITIONS.findIndex(({ id }) => id === tab);
+      const tabIndex = workspaceTabs.findIndex(({ id }) => id === tab);
       window.requestAnimationFrame(() => {
         tabButtonRefs.current[tabIndex]?.focus();
       });
@@ -1461,16 +1728,51 @@ export function MunicipalWorkspace() {
     setLoadAttempt((value) => value + 1);
   }
 
+  function handleShieldDrop(event: DragEvent<HTMLSpanElement>) {
+    event.preventDefault();
+    setIsShieldTargeted(false);
+
+    const file = event.dataTransfer.files?.[0];
+    if (canEditMenu && file && file.type.startsWith("image/")) {
+      void townHallController.uploadShield(file);
+    }
+  }
+
   return (
     <section className={styles.workspace}>
       <header className={styles.masthead}>
         <div className={styles.identity}>
-          <span className={styles.municipalityMark} aria-hidden="true">
-            {getInitials(selectedContext.municipality.name)}
+          {/* El escudo sustituye a las iniciales cuando se ha subido uno; se
+              reemplaza soltando una imagen encima. */}
+          <span
+            aria-hidden="true"
+            className={`${styles.municipalityMark}${
+              isShieldTargeted ? ` ${styles.municipalityMarkTargeted}` : ""
+            }`}
+            onDragLeave={() => setIsShieldTargeted(false)}
+            onDragOver={(event) => {
+              if (!canEditMenu) {
+                return;
+              }
+              event.preventDefault();
+              setIsShieldTargeted(true);
+            }}
+            onDrop={handleShieldDrop}
+            title={
+              canEditMenu ? "Arrastra una imagen para cambiar el escudo" : undefined
+            }
+          >
+            {townHall?.profile.has_shield ? (
+              <img
+                alt=""
+                src={townHallShieldUrl(townHallController.shieldVersion)}
+              />
+            ) : (
+              getInitials(municipalityLabel)
+            )}
           </span>
           <div>
-            <p>Espacio municipal</p>
-            <h1>{selectedContext.municipality.name}</h1>
+            <h1>{municipalityLabel}</h1>
             <span>
               {selectedContext.municipality.province} ·{" "}
               {selectedContext.municipality.autonomous_community}
@@ -1478,7 +1780,112 @@ export function MunicipalWorkspace() {
           </div>
         </div>
 
-        <div className={styles.contextPanel}>
+        {/* Píldora central de navegación del prototipo: las áreas fijas son
+            botones planos y los apartados propios abren sus elementos al pasar
+            el ratón. El relleno superior del ancla es la zona-puente que evita
+            perder el hover al bajar del botón al panel. */}
+        <nav
+          aria-label="Áreas del ayuntamiento"
+          className={styles.areaPill}
+          role="tablist"
+        >
+          {workspaceTabs.map(({ id, label, icon: Icon, items }, index) => {
+            const hasItems = items.length > 0;
+            const isOpen = hasItems && openPillId === id;
+            const isSelected =
+              activeTab === id || items.some((item) => item.id === activeTab);
+
+            return (
+              <div
+                className={styles.areaPillGroup}
+                key={id}
+                onMouseEnter={() => setOpenPillId(hasItems ? id : null)}
+                onMouseLeave={() => setOpenPillId(null)}
+              >
+                <button
+                  aria-controls={`municipal-panel-${id}`}
+                  aria-expanded={hasItems ? isOpen : undefined}
+                  aria-selected={isSelected}
+                  id={`municipal-tab-${id}`}
+                  onClick={() => {
+                    selectWorkspaceTab(id);
+                    setOpenPillId((current) =>
+                      hasItems && current !== id ? id : null,
+                    );
+                  }}
+                  onKeyDown={(event) => handleTabKeyDown(event, index)}
+                  ref={(element) => {
+                    tabButtonRefs.current[index] = element;
+                  }}
+                  role="tab"
+                  tabIndex={isSelected ? 0 : -1}
+                  type="button"
+                >
+                  <Icon aria-hidden="true" size={16} strokeWidth={1.6} />
+                  <span>{label}</span>
+                  {hasItems ? (
+                    <ChevronDown aria-hidden="true" size={12} strokeWidth={2} />
+                  ) : null}
+                </button>
+                {isOpen ? (
+                  <div className={styles.areaPillMenuAnchor}>
+                    <div className={styles.areaPillMenu}>
+                      {items.map((item) => (
+                        <button
+                          key={item.id}
+                          onClick={() => {
+                            selectWorkspaceTab(item.id);
+                            setOpenPillId(null);
+                          }}
+                          type="button"
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </nav>
+
+        <div className={styles.mastheadAside}>
+          <div className={styles.municipalBar}>
+            {townHall?.profile.weather_enabled ? (
+              <span
+                className={styles.weatherBlock}
+                title={
+                  townHallController.weather
+                    ? `Temperatura de hoy en ${townHallController.weather.location}`
+                    : "Temperatura no disponible ahora mismo"
+                }
+              >
+                <CloudSun aria-hidden="true" size={18} strokeWidth={1.6} />
+                {/* Si el proveedor no responde se muestra un guion, nunca una
+                    cifra inventada. */}
+                <strong>
+                  {townHallController.weather
+                    ? `${Math.round(
+                        townHallController.weather.temperature_celsius,
+                      )}°C`
+                    : "—"}
+                </strong>
+              </span>
+            ) : null}
+            {canEditMenu ? (
+              <button
+                aria-label="Editar menú de navegación"
+                onClick={() => setIsMenuEditorOpen(true)}
+                title="Editar menú"
+                type="button"
+              >
+                <Settings2 aria-hidden="true" size={16} strokeWidth={1.7} />
+              </button>
+            ) : null}
+          </div>
+
+          <div className={styles.contextPanel}>
           <span>Organización activa</span>
           {contexts.length > 1 ? (
             <select
@@ -1498,9 +1905,12 @@ export function MunicipalWorkspace() {
           ) : (
             <strong>{selectedContext.organization.name}</strong>
           )}
-          <small>
-            {isPaused ? "Modo de consulta · organización pausada" : "Datos en producción"}
-          </small>
+            <small>
+              {isPaused
+                ? "Modo de consulta · organización pausada"
+                : "Datos en producción"}
+            </small>
+          </div>
         </div>
       </header>
 
@@ -1511,31 +1921,9 @@ export function MunicipalWorkspace() {
         </p>
       ) : null}
 
-      <nav aria-label="Áreas del ayuntamiento" className={styles.tabs} role="tablist">
-        {TAB_DEFINITIONS.map(({ id, label, icon: Icon }, index) => (
-          <button
-            aria-controls={`municipal-panel-${id}`}
-            aria-selected={activeTab === id}
-            id={`municipal-tab-${id}`}
-            key={id}
-            onClick={() => selectWorkspaceTab(id)}
-            onKeyDown={(event) => handleTabKeyDown(event, index)}
-            ref={(element) => {
-              tabButtonRefs.current[index] = element;
-            }}
-            role="tab"
-            tabIndex={activeTab === id ? 0 : -1}
-            type="button"
-          >
-            <Icon aria-hidden="true" size={17} strokeWidth={1.6} />
-            <span>{label}</span>
-          </button>
-        ))}
-      </nav>
-
       <div
-        aria-labelledby={`municipal-tab-${activeTabDefinition.id}`}
-        id={`municipal-panel-${activeTabDefinition.id}`}
+        aria-labelledby={`municipal-tab-${activeTab}`}
+        id={`municipal-panel-${activeTab}`}
         role="tabpanel"
       >
         {isLoading ? (
@@ -1602,6 +1990,93 @@ export function MunicipalWorkspace() {
           />
         ) : activeTab === "people" ? (
           <PeopleTab organization={organization} />
+        ) : activeContentBlockId !== null &&
+          townHallController.content !== null &&
+          townHallController.content.block_id === activeContentBlockId ? (
+          <div className={styles.tabContent}>
+            <TownHallContentPanel
+              canEdit={canEditMenu}
+              content={townHallController.content}
+              isSaving={townHallController.isSavingTownHall}
+              onAdd={() =>
+                void townHallController.addContentItem(
+                  activeContentBlockId,
+                  "Nuevo elemento",
+                )
+              }
+              onArchive={(itemId) =>
+                void townHallController.archiveContentItem(
+                  activeContentBlockId,
+                  itemId,
+                )
+              }
+              onSaveBody={(itemId, body) =>
+                void townHallController.saveContentItem(
+                  activeContentBlockId,
+                  itemId,
+                  { body: body.trim() === "" ? null : body },
+                )
+              }
+              onAddAttachment={(itemId, file) =>
+                void townHallController.addAttachment(
+                  activeContentBlockId,
+                  itemId,
+                  file,
+                )
+              }
+              onRemoveAttachment={(itemId, index) =>
+                void townHallController.removeAttachment(
+                  activeContentBlockId,
+                  itemId,
+                  index,
+                )
+              }
+              onSavePoints={(itemId, raw) =>
+                void townHallController.saveContentPoints(
+                  activeContentBlockId,
+                  itemId,
+                  parseSeriesPoints(raw),
+                )
+              }
+              onSaveFields={(itemId, fields) =>
+                void townHallController.saveContentFields(
+                  activeContentBlockId,
+                  itemId,
+                  fields,
+                )
+              }
+              onChangeLayout={(layout) =>
+                void townHallController.setSectionLayout(
+                  activeContentBlockId,
+                  layout,
+                )
+              }
+              onSaveTitle={(itemId, title) =>
+                void townHallController.saveContentItem(
+                  activeContentBlockId,
+                  itemId,
+                  { title },
+                )
+              }
+            />
+          </div>
+        ) : activeCustomBlock !== null ? (
+          <div className={styles.tabContent}>
+            <section className={`panel ${styles.pageState}`}>
+              <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
+              <p className="eyebrow">{activeCustomBlock.title}</p>
+              <h1>
+                {townHallController.isLoadingContent
+                  ? "Cargando"
+                  : "Elige un apartado"}
+              </h1>
+              <p className="muted">
+                {townHallController.isLoadingContent
+                  ? "Recuperando el contenido."
+                  : "Este epígrafe se recorre por sus apartados, en el desplegable de la barra."}
+              </p>
+            </section>
+          </div>
         ) : (
           <RoadmapTab
             assets={assets}
@@ -1613,6 +2088,41 @@ export function MunicipalWorkspace() {
           />
         )}
       </div>
+
+      {canEditMenu && isMenuEditorOpen && townHall !== null ? (
+        <TownHallNavEditor
+          fallbackName={selectedContext.municipality.name}
+          isSaving={townHallController.isSavingTownHall}
+          onAddItem={(sectionId) =>
+            void townHallController.addItem(sectionId, "Nuevo elemento")
+          }
+          onAddSection={() =>
+            void townHallController.addSection("Nuevo apartado")
+          }
+          onArchiveBlock={(blockId) =>
+            void townHallController.archiveBlock(blockId)
+          }
+          onChangeWeatherLocation={(location) =>
+            void townHallController.updateProfile({
+              weather_location: location === "" ? null : location,
+            })
+          }
+          onClose={() => setIsMenuEditorOpen(false)}
+          onRenameBlock={(blockId, title) =>
+            void townHallController.renameBlock(blockId, title)
+          }
+          onRenameMunicipality={(name) =>
+            void townHallController.updateProfile({
+              display_name: name === "" ? null : name,
+            })
+          }
+          onReorder={(nav) => void townHallController.reorderNav(nav)}
+          onToggleWeather={(enabled) =>
+            void townHallController.updateProfile({ weather_enabled: enabled })
+          }
+          townHall={townHall}
+        />
+      ) : null}
     </section>
   );
 }

@@ -1672,3 +1672,120 @@ export function userHasPermission(user: User, permissionCode: string) {
     user.is_superuser || (user.permissions ?? []).includes(permissionCode)
   );
 }
+
+// Ayuntamiento: perfil del municipio y navegación configurable de su barra.
+// Los apartados y elementos son bloques del mismo árbol genérico (ver
+// ADR-034), por eso comparten forma.
+export type TownHallProfile = {
+  display_name: string | null;
+  weather_enabled: boolean;
+  weather_location: string | null;
+  has_shield: boolean;
+};
+
+export type TownHallWeather = {
+  temperature_celsius: number;
+  location: string;
+};
+
+export type TownHallNavItem = {
+  id: number;
+  title: string;
+  position: number;
+};
+
+export type TownHallNavSection = TownHallNavItem & {
+  items: TownHallNavItem[];
+};
+
+export type TownHall = {
+  organization_id: number;
+  organization_name: string;
+  profile: TownHallProfile;
+  nav: TownHallNavSection[];
+};
+
+export type TownHallProfileUpdate = {
+  display_name?: string | null;
+  weather_enabled?: boolean;
+  weather_location?: string | null;
+};
+
+export type TownHallBlockCreate = {
+  block_type: "nav_section" | "nav_item" | "item";
+  parent_id?: number | null;
+  title: string;
+};
+
+export type TownHallBlockUpdate = {
+  title?: string;
+  body?: string | null;
+  layout?: TownHallSectionLayout;
+  fields?: TownHallContentField[];
+  points?: TownHallSeriesPoint[];
+  status?: "active" | "archived";
+};
+
+export type TownHallBlock = {
+  id: number;
+  organization_id: number;
+  parent_id: number | null;
+  block_type: string;
+  title: string;
+  position: number;
+  status: string;
+};
+
+export type TownHallBlockPlacement = {
+  id: number;
+  parent_id?: number | null;
+  position: number;
+};
+
+// Contenido de un apartado: la lista de elementos con su cuerpo (Fase B1 del
+// prototipo, ver docs/diseno-ayuntamiento-prototipo.md).
+// Cómo se presenta un apartado: prosa por defecto, o listas de nombre y
+// número como los teléfonos del prototipo. En ambos el elemento guarda la
+// etiqueta en `title` y el valor en `body`.
+export type TownHallSectionLayout =
+  | "text"
+  | "contacts"
+  | "people"
+  | "files"
+  | "data"
+  | "series";
+
+export type TownHallAttachment = {
+  index: number;
+  name: string;
+  content_type: string;
+  size_bytes: number;
+};
+
+export type TownHallSeriesPoint = {
+  x: string;
+  y: number;
+};
+
+export type TownHallContentField = {
+  label: string;
+  value: string;
+};
+
+export type TownHallContentItem = {
+  id: number;
+  title: string;
+  body: string | null;
+  position: number;
+  fields: TownHallContentField[];
+  attachments: TownHallAttachment[];
+  points: TownHallSeriesPoint[];
+};
+
+export type TownHallContent = {
+  block_id: number;
+  title: string;
+  parent_title: string | null;
+  layout: TownHallSectionLayout;
+  items: TownHallContentItem[];
+};

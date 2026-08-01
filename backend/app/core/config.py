@@ -18,9 +18,33 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
+    # Techo por IP frente a password spraying: la clave del limitador anterior
+    # incluye la cuenta, así que sin esto cada cuenta nueva estrena cupo.
+    login_ip_rate_limit_attempts: int = 50
+    login_ip_rate_limit_window_seconds: int = 300
+    bootstrap_admin_rate_limit_attempts: int = 5
+    bootstrap_admin_rate_limit_window_seconds: int = 3600
+    # Límites de los endpoints que cuestan dinero o CPU por llamada (ADR-036).
+    assistant_rate_limit_attempts: int = 30
+    assistant_rate_limit_window_seconds: int = 300
+    speech_rate_limit_attempts: int = 40
+    speech_rate_limit_window_seconds: int = 300
+    upload_rate_limit_attempts: int = 60
+    upload_rate_limit_window_seconds: int = 3600
+    ordinance_import_rate_limit_attempts: int = 10
+    ordinance_import_rate_limit_window_seconds: int = 3600
     bootstrap_admin_token: str | None = None
     jwt_algorithm: str = "HS256"
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Hosts que el backend acepta en la cabecera Host. "*" solo es admisible
+    # fuera de producción: en un dominio público hay que fijarlo para cerrar la
+    # inyección de Host. Ver ADR-036.
+    allowed_hosts: str = "*"
+    log_level: str = "INFO"
+    # Prefijo con el que el proxy inverso publica la API. El proxy lo elimina
+    # antes de reenviar, así que aquí solo sirve para que FastAPI genere
+    # redirecciones y esquema coherentes. Vacío en desarrollo. Ver ADR-035.
+    api_root_path: str = ""
     document_storage_root: str = "/var/lib/asistente_ayuntamientos/documents"
     document_max_upload_bytes: int = 25 * 1024 * 1024
     reference_storage_root: str = (
@@ -63,6 +87,10 @@ class Settings(BaseSettings):
     local_geoserver_postgis_database: str = "app"
     local_geoserver_postgis_user: str = "app"
     local_geoserver_postgis_password: SecretStr | None = None
+    municipal_shield_max_upload_bytes: int = 2 * 1024 * 1024
+    municipal_attachment_max_upload_bytes: int = 25 * 1024 * 1024
+    municipal_weather_timeout_seconds: float = 5.0
+    municipal_weather_cache_seconds: int = 1800
     assistant_runtime: str = "anthropic"
     anthropic_api_key: str | None = None
     assistant_model: str = "claude-opus-4-8"
@@ -150,6 +178,11 @@ class Settings(BaseSettings):
     speech_transcription_runtime: str = "disabled"
     speech_transcription_language_code: str = "multi"
     speech_transcription_max_bytes: int = 20 * 1024 * 1024
+    # Cota temporal del reconocimiento remoto y del transcodificado local. Sin
+    # ellas una conexión colgada o un ffmpeg atascado bloquean el único worker
+    # de uvicorn indefinidamente (ADR-036).
+    speech_transcription_timeout_seconds: float = 30.0
+    speech_transcode_timeout_seconds: float = 20.0
     nvidia_api_key: str | None = None
     nvidia_riva_server: str = "grpc.nvcf.nvidia.com:443"
     nvidia_whisper_function_id: str | None = None
@@ -725,6 +758,16 @@ class Settings(BaseSettings):
             raise ValueError("assistant timeouts must be finite and greater than zero")
         return value
 
+    @field_validator(
+        "speech_transcription_timeout_seconds",
+        "speech_transcode_timeout_seconds",
+    )
+    @classmethod
+    def validate_speech_timeouts(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError("speech timeouts must be finite and greater than zero")
+        return value
+
     @field_validator("assistant_max_attachments_per_message")
     @classmethod
     def validate_assistant_attachment_count(cls, value: int) -> int:
@@ -858,6 +901,91 @@ class Settings(BaseSettings):
             raise ValueError("speech_synthesis_runtime must be 'disabled' or 'azure'")
         return normalized
 
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        """Exige el valor canónico exacto, sin normalizar.
+
+        No se hace `strip().lower()` a propósito: varias guardas comparan
+        `environment` con la cadena literal, y ADR-024 exige que el puente Codex
+        solo arranque con `development` exactamente. Normalizar convertiría
+        `Development` o ` development ` en válidos y ablandaría esa puerta, así
+        que una grafía no canónica es un error de configuración explícito.
+        """
+        if value not in {"development", "test", "staging", "production"}:
+            raise ValueError(
+                "environment must be exactly 'development', 'test', 'staging' "
+                "or 'production' in lowercase"
+            )
+        return value
+
+    @field_validator("api_root_path")
+    @classmethod
+    def validate_api_root_path(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            return ""
+        if not normalized.startswith("/"):
+            raise ValueError("api_root_path must start with '/'")
+        return normalized
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            raise ValueError(
+                "log_level must be CRITICAL, ERROR, WARNING, INFO or DEBUG"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def require_hardened_production_configuration(self):
+        """Se niega a arrancar en producción con configuración de desarrollo.
+
+        Sin esto, un despliegue público arranca sin queja con la clave de firma
+        de ejemplo y orígenes en claro: el `.env` de desarrollo se copia con
+        facilidad y el fallo sería silencioso. Ver ADR-036.
+        """
+        if self.environment != "production":
+            return self
+
+        insecure_secrets = {
+            "change-me-in-development",
+            "change-this-secret-key-in-real-environments",
+        }
+        if self.secret_key in insecure_secrets:
+            raise ValueError(
+                "SECRET_KEY still holds the documented development placeholder; "
+                "generate a unique value before serving production traffic"
+            )
+        if len(self.secret_key) < 32:
+            raise ValueError(
+                "SECRET_KEY must be at least 32 characters in production"
+            )
+
+        if not self.cors_origins:
+            raise ValueError("CORS_ALLOWED_ORIGINS must be set in production")
+        for origin in self.cors_origins:
+            if origin == "*":
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must not be '*' in production: with "
+                    "credentialed requests it echoes any Origin back"
+                )
+            if not origin.startswith("https://"):
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must use https:// in production; "
+                    f"got {origin!r}"
+                )
+
+        if "*" in self.allowed_hosts_list:
+            raise ValueError(
+                "ALLOWED_HOSTS must list the real hostnames in production, "
+                "not '*'"
+            )
+
+        return self
+
     @property
     def cors_origins(self) -> list[str]:
         return [
@@ -865,6 +993,23 @@ class Settings(BaseSettings):
             for origin in self.cors_allowed_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def allowed_hosts_list(self) -> list[str]:
+        return [host.strip() for host in self.allowed_hosts.split(",") if host.strip()]
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def docs_enabled(self) -> bool:
+        """La documentación interactiva solo se publica en desarrollo.
+
+        `/openapi.json` describe las ~132 rutas, sus esquemas y la cabecera del
+        token de bootstrap: es un mapa del ataque servido sin autenticar.
+        """
+        return self.environment == "development"
 
 
 @lru_cache
