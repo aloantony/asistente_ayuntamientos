@@ -133,9 +133,11 @@ Orden propuesto, de menor a mayor riesgo:
   `organizations/<id>/archive/`, con lista blanca (PDF, imágenes, MP3/OGG), tope propio, límite de
   subida y descarga siempre como adjunto. Los ficheros **no** aparecen en el listado general de
   documentos: es la contrapartida aceptada. Visor de fotos y editor de crónicas siguen pendientes.
-- **B5 Datos del municipio** — General y Patrimonio primero; Demografía, Clima y Agua después, con las
-  gráficas. *Cierra la decisión 4.* El padrón puede apoyarse en `municipalities.population` y su
-  procedencia INE, ya existentes.
+- **B5 Datos del municipio** — PARCIAL. Hechos (`c06666d`) el formato `data` (rejilla de pares
+  dato/valor) para la pestaña General, y la vista previa de las imágenes adjuntas, que es lo que
+  necesitaban Patrimonio y la Fototeca. **Pendientes Demografía, Clima y Agua**, que necesitan
+  gráficas: *no cerrar sin la decisión 4*. El padrón puede apoyarse en `municipalities.population` y
+  su procedencia INE, ya existentes.
 - **B6 Normativa** — vista de categorías y documentos **sobre el módulo `ordinances` existente**, no
   un almacén nuevo.
 
@@ -165,10 +167,13 @@ Orden propuesto, de menor a mayor riesgo:
 
 ## 6. Cómo retomar
 
-Estado a 2026-07-30: hechas las fases A, B1, B2, B3 y B4. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
+Estado a 2026-07-30: hechas las fases A, B1, B2, B3, B4 y media B5. Antes, el cascarón (ADR-030, cinco commits en `feat/ayuntamiento-barra-configurable`,
 ya en la historia de `feat/despliegue-produccion`) y hecha la **Fase A** (`279e2a5`). Las fases B y C
 están sin empezar.
 
-Al retomar: la siguiente es **B5 (Datos del municipio)**, y **exige cerrar antes la decisión 4** (las
-gráficas de padrón y clima). General y Patrimonio se pueden hacer ya con los formatos existentes;
-Demografía, Clima y Agua necesitan dibujar series.
+Al retomar, dos caminos posibles:
+- **B6 (Normativa)**, que no necesita decisiones nuevas: es una vista sobre el módulo `ordinances` que
+  ya existe. Es el último epígrafe que se puede hacer sin abrir nada.
+- **Cerrar la decisión 4** y terminar B5 con Demografía, Clima y Agua.
+
+Después de eso solo queda la **Fase C (Instalaciones)**, con sus cinco decisiones abiertas (5 a 8).
