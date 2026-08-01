@@ -28,10 +28,12 @@ from app.town_hall import weather
 from app.town_hall.models import MunicipalBlock, MunicipalProfile
 from app.town_hall.schemas import (
     BLOCK_PARENT_TYPES,
+    SECTION_LAYOUTS,
     MunicipalBlockCreate,
     MunicipalBlockRead,
     MunicipalBlockReorder,
     MunicipalBlockUpdate,
+    MunicipalContentField,
     MunicipalContentItemRead,
     MunicipalContentRead,
     MunicipalNavItemRead,
@@ -119,7 +121,7 @@ def read_layout(block: MunicipalBlock) -> str:
         return "text"
 
     layout = payload.get("layout") if isinstance(payload, dict) else None
-    return layout if layout in ("text", "contacts") else "text"
+    return layout if layout in SECTION_LAYOUTS else "text"
 
 
 def write_layout(block: MunicipalBlock, layout: str) -> None:
@@ -133,6 +135,49 @@ def write_layout(block: MunicipalBlock, layout: str) -> None:
             payload = loaded
 
     payload["layout"] = layout
+    block.data_json = json.dumps(payload, ensure_ascii=False)
+
+
+def read_fields(block: MunicipalBlock) -> list[MunicipalContentField]:
+    """Campos libres del elemento; lista vacía ante cualquier dato ilegible."""
+    if not block.data_json:
+        return []
+
+    try:
+        payload = json.loads(block.data_json)
+    except ValueError:
+        return []
+
+    raw = payload.get("fields") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+
+    fields: list[MunicipalContentField] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get("label")
+        value = entry.get("value", "")
+        if isinstance(label, str) and label.strip() and isinstance(value, str):
+            fields.append(MunicipalContentField(label=label, value=value))
+
+    return fields
+
+
+def write_fields(
+    block: MunicipalBlock,
+    fields: list[MunicipalContentField],
+) -> None:
+    payload: dict[str, object] = {}
+    if block.data_json:
+        try:
+            loaded = json.loads(block.data_json)
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, dict):
+            payload = loaded
+
+    payload["fields"] = [field.model_dump() for field in fields]
     block.data_json = json.dumps(payload, ensure_ascii=False)
 
 
@@ -573,7 +618,16 @@ def read_block_content(
         title=block.title,
         parent_title=parent.title if parent is not None else None,
         layout=read_layout(block),  # type: ignore[arg-type]
-        items=[MunicipalContentItemRead.model_validate(item) for item in items],
+        items=[
+            MunicipalContentItemRead(
+                id=item.id,
+                title=item.title,
+                body=item.body,
+                position=item.position,
+                fields=read_fields(item),
+            )
+            for item in items
+        ],
     )
 
 
@@ -605,6 +659,13 @@ def update_block(
                 detail="Only sections carry a layout",
             )
         write_layout(block, fields["layout"])
+    if "fields" in fields:
+        if block.block_type != "item":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only content items carry fields",
+            )
+        write_fields(block, payload.fields or [])
     if "status" in fields:
         block.status = fields["status"]
         # Archivar arrastra la descendencia: preferimos el borrado lógico al

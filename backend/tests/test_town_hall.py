@@ -990,3 +990,174 @@ def test_unknown_layout_is_rejected_and_broken_data_falls_back(
 
     assert rejected.status_code == 422
     assert content["layout"] == "text"
+
+
+def test_people_sections_carry_free_fields(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Corporación")
+    apartado = create_item(client, headers, section["id"], "Pleno")
+    client.patch(
+        f"/town-hall/blocks/{apartado['id']}",
+        json={"layout": "people"},
+        headers=headers,
+    )
+    persona = create_content_item(client, headers, apartado["id"], "Ana Ruiz")
+    client.patch(
+        f"/town-hall/blocks/{persona['id']}",
+        json={
+            "fields": [
+                {"label": "Cargo", "value": "  Alcaldesa  "},
+                {"label": "Partido", "value": "Independiente"},
+            ]
+        },
+        headers=headers,
+    )
+
+    content = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert content["layout"] == "people"
+    assert content["items"][0]["title"] == "Ana Ruiz"
+    assert content["items"][0]["fields"] == [
+        {"label": "Cargo", "value": "Alcaldesa"},
+        {"label": "Partido", "value": "Independiente"},
+    ]
+
+
+def test_fields_replace_wholesale_and_survive_a_rename(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Corporación")
+    apartado = create_item(client, headers, section["id"], "Pleno")
+    persona = create_content_item(client, headers, apartado["id"], "Ana Ruiz")
+    client.patch(
+        f"/town-hall/blocks/{persona['id']}",
+        json={"fields": [{"label": "Cargo", "value": "Alcaldesa"}]},
+        headers=headers,
+    )
+    client.patch(
+        f"/town-hall/blocks/{persona['id']}",
+        json={"title": "Ana Ruiz Pérez"},
+        headers=headers,
+    )
+    # Enviar la lista completa es lo que sustituye: así se borra un campo.
+    client.patch(
+        f"/town-hall/blocks/{persona['id']}",
+        json={"fields": []},
+        headers=headers,
+    )
+
+    content = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert content["items"][0]["title"] == "Ana Ruiz Pérez"
+    assert content["items"][0]["fields"] == []
+
+
+def test_only_content_items_carry_fields(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Corporación")
+    apartado = create_item(client, headers, section["id"], "Pleno")
+
+    response = client.patch(
+        f"/town-hall/blocks/{apartado['id']}",
+        json={"fields": [{"label": "Cargo", "value": "Alcaldesa"}]},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Only content items carry fields"
+
+
+def test_malformed_fields_are_dropped_not_served(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    from app.town_hall.models import MunicipalBlock
+
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Corporación")
+    apartado = create_item(client, headers, section["id"], "Pleno")
+    persona = create_content_item(client, headers, apartado["id"], "Ana Ruiz")
+
+    # Un campo sin etiqueta, uno que no es objeto y uno correcto.
+    stored = db.get(MunicipalBlock, persona["id"])
+    stored.data_json = (
+        '{"fields": [{"label": "", "value": "x"}, "suelto",'
+        ' {"label": "Cargo", "value": "Alcaldesa"}]}'
+    )
+    db.commit()
+
+    content = client.get(
+        f"/town-hall/blocks/{apartado['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert content["items"][0]["fields"] == [
+        {"label": "Cargo", "value": "Alcaldesa"}
+    ]
+
+
+def test_too_many_fields_are_rejected(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Corporación")
+    apartado = create_item(client, headers, section["id"], "Pleno")
+    persona = create_content_item(client, headers, apartado["id"], "Ana Ruiz")
+
+    response = client.patch(
+        f"/town-hall/blocks/{persona['id']}",
+        json={
+            "fields": [
+                {"label": f"Campo {index}", "value": "x"} for index in range(21)
+            ]
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 422

@@ -178,6 +178,8 @@ function translateApiDetail(detail: string, fallback: string) {
       return "El estado de la necesidad no permite editar su contenido.";
     case "Project does not belong to the requirement organization":
       return "El proyecto no pertenece a la organización de la necesidad.";
+    case "Only content items carry fields":
+      return "Solo los elementos pueden tener campos.";
     case "Only sections carry a layout":
       return "Solo los apartados tienen formato.";
     case "Only content items carry a body":

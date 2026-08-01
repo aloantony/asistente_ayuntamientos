@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -9,9 +9,17 @@ CreatableBlockType = Literal["nav_section", "nav_item", "item"]
 BlockStatus = Literal["active", "archived"]
 
 # Cómo se presenta el contenido de un apartado. `text` es la prosa por defecto;
-# `contacts` son listas de nombre y número, como los teléfonos del prototipo.
-# En ambos casos el elemento guarda la etiqueta en `title` y el valor en `body`.
-SectionLayout = Literal["text", "contacts"]
+# `contacts` son listas de nombre y número, como los teléfonos del prototipo;
+# `people` son personas con cargo, partido y los campos que añada el usuario,
+# como la corporación y la estructura de gobierno. En `text` y `contacts` el
+# elemento guarda la etiqueta en `title` y el valor en `body`; en `people` el
+# nombre va en `title` y los campos en `fields`.
+SectionLayout = Literal["text", "contacts", "people"]
+SECTION_LAYOUTS: tuple[str, ...] = get_args(SectionLayout)
+
+# Cota de los campos libres por persona: evita que un `data_json` crezca sin
+# medida desde el formulario.
+MAX_ITEM_FIELDS = 20
 
 # Qué puede colgar de qué. El elemento es hoja: no admite hijos.
 BLOCK_PARENT_TYPES: dict[str, str | None] = {
@@ -61,13 +69,19 @@ class TownHallRead(BaseModel):
     nav: list[MunicipalNavSectionRead] = []
 
 
+class MunicipalContentField(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    value: str = Field(default="", max_length=2000)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
 class MunicipalContentItemRead(BaseModel):
     id: int
     title: str
     body: str | None
     position: int
-
-    model_config = ConfigDict(from_attributes=True)
+    fields: list[MunicipalContentField] = []
 
 
 class MunicipalContentRead(BaseModel):
@@ -92,6 +106,11 @@ class MunicipalBlockUpdate(BaseModel):
     body: str | None = None
     # El formato solo lo llevan los apartados.
     layout: SectionLayout | None = None
+    # Los campos libres solo los llevan los elementos.
+    fields: list[MunicipalContentField] | None = Field(
+        default=None,
+        max_length=MAX_ITEM_FIELDS,
+    )
     status: BlockStatus | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)

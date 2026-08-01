@@ -2,7 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
-import type { TownHallContent, TownHallSectionLayout } from "./types";
+import type {
+  TownHallContentField,
+  TownHallContent,
+  TownHallSectionLayout,
+} from "./types";
 
 type TownHallContentPanelProps = {
   content: TownHallContent;
@@ -13,6 +17,7 @@ type TownHallContentPanelProps = {
   onSaveBody: (itemId: number, body: string) => void;
   onArchive: (itemId: number) => void;
   onChangeLayout: (layout: TownHallSectionLayout) => void;
+  onSaveFields: (itemId: number, fields: TownHallContentField[]) => void;
 };
 
 /**
@@ -30,6 +35,7 @@ export function TownHallContentPanel({
   onSaveBody,
   onArchive,
   onChangeLayout,
+  onSaveFields,
 }: TownHallContentPanelProps) {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [bodies, setBodies] = useState<Record<number, string>>({});
@@ -64,11 +70,16 @@ export function TownHallContentPanel({
   }
 
   const isContacts = content.layout === "contacts";
+  const isPeople = content.layout === "people";
 
   return (
     <article
       className={
-        isContacts ? "townhall-content townhall-content-contacts" : "townhall-content"
+        isContacts
+          ? "townhall-content townhall-content-contacts"
+          : isPeople
+            ? "townhall-content townhall-content-people"
+            : "townhall-content"
       }
     >
       <header className="townhall-content-head">
@@ -91,6 +102,7 @@ export function TownHallContentPanel({
               >
                 <option value="text">Texto</option>
                 <option value="contacts">Teléfonos</option>
+                <option value="people">Personas</option>
               </select>
             </label>
           ) : null}
@@ -164,7 +176,112 @@ export function TownHallContentPanel({
               <h3>{item.title}</h3>
             )}
 
-            {canEdit ? (
+            {isPeople ? (
+              <div className="townhall-content-fields">
+                {item.fields.map((field, index) => (
+                  <div className="townhall-content-field" key={`${item.id}-${index}`}>
+                    {canEdit ? (
+                      <>
+                        <input
+                          aria-label={`Nombre del campo ${index + 1} de ${item.title}`}
+                          className="townhall-content-field-label"
+                          disabled={isSaving}
+                          onBlur={(event) => {
+                            const label = event.target.value.trim();
+                            if (label === field.label) {
+                              return;
+                            }
+                            if (label === "") {
+                              event.target.value = field.label;
+                              return;
+                            }
+                            onSaveFields(
+                              item.id,
+                              item.fields.map((current, position) =>
+                                position === index
+                                  ? { ...current, label }
+                                  : current,
+                              ),
+                            );
+                          }}
+                          defaultValue={field.label}
+                        />
+                        <input
+                          aria-label={`${field.label} de ${item.title}`}
+                          className="townhall-content-field-value"
+                          disabled={isSaving}
+                          onBlur={(event) => {
+                            const value = event.target.value;
+                            if (value === field.value) {
+                              return;
+                            }
+                            onSaveFields(
+                              item.id,
+                              item.fields.map((current, position) =>
+                                position === index
+                                  ? { ...current, value }
+                                  : current,
+                              ),
+                            );
+                          }}
+                          defaultValue={field.value}
+                        />
+                        <button
+                          aria-label={`Eliminar el campo ${field.label}`}
+                          className="townhall-editor-delete small"
+                          disabled={isSaving}
+                          onClick={() =>
+                            onSaveFields(
+                              item.id,
+                              item.fields.filter(
+                                (_current, position) => position !== index,
+                              ),
+                            )
+                          }
+                          type="button"
+                        >
+                          <svg
+                            aria-hidden="true"
+                            fill="none"
+                            height="12"
+                            stroke="currentColor"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="1.8"
+                            viewBox="0 0 24 24"
+                            width="12"
+                          >
+                            <path d="M6 6l12 12M18 6 6 18" />
+                          </svg>
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="townhall-content-field-label-text">
+                          {field.label}
+                        </span>
+                        <span>{field.value || "—"}</span>
+                      </>
+                    )}
+                  </div>
+                ))}
+                {canEdit ? (
+                  <button
+                    className="townhall-editor-add-item"
+                    disabled={isSaving}
+                    onClick={() =>
+                      onSaveFields(item.id, [
+                        ...item.fields,
+                        { label: `Campo ${item.fields.length + 1}`, value: "" },
+                      ])
+                    }
+                    type="button"
+                  >
+                    Añadir campo
+                  </button>
+                ) : null}
+              </div>
+            ) : canEdit ? (
               isContacts ? (
                 <input
                   aria-label={`Teléfono de ${item.title}`}
@@ -246,7 +363,11 @@ export function TownHallContentPanel({
           onClick={onAdd}
           type="button"
         >
-          {isContacts ? "Añadir teléfono" : "Añadir elemento"}
+          {isContacts
+            ? "Añadir teléfono"
+            : isPeople
+              ? "Añadir persona"
+              : "Añadir elemento"}
         </button>
       ) : null}
 

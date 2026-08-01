@@ -6,6 +6,7 @@ import type {
   TownHallBlockPlacement,
   TownHallNavSection,
   TownHallContent,
+  TownHallContentField,
   TownHallProfileUpdate,
   TownHallSectionLayout,
   TownHallWeather,
@@ -220,6 +221,18 @@ export function useTownHallController({
     );
   }
 
+  function saveContentFields(
+    blockId: number,
+    itemId: number,
+    fields: TownHallContentField[],
+  ) {
+    return runContentMutation(
+      blockId,
+      () => updateTownHallBlock(itemId, { fields }),
+      "No se pudieron guardar los campos.",
+    );
+  }
+
   function setSectionLayout(blockId: number, layout: TownHallSectionLayout) {
     return runContentMutation(
       blockId,
@@ -287,6 +300,7 @@ export function useTownHallController({
     loadContent,
     addContentItem,
     saveContentItem,
+    saveContentFields,
     setSectionLayout,
     archiveContentItem,
     loadWeather,
