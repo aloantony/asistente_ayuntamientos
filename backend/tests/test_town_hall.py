@@ -1365,3 +1365,132 @@ def test_every_declared_layout_is_accepted(
             headers=headers,
         ).json()
         assert content["layout"] == layout
+
+
+def test_series_points_round_trip(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Datos")
+    demografia = create_item(client, headers, section["id"], "Demografía")
+    client.patch(
+        f"/town-hall/blocks/{demografia['id']}",
+        json={"layout": "series"},
+        headers=headers,
+    )
+    serie = create_content_item(client, headers, demografia["id"], "Población")
+    client.patch(
+        f"/town-hall/blocks/{serie['id']}",
+        # El cuerpo es la unidad: es lo que agrupa las series en una gráfica.
+        json={
+            "body": "habitantes",
+            "points": [
+                {"x": "1950", "y": 812},
+                {"x": "2000", "y": 401},
+                {"x": "2025", "y": 320.0},
+            ],
+        },
+        headers=headers,
+    )
+
+    content = client.get(
+        f"/town-hall/blocks/{demografia['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert content["layout"] == "series"
+    item = content["items"][0]
+    assert item["body"] == "habitantes"
+    assert item["points"] == [
+        {"x": "1950", "y": 812.0},
+        {"x": "2000", "y": 401.0},
+        {"x": "2025", "y": 320.0},
+    ]
+
+
+def test_only_content_items_carry_a_series(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Datos")
+    demografia = create_item(client, headers, section["id"], "Demografía")
+
+    response = client.patch(
+        f"/town-hall/blocks/{demografia['id']}",
+        json={"points": [{"x": "1950", "y": 812}]},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Only content items carry a series"
+
+
+def test_malformed_points_are_dropped(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    from app.town_hall.models import MunicipalBlock
+
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Datos")
+    demografia = create_item(client, headers, section["id"], "Demografía")
+    serie = create_content_item(client, headers, demografia["id"], "Población")
+
+    stored = db.get(MunicipalBlock, serie["id"])
+    stored.data_json = (
+        '{"points": [{"x": "", "y": 1}, {"x": "1950", "y": "ocho"},'
+        ' "suelto", {"x": "1960", "y": 700}]}'
+    )
+    db.commit()
+
+    content = client.get(
+        f"/town-hall/blocks/{demografia['id']}/content",
+        headers=headers,
+    ).json()
+
+    assert content["items"][0]["points"] == [{"x": "1960", "y": 700.0}]
+
+
+def test_too_many_points_are_rejected(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization()
+    grant_permissions(user, organization, ["town_hall.view", "town_hall.edit"])
+    headers = headers_for(user)
+
+    section = create_section(client, headers, "Datos")
+    demografia = create_item(client, headers, section["id"], "Demografía")
+    serie = create_content_item(client, headers, demografia["id"], "Población")
+
+    response = client.patch(
+        f"/town-hall/blocks/{serie['id']}",
+        json={"points": [{"x": str(year), "y": 1} for year in range(301)]},
+        headers=headers,
+    )
+
+    assert response.status_code == 422

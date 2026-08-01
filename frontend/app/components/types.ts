@@ -1636,6 +1636,7 @@ export type TownHallBlockUpdate = {
   body?: string | null;
   layout?: TownHallSectionLayout;
   fields?: TownHallContentField[];
+  points?: TownHallSeriesPoint[];
   status?: "active" | "archived";
 };
 
@@ -1665,13 +1666,19 @@ export type TownHallSectionLayout =
   | "contacts"
   | "people"
   | "files"
-  | "data";
+  | "data"
+  | "series";
 
 export type TownHallAttachment = {
   index: number;
   name: string;
   content_type: string;
   size_bytes: number;
+};
+
+export type TownHallSeriesPoint = {
+  x: string;
+  y: number;
 };
 
 export type TownHallContentField = {
@@ -1686,6 +1693,7 @@ export type TownHallContentItem = {
   position: number;
   fields: TownHallContentField[];
   attachments: TownHallAttachment[];
+  points: TownHallSeriesPoint[];
 };
 
 export type TownHallContent = {

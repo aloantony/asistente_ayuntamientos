@@ -11,15 +11,21 @@ BlockStatus = Literal["active", "archived"]
 # Cómo se presenta el contenido de un apartado. `text` es la prosa por defecto;
 # `contacts` son listas de nombre y número, como los teléfonos del prototipo;
 # `data` son pares dato/valor en rejilla, como la ficha general del municipio;
+# `series` son series temporales que se dibujan (padrón, clima, análisis de agua):
+# cada elemento es una serie, su `body` es la unidad y sus puntos van en `points`.
+# Las series se agrupan por unidad al pintarlas, nunca en dos ejes verticales.
 # `people` son personas con cargo, partido y los campos que añada el usuario,
 # como la corporación y la estructura de gobierno. En `text` y `contacts` el
 # elemento guarda la etiqueta en `title` y el valor en `body`; en `people` el
 # nombre va en `title` y los campos en `fields`.
-SectionLayout = Literal["text", "contacts", "people", "files", "data"]
+SectionLayout = Literal["text", "contacts", "people", "files", "data", "series"]
 SECTION_LAYOUTS: tuple[str, ...] = get_args(SectionLayout)
 
 # Cota de adjuntos por elemento, por la misma razón que la de campos.
 MAX_ITEM_ATTACHMENTS = 30
+
+# Una serie histórica larga (padrón desde 1842) cabe de sobra en 300 puntos.
+MAX_SERIES_POINTS = 300
 
 # Cota de los campos libres por persona: evita que un `data_json` crezca sin
 # medida desde el formulario.
@@ -80,6 +86,15 @@ class MunicipalContentField(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
 
+class MunicipalSeriesPoint(BaseModel):
+    # La abscisa es una etiqueta (un año, un mes), no un número: así vale para
+    # el padrón y para los doce meses del clima sin dos modelos distintos.
+    x: str = Field(min_length=1, max_length=20)
+    y: float
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
 class MunicipalAttachmentRead(BaseModel):
     index: int
     name: str
@@ -94,6 +109,7 @@ class MunicipalContentItemRead(BaseModel):
     position: int
     fields: list[MunicipalContentField] = []
     attachments: list[MunicipalAttachmentRead] = []
+    points: list[MunicipalSeriesPoint] = []
 
 
 class MunicipalContentRead(BaseModel):
@@ -122,6 +138,11 @@ class MunicipalBlockUpdate(BaseModel):
     fields: list[MunicipalContentField] | None = Field(
         default=None,
         max_length=MAX_ITEM_FIELDS,
+    )
+    # Los puntos de una serie, también solo en elementos.
+    points: list[MunicipalSeriesPoint] | None = Field(
+        default=None,
+        max_length=MAX_SERIES_POINTS,
     )
     status: BlockStatus | None = None
 

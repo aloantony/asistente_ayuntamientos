@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 import { townHallAttachmentUrl } from "../lib/api";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { TownHallSeriesChart } from "./TownHallSeriesChart";
 import type {
   TownHallContentField,
+  TownHallContentItem,
   TownHallContent,
   TownHallSectionLayout,
 } from "./types";
@@ -21,6 +23,7 @@ type TownHallContentPanelProps = {
   onSaveFields: (itemId: number, fields: TownHallContentField[]) => void;
   onAddAttachment: (itemId: number, file: File) => void;
   onRemoveAttachment: (itemId: number, index: number) => void;
+  onSavePoints: (itemId: number, raw: string) => void;
 };
 
 /**
@@ -29,6 +32,27 @@ type TownHallContentPanelProps = {
  * `contenteditable` como el prototipo (decisión 2 de
  * docs/diseno-ayuntamiento-prototipo.md).
  */
+/** Agrupa las series por unidad: dos magnitudes distintas nunca comparten
+ *  gráfica, que es la regla que el prototipo se saltaba con su doble eje. */
+function groupSeriesByUnit(items: TownHallContentItem[]) {
+  const groups = new Map<string, TownHallContentItem[]>();
+
+  for (const item of items) {
+    if (item.points.length === 0) {
+      continue;
+    }
+    const unit = item.body?.trim() || "Sin unidad";
+    const group = groups.get(unit);
+    if (group) {
+      group.push(item);
+    } else {
+      groups.set(unit, [item]);
+    }
+  }
+
+  return [...groups.entries()];
+}
+
 function formatSize(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -51,6 +75,7 @@ export function TownHallContentPanel({
   onSaveFields,
   onAddAttachment,
   onRemoveAttachment,
+  onSavePoints,
 }: TownHallContentPanelProps) {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [bodies, setBodies] = useState<Record<number, string>>({});
@@ -88,6 +113,7 @@ export function TownHallContentPanel({
   const isPeople = content.layout === "people";
   const isFiles = content.layout === "files";
   const isData = content.layout === "data";
+  const isSeries = content.layout === "series";
 
   return (
     <article
@@ -126,11 +152,27 @@ export function TownHallContentPanel({
                 <option value="people">Personas</option>
                 <option value="files">Archivo</option>
                 <option value="data">Datos</option>
+                <option value="series">Series y gráficas</option>
               </select>
             </label>
           ) : null}
         </div>
       </header>
+
+      {isSeries && content.items.length > 0 ? (
+        <div className="townhall-charts">
+          {groupSeriesByUnit(content.items).map(([unit, group]) => (
+            <section className="townhall-chart-group" key={unit}>
+              <h3>{unit}</h3>
+              <TownHallSeriesChart
+                asBars={group.length === 1 && group[0].points.length <= 24}
+                series={group}
+                unit={unit}
+              />
+            </section>
+          ))}
+        </div>
+      ) : null}
 
       {content.items.length === 0 ? (
         <p className="muted">
@@ -406,6 +448,40 @@ export function TownHallContentPanel({
                 {item.body || "Sin contenido todavía."}
               </p>
             )}
+            {isSeries && canEdit ? (
+              <div className="townhall-series-editor">
+                <label>
+                  Unidad
+                  <input
+                    className="townhall-content-value-input"
+                    defaultValue={item.body ?? ""}
+                    disabled={isSaving}
+                    onBlur={(event) => {
+                      const unit = event.target.value.trim();
+                      if (unit !== (item.body ?? "")) {
+                        onSaveBody(item.id, unit);
+                      }
+                    }}
+                    placeholder="habitantes, °C, mm…"
+                  />
+                </label>
+                <textarea
+                  aria-label={`Datos de ${item.title}`}
+                  className="townhall-content-body-input"
+                  defaultValue={item.points
+                    .map((point) => `${point.x}: ${point.y}`)
+                    .join("\n")}
+                  disabled={isSaving}
+                  onBlur={(event) => onSavePoints(item.id, event.target.value)}
+                  rows={5}
+                />
+                <p className="muted">
+                  Una línea por dato, con el periodo y el valor separados por
+                  dos puntos. Por ejemplo <code>1950: 812</code>.
+                </p>
+              </div>
+            ) : null}
+
             {isFiles ? (
               <div className="townhall-attachments">
                 {item.attachments.map((attachment) => (
@@ -501,7 +577,9 @@ export function TownHallContentPanel({
                 ? "Añadir entrada"
                 : isData
                   ? "Añadir dato"
-                  : "Añadir elemento"}
+                  : isSeries
+                    ? "Añadir serie"
+                    : "Añadir elemento"}
         </button>
       ) : null}
 

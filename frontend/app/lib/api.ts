@@ -190,6 +190,8 @@ function translateApiDetail(detail: string, fallback: string) {
       return "No se pudo guardar el adjunto.";
     case "Too many attachments":
       return "Este elemento ya tiene demasiados adjuntos.";
+    case "Only content items carry a series":
+      return "Solo los elementos pueden tener datos de serie.";
     case "Only content items carry fields":
       return "Solo los elementos pueden tener campos.";
     case "Only sections carry a layout":

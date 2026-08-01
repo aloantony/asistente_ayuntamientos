@@ -42,6 +42,7 @@ from app.town_hall.schemas import (
     MunicipalNavSectionRead,
     MunicipalProfileRead,
     MunicipalProfileUpdate,
+    MunicipalSeriesPoint,
     MunicipalWeatherRead,
     TownHallRead,
 )
@@ -278,10 +279,51 @@ def build_content(db: Session, block: MunicipalBlock) -> MunicipalContentRead:
                 position=item.position,
                 fields=read_fields(item),
                 attachments=public_attachments(item),
+                points=read_points(item),
             )
             for item in items
         ],
     )
+
+
+def read_points(block: MunicipalBlock) -> list[MunicipalSeriesPoint]:
+    """Puntos de la serie; lista vacía ante cualquier dato ilegible."""
+    if not block.data_json:
+        return []
+
+    try:
+        payload = json.loads(block.data_json)
+    except ValueError:
+        return []
+
+    raw = payload.get("points") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+
+    points: list[MunicipalSeriesPoint] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        x = entry.get("x")
+        y = entry.get("y")
+        if isinstance(x, str) and x.strip() and isinstance(y, (int, float)):
+            points.append(MunicipalSeriesPoint(x=x, y=float(y)))
+
+    return points
+
+
+def write_points(block: MunicipalBlock, points: list[MunicipalSeriesPoint]) -> None:
+    payload: dict[str, object] = {}
+    if block.data_json:
+        try:
+            loaded = json.loads(block.data_json)
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, dict):
+            payload = loaded
+
+    payload["points"] = [point.model_dump() for point in points]
+    block.data_json = json.dumps(payload, ensure_ascii=False)
 
 
 def archive_descendants(
@@ -895,6 +937,13 @@ def update_block(
                 detail="Only content items carry fields",
             )
         write_fields(block, payload.fields or [])
+    if "points" in fields:
+        if block.block_type != "item":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Only content items carry a series",
+            )
+        write_points(block, payload.points or [])
     if "status" in fields:
         block.status = fields["status"]
         # Archivar arrastra la descendencia: preferimos el borrado lógico al

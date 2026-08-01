@@ -8,6 +8,7 @@ import type {
   TownHallContent,
   TownHallContentField,
   TownHallProfileUpdate,
+  TownHallSeriesPoint,
   TownHallSectionLayout,
   TownHallWeather,
 } from "../components/types";
@@ -251,6 +252,18 @@ export function useTownHallController({
     );
   }
 
+  function saveContentPoints(
+    blockId: number,
+    itemId: number,
+    points: TownHallSeriesPoint[],
+  ) {
+    return runContentMutation(
+      blockId,
+      () => updateTownHallBlock(itemId, { points }),
+      "No se pudieron guardar los datos de la serie.",
+    );
+  }
+
   function setSectionLayout(blockId: number, layout: TownHallSectionLayout) {
     return runContentMutation(
       blockId,
@@ -319,6 +332,7 @@ export function useTownHallController({
     addContentItem,
     saveContentItem,
     saveContentFields,
+    saveContentPoints,
     addAttachment,
     removeAttachment,
     setSectionLayout,

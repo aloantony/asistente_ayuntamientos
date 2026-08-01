@@ -321,6 +321,27 @@ function isOverdue(order: MaintenanceOrder) {
   return order.scheduled_for < new Date().toISOString().slice(0, 10);
 }
 
+/** «1950: 812» por línea. Se ignora lo que no cuadre en vez de fallar: quien
+ *  escribe una serie a mano deja líneas a medias, y perder las buenas por una
+ *  mala sería peor que descartar esa. */
+function parseSeriesPoints(raw: string) {
+  const points: { x: string; y: number }[] = [];
+
+  for (const line of raw.split("\n")) {
+    const separator = line.lastIndexOf(":");
+    if (separator === -1) {
+      continue;
+    }
+    const x = line.slice(0, separator).trim();
+    const y = Number(line.slice(separator + 1).trim().replace(",", "."));
+    if (x && Number.isFinite(y)) {
+      points.push({ x, y });
+    }
+  }
+
+  return points;
+}
+
 function getInitials(value: string) {
   const initials = value
     .trim()
@@ -2008,6 +2029,13 @@ export function MunicipalWorkspace() {
                   activeContentBlockId,
                   itemId,
                   index,
+                )
+              }
+              onSavePoints={(itemId, raw) =>
+                void townHallController.saveContentPoints(
+                  activeContentBlockId,
+                  itemId,
+                  parseSeriesPoints(raw),
                 )
               }
               onSaveFields={(itemId, fields) =>
