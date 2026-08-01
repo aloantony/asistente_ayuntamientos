@@ -1337,3 +1337,31 @@
   color: var(--accent);
   background: var(--surface);
 }
+
+/* Normativa agrupada por materia: la «categoría» del prototipo. */
+.ordinanceGroup + .ordinanceGroup {
+  margin-top: 18px;
+}
+
+.ordinanceGroupHeading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ordinanceGroupHeading span {
+  font-size: 0.94rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.ordinanceGroupHeading small {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+}

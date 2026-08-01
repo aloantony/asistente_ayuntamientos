@@ -281,6 +281,26 @@ function formatUpdatedAt(value: string) {
   }).format(date);
 }
 
+/** Agrupa por materia, que es la «categoría» del prototipo, en orden alfabético
+ *  y conservando dentro el orden que trae el repositorio. */
+function groupOrdinancesByTopic(ordinances: Ordinance[]) {
+  const groups = new Map<string, Ordinance[]>();
+
+  for (const ordinance of ordinances) {
+    const topic = ordinance.topic?.trim() || "Sin materia";
+    const group = groups.get(topic);
+    if (group) {
+      group.push(ordinance);
+    } else {
+      groups.set(topic, [ordinance]);
+    }
+  }
+
+  return [...groups.entries()].sort(([left], [right]) =>
+    left.localeCompare(right, "es"),
+  );
+}
+
 function getInitials(value: string) {
   const initials = value
     .trim()
@@ -690,8 +710,16 @@ function OrdinancesTab({
               Se muestran {ordinances.items.length} de {ordinances.total}.
             </p>
           </div>
+          {groupOrdinancesByTopic(ordinances.items).map(([topic, group]) => (
+          <div className={styles.ordinanceGroup} key={topic}>
+            <h3 className={styles.ordinanceGroupHeading}>
+              <span>{topic}</span>
+              <small>
+                {group.length} {group.length === 1 ? "documento" : "documentos"}
+              </small>
+            </h3>
           <div className={styles.ordinanceList}>
-            {ordinances.items.map((ordinance) => (
+            {group.map((ordinance) => (
               <article key={ordinance.id}>
                 <div className={styles.ordinanceIcon}>
                   <FileText aria-hidden="true" size={20} strokeWidth={1.6} />
@@ -714,7 +742,6 @@ function OrdinancesTab({
                       "El repositorio no incluye todavía un resumen de este documento."}
                   </p>
                   <div className={styles.itemMeta}>
-                    <span>{ordinance.topic}</span>
                     {ordinance.subtopic ? <span>{ordinance.subtopic}</span> : null}
                     <span>
                       Publicación: {formatDate(ordinance.publication_date)}
@@ -741,6 +768,8 @@ function OrdinancesTab({
               </article>
             ))}
           </div>
+          </div>
+          ))}
         </section>
       ) : (
         <ResourceState
