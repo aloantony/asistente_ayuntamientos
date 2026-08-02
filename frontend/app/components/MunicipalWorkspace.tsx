@@ -1780,15 +1780,74 @@ export function MunicipalWorkspace() {
           </div>
         </div>
 
-        {/* Píldora central de navegación del prototipo: las áreas fijas son
-            botones planos y los apartados propios abren sus elementos al pasar
-            el ratón. El relleno superior del ancla es la zona-puente que evita
-            perder el hover al bajar del botón al panel. */}
-        <nav
-          aria-label="Áreas del ayuntamiento"
-          className={styles.areaPill}
-          role="tablist"
-        >
+        <div className={styles.mastheadAside}>
+          {/* El selector solo aparece cuando hay algo que elegir: con una sola
+              organización el nombre ya está en el titular y la tarjeta sobraba. */}
+          {contexts.length > 1 ? (
+            <select
+              aria-label="Organización y municipio"
+              className={styles.orgSwitch}
+              onChange={(event) =>
+                changeOrganization(Number(event.target.value))
+              }
+              value={selectedContext.organization.id}
+            >
+              {contexts.map(({ organization: item, municipality: summary }) => (
+                <option key={item.id} value={item.id}>
+                  {item.name} · {summary.name}
+                  {item.status === "paused" ? " (pausada)" : ""}
+                </option>
+              ))}
+            </select>
+          ) : null}
+
+          <div className={styles.municipalBar}>
+            {townHall?.profile.weather_enabled ? (
+              <span
+                className={styles.weatherBlock}
+                title={
+                  townHallController.weather
+                    ? `Temperatura de hoy en ${townHallController.weather.location}`
+                    : "Temperatura no disponible ahora mismo"
+                }
+              >
+                <CloudSun aria-hidden="true" size={18} strokeWidth={1.6} />
+                {/* Si el proveedor no responde se muestra un guion, nunca una
+                    cifra inventada. */}
+                <strong>
+                  {townHallController.weather
+                    ? `${Math.round(
+                        townHallController.weather.temperature_celsius,
+                      )}°C`
+                    : "—"}
+                </strong>
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </header>
+
+      {/* Fila de pestañas del prototipo: plana, alineada a la izquierda y
+          separada por un filete inferior, con el botón de gestión delante.
+          Los apartados propios abren sus elementos al pasar el ratón; el
+          relleno superior del ancla es la zona-puente que evita perder el
+          hover al bajar del botón al panel. */}
+      <nav
+        aria-label="Áreas del ayuntamiento"
+        className={styles.areaTabs}
+        role="tablist"
+      >
+        {canEditMenu ? (
+          <button
+            aria-label="Gestionar pestañas"
+            className={styles.areaTabsManage}
+            onClick={() => setIsMenuEditorOpen(true)}
+            title="Gestionar pestañas"
+            type="button"
+          >
+            <Settings2 aria-hidden="true" size={14} strokeWidth={1.7} />
+          </button>
+        ) : null}
           {workspaceTabs.map(({ id, label, icon: Icon, items }, index) => {
             const hasItems = items.length > 0;
             const isOpen = hasItems && openPillId === id;
@@ -1848,64 +1907,7 @@ export function MunicipalWorkspace() {
               </div>
             );
           })}
-        </nav>
-
-        <div className={styles.mastheadAside}>
-          {/* El selector solo aparece cuando hay algo que elegir: con una sola
-              organización el nombre ya está en el titular y la tarjeta sobraba. */}
-          {contexts.length > 1 ? (
-            <select
-              aria-label="Organización y municipio"
-              className={styles.orgSwitch}
-              onChange={(event) =>
-                changeOrganization(Number(event.target.value))
-              }
-              value={selectedContext.organization.id}
-            >
-              {contexts.map(({ organization: item, municipality: summary }) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} · {summary.name}
-                  {item.status === "paused" ? " (pausada)" : ""}
-                </option>
-              ))}
-            </select>
-          ) : null}
-
-          <div className={styles.municipalBar}>
-            {townHall?.profile.weather_enabled ? (
-              <span
-                className={styles.weatherBlock}
-                title={
-                  townHallController.weather
-                    ? `Temperatura de hoy en ${townHallController.weather.location}`
-                    : "Temperatura no disponible ahora mismo"
-                }
-              >
-                <CloudSun aria-hidden="true" size={18} strokeWidth={1.6} />
-                {/* Si el proveedor no responde se muestra un guion, nunca una
-                    cifra inventada. */}
-                <strong>
-                  {townHallController.weather
-                    ? `${Math.round(
-                        townHallController.weather.temperature_celsius,
-                      )}°C`
-                    : "—"}
-                </strong>
-              </span>
-            ) : null}
-            {canEditMenu ? (
-              <button
-                aria-label="Editar menú de navegación"
-                onClick={() => setIsMenuEditorOpen(true)}
-                title="Editar menú"
-                type="button"
-              >
-                <Settings2 aria-hidden="true" size={16} strokeWidth={1.7} />
-              </button>
-            ) : null}
-          </div>
-        </div>
-      </header>
+      </nav>
 
       {isPaused ? (
         <p className={styles.warning} role="status">

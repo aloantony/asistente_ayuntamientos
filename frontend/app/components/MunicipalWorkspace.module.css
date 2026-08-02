@@ -12,7 +12,7 @@
      centrada y acciones a la derecha. Sin `overflow: hidden`, porque los
      desplegables de la píldora salen del recuadro. */
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 20px;
   min-height: 104px;
@@ -128,20 +128,37 @@
   font-weight: 600;
 }
 
-/* Píldora de navegación del prototipo: un único carril centrado con las áreas
-   fijas y los apartados propios, que abren sus elementos al pasar el ratón. */
-.areaPill {
-  justify-self: center;
+/* Fila de pestañas del prototipo: plana, alineada a la izquierda y cerrada por
+   un filete inferior. Los apartados propios abren sus elementos al pasar el
+   ratón. Ver docs/diseno-ayuntamiento-prototipo.md §7.2. */
+.areaTabs {
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
-  gap: 26px;
-  min-width: fit-content;
-  border: 1px solid var(--border);
-  border-radius: 13px;
-  padding: 12px 22px;
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-soft);
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+
+/* Botón de gestión, delante de las pestañas como en el prototipo. */
+.areaTabsManage {
+  display: inline-flex;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-faint, var(--text-muted));
+  background: transparent;
+  cursor: pointer;
+}
+
+.areaTabsManage:hover {
+  color: var(--text);
+  background: var(--fill);
 }
 
 .areaPillGroup {
@@ -149,32 +166,35 @@
   display: inline-flex;
 }
 
-.areaPill button {
+/* El prototipo las pinta a 12,5 px; aquí suben a 14,4 porque a ese tamaño
+   resultaban ilegibles en la pantalla real. */
+.areaTabs button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 3px;
+  padding: 7px 13px;
   border: 0;
   border-radius: 8px;
   color: var(--text-secondary);
-  background: none;
+  background: transparent;
   cursor: pointer;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   font-weight: 600;
   line-height: 1.2;
   white-space: nowrap;
   transition:
     color 140ms ease,
-    box-shadow 140ms ease;
+    background-color 140ms ease;
 }
 
-.areaPill button:hover {
+.areaTabs button:hover {
   color: var(--text);
+  background: var(--fill);
 }
 
-.areaPill button[aria-selected="true"] {
-  color: var(--text);
-  box-shadow: inset 0 -2px 0 var(--accent);
+.areaTabs button[aria-selected="true"] {
+  color: var(--accent-contrast);
+  background: var(--accent);
 }
 
 /* El relleno superior es la zona-puente que evita perder el hover al bajar del
@@ -225,18 +245,8 @@
     gap: 4px;
   }
 
-  .areaPill,
   .mastheadAside {
     justify-self: start;
-  }
-
-  .areaPill {
-    flex-wrap: wrap;
-    gap: 12px 18px;
-    margin: 0 30px;
-  }
-
-  .mastheadAside {
     padding-left: 30px;
   }
 }
@@ -1232,7 +1242,7 @@
 
   .areaGrid > a,
   .areaGrid > button,
-  .areaPill button {
+  .areaTabs button {
     transition: none;
   }
 }
