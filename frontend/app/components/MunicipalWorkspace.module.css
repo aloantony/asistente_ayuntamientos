@@ -76,7 +76,6 @@
 }
 
 .identity p,
-.contextPanel > span,
 .sectionHeading p,
 .cardHeading p,
 .notConfigured p {
@@ -111,43 +110,22 @@
   justify-self: end;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 18px 30px 18px 0;
+  gap: 12px;
+  padding: 18px 30px;
 }
 
-.contextPanel {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  width: min(390px, 36%);
-  flex-direction: column;
-  justify-content: center;
-  gap: 8px;
-  padding: 28px 34px;
-  border-left: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-raised) 78%, transparent);
-  backdrop-filter: blur(12px);
-}
-
-.contextPanel strong,
-.contextPanel select {
-  color: var(--text);
-  font-size: 1rem;
-  font-weight: 650;
-}
-
-.contextPanel select {
-  width: 100%;
-  min-height: 42px;
-  padding: 8px 34px 8px 12px;
+/* Selector de organización: solo se pinta cuando hay varias, y comparte altura
+   con el bloque de temperatura y el botón del editor para no romper la línea. */
+.orgSwitch {
+  max-width: 260px;
+  min-height: 34px;
+  padding: 0 30px 0 12px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--surface-raised);
-}
-
-.contextPanel small {
-  color: var(--text-muted);
-  font-size: 0.76rem;
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 0.85rem;
+  font-weight: 600;
 }
 
 /* Píldora de navegación del prototipo: un único carril centrado con las áreas
@@ -157,11 +135,11 @@
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
-  gap: 22px;
+  gap: 26px;
   min-width: fit-content;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 18px;
+  border-radius: 13px;
+  padding: 12px 22px;
   background: var(--surface-raised);
   box-shadow: var(--shadow-soft);
 }
@@ -174,14 +152,14 @@
 .areaPill button {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 4px 2px;
+  gap: 8px;
+  padding: 5px 3px;
   border: 0;
   border-radius: 8px;
   color: var(--text-secondary);
   background: none;
   cursor: pointer;
-  font-size: 0.84rem;
+  font-size: 0.95rem;
   font-weight: 600;
   line-height: 1.2;
   white-space: nowrap;
@@ -225,10 +203,10 @@
 .areaPillMenu button {
   display: block;
   width: 100%;
-  padding: 9px 12px;
+  padding: 10px 13px;
   border-radius: 8px;
   color: var(--text-secondary);
-  font-size: 0.84rem;
+  font-size: 0.9rem;
   font-weight: 500;
   line-height: 1.35;
   text-align: left;
@@ -1127,13 +1105,6 @@
     padding-bottom: 25px;
   }
 
-  .contextPanel {
-    width: 100%;
-    padding: 19px 32px;
-    border-top: 1px solid var(--border);
-    border-left: 0;
-  }
-
   .summaryGrid,
   .facilitiesGrid {
     grid-template-columns: 1fr;
@@ -1176,10 +1147,6 @@
 
   .identity h1 {
     font-size: clamp(1.7rem, 10vw, 2.5rem);
-  }
-
-  .contextPanel {
-    padding: 17px 21px;
   }
 
   .metricsGrid,
@@ -1293,7 +1260,6 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 32px 38px 0 0;
 }
 
 .weatherBlock {

@@ -1851,6 +1851,26 @@ export function MunicipalWorkspace() {
         </nav>
 
         <div className={styles.mastheadAside}>
+          {/* El selector solo aparece cuando hay algo que elegir: con una sola
+              organización el nombre ya está en el titular y la tarjeta sobraba. */}
+          {contexts.length > 1 ? (
+            <select
+              aria-label="Organización y municipio"
+              className={styles.orgSwitch}
+              onChange={(event) =>
+                changeOrganization(Number(event.target.value))
+              }
+              value={selectedContext.organization.id}
+            >
+              {contexts.map(({ organization: item, municipality: summary }) => (
+                <option key={item.id} value={item.id}>
+                  {item.name} · {summary.name}
+                  {item.status === "paused" ? " (pausada)" : ""}
+                </option>
+              ))}
+            </select>
+          ) : null}
+
           <div className={styles.municipalBar}>
             {townHall?.profile.weather_enabled ? (
               <span
@@ -1883,33 +1903,6 @@ export function MunicipalWorkspace() {
                 <Settings2 aria-hidden="true" size={16} strokeWidth={1.7} />
               </button>
             ) : null}
-          </div>
-
-          <div className={styles.contextPanel}>
-          <span>Organización activa</span>
-          {contexts.length > 1 ? (
-            <select
-              aria-label="Organización y municipio"
-              onChange={(event) =>
-                changeOrganization(Number(event.target.value))
-              }
-              value={selectedContext.organization.id}
-            >
-              {contexts.map(({ organization: item, municipality: summary }) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} · {summary.name}
-                  {item.status === "paused" ? " (pausada)" : ""}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <strong>{selectedContext.organization.name}</strong>
-          )}
-            <small>
-              {isPaused
-                ? "Modo de consulta · organización pausada"
-                : "Datos en producción"}
-            </small>
           </div>
         </div>
       </header>
