@@ -216,3 +216,73 @@ código, es fusionar.
 Cuando SIUR esté en `main`, la Fase C se reduce a **C3** (panel de capas, leyenda y búsqueda sobre el
 catálogo), **C6** (exportación del recorte) y la parte de C4 que necesita el mapa. Bastante menos de
 lo que este documento estimaba al escribirse.
+
+## 7. GIRO (2026-08-02): el diseño no tiene pestañas fijas
+
+Al revisar la pantalla ya fusionada, Anthony señaló que no se parece al prototipo. Al volver al
+proyecto de Claude Design aparecieron dos cosas que invalidan parte de lo escrito arriba.
+
+### 7.1 El HTML del que se trabajó estaba truncado
+
+La copia durable (`~/.claude/plans/assets/pantalla-principal.dc.html`) pesa exactamente 262.144
+bytes —el tope de 256 KiB de `DesignSync.get_file`—, termina a mitad de etiqueta y no tiene
+`</html>`. Todo lo implementado hasta ahora salió de un diseño incompleto. `get_file` devuelve un
+campo `truncated`; conviene comprobarlo siempre antes de dar por buena una lectura.
+
+### 7.2 Estructura real de la pantalla «Ayuntamiento»
+
+```
+<div data-screen-label="Ayuntamiento"
+     style="display:flex;flex-direction:column;gap:24px;max-width:1440px;margin:0 auto;">
+
+  <!-- fila de pestañas CONFIGURABLES, no fijas -->
+  <div style="display:flex;flex-wrap:wrap;gap:4px;
+              border-bottom:1px solid var(--border);padding-bottom:10px;">
+    <button title="Gestionar pestañas" 28x28 border:0 radius:8
+            background:transparent color:var(--text-faint)
+            hover: background:var(--fill) color:var(--text)>
+    <for aySecTabs as t>
+      <button style="border:0;border-radius:8px;padding:7px 13px;
+                     background:{t.bg};color:{t.col};
+                     font-size:12.5px;font-weight:600;">{t.label}</button>
+  </div>
+
+  <!-- epígrafes de la pestaña activa, APILADOS -->
+  <article style="max-width:900px;display:flex;flex-direction:column;gap:12px;">
+    ... una tarjeta por epígrafe ...
+  </article>
+</div>
+```
+
+Tarjeta de epígrafe (`epiList.<clave>`), con `order` y `display` controlados desde el modelo:
+
+- contenedor: `border:1px solid var(--border); border-radius:13px; background:var(--surface);
+  padding:0 18px; position:relative`, más `onDragOver`/`onDrop`.
+- cabecera: `display:flex; align-items:center; gap:12px`.
+  - asa `draggable`: `color:var(--text-faint); cursor:grab; padding:3px; border-radius:5px`,
+    hover `color:var(--text); background:var(--fill)`; SVG 14×14 con seis círculos `r=1.6`
+    en (9|15, 6|12|18). El clic abre el menú del epígrafe.
+  - zona de título `draggable`, clic = plegar: `flex:1; min-width:0; display:flex;
+    align-items:center; justify-content:space-between; gap:16px; padding:16px 0; cursor:pointer`.
+    - `<h2>`: `margin:0; font-size:18px; font-weight:600; letter-spacing:-0.01em`.
+    - chevron 18×18 `m6 9 6 6 6-6`, `stroke:var(--text-muted)`, grosor 2, gira al plegar.
+  - menú: `position:absolute; left:26px; top:56px; z-index:50; min-width:190px; padding:6px;
+    border:1px solid var(--border); border-radius:10px; background:var(--surface-raised);
+    box-shadow:var(--shadow-raised)`. Opciones: **Renombrar**, **Añadir nivel**,
+    **Eliminar epígrafe**. Cada una `padding:8px 10px; border-radius:7px; font-size:13px`,
+    hover `background:var(--bg)`.
+
+Siete epígrafes en el diseño: `estructura`, `corp`, `org`, `normativa`, `datos`, `telefonos`,
+`archivo`.
+
+### 7.3 Qué hay que cambiar
+
+`MunicipalWorkspace` sirve hoy **cinco pestañas fijas** —Resumen, Normativa, Instalaciones,
+Personal, Hoja de ruta— que no salen del diseño: las introdujo otra rama `codex/*`. «Hoja de ruta»
+no aparece ni una sola vez en el HTML del prototipo. Decisión de Anthony (2026-08-02):
+**reestructurar al diseño**, conservando dentro de las tarjetas el contenido real que hoy vive en
+esas pestañas, para no perder funciones conectadas al backend.
+
+`isInstalaciones` es el **mapa incrustado**, con `height:min(720px, calc(100vh - 250px))` y las
+cinco agrupaciones de capas `isBase`, `isTerritorio`, `isUrbanismo`, `isInfra`, `isAnalisis`.
+Hoy la pestaña solo enlaza a `/mapa`.
