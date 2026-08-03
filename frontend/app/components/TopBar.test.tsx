@@ -67,6 +67,37 @@ describe("TopBar", () => {
     expect(screen.queryByText("Información del municipio")).toBeNull();
   });
 
+  it("mantiene el desplegable abierto al hacer clic tras señalarlo con el ratón", () => {
+    render(<TopBar municipalityName="Fuentelcésped" />);
+
+    const trigger = screen.getByRole("button", { name: /AYUNTAMIENTO/ });
+    const section = trigger.parentElement as HTMLElement;
+
+    // Secuencia real del puntero: entrar abre el menú y el clic llega después.
+    fireEvent.mouseEnter(section);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Información del municipio")).toBeTruthy();
+
+    // Al salir con el ratón sí se cierra.
+    fireEvent.mouseLeave(section);
+    fireEvent.mouseLeave(
+      screen.getByRole("navigation", { name: "Navegación municipal" }),
+    );
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("abre el desplegable al enfocar la sección con el teclado", () => {
+    render(<TopBar municipalityName="Fuentelcésped" />);
+
+    const trigger = screen.getByRole("button", { name: /AYUNTAMIENTO/ });
+    fireEvent.focus(trigger);
+
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("marca la sección activa", () => {
     render(
       <TopBar activeSectionId="hoja-de-ruta" municipalityName="Fuentelcésped" />,

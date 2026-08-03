@@ -160,6 +160,7 @@ function TopNavSectionButton({
   onToggle,
   onClose,
 }: SectionProps) {
+  const [pointerInside, setPointerInside] = useState(false);
   const hasMenu = section.items.length > 0;
   const className = `${styles.sectionButton}${
     isActive ? ` ${styles.sectionButtonActive}` : ""
@@ -181,17 +182,33 @@ function TopNavSectionButton({
     );
   }
 
+  // El puntero ya abre el desplegable al entrar, así que el clic que sigue no
+  // debe cerrarlo: sólo alterna cuando la activación llega por teclado, donde
+  // el botón no ha recibido ningún mouseenter previo.
+  function handleClick() {
+    if (pointerInside) {
+      onOpen();
+      return;
+    }
+    onToggle();
+  }
+
   return (
     <div
       className={styles.section}
-      onMouseEnter={onOpen}
+      onMouseEnter={() => {
+        setPointerInside(true);
+        onOpen();
+      }}
+      onMouseLeave={() => setPointerInside(false)}
     >
       <button
         aria-controls={isOpen ? menuId : undefined}
         aria-expanded={isOpen}
         aria-haspopup="true"
         className={className}
-        onClick={onToggle}
+        onClick={handleClick}
+        onFocus={onOpen}
         type="button"
       >
         {section.label}
