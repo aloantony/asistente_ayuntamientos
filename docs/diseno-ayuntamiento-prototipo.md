@@ -391,3 +391,34 @@ de presentación y no viaja en la URL; la pestaña sí, como hasta ahora.
 Lo que **no** hace esta fase, y sigue abierto de §8.3: sacar Instalaciones, Personal y Hoja de ruta
 del Ayuntamiento a pantallas de primer nivel. Son rutas nuevas, y hoy conviven como pestañas fijas
 delante de las configurables.
+
+### 9.1 El Ayuntamiento configurable nunca se había llegado a cargar
+
+Al revisar la pantalla con datos sembrados no aparecía ninguna pestaña. La causa no eran las
+tarjetas: `MunicipalWorkspace` guardaba la organización elegida en `selectedOrganizationId`,
+inicializado a `null` y escrito **solo** por el selector de organización, que a su vez solo se pinta
+cuando el usuario pertenece a más de una. Con una sola organización —el caso de Fuentelcésped y el
+de cualquier ayuntamiento real— el estado se quedaba a `null` para siempre, así que la condición de
+guarda cortaba `loadTownHall()` y el controlador se construía con `organizationId: 0`.
+
+Consecuencia: **escudo, nombre configurable, temperatura, pestañas y epígrafes no se cargaban
+nunca** para un usuario de una sola organización. El fallo venía del commit original del módulo
+(`1af5ac9`), no de esta fase; estaba tapado porque hasta ahora no había datos que enseñar.
+
+Arreglado derivando la organización activa de `selectedContext` —que ya caía en la primera cuando
+no se ha elegido ninguna— en vez de del estado. El estado se conserva para la elección explícita
+del selector.
+
+### 9.2 Comprobado en el navegador
+
+Con una pestaña «Información» y los siete epígrafes del diseño, sobre Chromium:
+
+- Las siete tarjetas se apilan, la primera desplegada y las demás plegadas.
+- El menú del asa trae las cuatro opciones de §8.4.
+- «Bajar» reordena y **el orden persiste tras recargar**.
+- Renombrar guarda con Intro; plegar y desplegar deja dos tarjetas abiertas a la vez.
+- `?tab=block-<id>` entra en la pestaña con su primera tarjeta abierta.
+- Claro y oscuro, ambos correctos.
+
+El botón «Gestionar pestañas» pasa a usar el asa de seis puntos del prototipo; llevaba un
+engranaje, que no sale del diseño.

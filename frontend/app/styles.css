@@ -6837,6 +6837,9 @@ html.dark .dashboard-ask input {
   background: none;
   cursor: pointer;
   text-align: left;
+  /* Es un mando de plegado: pulsarlo repetidamente no debe seleccionar
+     el título. */
+  user-select: none;
 }
 
 .townhall-epigraph-title h2 {

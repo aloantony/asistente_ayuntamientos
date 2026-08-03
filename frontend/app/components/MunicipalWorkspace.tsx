@@ -16,7 +16,6 @@ import {
   Landmark,
   MapPin,
   RefreshCw,
-  Settings2,
   ShieldCheck,
   UserRound,
   Users,
@@ -1403,12 +1402,24 @@ export function MunicipalWorkspace() {
   const [draggedEpigraphId, setDraggedEpigraphId] = useState<number | null>(
     null,
   );
+  // Solo guarda una elección explícita del selector. La organización que vale
+  // es la de `selectedContext`, que cae en la primera cuando no se ha elegido:
+  // con una sola organización el selector no se pinta y este estado se queda a
+  // null para siempre.
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
+  const contexts = user ? getMunicipalContexts(user) : [];
+  const selectedContext =
+    contexts.find(
+      ({ organization: item }) => item.id === selectedOrganizationId,
+    ) ??
+    contexts[0] ??
+    null;
+  const activeOrganizationId = selectedContext?.organization.id ?? null;
   const townHallController = useTownHallController({
     handleRequestError,
-    organizationId: selectedOrganizationId ?? 0,
+    organizationId: activeOrganizationId ?? 0,
   });
   const [municipality, setMunicipality] = useState<Municipality | null>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
@@ -1432,13 +1443,6 @@ export function MunicipalWorkspace() {
   // Pestaña a la que ya se le desplegó el primer epígrafe.
   const expandedTabRef = useRef<ActiveTab | null>(null);
 
-  const contexts = user ? getMunicipalContexts(user) : [];
-  const selectedContext =
-    contexts.find(
-      ({ organization: item }) => item.id === selectedOrganizationId,
-    ) ??
-    contexts[0] ??
-    null;
   const permissionSignature = (user?.permissions ?? []).slice().sort().join(",");
   const canViewOrdinances = Boolean(
     user &&
@@ -1486,13 +1490,13 @@ export function MunicipalWorkspace() {
   // Perfil del municipio y menú configurable: se cargan aparte de los módulos
   // operativos, para que un fallo en uno no arrastre al otro.
   useEffect(() => {
-    if (!user || !canViewMunicipalHub(user) || selectedOrganizationId === null) {
+    if (!user || !canViewMunicipalHub(user) || activeOrganizationId === null) {
       return;
     }
 
     void townHallController.loadTownHall();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, selectedOrganizationId]);
+  }, [user?.id, activeOrganizationId]);
 
   const weatherEnabled = townHallController.townHall?.profile.weather_enabled;
   const weatherLocation = townHallController.townHall?.profile.weather_location;
@@ -1954,7 +1958,22 @@ export function MunicipalWorkspace() {
             title="Gestionar pestañas"
             type="button"
           >
-            <Settings2 aria-hidden="true" size={14} strokeWidth={1.7} />
+            {/* El prototipo abre las pestañas con el mismo asa de seis puntos
+                que las tarjetas, no con un engranaje. */}
+            <svg
+              aria-hidden="true"
+              fill="currentColor"
+              height="14"
+              viewBox="0 0 24 24"
+              width="14"
+            >
+              <circle cx="9" cy="6" r="1.5" />
+              <circle cx="15" cy="6" r="1.5" />
+              <circle cx="9" cy="12" r="1.5" />
+              <circle cx="15" cy="12" r="1.5" />
+              <circle cx="9" cy="18" r="1.5" />
+              <circle cx="15" cy="18" r="1.5" />
+            </svg>
           </button>
         ) : null}
         {workspaceTabs.map(({ id, label, icon: Icon }, index) => (
