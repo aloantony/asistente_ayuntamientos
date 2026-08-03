@@ -4,7 +4,6 @@ import {
   BookOpen,
   Building2,
   CheckCircle2,
-  ChevronDown,
   CircleAlert,
   ClipboardList,
   CloudSun,
@@ -52,6 +51,7 @@ import {
 } from "../lib/session";
 import { useTownHallController } from "../lib/useTownHallController";
 import { TownHallContentPanel } from "./TownHallContentPanel";
+import { TownHallEpigraphCard } from "./TownHallEpigraphCard";
 import { TownHallNavEditor } from "./TownHallNavEditor";
 import styles from "./MunicipalWorkspace.module.css";
 import {
@@ -66,6 +66,7 @@ import {
   type OrganizationSummary,
   type Ordinance,
   type TownHall,
+  type TownHallNavSection,
   type User,
 } from "./types";
 
@@ -106,13 +107,10 @@ type TabDefinition = {
   icon: LucideIcon;
 };
 
-// Entrada de la píldora de navegación: las áreas fijas no llevan desplegable,
-// los apartados creados por el usuario cuelgan de él sus elementos.
-type PillEntry = TabDefinition & {
-  items: { id: CustomTab; label: string }[];
-};
-
-function findCustomBlock(townHall: TownHall | null, tab: ActiveTab) {
+/** Localiza la pestaña de un bloque: si es un epígrafe, la de su pestaña padre.
+ *  Sirve para que los enlaces antiguos a un epígrafe sigan llevando a su sitio,
+ *  ahora que un epígrafe es una tarjeta dentro de una pestaña y no una pestaña. */
+function findTabForBlock(townHall: TownHall | null, tab: ActiveTab) {
   if (townHall === null || !isCustomTab(tab)) {
     return null;
   }
@@ -120,15 +118,43 @@ function findCustomBlock(townHall: TownHall | null, tab: ActiveTab) {
   const blockId = customTabBlockId(tab);
   for (const section of townHall.nav) {
     if (section.id === blockId) {
-      return { title: section.title, parentTitle: null as string | null };
+      return { sectionId: section.id, epigraphId: null as number | null };
     }
-    const item = section.items.find((candidate) => candidate.id === blockId);
-    if (item) {
-      return { title: item.title, parentTitle: section.title };
+    if (section.items.some((candidate) => candidate.id === blockId)) {
+      return { sectionId: section.id, epigraphId: blockId };
     }
   }
 
   return null;
+}
+
+/** Reordena los epígrafes de una pestaña colocando el arrastrado ante el
+ *  destino. Devuelve el árbol completo porque es lo que guarda el backend. */
+function moveEpigraph(
+  nav: TownHallNavSection[],
+  sectionId: number,
+  draggedId: number,
+  targetId: number,
+) {
+  if (draggedId === targetId) {
+    return null;
+  }
+
+  const section = nav.find((candidate) => candidate.id === sectionId);
+  const from = section?.items.findIndex((item) => item.id === draggedId) ?? -1;
+  const to = section?.items.findIndex((item) => item.id === targetId) ?? -1;
+
+  if (section === undefined || from === -1 || to === -1) {
+    return null;
+  }
+
+  const items = [...section.items];
+  const [moved] = items.splice(from, 1);
+  items.splice(to, 0, moved);
+
+  return nav.map((candidate) =>
+    candidate.id === sectionId ? { ...candidate, items } : candidate,
+  );
 }
 
 const TAB_DEFINITIONS: TabDefinition[] = [
@@ -1371,7 +1397,12 @@ export function MunicipalWorkspace() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("summary");
   const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
   const [isShieldTargeted, setIsShieldTargeted] = useState(false);
-  const [openPillId, setOpenPillId] = useState<ActiveTab | null>(null);
+  // Tarjetas de epígrafe desplegadas y epígrafe que se está arrastrando. Es
+  // estado de presentación, no de selección: la URL sigue llevando la pestaña.
+  const [openEpigraphIds, setOpenEpigraphIds] = useState<number[]>([]);
+  const [draggedEpigraphId, setDraggedEpigraphId] = useState<number | null>(
+    null,
+  );
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
@@ -1398,6 +1429,8 @@ export function MunicipalWorkspace() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const requestSequenceRef = useRef(0);
   const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // Pestaña a la que ya se le desplegó el primer epígrafe.
+  const expandedTabRef = useRef<ActiveTab | null>(null);
 
   const contexts = user ? getMunicipalContexts(user) : [];
   const selectedContext =
@@ -1473,19 +1506,65 @@ export function MunicipalWorkspace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weatherEnabled, weatherLocation]);
 
-  const contentBlockId =
-    isCustomTab(activeTab) && townHallController.townHall !== null
-      ? customTabBlockId(activeTab)
-      : null;
+  // Cambia cuando el árbol se recarga con otras pestañas o epígrafes.
+  const navSignature = (townHallController.townHall?.nav ?? [])
+    .map(
+      (section) =>
+        `${section.id}:${section.items.map((item) => item.id).join("-")}`,
+    )
+    .join("|");
 
+  // Al entrar en una pestaña se despliega su primer epígrafe: abrirla con todo
+  // plegado no enseñaría nada. Solo una vez por pestaña, para no volver a
+  // plegar lo que el usuario abra después de renombrar o reordenar.
   useEffect(() => {
-    if (contentBlockId === null) {
+    const townHall = townHallController.townHall;
+
+    if (!isCustomTab(activeTab)) {
+      expandedTabRef.current = null;
+      setOpenEpigraphIds((current) => (current.length === 0 ? current : []));
       return;
     }
 
-    void townHallController.loadContent(contentBlockId);
+    const placement = findTabForBlock(townHall, activeTab);
+
+    if (placement === null) {
+      return;
+    }
+
+    // Un enlace antiguo podía apuntar a un epígrafe: hoy es una tarjeta, así
+    // que se traduce a su pestaña, con esa tarjeta ya desplegada.
+    if (placement.epigraphId !== null) {
+      expandedTabRef.current = `block-${placement.sectionId}`;
+      setOpenEpigraphIds([placement.epigraphId]);
+      selectWorkspaceTab(`block-${placement.sectionId}`);
+      return;
+    }
+
+    if (expandedTabRef.current === activeTab) {
+      return;
+    }
+
+    expandedTabRef.current = activeTab;
+    const section = townHall?.nav.find(({ id }) => id === placement.sectionId);
+    const first = section?.items[0]?.id;
+    setOpenEpigraphIds(first === undefined ? [] : [first]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentBlockId]);
+  }, [activeTab, navSignature]);
+
+  // Cada tarjeta desplegada trae su propio contenido; las plegadas no piden
+  // nada. Un fallo deja la tarjeta sin contenido y con su botón de reintento,
+  // así que no se vuelve a pedir solo.
+  const openEpigraphKey = openEpigraphIds.join(",");
+
+  useEffect(() => {
+    for (const blockId of openEpigraphIds) {
+      if (townHallController.contents[blockId] === undefined) {
+        void townHallController.loadContent(blockId);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openEpigraphKey]);
 
   useEffect(() => {
     if (!user || !canViewMunicipalHub(user) || !selectedContext) {
@@ -1643,28 +1722,19 @@ export function MunicipalWorkspace() {
   const townHall = townHallController.townHall;
   const canEditMenu = canEditTownHall(user);
 
-  // Los apartados del editor se añaden como pestañas tras las áreas fijas, de
-  // modo que la tira de pestañas siga siendo una sola navegación.
-  const workspaceTabs: PillEntry[] = [
-    ...TAB_DEFINITIONS.map((tab) => ({ ...tab, items: [] })),
+  // Las pestañas del editor se añaden tras las áreas fijas, de modo que la
+  // tira siga siendo una sola navegación. Ya no llevan desplegable: sus
+  // epígrafes se apilan debajo, en tarjetas.
+  const workspaceTabs: TabDefinition[] = [
+    ...TAB_DEFINITIONS,
     ...(townHall?.nav ?? []).map((section) => ({
       id: `block-${section.id}` as CustomTab,
       label: section.title,
       icon: Landmark,
-      items: section.items.map((item) => ({
-        id: `block-${item.id}` as CustomTab,
-        label: item.title,
-      })),
     })),
   ];
-  // Un apartado propio puede ser un apartado o uno de sus elementos.
-  const activeCustomBlock = findCustomBlock(townHall, activeTab);
-  // Solo los apartados (los que cuelgan de un epígrafe) tienen contenido; un
-  // epígrafe se navega por sus apartados, que ya viven en el desplegable.
-  const activeContentBlockId =
-    activeCustomBlock !== null && activeCustomBlock.parentTitle !== null
-      ? customTabBlockId(activeTab as CustomTab)
-      : null;
+  const activeSection =
+    townHall?.nav.find(({ id }) => `block-${id}` === activeTab) ?? null;
 
   function handleTabKeyDown(
     event: KeyboardEvent<HTMLButtonElement>,
@@ -1735,6 +1805,46 @@ export function MunicipalWorkspace() {
     const file = event.dataTransfer.files?.[0];
     if (canEditMenu && file && file.type.startsWith("image/")) {
       void townHallController.uploadShield(file);
+    }
+  }
+
+  function toggleEpigraph(blockId: number) {
+    setOpenEpigraphIds((current) =>
+      current.includes(blockId)
+        ? current.filter((id) => id !== blockId)
+        : [...current, blockId],
+    );
+  }
+
+  // Reordenar por arrastre o por el menú acaba en el mismo sitio: el árbol
+  // entero, que es lo que el backend guarda de una vez.
+  function reorderEpigraph(draggedId: number, targetId: number) {
+    if (townHall === null || activeSection === null) {
+      return;
+    }
+
+    const next = moveEpigraph(
+      townHall.nav,
+      activeSection.id,
+      draggedId,
+      targetId,
+    );
+
+    if (next !== null) {
+      void townHallController.reorderNav(next);
+    }
+  }
+
+  function moveEpigraphBy(blockId: number, offset: number) {
+    if (activeSection === null) {
+      return;
+    }
+
+    const index = activeSection.items.findIndex(({ id }) => id === blockId);
+    const target = activeSection.items[index + offset];
+
+    if (target !== undefined) {
+      reorderEpigraph(blockId, target.id);
     }
   }
 
@@ -1828,10 +1938,9 @@ export function MunicipalWorkspace() {
       </header>
 
       {/* Fila de pestañas del prototipo: plana, alineada a la izquierda y
-          separada por un filete inferior, con el botón de gestión delante.
-          Los apartados propios abren sus elementos al pasar el ratón; el
-          relleno superior del ancla es la zona-puente que evita perder el
-          hover al bajar del botón al panel. */}
+          separada por un filete inferior, con el botón de gestión delante. No
+          lleva desplegables: los epígrafes de la pestaña activa se apilan
+          debajo en tarjetas. Ver docs/diseno-ayuntamiento-prototipo.md §8. */}
       <nav
         aria-label="Áreas del ayuntamiento"
         className={styles.areaTabs}
@@ -1848,65 +1957,25 @@ export function MunicipalWorkspace() {
             <Settings2 aria-hidden="true" size={14} strokeWidth={1.7} />
           </button>
         ) : null}
-          {workspaceTabs.map(({ id, label, icon: Icon, items }, index) => {
-            const hasItems = items.length > 0;
-            const isOpen = hasItems && openPillId === id;
-            const isSelected =
-              activeTab === id || items.some((item) => item.id === activeTab);
-
-            return (
-              <div
-                className={styles.areaPillGroup}
-                key={id}
-                onMouseEnter={() => setOpenPillId(hasItems ? id : null)}
-                onMouseLeave={() => setOpenPillId(null)}
-              >
-                <button
-                  aria-controls={`municipal-panel-${id}`}
-                  aria-expanded={hasItems ? isOpen : undefined}
-                  aria-selected={isSelected}
-                  id={`municipal-tab-${id}`}
-                  onClick={() => {
-                    selectWorkspaceTab(id);
-                    setOpenPillId((current) =>
-                      hasItems && current !== id ? id : null,
-                    );
-                  }}
-                  onKeyDown={(event) => handleTabKeyDown(event, index)}
-                  ref={(element) => {
-                    tabButtonRefs.current[index] = element;
-                  }}
-                  role="tab"
-                  tabIndex={isSelected ? 0 : -1}
-                  type="button"
-                >
-                  <Icon aria-hidden="true" size={16} strokeWidth={1.6} />
-                  <span>{label}</span>
-                  {hasItems ? (
-                    <ChevronDown aria-hidden="true" size={12} strokeWidth={2} />
-                  ) : null}
-                </button>
-                {isOpen ? (
-                  <div className={styles.areaPillMenuAnchor}>
-                    <div className={styles.areaPillMenu}>
-                      {items.map((item) => (
-                        <button
-                          key={item.id}
-                          onClick={() => {
-                            selectWorkspaceTab(item.id);
-                            setOpenPillId(null);
-                          }}
-                          type="button"
-                        >
-                          {item.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
+        {workspaceTabs.map(({ id, label, icon: Icon }, index) => (
+          <button
+            aria-controls={`municipal-panel-${id}`}
+            aria-selected={activeTab === id}
+            id={`municipal-tab-${id}`}
+            key={id}
+            onClick={() => selectWorkspaceTab(id)}
+            onKeyDown={(event) => handleTabKeyDown(event, index)}
+            ref={(element) => {
+              tabButtonRefs.current[index] = element;
+            }}
+            role="tab"
+            tabIndex={activeTab === id ? 0 : -1}
+            type="button"
+          >
+            <Icon aria-hidden="true" size={16} strokeWidth={1.6} />
+            <span>{label}</span>
+          </button>
+        ))}
       </nav>
 
       {isPaused ? (
@@ -1985,94 +2054,150 @@ export function MunicipalWorkspace() {
           />
         ) : activeTab === "people" ? (
           <PeopleTab organization={organization} />
-        ) : activeContentBlockId !== null &&
-          townHallController.content !== null &&
-          townHallController.content.block_id === activeContentBlockId ? (
+        ) : activeSection !== null ? (
           <div className={styles.tabContent}>
-            <TownHallContentPanel
-              canEdit={canEditMenu}
-              content={townHallController.content}
-              isSaving={townHallController.isSavingTownHall}
-              onAdd={() =>
-                void townHallController.addContentItem(
-                  activeContentBlockId,
-                  "Nuevo elemento",
-                )
-              }
-              onArchive={(itemId) =>
-                void townHallController.archiveContentItem(
-                  activeContentBlockId,
-                  itemId,
-                )
-              }
-              onSaveBody={(itemId, body) =>
-                void townHallController.saveContentItem(
-                  activeContentBlockId,
-                  itemId,
-                  { body: body.trim() === "" ? null : body },
-                )
-              }
-              onAddAttachment={(itemId, file) =>
-                void townHallController.addAttachment(
-                  activeContentBlockId,
-                  itemId,
-                  file,
-                )
-              }
-              onRemoveAttachment={(itemId, index) =>
-                void townHallController.removeAttachment(
-                  activeContentBlockId,
-                  itemId,
-                  index,
-                )
-              }
-              onSavePoints={(itemId, raw) =>
-                void townHallController.saveContentPoints(
-                  activeContentBlockId,
-                  itemId,
-                  parseSeriesPoints(raw),
-                )
-              }
-              onSaveFields={(itemId, fields) =>
-                void townHallController.saveContentFields(
-                  activeContentBlockId,
-                  itemId,
-                  fields,
-                )
-              }
-              onChangeLayout={(layout) =>
-                void townHallController.setSectionLayout(
-                  activeContentBlockId,
-                  layout,
-                )
-              }
-              onSaveTitle={(itemId, title) =>
-                void townHallController.saveContentItem(
-                  activeContentBlockId,
-                  itemId,
-                  { title },
-                )
-              }
-            />
+            {activeSection.items.length === 0 ? (
+              <section className={`panel ${styles.pageState}`}>
+                <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
+                <p className="eyebrow">{activeSection.title}</p>
+                <h1>Sin epígrafes</h1>
+                <p className="muted">
+                  {canEditMenu
+                    ? "Añade el primero desde «Gestionar pestañas», el botón que abre la fila."
+                    : "Esta pestaña todavía no tiene contenido."}
+                </p>
+              </section>
+            ) : (
+              // Epígrafes apilados en tarjetas, como el prototipo: una por
+              // epígrafe, plegables y reordenables por arrastre.
+              <article className="townhall-epigraph-stack">
+                {activeSection.items.map((item, index) => {
+                  const content = townHallController.contents[item.id];
+                  const isLoadingEpigraph =
+                    townHallController.loadingContentIds.includes(item.id);
+
+                  return (
+                    <TownHallEpigraphCard
+                      canEdit={canEditMenu}
+                      canMoveDown={index < activeSection.items.length - 1}
+                      canMoveUp={index > 0}
+                      isOpen={openEpigraphIds.includes(item.id)}
+                      isSaving={townHallController.isSavingTownHall}
+                      key={item.id}
+                      onDelete={() =>
+                        void townHallController.archiveBlock(item.id)
+                      }
+                      onDragStart={() => setDraggedEpigraphId(item.id)}
+                      onDrop={() => {
+                        if (draggedEpigraphId !== null) {
+                          reorderEpigraph(draggedEpigraphId, item.id);
+                          setDraggedEpigraphId(null);
+                        }
+                      }}
+                      onMoveDown={() => moveEpigraphBy(item.id, 1)}
+                      onMoveUp={() => moveEpigraphBy(item.id, -1)}
+                      onRename={(title) =>
+                        void townHallController.renameBlock(item.id, title)
+                      }
+                      onToggle={() => toggleEpigraph(item.id)}
+                      title={item.title}
+                    >
+                      {content !== undefined ? (
+                        <TownHallContentPanel
+                          canEdit={canEditMenu}
+                          content={content}
+                          embedded
+                          isSaving={townHallController.isSavingTownHall}
+                          onAdd={() =>
+                            void townHallController.addContentItem(
+                              item.id,
+                              "Nuevo elemento",
+                            )
+                          }
+                          onAddAttachment={(itemId, file) =>
+                            void townHallController.addAttachment(
+                              item.id,
+                              itemId,
+                              file,
+                            )
+                          }
+                          onArchive={(itemId) =>
+                            void townHallController.archiveContentItem(
+                              item.id,
+                              itemId,
+                            )
+                          }
+                          onChangeLayout={(layout) =>
+                            void townHallController.setSectionLayout(
+                              item.id,
+                              layout,
+                            )
+                          }
+                          onRemoveAttachment={(itemId, attachmentIndex) =>
+                            void townHallController.removeAttachment(
+                              item.id,
+                              itemId,
+                              attachmentIndex,
+                            )
+                          }
+                          onSaveBody={(itemId, body) =>
+                            void townHallController.saveContentItem(
+                              item.id,
+                              itemId,
+                              { body: body.trim() === "" ? null : body },
+                            )
+                          }
+                          onSaveFields={(itemId, fields) =>
+                            void townHallController.saveContentFields(
+                              item.id,
+                              itemId,
+                              fields,
+                            )
+                          }
+                          onSavePoints={(itemId, raw) =>
+                            void townHallController.saveContentPoints(
+                              item.id,
+                              itemId,
+                              parseSeriesPoints(raw),
+                            )
+                          }
+                          onSaveTitle={(itemId, title) =>
+                            void townHallController.saveContentItem(
+                              item.id,
+                              itemId,
+                              { title },
+                            )
+                          }
+                        />
+                      ) : isLoadingEpigraph ? (
+                        <p
+                          aria-live="polite"
+                          className="townhall-epigraph-state"
+                          role="status"
+                        >
+                          Cargando el contenido…
+                        </p>
+                      ) : (
+                        <div className="townhall-epigraph-state">
+                          <p>No se pudo cargar el contenido de este epígrafe.</p>
+                          <button
+                            className={styles.primaryAction}
+                            onClick={() =>
+                              void townHallController.loadContent(item.id)
+                            }
+                            type="button"
+                          >
+                            Reintentar
+                          </button>
+                        </div>
+                      )}
+                    </TownHallEpigraphCard>
+                  );
+                })}
+              </article>
+            )}
           </div>
-        ) : activeCustomBlock !== null ? (
-          <div className={styles.tabContent}>
-            <section className={`panel ${styles.pageState}`}>
-              <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
-              <p className="eyebrow">{activeCustomBlock.title}</p>
-              <h1>
-                {townHallController.isLoadingContent
-                  ? "Cargando"
-                  : "Elige un apartado"}
-              </h1>
-              <p className="muted">
-                {townHallController.isLoadingContent
-                  ? "Recuperando el contenido."
-                  : "Este epígrafe se recorre por sus apartados, en el desplegable de la barra."}
-              </p>
-            </section>
-          </div>
-        ) : (
+        ) : activeTab === "roadmap" ? (
           <RoadmapTab
             assets={assets}
             canViewMap={canViewMap}
@@ -2081,6 +2206,21 @@ export function MunicipalWorkspace() {
             organizationId={selectedContext.organization.id}
             user={user}
           />
+        ) : (
+          // Pestaña propia cuyo árbol todavía no ha llegado: la barra ya está
+          // pintada, así que solo falta decir que se está trayendo.
+          <div
+            aria-busy="true"
+            aria-live="polite"
+            className={styles.loadingState}
+            role="status"
+          >
+            <RefreshCw aria-hidden="true" size={22} />
+            <div>
+              <strong>Cargando la pestaña</strong>
+              <span>Recuperando sus epígrafes…</span>
+            </div>
+          </div>
         )}
       </div>
 
@@ -2089,11 +2229,9 @@ export function MunicipalWorkspace() {
           fallbackName={selectedContext.municipality.name}
           isSaving={townHallController.isSavingTownHall}
           onAddItem={(sectionId) =>
-            void townHallController.addItem(sectionId, "Nuevo elemento")
+            void townHallController.addItem(sectionId, "Nuevo epígrafe")
           }
-          onAddSection={() =>
-            void townHallController.addSection("Nuevo apartado")
-          }
+          onAddSection={() => void townHallController.addSection("Nueva pestaña")}
           onArchiveBlock={(blockId) =>
             void townHallController.archiveBlock(blockId)
           }

@@ -41,7 +41,7 @@ function moveSection(
   return next;
 }
 
-/** Mueve un elemento a otro apartado, opcionalmente ante un elemento concreto. */
+/** Mueve un epígrafe a otra pestaña, opcionalmente ante un epígrafe concreto. */
 function moveItem(
   nav: TownHallNavSection[],
   draggedId: number,
@@ -168,7 +168,7 @@ export function TownHallNavEditor({
     }
 
     if (draft === "") {
-      // Un apartado sin nombre no es editable después: se revierte.
+      // Una pestaña sin nombre no es editable después: se revierte.
       setTitles((current) => {
         const next = { ...current };
         delete next[blockId];
@@ -239,13 +239,13 @@ export function TownHallNavEditor({
     <div className="townhall-editor-scrim" onClick={onClose} role="presentation">
       <div
         aria-modal="true"
-        aria-label="Editar menú de navegación"
+        aria-label="Gestionar pestañas"
         className="townhall-editor"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
       >
         <div className="townhall-editor-head">
-          <h3>Editar menú de navegación</h3>
+          <h3>Gestionar pestañas</h3>
           <button
             aria-label="Cerrar"
             className="townhall-editor-close"
@@ -288,7 +288,7 @@ export function TownHallNavEditor({
           </p>
         </div>
 
-        <span className="townhall-editor-eyebrow">Menú de navegación</span>
+        <span className="townhall-editor-eyebrow">Pestañas y epígrafes</span>
 
         {townHall.nav.map((section) => (
           <div
@@ -307,7 +307,7 @@ export function TownHallNavEditor({
                 <DragHandleIcon size={14} />
               </span>
               <input
-                aria-label={`Nombre del apartado ${section.title}`}
+                aria-label={`Nombre de la pestaña ${section.title}`}
                 className="townhall-editor-section-input"
                 disabled={isSaving}
                 onBlur={() => commitTitle(section.id, section.title)}
@@ -320,7 +320,7 @@ export function TownHallNavEditor({
                 value={titleValue(section.id, section.title)}
               />
               <button
-                aria-label={`Eliminar el apartado ${section.title}`}
+                aria-label={`Eliminar la pestaña ${section.title}`}
                 className="townhall-editor-delete"
                 disabled={isSaving}
                 onClick={() =>
@@ -368,7 +368,7 @@ export function TownHallNavEditor({
                     <DragHandleIcon size={12} />
                   </span>
                   <input
-                    aria-label={`Nombre del elemento ${item.title}`}
+                    aria-label={`Nombre del epígrafe ${item.title}`}
                     className="townhall-editor-item-input"
                     disabled={isSaving}
                     onBlur={() => commitTitle(item.id, item.title)}
@@ -381,7 +381,7 @@ export function TownHallNavEditor({
                     value={titleValue(item.id, item.title)}
                   />
                   <button
-                    aria-label={`Eliminar el elemento ${item.title}`}
+                    aria-label={`Eliminar el epígrafe ${item.title}`}
                     className="townhall-editor-delete small"
                     disabled={isSaving}
                     onClick={() =>
@@ -416,7 +416,7 @@ export function TownHallNavEditor({
                 type="button"
               >
                 <PlusIcon size={13} />
-                Añadir elemento
+                Añadir epígrafe
               </button>
             </div>
           </div>
@@ -429,7 +429,7 @@ export function TownHallNavEditor({
           type="button"
         >
           <PlusIcon size={15} />
-          Añadir apartado principal
+          Añadir pestaña
         </button>
 
         <div className="townhall-editor-card townhall-editor-weather">
@@ -487,8 +487,8 @@ export function TownHallNavEditor({
         <ConfirmDialog
           message={
             pendingDeletion.kind === "section"
-              ? `¿Eliminar el apartado «${pendingDeletion.title}» y todos sus elementos?`
-              : `¿Eliminar el elemento «${pendingDeletion.title}»?`
+              ? `¿Eliminar la pestaña «${pendingDeletion.title}» y todos sus epígrafes?`
+              : `¿Eliminar el epígrafe «${pendingDeletion.title}»?`
           }
           onCancel={() => setPendingDeletion(null)}
           onConfirm={() => {

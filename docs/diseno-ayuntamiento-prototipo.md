@@ -47,7 +47,7 @@ Lo ya construido y reutilizable:
 
 ### Pantalla Ayuntamiento (cuerpo)
 Siete epígrafes, todos con menú contextual propio (renombrar, subir, bajar, eliminar) y reordenables
-por arrastre. **Ninguno está implementado.**
+por arrastre. **La tarjeta —plegado, arrastre y menú— está hecha (§9); los contenidos, en la Fase B.**
 
 | Epígrafe | Contenido del prototipo |
 |---|---|
@@ -343,3 +343,51 @@ Ayuntamiento son las configurables `aySecTabs`.
 
 Así que el diagnóstico de §7.3 —«las cinco pestañas no salen del diseño»— era medio falso: los
 nombres sí salen, lo que está mal es **el nivel de navegación en el que viven**.
+
+### 8.4 El menú del epígrafe tiene cuatro opciones, no tres
+
+§7.2 leyó **Renombrar · Añadir nivel · Eliminar epígrafe**. En el diseño completo son
+**Renombrar · Subir · Bajar · Eliminar epígrafe**: no hay «Añadir nivel», y sí hay movimiento
+arriba/abajo, que es la alternativa por teclado al arrastre. La geometría del menú que §7.2
+describe (`left:26px; top:56px`, ancho mínimo 190, opciones de 13 px) sí es correcta.
+
+El chevron de plegado gira con `transform:rotate(180deg)` y `transition:transform .18s ease`.
+
+## 9. Tarjetas de epígrafe (2026-08-03) — HECHO
+
+Implementadas las tarjetas del cuerpo del Ayuntamiento, que es lo que §8 identifica como la
+estructura real de la pantalla. **Sin cambios de backend ni de esquema**: el árbol de
+`municipal_blocks` ya tenía la forma necesaria, solo estaba mal proyectado en la pantalla.
+
+**La corrección de nivel.** El árbol se lee ahora como lo lee el diseño:
+
+| Bloque | Antes | Ahora |
+|---|---|---|
+| `nav_section` | pestaña con desplegable al hover | **pestaña** (`aySecTabs`), plana, sin desplegable |
+| `nav_item` | opción del desplegable, con panel propio | **tarjeta de epígrafe**, apilada bajo la pestaña |
+| `item` | elemento del panel | elemento dentro de la tarjeta, sin cambios |
+
+La fila de pestañas del diseño son botones planos: no lleva desplegables. Los tenía la
+implementación de la Fase A, no el prototipo.
+
+**Lo que hace cada tarjeta**: plegarse (chevron), arrastrarse para reordenar y abrir su menú desde
+el asa, con las cuatro opciones de §8.4. Renombrar convierte el `<h2>` en un campo que guarda al
+perder el foco o con Intro, y Escape descarta —decisión 2, nada de `contenteditable`—. Eliminar
+pasa por `ConfirmDialog`, como el resto de acciones destructivas.
+
+**Contenido por tarjeta.** `useTownHallController` guardaba **un** contenido; ahora guarda un mapa
+`contents[blockId]` y una lista de los que están en vuelo, porque varias tarjetas pueden estar
+abiertas a la vez. Cada tarjeta abierta pide el suyo; las plegadas no piden nada. Al entrar en una
+pestaña se despliega su primer epígrafe: abrirla con todo plegado no enseñaría nada. Un fallo de
+carga deja esa tarjeta —y solo esa— con su botón de reintento.
+
+**Enlaces antiguos.** `?tab=block-<id>` apuntando a un epígrafe se traduce a la pestaña que lo
+contiene, con esa tarjeta desplegada, y la URL se reescribe. Qué tarjetas están abiertas es estado
+de presentación y no viaja en la URL; la pestaña sí, como hasta ahora.
+
+**Vocabulario.** El editor pasa a llamar a las cosas como el diseño: `nav_section` es «pestaña» y
+`nav_item` es «epígrafe» (antes «apartado» y «elemento», que además chocaba con los `item`).
+
+Lo que **no** hace esta fase, y sigue abierto de §8.3: sacar Instalaciones, Personal y Hoja de ruta
+del Ayuntamiento a pantallas de primer nivel. Son rutas nuevas, y hoy conviven como pestañas fijas
+delante de las configurables.

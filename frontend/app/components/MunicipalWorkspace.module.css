@@ -129,8 +129,8 @@
 }
 
 /* Fila de pestañas del prototipo: plana, alineada a la izquierda y cerrada por
-   un filete inferior. Los apartados propios abren sus elementos al pasar el
-   ratón. Ver docs/diseno-ayuntamiento-prototipo.md §7.2. */
+   un filete inferior. Sin desplegables: los epígrafes de la pestaña activa se
+   apilan debajo. Ver docs/diseno-ayuntamiento-prototipo.md §7.2 y §8. */
 .areaTabs {
   display: flex;
   align-items: center;
@@ -161,11 +161,6 @@
   background: var(--fill);
 }
 
-.areaPillGroup {
-  position: relative;
-  display: inline-flex;
-}
-
 .areaTabs button {
   display: inline-flex;
   align-items: center;
@@ -194,47 +189,6 @@
 .areaTabs button[aria-selected="true"] {
   color: var(--accent-contrast);
   background: var(--accent);
-}
-
-/* El relleno superior es la zona-puente que evita perder el hover al bajar del
-   botón al panel. */
-.areaPillMenuAnchor {
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  z-index: 30;
-  padding-top: 17px;
-  transform: translateX(-50%);
-}
-
-.areaPillMenu {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 260px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-raised);
-}
-
-.areaPillMenu button {
-  display: block;
-  width: 100%;
-  padding: 10px 13px;
-  border-radius: 8px;
-  color: var(--text-secondary);
-  font-size: 0.9rem;
-  font-weight: 500;
-  line-height: 1.35;
-  text-align: left;
-}
-
-.areaPillMenu button:hover {
-  color: var(--text);
-  background: var(--bg);
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 @media (max-width: 1100px) {

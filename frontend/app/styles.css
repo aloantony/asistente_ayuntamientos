@@ -6779,6 +6779,176 @@ html.dark .dashboard-ask input {
 }
 
 /* ---------------------------------------------------------------------------
+ * Tarjetas de epígrafe del Ayuntamiento
+ *
+ * Las medidas son las del prototipo: tarjeta de 13 px de radio con relleno
+ * lateral de 18 px y ninguno vertical, cabecera de 16 px arriba y abajo, y un
+ * filete de acento de 44×2 al abrir. Ver docs/diseno-ayuntamiento-prototipo.md
+ * §7.2 (confirmado en §8.1).
+ * ------------------------------------------------------------------------ */
+
+.townhall-epigraph-stack {
+  display: flex;
+  max-width: 900px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.townhall-epigraph {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 0 18px;
+  background: var(--surface);
+}
+
+.townhall-epigraph-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.townhall-epigraph-handle {
+  display: inline-flex;
+  flex: none;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-faint);
+  background: none;
+  cursor: grab;
+}
+
+.townhall-epigraph-handle:hover {
+  color: var(--text);
+  background: var(--fill);
+}
+
+.townhall-epigraph-title {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.townhall-epigraph-title h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.townhall-epigraph-chevron {
+  flex: none;
+  color: var(--text-muted);
+  transition: transform 180ms ease;
+}
+
+.townhall-epigraph-chevron.open {
+  transform: rotate(180deg);
+}
+
+.townhall-epigraph-rename {
+  flex: 1;
+  min-width: 0;
+  margin: 10px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Cierra el menú al pulsar fuera sin robar el clic a la propia tarjeta. */
+.townhall-epigraph-scrim {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+}
+
+.townhall-epigraph-menu {
+  position: absolute;
+  z-index: 50;
+  top: 56px;
+  left: 26px;
+  display: flex;
+  min-width: 190px;
+  flex-direction: column;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+}
+
+.townhall-epigraph-menu button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text);
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.townhall-epigraph-menu button:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+.townhall-epigraph-menu button:disabled {
+  color: var(--text-faint, var(--text-muted));
+  cursor: not-allowed;
+}
+
+/* El prototipo tiñe la opción destructiva de rojo fijo; aquí se usan los tokens
+   de estado, que ya están calibrados para las dos superficies. */
+.townhall-epigraph-menu-danger {
+  color: var(--danger-fg);
+}
+
+.townhall-epigraph-menu .townhall-epigraph-menu-danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
+
+.townhall-epigraph-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 0 28px;
+}
+
+.townhall-epigraph-rule {
+  width: 44px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.townhall-epigraph-state {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+
+/* ---------------------------------------------------------------------------
  * Contenido de un apartado del Ayuntamiento (Fase B1)
  * ------------------------------------------------------------------------ */
 
@@ -6868,6 +7038,16 @@ html.dark .dashboard-ask input {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+/* Empotrado en una tarjeta: sin título propio, el selector de formato se va al
+   margen derecho en vez de quedarse suelto a la izquierda. */
+.townhall-content-embedded {
+  gap: 12px;
+}
+
+.townhall-content-embedded .townhall-content-head-row {
+  justify-content: flex-end;
 }
 
 .townhall-content-layout {

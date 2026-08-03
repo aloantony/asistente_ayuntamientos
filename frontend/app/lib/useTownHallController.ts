@@ -69,14 +69,18 @@ export function useTownHallController({
   // Se incrementa al sustituir el escudo para invalidar la caché del <img>.
   const [shieldVersion, setShieldVersion] = useState(0);
   const [weather, setWeather] = useState<TownHallWeather | null>(null);
-  const [content, setContent] = useState<TownHallContent | null>(null);
-  const [isLoadingContent, setIsLoadingContent] = useState(false);
+  // Los epígrafes se apilan y varios pueden estar abiertos a la vez, así que el
+  // contenido se guarda por bloque y no de uno en uno.
+  const [contents, setContents] = useState<Record<number, TownHallContent>>({});
+  const [loadingContentIds, setLoadingContentIds] = useState<number[]>([]);
 
   const loadTownHall = useCallback(async () => {
     setIsLoadingTownHall(true);
     setTownHallError("");
 
     try {
+      // El árbol nuevo puede ser de otra organización: lo cargado deja de valer.
+      setContents({});
       setTownHall(await fetchTownHall(organizationId));
     } catch (requestError) {
       handleRequestError(
@@ -158,28 +162,38 @@ export function useTownHallController({
     }
   }, [organizationId]);
 
-  // Contenido del apartado abierto. Se pide aparte del árbol porque cambia
-  // con la navegación, no con el menú.
+  // Contenido de un epígrafe. Se pide aparte del árbol porque depende de qué
+  // tarjetas estén desplegadas, no del menú.
   const loadContent = useCallback(
     async (blockId: number) => {
-      setIsLoadingContent(true);
+      setLoadingContentIds((current) =>
+        current.includes(blockId) ? current : [...current, blockId],
+      );
+
       try {
-        setContent(await fetchTownHallContent(blockId));
+        const loaded = await fetchTownHallContent(blockId);
+        setContents((current) => ({ ...current, [blockId]: loaded }));
       } catch (requestError) {
-        setContent(null);
+        setContents((current) => {
+          const next = { ...current };
+          delete next[blockId];
+          return next;
+        });
         handleRequestError(
           requestError,
           setTownHallError,
-          "No se pudo cargar el contenido del apartado.",
+          "No se pudo cargar el contenido del epígrafe.",
         );
       } finally {
-        setIsLoadingContent(false);
+        setLoadingContentIds((current) =>
+          current.filter((id) => id !== blockId),
+        );
       }
     },
     [handleRequestError],
   );
 
-  // Las mutaciones de contenido releen solo el apartado, no el árbol entero.
+  // Las mutaciones de contenido releen solo ese epígrafe, no el árbol entero.
   async function runContentMutation(
     blockId: number,
     mutation: () => Promise<unknown>,
@@ -190,7 +204,8 @@ export function useTownHallController({
 
     try {
       await mutation();
-      setContent(await fetchTownHallContent(blockId));
+      const reloaded = await fetchTownHallContent(blockId);
+      setContents((current) => ({ ...current, [blockId]: reloaded }));
       return true;
     } catch (requestError) {
       handleRequestError(requestError, setTownHallError, fallback);
@@ -325,8 +340,8 @@ export function useTownHallController({
     townHallError,
     shieldVersion,
     weather,
-    content,
-    isLoadingContent,
+    contents,
+    loadingContentIds,
     loadTownHall,
     loadContent,
     addContentItem,

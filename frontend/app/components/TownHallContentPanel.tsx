@@ -15,6 +15,9 @@ type TownHallContentPanelProps = {
   content: TownHallContent;
   canEdit: boolean;
   isSaving: boolean;
+  // Dentro de una tarjeta de epígrafe el título ya está en la cabecera de la
+  // tarjeta: el panel solo aporta el selector de formato.
+  embedded?: boolean;
   onAdd: () => void;
   onSaveTitle: (itemId: number, title: string) => void;
   onSaveBody: (itemId: number, body: string) => void;
@@ -27,7 +30,7 @@ type TownHallContentPanelProps = {
 };
 
 /**
- * Contenido de un apartado del Ayuntamiento: una lista de elementos con título
+ * Contenido de un epígrafe del Ayuntamiento: una lista de elementos con título
  * y texto. Se edita con campos normales y guardado al perder el foco, no con
  * `contenteditable` como el prototipo (decisión 2 de
  * docs/diseno-ayuntamiento-prototipo.md).
@@ -67,6 +70,7 @@ export function TownHallContentPanel({
   content,
   canEdit,
   isSaving,
+  embedded = false,
   onAdd,
   onSaveTitle,
   onSaveBody,
@@ -85,7 +89,7 @@ export function TownHallContentPanel({
   } | null>(null);
 
   // Los borradores locales sólo espejan lo que llega del servidor; al recargar
-  // el apartado se descartan para no pisar cambios de otra sesión.
+  // el epígrafe se descartan para no pisar cambios de otra sesión.
   useEffect(() => {
     setDrafts({});
     setBodies({});
@@ -115,49 +119,56 @@ export function TownHallContentPanel({
   const isData = content.layout === "data";
   const isSeries = content.layout === "series";
 
+  const layoutClass = isContacts
+    ? " townhall-content-contacts"
+    : isPeople
+      ? " townhall-content-people"
+      : isFiles
+        ? " townhall-content-files"
+        : isData
+          ? " townhall-content-data"
+          : "";
+
   return (
     <article
-      className={
-        isContacts
-          ? "townhall-content townhall-content-contacts"
-          : isPeople
-            ? "townhall-content townhall-content-people"
-            : isFiles
-              ? "townhall-content townhall-content-files"
-              : isData
-                ? "townhall-content townhall-content-data"
-                : "townhall-content"
-      }
+      className={`townhall-content${layoutClass}${
+        embedded ? " townhall-content-embedded" : ""
+      }`}
     >
-      <header className="townhall-content-head">
-        <p className="eyebrow">
-          {content.parent_title
-            ? `${content.parent_title} · ${content.title}`
-            : content.title}
-        </p>
-        <div className="townhall-content-head-row">
-          <h2>{content.title}</h2>
-          {canEdit ? (
-            <label className="townhall-content-layout">
-              Formato
-              <select
-                disabled={isSaving}
-                onChange={(event) =>
-                  onChangeLayout(event.target.value as TownHallSectionLayout)
-                }
-                value={content.layout}
-              >
-                <option value="text">Texto</option>
-                <option value="contacts">Teléfonos</option>
-                <option value="people">Personas</option>
-                <option value="files">Archivo</option>
-                <option value="data">Datos</option>
-                <option value="series">Series y gráficas</option>
-              </select>
-            </label>
-          ) : null}
-        </div>
-      </header>
+      {/* Empotrado y sin permiso de edición no queda nada que encabezar. */}
+      {embedded && !canEdit ? null : (
+        <header className="townhall-content-head">
+          {embedded ? null : (
+            <p className="eyebrow">
+              {content.parent_title
+                ? `${content.parent_title} · ${content.title}`
+                : content.title}
+            </p>
+          )}
+          <div className="townhall-content-head-row">
+            {embedded ? null : <h2>{content.title}</h2>}
+            {canEdit ? (
+              <label className="townhall-content-layout">
+                Formato
+                <select
+                  disabled={isSaving}
+                  onChange={(event) =>
+                    onChangeLayout(event.target.value as TownHallSectionLayout)
+                  }
+                  value={content.layout}
+                >
+                  <option value="text">Texto</option>
+                  <option value="contacts">Teléfonos</option>
+                  <option value="people">Personas</option>
+                  <option value="files">Archivo</option>
+                  <option value="data">Datos</option>
+                  <option value="series">Series y gráficas</option>
+                </select>
+              </label>
+            ) : null}
+          </div>
+        </header>
+      )}
 
       {isSeries && content.items.length > 0 ? (
         <div className="townhall-charts">
@@ -177,8 +188,8 @@ export function TownHallContentPanel({
       {content.items.length === 0 ? (
         <p className="muted">
           {canEdit
-            ? "Este apartado todavía no tiene elementos. Añade el primero."
-            : "Este apartado todavía no tiene contenido."}
+            ? "Este epígrafe todavía no tiene elementos. Añade el primero."
+            : "Este epígrafe todavía no tiene contenido."}
         </p>
       ) : null}
 
