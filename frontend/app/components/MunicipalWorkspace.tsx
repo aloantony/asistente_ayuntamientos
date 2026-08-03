@@ -83,10 +83,12 @@ type TabDefinition = {
   icon: LucideIcon;
 };
 
+// Rótulos tomados de la navegación municipal de referencia. Los identificadores
+// no cambian: se usan en enlaces `?tab=` repartidos por el producto.
 const TAB_DEFINITIONS: TabDefinition[] = [
-  { id: "summary", label: "Resumen", icon: Landmark },
+  { id: "summary", label: "Información", icon: Landmark },
   { id: "ordinances", label: "Normativa", icon: BookOpen },
-  { id: "facilities", label: "Instalaciones", icon: Wrench },
+  { id: "facilities", label: "Servicios municipales", icon: Wrench },
   { id: "people", label: "Personal", icon: Users },
   { id: "roadmap", label: "Hoja de ruta", icon: ClipboardList },
 ];
