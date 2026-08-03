@@ -166,8 +166,6 @@
   display: inline-flex;
 }
 
-/* El prototipo las pinta a 12,5 px; aquí suben a 14,4 porque a ese tamaño
-   resultaban ilegibles en la pantalla real. */
 .areaTabs button {
   display: inline-flex;
   align-items: center;
@@ -178,7 +176,8 @@
   color: var(--text-secondary);
   background: transparent;
   cursor: pointer;
-  font-size: 0.9rem;
+  /* 12,5 px del prototipo. */
+  font-size: 0.781rem;
   font-weight: 600;
   line-height: 1.2;
   white-space: nowrap;

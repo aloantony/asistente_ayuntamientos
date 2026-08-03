@@ -286,3 +286,60 @@ esas pestañas, para no perder funciones conectadas al backend.
 `isInstalaciones` es el **mapa incrustado**, con `height:min(720px, calc(100vh - 250px))` y las
 cinco agrupaciones de capas `isBase`, `isTerritorio`, `isUrbanismo`, `isInfra`, `isAnalisis`.
 Hoy la pestaña solo enlaza a `/mapa`.
+
+## 8. CORRECCIÓN (2026-08-03): el diseño completo llegó por GitHub
+
+Anthony subió el proyecto exportado a la rama `agent/add-fuentelcesped-design-export`:
+`design/exports/Fuentelcesped - Pantalla Principal (standalone).html`, **9,4 MB**. El standalone
+lleva la plantilla `.dc` incrustada como literales JavaScript; desescapada quedan 9,3 MB. La copia
+con la que se trabajó hasta ahora eran 262.144 bytes: el **2,8 %** del diseño.
+
+Copia durable desescapada: `~/.claude/plans/assets/pantalla-principal-COMPLETA.dc.html`.
+
+### 8.1 Lo que §7 acertó
+
+La estructura de la pantalla «Ayuntamiento» es exactamente la descrita en §7.2: fila de pestañas
+configurables (`aySecTabs`) con el botón «Gestionar pestañas» delante, y debajo los epígrafes
+apilados en tarjetas arrastrables. Las medidas de §7.2 son correctas y siguen valiendo.
+
+### 8.2 Lo que §7 se inventó por leer solo el 2,8 %
+
+**«Hoja de ruta» sí está en el diseño.** §7.3 afirma que no aparece «ni una sola vez»: falso. Es
+una pantalla propia, `isRuta`, con su `data-screen-label="Hoja de ruta"`.
+
+Y no está sola. El diseño tiene **trece pantallas de primer nivel**, no tres:
+
+| Bandera | Pantalla |
+|---|---|
+| `isInicio` | Inicio |
+| `isAyuntamiento` | Ayuntamiento |
+| `isInstalaciones` | Instalaciones (mapa + capas) |
+| `isAdmon` | Administración |
+| `isPersonalModule` | Módulo Personal |
+| `isRuta` | Hoja de ruta |
+| `isSede` | Sede electrónica |
+| `isNecesidades` | Necesidades |
+| `isMapa` | Mapa |
+| `isProyectos` | Proyectos |
+| `isAnacleto` | Anacleto |
+| `isCuenta` | Mi cuenta |
+| `isGroupView` | Vista de grupo (dentro de Instalaciones) |
+
+Dentro de Instalaciones, las agrupaciones de capas son seis, no cinco: `isBase`, `isTerritorio`,
+`isUrbanismo`, `isInfra`, `isAnalisis` y `isPatrimonio`.
+
+Secciones marcadas con banner en el fichero: INICIO · BARRA SUPERIOR GLOBAL (ayuntamiento + ruta) ·
+AYUNTAMIENTO · FICHAS Y MANTENIMIENTO (paneles bajo el mapa) · FICHA URBANÍSTICA (recinto) ·
+FICHA TÉCNICA DEL ELEMENTO · CONFIGURACIÓN (reventa a otros ayuntamientos) · MÓDULO PERSONAL ·
+DASHBOARD: CONTROL PERSONAL · FICHA DEL TRABAJADOR · CONTROL DE ASISTENCIA · HOJA DE RUTA ·
+SEDE ELECTRÓNICA · NECESIDADES · MAPA · PROYECTOS · ANACLETO · MI CUENTA.
+
+### 8.3 Consecuencia para las cinco pestañas
+
+`MunicipalWorkspace` sirve Resumen · Normativa · Instalaciones · Personal · Hoja de ruta como
+pestañas *dentro* del Ayuntamiento. En el diseño, **Instalaciones, Personal y Hoja de ruta son
+pantallas de primer nivel**, hermanas del Ayuntamiento, no pestañas suyas. Las pestañas del
+Ayuntamiento son las configurables `aySecTabs`.
+
+Así que el diagnóstico de §7.3 —«las cinco pestañas no salen del diseño»— era medio falso: los
+nombres sí salen, lo que está mal es **el nivel de navegación en el que viven**.
