@@ -77,4 +77,3 @@ export function Personal({ organization }: { organization: Organization }) {
     </div>
   );
 }
-
