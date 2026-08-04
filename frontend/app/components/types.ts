@@ -1803,3 +1803,77 @@ export type StaffInvoice = {
   created_at: string;
   updated_at: string;
 };
+
+// Hoja de ruta municipal. "Vencida" no aparece como campo: se deriva de
+// `due_date` contra la fecha del servidor, que llega en el resumen.
+
+export type MunicipalTaskStatus =
+  | "pending"
+  | "in_progress"
+  | "blocked"
+  | "completed"
+  | "cancelled";
+
+export type MunicipalTaskPriority = "low" | "normal" | "high" | "urgent";
+
+export type MunicipalTaskEventType =
+  | "created"
+  | "updated"
+  | "status_changed"
+  | "assigned";
+
+export type TaskAssignee = {
+  id: number;
+  full_name: string;
+};
+
+export type TaskProject = {
+  id: number;
+  name: string;
+};
+
+export type MunicipalTask = {
+  id: number;
+  organization_id: number;
+  title: string;
+  description: string | null;
+  status: MunicipalTaskStatus;
+  priority: MunicipalTaskPriority;
+  due_date: string | null;
+  blocked_reason: string | null;
+  completed_at: string | null;
+  assignee_worker_id: number | null;
+  project_id: number | null;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  assignee: TaskAssignee | null;
+  project: TaskProject | null;
+};
+
+export type MunicipalTaskEvent = {
+  id: number;
+  task_id: number;
+  organization_id: number;
+  event_type: MunicipalTaskEventType;
+  from_status: MunicipalTaskStatus | null;
+  to_status: MunicipalTaskStatus | null;
+  changed_fields: string[];
+  note: string | null;
+  actor_id: number | null;
+  created_at: string;
+};
+
+export type MunicipalTaskSummary = {
+  total: number;
+  pending: number;
+  in_progress: number;
+  blocked: number;
+  completed: number;
+  cancelled: number;
+  overdue: number;
+  unassigned: number;
+  /** Fecha del servidor con la que se ha decidido qué está vencido. */
+  reference_date: string;
+};

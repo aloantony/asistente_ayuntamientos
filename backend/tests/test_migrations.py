@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260803_0034"
+HEAD_REVISION = "20260804_0035"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1004,6 +1004,79 @@ ASSET_SUPPORTING_UNIQUE_CONSTRAINTS = {
     "geo_locations": {"uq_geo_locations_id_org_municipality"},
 }
 
+ROADMAP_SCHEMA = {
+    "municipal_tasks": {
+        "columns": {
+            "id",
+            "organization_id",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "due_date",
+            "blocked_reason",
+            "completed_at",
+            "assignee_worker_id",
+            "project_id",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_municipal_tasks_org_status_due",
+            "ix_municipal_tasks_assignee_status",
+            "ix_municipal_tasks_project_status",
+            "ix_municipal_tasks_created_by_id",
+            "ix_municipal_tasks_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("project_id", "organization_id"),
+            ("assignee_worker_id", "organization_id"),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_municipal_tasks_status",
+            "ck_municipal_tasks_priority",
+            "ck_municipal_tasks_title",
+            "ck_municipal_tasks_blocked_reason",
+            "ck_municipal_tasks_completed_at",
+        },
+        "unique_constraints": {"uq_municipal_tasks_id_org"},
+    },
+    "municipal_task_events": {
+        "columns": {
+            "id",
+            "task_id",
+            "organization_id",
+            "event_type",
+            "from_status",
+            "to_status",
+            "changed_fields",
+            "note",
+            "actor_id",
+            "created_at",
+        },
+        "indexes": {
+            "ix_municipal_task_events_task",
+            "ix_municipal_task_events_org_created",
+            "ix_municipal_task_events_actor_id",
+        },
+        "foreign_keys": {
+            ("task_id", "organization_id"),
+            ("actor_id",),
+        },
+        "checks": {
+            "ck_municipal_task_events_type",
+            "ck_municipal_task_events_from_status",
+            "ck_municipal_task_events_to_status",
+        },
+        "unique_constraints": set(),
+    },
+}
+
 GOVERNMENT_STAFF_SCHEMA = {
     "government_members": {
         "columns": {
@@ -1637,6 +1710,35 @@ def assert_maintenance_schema(inspector: Inspector) -> None:
         } == expected["unique_constraints"]
 
 
+def assert_roadmap_schema(inspector: Inspector) -> None:
+    for table_name, expected in ROADMAP_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+    # "Vencida" no es una columna: es una lectura del calendario. Si algún día
+    # alguien la materializa, este test tiene que enterarse.
+    assert "overdue" not in {
+        column["name"] for column in inspector.get_columns("municipal_tasks")
+    }
+
+
 def assert_government_staff_schema(inspector: Inspector) -> None:
     for table_name, expected in GOVERNMENT_STAFF_SCHEMA.items():
         assert {
@@ -1769,6 +1871,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(upgraded_inspector)
         assert_maintenance_schema(upgraded_inspector)
         assert_government_staff_schema(upgraded_inspector)
+        assert_roadmap_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(upgraded_inspector)
@@ -1801,6 +1904,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert set(GOVERNMENT_STAFF_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert set(ROADMAP_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -1816,6 +1922,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_asset_inventory_schema(reupgraded_inspector)
         assert_maintenance_schema(reupgraded_inspector)
         assert_government_staff_schema(reupgraded_inspector)
+        assert_roadmap_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(reupgraded_inspector)
@@ -3127,6 +3234,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_government_staff_schema(inspect(engine))
+        assert_roadmap_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
@@ -3144,6 +3252,9 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert set(GOVERNMENT_STAFF_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert set(ROADMAP_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -3159,6 +3270,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
         assert_government_staff_schema(inspect(engine))
+        assert_roadmap_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))

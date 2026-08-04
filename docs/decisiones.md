@@ -367,3 +367,38 @@ un error de captura.
 La revisión Alembic `20260803_0034` se serializa detrás de `20260717_0033`
 conforme a ADR-033, y `test_migrations.py` fija la huella estructural de las
 siete tablas nuevas en las dos direcciones del grafo.
+## ADR-036: La hoja de ruta y el estado "vencida" como lectura, no como dato (2026-08-04)
+
+La hoja de ruta municipal necesita un dominio propio, `backend/app/tasks/`, con
+`municipal_tasks` y su rastro append-only `municipal_task_events`. No se apoya en
+`maintenance_orders` porque aquel dominio existe para el mantenimiento de un
+activo concreto y exige uno; buena parte del trabajo de un ayuntamiento pequeño
+no cuelga de ningún activo ni de ningún expediente. Una tarea puede referirse a
+un proyecto y asignarse a alguien de la plantilla, pero ninguna de las dos cosas
+es obligatoria, y ambas se atan con claves ajenas compuestas
+`(id, organization_id)` para que no crucen de ayuntamiento.
+
+**"Vencida" no es un estado ni una columna.** El diseño la presenta junto a
+"bloqueada" o "en curso", pero no es de la misma naturaleza: bloqueada describe
+una decisión de alguien, vencida solo dice que la fecha límite ya pasó y la
+tarea sigue abierta. Materializarla obligaría a un proceso que reescribiese
+filas cada medianoche, y entre ejecución y ejecución la base contendría datos
+que ya no son ciertos. Se calcula en la consulta contra `current_date` del
+servidor, y `GET /tasks/summary` devuelve además el `reference_date` que ha
+usado, para que la interfaz decida con la misma fecha que el backend y no con el
+reloj del navegador. `test_migrations.py` comprueba que la columna no existe, de
+modo que un futuro intento de guardarla no pase inadvertido.
+
+El grafo de transiciones es explícito y una tarea cerrada no se edita: se reabre
+a `pending` y desde ahí vuelve a moverse. Así la reapertura queda en el
+histórico en lugar de disimularse como un salto directo. Bloquear exige motivo
+—una tarea bloqueada sin decir qué la bloquea no la puede desatascar nadie, y un
+`CHECK` lo garantiza en la base—, y cancelar o reabrir exigen explicación,
+porque borran o revierten una decisión anterior. Cancelar y reabrir piden
+`tasks.manage`; el resto del movimiento diario vive en `tasks.edit`.
+
+La pantalla deja de ser una pestaña de `/ayuntamiento` y pasa a ruta propia
+`/hoja-de-ruta`, con la entrada de la barra superior apuntando ahí. Cruza
+tareas, proyectos y corporación, y no cabe dentro de la ficha de un municipio.
+La revisión Alembic `20260804_0035` se serializa detrás de `20260803_0034`
+conforme a ADR-033.

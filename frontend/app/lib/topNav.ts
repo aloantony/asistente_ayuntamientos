@@ -109,7 +109,10 @@ export const TOP_NAV_SECTIONS: TopNavSection[] = [
   {
     id: "hoja-de-ruta",
     label: "HOJA DE RUTA",
-    href: "/ayuntamiento?tab=roadmap",
+    // Deja de ser una pestaña del ayuntamiento y pasa a pantalla propia: la
+    // hoja de ruta cruza tareas, proyectos y corporación, y no cabe dentro de
+    // la ficha del municipio.
+    href: "/hoja-de-ruta",
     enabled: true,
     items: [],
   },
