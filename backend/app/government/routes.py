@@ -146,7 +146,6 @@ def update_government_member(
         updates.get("term_end_date", member.term_end_date),
     )
 
-
     for field, value in updates.items():
         setattr(member, field, value)
     member.updated_by_id = current_user.id

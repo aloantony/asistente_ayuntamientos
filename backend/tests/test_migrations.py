@@ -2832,9 +2832,11 @@ def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
         assert refused.returncode != 0
         assert "immutable reference delivery evidence exists" in refused.stderr
         with engine.connect() as connection:
+            # El downgrade rechazado no puede mover el sello: la base sigue
+            # donde la dejó el `upgrade head` anterior, sea cual sea la cabeza.
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "20260717_0033"
+            ).scalar_one() == HEAD_REVISION
     finally:
         engine.dispose()
 

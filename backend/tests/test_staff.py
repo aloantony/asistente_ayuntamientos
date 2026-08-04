@@ -461,8 +461,10 @@ def test_absences_are_scoped_to_their_worker(
     grant_permissions,
     superuser,
 ):
+    # Anotar una ausencia exige `staff.edit`; listarla, `staff.view`. Quien
+    # lleva el día a día del personal tiene los dos.
     editor = make_user()
-    grant_permissions(editor, staff_organization, ["staff.edit"])
+    grant_permissions(editor, staff_organization, ["staff.view", "staff.edit"])
     auth = headers_for(editor)
     worker = create_worker(client, headers_for(superuser), staff_organization.id)
     other_worker = create_worker(
@@ -529,7 +531,7 @@ def test_diary_entries_need_content_and_record_their_author(
     superuser,
 ):
     editor = make_user()
-    grant_permissions(editor, staff_organization, ["staff.edit"])
+    grant_permissions(editor, staff_organization, ["staff.view", "staff.edit"])
     auth = headers_for(editor)
     worker = create_worker(client, headers_for(superuser), staff_organization.id)
 
@@ -589,7 +591,7 @@ def test_invoices_belong_to_external_staff_only(
     )
 
     editor = make_user()
-    grant_permissions(editor, staff_organization, ["staff.edit"])
+    grant_permissions(editor, staff_organization, ["staff.view", "staff.edit"])
     auth = headers_for(editor)
 
     denied = client.post(
@@ -620,6 +622,45 @@ def test_invoices_belong_to_external_staff_only(
 
     listed = client.get(f"/staff/workers/{external['id']}/invoices", headers=auth)
     assert [item["id"] for item in listed.json()] == [accepted.json()["id"]]
+
+
+def test_edit_alone_writes_but_does_not_read(
+    client,
+    make_user,
+    staff_organization,
+    grant_permissions,
+    superuser,
+):
+    """`staff.edit` no arrastra `staff.view`, igual que en el inventario.
+
+    Los permisos de este producto son independientes y `manage` es el paraguas:
+    quien solo puede escribir no obtiene de regalo el acceso a los datos
+    laborales de la plantilla. Un rol de uso diario se compone con los dos.
+    """
+    worker = create_worker(client, headers_for(superuser), staff_organization.id)
+    editor = make_user()
+    grant_permissions(editor, staff_organization, ["staff.edit"])
+    auth = headers_for(editor)
+
+    written = client.post(
+        f"/staff/workers/{worker['id']}/absences",
+        json={
+            "absence_type": "vacation",
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-15",
+        },
+        headers=auth,
+    )
+    denied_read = client.get(
+        f"/staff/workers/{worker['id']}/absences",
+        headers=auth,
+    )
+    denied_detail = client.get(f"/staff/workers/{worker['id']}", headers=auth)
+
+    assert written.status_code == 201
+    assert denied_read.status_code == 403
+    assert denied_read.json()["detail"] == "Permission required: staff.view"
+    assert denied_detail.status_code == 403
 
 
 def test_workers_from_other_organizations_are_never_listed(
