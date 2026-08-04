@@ -402,3 +402,41 @@ La pantalla deja de ser una pestaña de `/ayuntamiento` y pasa a ruta propia
 tareas, proyectos y corporación, y no cabe dentro de la ficha de un municipio.
 La revisión Alembic `20260804_0035` se serializa detrás de `20260803_0034`
 conforme a ADR-033.
+## ADR-037: Series municipales propias junto a las cifras oficiales (2026-08-04)
+
+La pantalla del municipio necesita empadronamiento, clima, parque de viviendas y
+abastecimiento de agua. Todo eso vive en `backend/app/municipal_data/`, separado
+de `municipalities`, porque responde a una pregunta distinta: `municipalities`
+guarda la ficha oficial del municipio —una fila, con su procedencia INE y su
+huella de descarga—, mientras que estas tablas guardan **series temporales que
+mantiene el ayuntamiento**. Meterlas en la ficha habría obligado a decidir qué
+año es "el" año.
+
+Padrón municipal y cifra oficial del INE conviven a propósito. El padrón se
+cierra antes que la cifra oficial y los ayuntamientos trabajan con él durante
+meses; presentarlos como el mismo dato llevaría a discusiones sobre cuál está
+mal. Por eso cada fila lleva `source` (`municipal`, `ine`, `aemet`, `other`) y la
+serie propia no sobreescribe la del INE que ya resuelve
+`municipalities/ine_population.py`.
+
+`climate_records` cubre año y mes en una sola tabla: `reference_month` nulo es el
+resumen anual y con mes la fila es mensual. Duplicar el esquema para lo mismo a
+dos granularidades habría obligado a mantener dos veces cada validación. La
+unicidad es por `(organización, año, mes)`, de modo que la fila anual y las doce
+mensuales del mismo año conviven sin chocar.
+
+Los contadores de agua son la única parte que se sitúa en el territorio, así que
+son los únicos que exigen que la organización tenga municipio, igual que el
+inventario; el resto de series no lo necesita y no lo pide. Las lecturas son una
+por contador y día —dos lecturas del mismo día se contradicen— y el consumo se
+deriva restando lecturas consecutivas en lugar de guardarse, por la misma razón
+que "vencida" no es columna en ADR-036: un dato calculable que se almacena
+empieza a envejecer en cuanto cambia el que lo origina.
+
+Los permisos son `municipal_data.view|edit|manage`. No hay `create` separado
+porque estas series se rellenan y se corrigen en el mismo gesto —una cifra de
+padrón mal tecleada se arregla, no se archiva—, y distinguir crear de editar solo
+habría añadido un permiso que nadie concedería por separado.
+
+La revisión Alembic `20260804_0036` se serializa detrás de `20260804_0035`
+conforme a ADR-033.

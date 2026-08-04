@@ -12,6 +12,7 @@ from app.documents import models as document_models  # noqa: F401
 from app.geo import models as geo_models  # noqa: F401
 from app.government import models as government_models  # noqa: F401
 from app.maintenance import models as maintenance_models  # noqa: F401
+from app.municipal_data import models as municipal_data_models  # noqa: F401
 from app.municipalities import models as municipality_models  # noqa: F401
 from app.ordinances import models as ordinance_models  # noqa: F401
 from app.organizations import models as organization_models  # noqa: F401
