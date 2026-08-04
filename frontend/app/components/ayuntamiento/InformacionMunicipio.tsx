@@ -1,7 +1,8 @@
 "use client";
 import type { MunicipalCollection } from "../../lib/municipalWorkspace";
 
-import { BookOpen, Building2, ClipboardList, CloudSun, Database, Droplets, Hammer, MapPin, UserRound, Users, Wrench } from "lucide-react";
+import { BookOpen, ClipboardList, CloudSun, Database, Droplets, Hammer, MapPin, UserRound, Users, Wrench } from "lucide-react";
+import type { ReactNode } from "react";
 import styles from "../MunicipalWorkspace.module.css";
 import {
   type MaintenanceOrder,
@@ -33,6 +34,7 @@ export function InformacionMunicipio({
   canViewOrdinances,
   canViewAssets,
   canViewMaintenance,
+  governmentSection,
   onTabChange,
 }: {
   municipality: Municipality;
@@ -44,6 +46,8 @@ export function InformacionMunicipio({
   canViewOrdinances: boolean;
   canViewAssets: boolean;
   canViewMaintenance: boolean;
+  /** Corporación municipal; llega montada para no acoplar la ficha al dominio. */
+  governmentSection: ReactNode;
   onTabChange: (tab: WorkspaceTab) => void;
 }) {
   return (
@@ -165,6 +169,8 @@ export function InformacionMunicipio({
         </article>
       </div>
 
+      {governmentSection}
+
       <section className={styles.card}>
         <SectionHeading
           description="Accesos directos a la información que ya está conectada al backend."
@@ -215,11 +221,6 @@ export function InformacionMunicipio({
         />
         <div className={styles.notConfiguredGrid}>
           <NotConfigured
-            description="No hay un registro validado de alcaldía, concejalías u órganos colegiados."
-            icon={Building2}
-            title="Gobierno y corporación"
-          />
-          <NotConfigured
             description="No existe una serie meteorológica municipal conectada y trazable."
             icon={CloudSun}
             title="Clima"
@@ -234,4 +235,3 @@ export function InformacionMunicipio({
     </div>
   );
 }
-

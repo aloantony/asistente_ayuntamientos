@@ -38,6 +38,19 @@ STAFF_WORKER_STATUSES = ("active", "vacation", "leave", "archived")
 
 STAFF_ABSENCE_TYPES = ("vacation", "personal", "sick_leave", "other")
 
+# Días de atención de un puesto, de lunes a domingo. La ficha del diseño
+# presenta la semana completa porque alguacil y servicios sí trabajan fines de
+# semana; se guardan como lista JSON, no como siete columnas booleanas.
+STAFF_SCHEDULE_DAYS = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
 # El diario es la nota breve del día; el reporte, el parte con más detalle.
 STAFF_REPORT_TYPES = ("diary", "report")
 

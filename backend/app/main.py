@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
 from app.geo.routes import router as geo_router
+from app.government.routes import router as government_router
 from app.maintenance.routes import router as maintenance_router
 from app.municipalities.routes import router as municipalities_router
 from app.ordinances.routes import router as ordinances_router
@@ -25,6 +26,7 @@ from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
 from app.reference_layers.routes import router as reference_layers_router
 from app.reference_layers.wms_middleware import ReferenceWMSVaryMiddleware
+from app.staff.routes import router as staff_router
 from app.telegram.routes import router as telegram_router
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,8 @@ for app_router in (
     reference_layers_router,
     assets_router,
     maintenance_router,
+    government_router,
+    staff_router,
     assistant_router,
     agent_office_router,
     telegram_router,

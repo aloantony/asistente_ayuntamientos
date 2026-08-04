@@ -15,9 +15,9 @@ MODEL_MODULES = (
     "app.organizations.models",
     "app.projects.models",
     "app.rbac.models",
-    "app.staff.models",
     "app.requirements.models",
     "app.reference_layers.models",
+    "app.staff.models",
     "app.telegram.models",
     "app.users.models",
 )

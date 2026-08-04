@@ -312,3 +312,58 @@ simultáneos; los módulos ya son el patrón de las superficies recientes. En
 `styles.css` solo se añaden tokens compartidos: `--status-blocked` y
 `--status-overdue`, que los estados de la hoja de ruta necesitan en ambos temas
 y que no pueden expresarse con `--danger-fg` o `--accent` sin perder significado.
+## ADR-035: Dominios tenant-scoped de gobierno y personal (2026-08-03)
+
+La pantalla del ayuntamiento necesita dos realidades que hasta ahora no existían
+en el modelo: quién gobierna el municipio y quién trabaja en él. Se separan en
+dos dominios, `backend/app/government/` y `backend/app/staff/`, porque responden
+a preguntas distintas y se rigen por reglas distintas. La corporación —alcaldía,
+tenencias, concejalías y secretaría— es información pública que acaba en la sede
+electrónica; la plantilla es información laboral, sensible, de acceso mucho más
+restringido. Mezclarlas en una tabla de «personas del ayuntamiento» habría
+obligado a filtrar por rol en cada consulta y a razonar sobre la confidencialidad
+caso por caso.
+
+Ambos dominios se anclan a `organizations`, no a `municipalities`. La
+organización es la unidad de aislamiento del producto y la que ya sostiene el
+modelo de permisos; el municipio describe el territorio. Un cargo o un puesto se
+pueden registrar antes de que el municipio esté dado de alta, así que —a
+diferencia del inventario, que sí exige municipio para poder situar un activo en
+el mapa— aquí las escrituras sólo requieren que la organización esté activa. Las
+lecturas se admiten también con la organización pausada, en modo consulta, igual
+que en el resto de superficies municipales. Las claves ajenas compuestas
+`(id, organization_id)` impiden que un puesto cuelgue de la plantilla de otro
+ayuntamiento o que una ausencia se enganche a una persona ajena: el aislamiento
+se sostiene en la base, no sólo en el filtro de la consulta.
+
+La plantilla se modela como puesto y persona separados, porque el puesto
+sobrevive a quien lo ocupa: en un municipio pequeño el arquitecto puede estar a
+tiempo parcial, vacante o compartido con otro ayuntamiento, y el histórico debe
+seguir siendo legible cuando cambia el titular. `staff_posts` admite además
+contenedores que agrupan puestos sin poder ocuparse, para reproducir la
+estructura por servicios del diseño. Un puesto lo ocupa como mucho una persona a
+la vez, garantizado por índice único; los ciclos del árbol se cierran en la ruta,
+porque la base sólo puede impedir que un puesto sea su propio padre.
+
+Los permisos siguen la gradación del inventario, adaptada a lo que cada dominio
+puede sufrir. Gobierno usa `government.view` y `government.manage`: la
+corporación cambia en bloque tras unas elecciones, no campo a campo, y no
+justifica un nivel intermedio. Personal usa `staff.view`, `staff.edit` y
+`staff.manage`: corregir un teléfono, anotar una ausencia o abrir un parte de
+trabajo es rutina diaria y vive en `edit`, mientras que tocar la estructura de
+puestos o archivar a una persona —que la retira de las vistas— exige `manage`.
+Los cargos y las fichas no se borran: se archivan, para que actas, acuerdos y
+partes antiguos sigan siendo interpretables.
+
+Toda modificación de una ficha de personal deja un evento en
+`staff_history_events`, append-only. Son datos laborales y su edición tiene que
+poder auditarse: un cambio de estado, de puesto o de campos queda registrado con
+su autor y su momento, en lugar de sobrescribirse en silencio. El diario y los
+partes (`staff_reports`) y las facturas del personal externo (`staff_invoices`)
+cuelgan de la persona y heredan su organización; facturar sólo se admite en
+quien está marcado como externo, porque en alguien de nómina sería casi siempre
+un error de captura.
+
+La revisión Alembic `20260803_0034` se serializa detrás de `20260717_0033`
+conforme a ADR-033, y `test_migrations.py` fija la huella estructural de las
+siete tablas nuevas en las dos direcciones del grafo.
