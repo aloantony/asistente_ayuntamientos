@@ -123,7 +123,6 @@ def upgrade() -> None:
     sa.CheckConstraint("status in ('active', 'inactive', 'removed')", name='ck_water_meters_status'),
     sa.ForeignKeyConstraint(['location_id', 'organization_id', 'municipality_id'], ['geo_locations.id', 'geo_locations.organization_id', 'geo_locations.municipality_id'], name='fk_water_meters_location_tenant', ondelete='NO ACTION', initially='DEFERRED', deferrable=True, match='SIMPLE'),
     sa.ForeignKeyConstraint(['location_id'], ['geo_locations.id'], ondelete='SET NULL'),
-    sa.ForeignKeyConstraint(['municipality_id'], ['municipalities.id'], ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['organization_id', 'municipality_id'], ['organizations.id', 'organizations.municipality_id'], name='fk_water_meters_organization_municipality', ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['supply_id', 'organization_id'], ['utility_supplies.id', 'utility_supplies.organization_id'], name='fk_water_meters_supply_org', ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id'),

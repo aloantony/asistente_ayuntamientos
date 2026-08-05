@@ -363,10 +363,14 @@ class WaterMeter(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     organization_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    municipality_id: Mapped[int] = mapped_column(
-        ForeignKey("municipalities.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # Sin clave ajena directa a `municipalities`, a diferencia del inventario.
+    # La compuesta hacia `organizations(id, municipality_id)` ya obliga a que el
+    # municipio sea el de la organización, y `organizations.municipality_id`
+    # apunta a su vez a `municipalities`: la integridad se mantiene por
+    # transitividad. Añadir además la directa haría que soltar esta tabla en un
+    # downgrade pidiera un lock exclusivo sobre `municipalities`, y bastaría un
+    # escritor abierto para que la bajada se quedara esperando en vez de fallar.
+    municipality_id: Mapped[int] = mapped_column(Integer, nullable=False)
     supply_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     location_id: Mapped[int | None] = mapped_column(
         ForeignKey("geo_locations.id", ondelete="SET NULL"),
