@@ -21,6 +21,7 @@ from app.municipal_data.routes import router as municipal_data_router
 from app.municipalities.routes import router as municipalities_router
 from app.ordinances.routes import router as ordinances_router
 from app.ordinances.seed import ensure_initial_official_legal_sources
+from app.organizations.branding_routes import router as branding_router
 from app.organizations.routes import router as organizations_router
 from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
@@ -30,6 +31,7 @@ from app.reference_layers.wms_middleware import ReferenceWMSVaryMiddleware
 from app.staff.routes import router as staff_router
 from app.tasks.routes import router as tasks_router
 from app.telegram.routes import router as telegram_router
+from app.weather.routes import router as weather_router
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,8 @@ for app_router in (
     staff_router,
     tasks_router,
     municipal_data_router,
+    weather_router,
+    branding_router,
     assistant_router,
     agent_office_router,
     telegram_router,
