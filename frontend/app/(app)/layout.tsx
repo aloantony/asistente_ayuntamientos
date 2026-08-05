@@ -766,6 +766,7 @@ export default function AppLayout({
           {showTopNav ? (
             <TopBar
               activeSectionId={activeTopNavSectionId}
+              municipalityId={user.organizations?.[0]?.municipality?.id ?? null}
               municipalityName={brandName}
             />
           ) : null}

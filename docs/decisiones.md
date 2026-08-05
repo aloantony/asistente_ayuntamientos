@@ -482,3 +482,29 @@ integridad no cambia: la clave compuesta hacia `organizations(id,
 municipality_id)` ya obliga a que el municipio sea el de la organización, y esa
 columna apunta a su vez a `municipalities`. La lección es que una clave ajena
 redundante no es gratis: se paga en los locks del downgrade.
+## ADR-039: Gráficas propias en SVG y degradación silenciosa (2026-08-04)
+
+Las series del municipio se dibujan con dos componentes SVG escritos aquí,
+`LineChart` y `BarChart`, en lugar de incorporar una librería de gráficas. Son
+series de pocos puntos —un valor por año o por mes— con dos formas: una línea
+para lo continuo y unas barras para lo discreto. Cualquier librería del ramo pesa
+más que toda la pantalla que la usaría, y traería su propio modelo de temas justo
+cuando ADR-034 acaba de fijar que lo visual va en CSS Modules con los tokens del
+producto.
+
+El pie visible de la figura es también el nombre accesible del SVG,
+mediante `aria-labelledby`; la primera versión repetía el título dentro de un
+`<title>` y un lector de pantalla lo habría anunciado dos veces.
+
+**Los adornos informativos degradan en silencio.** El bloque de temperatura de la
+barra superior y las series de la ficha municipal comparten una regla: cuando su
+consulta falla, no se dibujan y no levantan bandera de error. Ninguno de los dos
+sostiene una decisión municipal, y un aviso rojo en la cabecera institucional le
+daría a una avería del servicio del tiempo el mismo peso visual que a un problema
+del ayuntamiento. Se distingue lo vacío de lo roto donde importa —el inventario,
+la plantilla, la hoja de ruta avisan— y se calla donde no.
+
+Las series se piden siempre, sin condicionarlas a un permiso en el cliente: si la
+cuenta no tiene `municipal_data.view`, la petición vuelve con 403 y el bloque
+enseña su estado vacío, que dice lo mismo sin duplicar la regla de autorización
+en dos sitios.

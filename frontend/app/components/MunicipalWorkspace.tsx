@@ -32,7 +32,13 @@ import {
 } from "../lib/permissions";
 import { useSession } from "../lib/session";
 import styles from "./MunicipalWorkspace.module.css";
+import {
+  fetchClimateSeries,
+  fetchHouseholdSeries,
+  fetchPadronSeries,
+} from "../lib/municipalData";
 import { EstructuraGobierno } from "./ayuntamiento/EstructuraGobierno";
+import { SeriesMunicipio } from "./ayuntamiento/SeriesMunicipio";
 import { HojaDeRuta } from "./ayuntamiento/HojaDeRuta";
 import { InformacionMunicipio } from "./ayuntamiento/InformacionMunicipio";
 import { Normativa } from "./ayuntamiento/Normativa";
@@ -48,7 +54,10 @@ import {
 import type { ResourceErrors, WorkspaceTab } from "./ayuntamiento/types";
 import {
   userHasPermission,
+  type ClimateRecord,
   type GovernmentMember,
+  type HouseholdStat,
+  type PadronRecord,
   type MaintenanceOrder,
   type Municipality,
   type MunicipalAsset,
@@ -142,6 +151,11 @@ export function MunicipalWorkspace() {
   const [staffPosts, setStaffPosts] = useState<
     MunicipalCollection<StaffPost> | null
   >(null);
+  // Las series son un adorno informativo: si fallan, la ficha sigue en pie y
+  // el bloque muestra su estado vacío, sin bandera de error propia.
+  const [padron, setPadron] = useState<PadronRecord[]>([]);
+  const [climate, setClimate] = useState<ClimateRecord[]>([]);
+  const [households, setHouseholds] = useState<HouseholdStat[]>([]);
   const [resourceErrors, setResourceErrors] = useState<ResourceErrors>(
     EMPTY_RESOURCE_ERRORS,
   );
@@ -207,6 +221,9 @@ export function MunicipalWorkspace() {
       setGovernment(null);
       setStaffWorkers(null);
       setStaffPosts(null);
+      setPadron([]);
+      setClimate([]);
+      setHouseholds([]);
       setError("");
       setResourceErrors(EMPTY_RESOURCE_ERRORS);
       setIsLoading(false);
@@ -226,6 +243,9 @@ export function MunicipalWorkspace() {
     setGovernment(null);
     setStaffWorkers(null);
     setStaffPosts(null);
+    setPadron([]);
+    setClimate([]);
+    setHouseholds([]);
     setError("");
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setIsLoading(true);
@@ -240,6 +260,9 @@ export function MunicipalWorkspace() {
         governmentResult,
         staffWorkerResult,
         staffPostResult,
+        padronResult,
+        climateResult,
+        householdResult,
       ] = await Promise.allSettled([
         fetchMunicipality(municipalityId, controller.signal),
         fetchMunicipalOrganization(organizationId, controller.signal),
@@ -261,6 +284,9 @@ export function MunicipalWorkspace() {
         canViewStaff
           ? fetchStaffPosts(organizationId, controller.signal)
           : Promise.resolve(null),
+        fetchPadronSeries(organizationId, controller.signal),
+        fetchClimateSeries(organizationId, undefined, controller.signal),
+        fetchHouseholdSeries(organizationId, controller.signal),
       ] as const);
 
       if (
@@ -367,6 +393,18 @@ export function MunicipalWorkspace() {
           "No se pudo cargar la plantilla municipal.",
         );
       }
+
+      // Las series no levantan bandera de error: sin permiso o sin datos el
+      // bloque enseña su estado vacío, que dice lo mismo sin alarmar.
+      if (padronResult.status === "fulfilled") {
+        setPadron(padronResult.value.items);
+      }
+      if (climateResult.status === "fulfilled") {
+        setClimate(climateResult.value.items);
+      }
+      if (householdResult.status === "fulfilled") {
+        setHouseholds(householdResult.value.items);
+      }
     }
 
     void loadWorkspace().finally(() => {
@@ -460,6 +498,9 @@ export function MunicipalWorkspace() {
     setGovernment(null);
     setStaffWorkers(null);
     setStaffPosts(null);
+    setPadron([]);
+    setClimate([]);
+    setHouseholds([]);
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setError("");
     setIsLoading(true);
@@ -593,6 +634,13 @@ export function MunicipalWorkspace() {
             }
             maintenance={maintenance}
             municipality={municipality}
+            seriesSection={
+              <SeriesMunicipio
+                climate={climate}
+                households={households}
+                padron={padron}
+              />
+            }
             onTabChange={(tab) => selectWorkspaceTab(tab, true)}
             ordinances={ordinances}
             organization={organization}

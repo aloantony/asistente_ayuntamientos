@@ -158,6 +158,34 @@
   justify-self: end;
 }
 
+/* Temperatura del municipio. Sin lectura el bloque no se renderiza, así que
+   este contenedor no reserva hueco ni deja un espacio vacío. */
+.weather {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.weather strong {
+  color: var(--text);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.weather span {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+@media (max-width: 720px) {
+  .weather span {
+    display: none;
+  }
+}
+
 /* Cuando el municipio no cabe en una fila, la barra se apila y la navegación
  * pasa a poder desplazarse en horizontal en lugar de desbordar la página. */
 @media (max-width: 1000px) {
