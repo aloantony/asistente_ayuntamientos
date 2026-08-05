@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260804_0037"
+HEAD_REVISION = "20260805_0038"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1720,6 +1720,45 @@ MUNICIPAL_DATA_TABLES = {
 }
 
 
+ADMINISTRATION_TABLES = {
+    "office_hours",
+    "municipal_procedures",
+    "municipal_licences",
+    "municipal_contracts",
+    "municipal_grants",
+    "transparency_items",
+    "municipal_news",
+    "municipal_notices",
+    "municipal_notice_events",
+}
+
+
+def assert_administration_schema(inspector: Inspector) -> None:
+    """Administracion y comunicacion existen y siguen aisladas por organizacion."""
+    table_names = set(inspector.get_table_names())
+    assert ADMINISTRATION_TABLES <= table_names
+
+    # Las referencias de expediente se numeran por municipio, asi que la misma
+    # en otro ayuntamiento es legitima.
+    for table_name, constraint_name in (
+        ("municipal_licences", "uq_municipal_licences_org_reference"),
+        ("municipal_contracts", "uq_municipal_contracts_org_reference"),
+        ("municipal_procedures", "uq_municipal_procedures_org_slug"),
+        ("municipal_news", "uq_municipal_news_org_slug"),
+    ):
+        assert constraint_name in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+
+    # El historial de un bando se ata por (id, organization_id): retirar uno no
+    # puede alcanzar al de otro ayuntamiento.
+    assert ("notice_id", "organization_id") in {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("municipal_notice_events")
+    }
+
+
 def assert_municipal_data_schema(inspector: Inspector) -> None:
     """Las series municipales existen y siguen aisladas por organización.
 
@@ -1932,6 +1971,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_government_staff_schema(upgraded_inspector)
         assert_roadmap_schema(upgraded_inspector)
         assert_municipal_data_schema(upgraded_inspector)
+        assert_administration_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(upgraded_inspector)
@@ -1970,6 +2010,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert MUNICIPAL_DATA_TABLES.isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert ADMINISTRATION_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -1987,6 +2030,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_government_staff_schema(reupgraded_inspector)
         assert_roadmap_schema(reupgraded_inspector)
         assert_municipal_data_schema(reupgraded_inspector)
+        assert_administration_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(reupgraded_inspector)
@@ -3300,6 +3344,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_government_staff_schema(inspect(engine))
         assert_roadmap_schema(inspect(engine))
         assert_municipal_data_schema(inspect(engine))
+        assert_administration_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
@@ -3323,6 +3368,9 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert MUNICIPAL_DATA_TABLES.isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert ADMINISTRATION_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -3340,6 +3388,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_government_staff_schema(inspect(engine))
         assert_roadmap_schema(inspect(engine))
         assert_municipal_data_schema(inspect(engine))
+        assert_administration_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))

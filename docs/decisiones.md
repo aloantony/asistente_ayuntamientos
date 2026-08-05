@@ -508,3 +508,44 @@ Las series se piden siempre, sin condicionarlas a un permiso en el cliente: si l
 cuenta no tiene `municipal_data.view`, la petición vuelve con 403 y el bloque
 enseña su estado vacío, que dice lo mismo sin duplicar la regla de autorización
 en dos sitios.
+## ADR-040: Administración y comunicación, con la publicación como transición (2026-08-05)
+
+La administración municipal entra en `backend/app/administration/` —horarios de
+atención, trámites, licencias, contratos, subvenciones y publicidad activa— y la
+comunicación en `backend/app/communications/`. Se separan porque tienen dueños
+distintos: la administración la lleva la secretaría y la comunicación, alcaldía.
+Compartir permisos habría obligado a que quien redacta un bando pudiera tocar
+expedientes de licencia.
+
+**Publicar un bando es una transición, no un campo.** Un bando nace en borrador
+y se expone mediante `POST /notices/{id}/publish`, con `communications.publish`,
+distinto de `communications.edit`. Redactar y exponer son actos diferentes:
+exponer produce efectos administrativos y suele corresponder a otra persona.
+Retirarlo exige motivo y **no borra `published_on`**, porque que el bando llegó a
+estar expuesto en esa fecha puede tener que demostrarse después; queda además el
+evento en `municipal_notice_events`, append-only. Reexponer lo retirado se
+rechaza: sería reescribir la historia, y lo correcto es publicar uno nuevo.
+
+Las reglas que expresan una verdad del dominio viven en la base, no solo en
+Pydantic. Una licencia resuelta tiene fecha de resolución y una sin resolver no
+—un `CHECK` con `(status in ('granted','denied')) = (resolved_on is not null)`—;
+un contrato adjudicado tiene adjudicatario e importe; una noticia publicada dice
+desde cuándo. Son afirmaciones que no dependen de qué endpoint escriba la fila.
+
+Los horarios guardan **minutos desde medianoche** en lugar de `TIME`. Comparar y
+ordenar franjas se vuelve aritmética simple y no arrastra la zona horaria que un
+`TIME WITH TIME ZONE` obligaría a razonar; la interfaz los formatea al leerlos.
+El orden de la semana se aplica al servir, porque alfabéticamente «friday» iría
+antes que «monday» y así no lee un horario nadie.
+
+Las referencias de expediente son únicas **por organización**, no globalmente:
+los ayuntamientos numeran sus expedientes por su cuenta y dos municipios pueden
+tener legítimamente el mismo `LIC-2026-01`.
+
+`publish_to_sede` aparece ya en trámites, transparencia, noticias y bandos, sin
+consumidor todavía. La sede electrónica de la fase 7 será read-only sobre estas
+tablas, y la bandera es el contrato que necesita para saber qué sale al público:
+declararla ahora evita una migración que toque cuatro tablas más adelante.
+
+La revisión Alembic `20260805_0038` se serializa detrás de `20260804_0037`
+conforme a ADR-033.

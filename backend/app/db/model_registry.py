@@ -5,7 +5,9 @@ from importlib import import_module
 MODEL_MODULES = (
     "app.agent_office.models",
     "app.assistant.models",
+    "app.administration.models",
     "app.assets.models",
+    "app.communications.models",
     "app.documents.models",
     "app.geo.models",
     "app.government.models",

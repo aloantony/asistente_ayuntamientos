@@ -10,7 +10,9 @@ from app.agent_office.routes import router as agent_office_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.assistant.routes import router as assistant_router
+from app.administration.routes import router as administration_router
 from app.assets.routes import router as assets_router
+from app.communications.routes import router as communications_router
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
@@ -87,6 +89,8 @@ for app_router in (
     staff_router,
     tasks_router,
     municipal_data_router,
+    administration_router,
+    communications_router,
     weather_router,
     branding_router,
     assistant_router,

@@ -1940,3 +1940,129 @@ export type HouseholdStat = {
   created_at: string;
   updated_at: string;
 };
+
+// Administración y comunicación municipal (ADR-040).
+
+export type Weekday =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+export type OfficeHour = {
+  id: number;
+  organization_id: number;
+  office_name: string;
+  weekday: Weekday;
+  /** Minutos desde medianoche. */
+  opens_at: number;
+  closes_at: number;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LicenceKind =
+  | "works"
+  | "opening"
+  | "occupancy"
+  | "environmental"
+  | "other";
+
+export type LicenceStatus =
+  | "requested"
+  | "in_review"
+  | "granted"
+  | "denied"
+  | "expired"
+  | "withdrawn";
+
+export type MunicipalLicence = {
+  id: number;
+  organization_id: number;
+  reference: string;
+  kind: LicenceKind;
+  applicant: string;
+  address: string | null;
+  summary: string | null;
+  status: LicenceStatus;
+  requested_on: string;
+  resolved_on: string | null;
+  fee_amount: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ContractStatus =
+  | "draft"
+  | "published"
+  | "awarded"
+  | "executed"
+  | "cancelled";
+
+export type MunicipalContract = {
+  id: number;
+  organization_id: number;
+  reference: string;
+  title: string;
+  description: string | null;
+  procedure_type: "minor" | "open" | "negotiated" | "framework" | "other";
+  status: ContractStatus;
+  base_amount: string | null;
+  awarded_amount: string | null;
+  awarded_to: string | null;
+  published_on: string | null;
+  awarded_on: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GrantStatus = "open" | "applied" | "granted" | "denied" | "settled";
+
+export type MunicipalGrant = {
+  id: number;
+  organization_id: number;
+  title: string;
+  funder: string | null;
+  description: string | null;
+  status: GrantStatus;
+  requested_amount: string | null;
+  granted_amount: string | null;
+  application_deadline: string | null;
+  resolved_on: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NoticeStatus = "draft" | "published" | "withdrawn" | "expired";
+
+export type MunicipalNoticeEvent = {
+  id: number;
+  notice_id: number;
+  organization_id: number;
+  event_type: "created" | "updated" | "published" | "withdrawn";
+  from_status: NoticeStatus | null;
+  to_status: NoticeStatus | null;
+  note: string | null;
+  actor_id: number | null;
+  created_at: string;
+};
+
+export type MunicipalNotice = {
+  id: number;
+  organization_id: number;
+  kind: "bando" | "edicto" | "convocatoria" | "other";
+  title: string;
+  body: string | null;
+  status: NoticeStatus;
+  published_on: string | null;
+  expires_on: string | null;
+  publish_to_sede: boolean;
+  created_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  events: MunicipalNoticeEvent[];
+};
