@@ -20,7 +20,6 @@ from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.geo.models import GeoLocation
-    from app.municipalities.models import Municipality
     from app.organizations.models import Organization
 
 
@@ -388,16 +387,16 @@ class WaterMeter(TimestampMixin, Base):
     installed_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    municipality: Mapped["Municipality"] = relationship("Municipality")
+    # Sin relación a `Municipality`: sin clave ajena directa el ORM no puede
+    # deducir el join, y nadie navega ese camino — la ficha expone el id.
     supply: Mapped["UtilitySupply | None"] = relationship(
         "UtilitySupply",
         foreign_keys=[supply_id],
-        overlaps="municipality",
     )
     location: Mapped["GeoLocation | None"] = relationship(
         "GeoLocation",
         foreign_keys=[location_id],
-        overlaps="municipality,supply",
+        overlaps="supply",
     )
 
 
