@@ -628,3 +628,34 @@ descripción: un tipo porcentual sin valor no dice cuánto se paga.
 
 La revisión Alembic `20260805_0040` se serializa detrás de `20260805_0039`
 conforme a ADR-033.
+## ADR-043: Taxonomía de partida del inventario, sembrada bajo petición (2026-08-05)
+
+El árbol de capas del diseño —vías, agua, saneamiento, alumbrado, mobiliario,
+parques, residuos, seguridad, deportivas, espacios públicos, cementerio,
+vehículos— no se modela como catálogo del producto sino como **semilla** en
+`backend/app/assets/seed.py`. Un ayuntamiento recién dado de alta que abre el
+mapa y encuentra un formulario vacío no sabe qué contestar; uno que encuentra
+trece categorías con sus tipos habituales sí, y a partir de ahí adapta.
+
+**Se siembra bajo petición, no al arrancar.** `POST /assets/taxonomy/seed` con
+`assets.manage`, por organización. Hacerlo automático en el `lifespan` habría
+impuesto la taxonomía a organizaciones que no la quieren y habría reintroducido
+categorías que alguien archivó a conciencia, cada vez que el servicio reinicia.
+
+**Y no reescribe nada.** El seed es idempotente y no destructivo: una categoría
+que ya existe se deja como esté —renombrada, con otro color o archivada— y sólo
+se completan los tipos que falten. Un ayuntamiento que llamó «Aguas del
+municipio» a su categoría de agua no debe encontrársela revertida tras un
+redespliegue; que archivó el cementerio porque lo lleva una junta vecinal,
+tampoco. Hay tests para ambos casos.
+
+Los códigos del seed se validan contra el mismo `CHECK` que impone la base
+—minúsculas ASCII con guiones—, en un test que recorre la tabla entera. La
+primera versión traía `frontón` con tilde y habría reventado la inserción en
+producción sin que ningún test de dominio lo notara.
+
+Esta es la parte de backend de la fase del mapa general. La pantalla
+`MapaGeneral.tsx` va aparte, y **no toca `MapPanel.tsx` ni `SiurLayerTree.tsx`**:
+esos dos ficheros aparecen en tres PRs abiertos sin mergear (#15, #16, #28) y
+editarlos garantizaría un conflicto. `MunicipalMap.tsx` sí se reutiliza, porque
+su interfaz de props es estable y nadie la está tocando.
