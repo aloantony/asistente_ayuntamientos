@@ -1,0 +1,430 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<ViewContext version="1.1.0" xmlns="http://www.opengis.net/context" id="Contexto_JCYL" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.opengis.net/context http://schemas.opengis.net/context/1.1.0/context.xsd" xmlns:sld="http://www.opengis.net/sld" xmlns:ogc="http://ww.opengis.org/ogc/2.0">
+  <General>
+    <BoundingBox SRS="EPSG:25830" minx="130194.16787241478" miny="4438386.97480451" maxx="630834.1683830676" maxy="4792446.975165651"/>
+    <Window width="1192" height="843"/>
+    <Title>Sistema de Información Urbanística de Castilla y León</Title>
+  </General>
+  <LayerList>
+    <Layer hidden="0" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/wms?"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="-782098.9406071561" miny="3081060.450974109" maxx="1233893.6941155298" maxy="4939778.578393651"/>
+      </Extension>
+      <Name>limites_esp_provincias</Name>
+      <Title>Provincias</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style>
+          <Name>limites_provincias_negro_etiquetado</Name>
+          <Title>Contorno negro y etiqueta texto</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_esp_provincias&amp;style=limites_provincias_negro_etiquetado&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_provincias_blanco_etiquetado</Name>
+          <Title>Contorno blanco y etiqueta texto</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_esp_provincias&amp;style=limites_provincias_blanco_etiquetado&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style current="1">
+          <Name>limites_provincias_negro</Name>
+          <Title>Contorno negro</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_esp_provincias&amp;style=limites_provincias_negro&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_provincias_blanco</Name>
+          <Title>Contorno blanco</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_esp_provincias&amp;style=limites_provincias_blanco&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_provincias_amarillo</Name>
+          <Title>Contorno amarillo</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_esp_provincias&amp;style=limites_provincias_amarillo&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_provincias_fucsia</Name>
+          <Title>Contorno fucsia</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_esp_provincias&amp;style=limites_provincias_fucsia&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcylbasuadlimproesp"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>15000000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="0" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/wms?"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="145853.19016397558" miny="4430725.500132396" maxx="609394.7466406901" maxy="4799144.790082034"/>
+      </Extension>
+      <Name>limites_cyl_municipios</Name>
+      <Title>Municipios</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style>
+          <Name>limites_municipios_gris_etiquetado</Name>
+          <Title>Contorno gris y etiqueta texto</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_cyl_municipios&amp;style=limites_municipios_gris_etiquetado&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_municipios_blanco_etiquetado</Name>
+          <Title>Contorno blanco y etiqueta texto</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_cyl_municipios&amp;style=limites_municipios_blanco_etiquetado&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style current="1">
+          <Name>limites_municipios_negro</Name>
+          <Title>Contorno negro</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_cyl_municipios&amp;style=limites_municipios_negro&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_municipios_blanco</Name>
+          <Title>Contorno blanco</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_cyl_municipios&amp;style=limites_municipios_blanco&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_municipios_amarillo</Name>
+          <Title>Contorno amarillo</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_cyl_municipios&amp;style=limites_municipios_amarillo&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>limites_municipios_fucsia</Name>
+          <Title>Contorno fucsia</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/limites/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=limites_cyl_municipios&amp;style=limites_municipios_fucsia&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcylbasuadlimmuncyl"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>50100</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="0" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/entidades/wms?"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="149131.03256398987" miny="4433607.158455412" maxx="606172.7701869179" maxy="4796204.378002295"/>
+      </Extension>
+      <Name>nucleos_cyl_poblaciones</Name>
+      <Title>Poblaciones</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style>
+          <Name>nucleos_cyl_poblaciones_rosa_txt</Name>
+          <Title>Poblaciones recinto rosa y nombre</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/entidades/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=nucleos_cyl_poblaciones&amp;style=nucleos_cyl_poblaciones_rosa_txt&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>nucleos_cyl_poblaciones_gris_txt</Name>
+          <Title>Poblaciones recinto gris y nombre</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/entidades/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=nucleos_cyl_poblaciones&amp;style=nucleos_cyl_poblaciones_gris_txt&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style current="1">
+          <Name>nucleos_cyl_poblaciones_txt_blanco</Name>
+          <Title>Poblaciones nombre blanco</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/entidades/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=nucleos_cyl_poblaciones&amp;style=nucleos_cyl_poblaciones_txt_blanco&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>nucleos_cyl_poblaciones_txt_negro</Name>
+          <Title>Poblaciones nombre negro</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/entidades/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=nucleos_cyl_poblaciones&amp;style=nucleos_cyl_poblaciones_txt_negro&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>nucleos_cyl_poblaciones_rosa</Name>
+          <Title>Poblaciones recinto rosa</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/entidades/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=nucleos_cyl_poblaciones&amp;style=nucleos_cyl_poblaciones_rosa&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>nucleos_cyl_poblaciones_gris</Name>
+          <Title>Poblaciones recinto gris</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/entidades/ows?service=WMS&amp;version=1.3.0&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=nucleos_cyl_poblaciones&amp;style=nucleos_cyl_poblaciones_gris&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcylbasentnucdispob"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>15000000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="0" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>plau_cyl_planes_parciales</Name>
+      <Title>Planes parciales (ordenación detallada)</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>urbanismo:plau_cyl_planes_parciales_rojo_disc</Name>
+          <Title>Contorno recintos rojo discontinuo</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_planes_parciales&amp;style=plau_cyl_planes_parciales_rojo_disc&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>urbanismo:plau_cyl_planes_parciales_rosa</Name>
+          <Title>Contorno recintos rosa</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_planes_parciales&amp;style=plau_cyl_planes_parciales_rosa&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcyltemplamunplapar"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>55000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="0" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>plau_cyl_sectores</Name>
+      <Title>Sectores de desarrollo</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>urbanismo:plau_cyl_sectores_borde</Name>
+          <Title>Recintos de sectores contorno color y etiqueta texto</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_sectores&amp;style=plau_cyl_sectores_borde&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+        <Style>
+          <Name>urbanismo:plau_cyl_sectores_uso_glob</Name>
+          <Title>Recintos de sectores color según uso general</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_sectores&amp;style=plau_cyl_sectores_uso_glob&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcyltemplamunsecsue"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>55000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="0" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>80</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>plau_cyl_categorias_desagrupa</Name>
+      <Title>Categorías de suelo</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>plau_cyl_categorias_trama</Name>
+          <Title>Recintos paleta color, trama y etiqueta texto</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_categorias_desagrupa&amp;style=plau_cyl_categorias_trama&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcyltemplamuncatsue"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>125000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="0" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>80</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>plau_cyl_clasificacion</Name>
+      <Title>Clases de suelo</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>urbanismo:plau_cyl_clasificacion_color</Name>
+          <Title>Recintos de clases paleta color</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_clasificacion&amp;style=plau_cyl_clasificacion_color&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcyltemplamunclasue"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>501000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="1" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>plau_cyl_grado_ejecucion</Name>
+      <Title>Grado ejecución planeamiento</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>urbanismo:plau_cyl_grado_ejecucion_color</Name>
+          <Title>Recintos color y contorno negro</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_grado_ejecucion&amp;style=plau_cyl_grado_ejecucion_color&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcyltemplamungraeje"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>2500000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="1" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>plau_cyl_sectores_desclasif</Name>
+      <Title>Suelo desclasificado</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>urbanismo:plau_cyl_sectores_desclasif</Name>
+          <Title>Contorno zonas azul y etiqueta texto</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_sectores_desclasif&amp;style=plau_cyl_sectores_desclasif&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcyltemplamunsecdes"/>
+      </MetadataURL>
+      <sld:MaxScaleDenominator>55000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="0" queryable="1" active="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>75</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>plau_cyl_instrumentos_ambito</Name>
+      <Title>Ambito aplic instrumentos urbanísticos</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>urbanismo:plau_cyl_instrumentos_ambito_color</Name>
+          <Title>Recintos municipales paleta color</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=plau_cyl_instrumentos_ambito&amp;style=plau_cyl_instrumentos_ambito_color&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <MetadataURL format="text/plain">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/spagobcyltemplamuninsamb"/>
+      </MetadataURL>
+      <sld:MinScaleDenominator>500100</sld:MinScaleDenominator>
+      <sld:MaxScaleDenominator>20000000</sld:MaxScaleDenominator>
+    </Layer>
+    <Layer hidden="1" queryable="1">
+      <Server service="OGC:WMS" version="1.1.1">
+        <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/wms"/>
+      </Server>
+      <Extension>
+        <Opacity>100</Opacity>
+        <Extent SRS="EPSG:25830" minx="149946.34972286824" miny="4437196.1379032275" maxx="606084.7681070393" maxy="4796156.6050108075"/>
+      </Extension>
+      <Name>ot_cyl_instrumentos_ambito</Name>
+      <Title>Ámbito aplic instrumentos de OT</Title>
+      <SRS>EPSG:25830</SRS>
+      <StyleList>
+        <Style current="1">
+          <Name>urbanismo:ot_cyl_instrumentos_ambito_trama</Name>
+          <Title>Recinto de ámbitos contorno y trama color</Title>
+          <Abstract/>
+          <LegendURL>
+            <OnlineResource xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" xlink:href="https://idecyl.jcyl.es/geoserver/urbanismo/ows?service=WMS&amp;request=GetLegendGraphic&amp;format=image%2Fpng&amp;width=20&amp;height=20&amp;layer=ot_cyl_instrumentos_ambito&amp;style=ot_cyl_instrumentos_ambito_trama&amp;format=image/png"/>
+          </LegendURL>
+        </Style>
+      </StyleList>
+      <sld:MaxScaleDenominator>15000000</sld:MaxScaleDenominator>
+    </Layer>
+  </LayerList>
+</ViewContext>

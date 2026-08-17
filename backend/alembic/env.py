@@ -7,16 +7,28 @@ from app.core.config import settings
 from app.db.base import Base
 from app.agent_office import models as agent_office_models  # noqa: F401
 from app.assistant import models as assistant_models  # noqa: F401
+from app.administration import models as administration_models  # noqa: F401
 from app.assets import models as asset_models  # noqa: F401
+from app.budgets import models as budget_models  # noqa: F401
+from app.communications import models as communication_models  # noqa: F401
 from app.documents import models as document_models  # noqa: F401
 from app.geo import models as geo_models  # noqa: F401
+from app.government import models as government_models  # noqa: F401
+from app.heritage import models as heritage_models  # noqa: F401
 from app.maintenance import models as maintenance_models  # noqa: F401
+from app.municipal_data import models as municipal_data_models  # noqa: F401
 from app.municipalities import models as municipality_models  # noqa: F401
 from app.ordinances import models as ordinance_models  # noqa: F401
+from app.organizations import branding as organization_branding  # noqa: F401
 from app.organizations import models as organization_models  # noqa: F401
+from app.plenos import models as pleno_models  # noqa: F401
 from app.projects import models as project_models  # noqa: F401
 from app.rbac import models as rbac_models  # noqa: F401
 from app.requirements import models as requirement_models  # noqa: F401
+from app.reference_layers import models as reference_layer_models  # noqa: F401
+from app.sede import models as sede_models  # noqa: F401
+from app.staff import models as staff_models  # noqa: F401
+from app.tasks import models as task_models  # noqa: F401
 from app.telegram import models as telegram_models  # noqa: F401
 from app.users import models as user_models  # noqa: F401
 
@@ -152,11 +164,30 @@ def _refuse_unsafe_legacy_history_mutation(connection) -> None:
         )
 
 
+def _include_object(
+    object_,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to,
+) -> bool:
+    """Ignore only the table owned by the PostGIS extension."""
+
+    return not (
+        type_ == "table"
+        and reflected
+        and compare_to is None
+        and name == "spatial_ref_sys"
+        and getattr(object_, "schema", None) in {None, "public"}
+    )
+
+
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=_include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -173,7 +204,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=_include_object,
+        )
 
         with context.begin_transaction():
             _refuse_unsafe_legacy_history_mutation(connection)

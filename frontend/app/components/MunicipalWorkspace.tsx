@@ -3,79 +3,102 @@
 import {
   BookOpen,
   Building2,
-  CheckCircle2,
   CircleAlert,
   ClipboardList,
-  CloudSun,
-  Database,
-  Droplets,
-  ExternalLink,
-  FileStack,
-  FileText,
-  Hammer,
   Landmark,
-  MapPin,
+  Map as MapIcon,
   RefreshCw,
   ShieldCheck,
-  UserRound,
   Users,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
-import {
-  useEffect,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type ReactNode,
-} from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { fetchMunicipality } from "../lib/fetchers";
 import {
+  fetchGovernmentMembers,
   fetchMunicipalAssetSummary,
   fetchMunicipalMaintenanceSummary,
   fetchMunicipalOrdinances,
   fetchMunicipalOrganization,
+  fetchStaffPosts,
+  fetchStaffWorkers,
   type MunicipalCollection,
 } from "../lib/municipalWorkspace";
-import { canViewMunicipalHub } from "../lib/permissions";
 import {
-  shouldShowProjectsPanel,
-  shouldShowRequirementsPanel,
-  useSession,
-} from "../lib/session";
+  canViewGovernment as hasGovernmentAccess,
+  canViewMunicipalHub,
+  canViewStaff as hasStaffAccess,
+} from "../lib/permissions";
+import { useSession } from "../lib/session";
 import styles from "./MunicipalWorkspace.module.css";
 import {
-  formatOrdinanceStatus,
-  formatOrdinanceType,
+  fetchClimateSeries,
+  fetchHouseholdSeries,
+  fetchPadronSeries,
+} from "../lib/municipalData";
+import {
+  fetchContracts,
+  fetchGrants,
+  fetchLicences,
+  fetchNotices,
+  fetchOfficeHours,
+} from "../lib/administration";
+import {
+  fetchBudgetExecution,
+  fetchBudgets,
+  fetchCouncilSessions,
+  fetchTreasuryMovements,
+} from "../lib/budgets";
+import { Administracion } from "./ayuntamiento/Administracion";
+import { fetchArchiveItems, fetchHeritageAssets } from "../lib/heritage";
+import { MapaGeneral } from "./ayuntamiento/MapaGeneral";
+import { Patrimonio } from "./ayuntamiento/Patrimonio";
+import { Plenos } from "./ayuntamiento/Plenos";
+import { Presupuestos } from "./ayuntamiento/Presupuestos";
+import { Comunicacion } from "./ayuntamiento/Comunicacion";
+import { EstructuraGobierno } from "./ayuntamiento/EstructuraGobierno";
+import { SeriesMunicipio } from "./ayuntamiento/SeriesMunicipio";
+import { HojaDeRuta } from "./ayuntamiento/HojaDeRuta";
+import { InformacionMunicipio } from "./ayuntamiento/InformacionMunicipio";
+import { Normativa } from "./ayuntamiento/Normativa";
+import { Personal } from "./ayuntamiento/Personal";
+import { ServiciosMunicipales } from "./ayuntamiento/ServiciosMunicipales";
+import {
+  EMPTY_RESOURCE_ERRORS,
+  ORDINANCE_MANAGEMENT_PERMISSIONS,
+  ResourceState,
+  getInitials,
+  getMunicipalContexts,
+} from "./ayuntamiento/shared";
+import type { ResourceErrors, WorkspaceTab } from "./ayuntamiento/types";
+import {
   userHasPermission,
+  type ArchiveItem,
+  type BudgetExecution,
+  type HeritageAsset,
+  type ClimateRecord,
+  type CouncilSession,
+  type MunicipalBudget,
+  type TreasuryMovement,
+  type MunicipalContract,
+  type MunicipalGrant,
+  type MunicipalLicence,
+  type MunicipalNotice,
+  type OfficeHour,
+  type GovernmentMember,
+  type HouseholdStat,
+  type PadronRecord,
   type MaintenanceOrder,
   type Municipality,
-  type MunicipalitySummary,
   type MunicipalAsset,
   type Organization,
-  type OrganizationSummary,
   type Ordinance,
+  type StaffPost,
+  type StaffWorker,
   type User,
 } from "./types";
-
-type WorkspaceTab =
-  | "summary"
-  | "ordinances"
-  | "facilities"
-  | "people"
-  | "roadmap";
-
-type MunicipalContext = {
-  organization: OrganizationSummary;
-  municipality: MunicipalitySummary;
-};
-
-type ResourceErrors = {
-  ordinances: string;
-  assets: string;
-  maintenance: string;
-};
 
 type TabDefinition = {
   id: WorkspaceTab;
@@ -83,1058 +106,16 @@ type TabDefinition = {
   icon: LucideIcon;
 };
 
+// Rótulos tomados de la navegación municipal de referencia. Los identificadores
+// no cambian: se usan en enlaces `?tab=` repartidos por el producto.
 const TAB_DEFINITIONS: TabDefinition[] = [
-  { id: "summary", label: "Resumen", icon: Landmark },
+  { id: "summary", label: "Información", icon: Landmark },
   { id: "ordinances", label: "Normativa", icon: BookOpen },
-  { id: "facilities", label: "Instalaciones", icon: Wrench },
+  { id: "facilities", label: "Servicios municipales", icon: Wrench },
+  { id: "map", label: "Mapa general", icon: MapIcon },
   { id: "people", label: "Personal", icon: Users },
   { id: "roadmap", label: "Hoja de ruta", icon: ClipboardList },
 ];
-
-const EMPTY_RESOURCE_ERRORS: ResourceErrors = {
-  ordinances: "",
-  assets: "",
-  maintenance: "",
-};
-
-const MUNICIPALITY_TYPE_LABELS: Record<
-  Municipality["municipality_type"],
-  string
-> = {
-  municipality: "Municipio",
-  minor_local_entity: "Entidad local menor",
-  district: "Distrito",
-  other: "Otro",
-};
-
-const RURAL_URBAN_PROFILE_LABELS: Record<
-  Municipality["rural_urban_profile"],
-  string
-> = {
-  rural: "Rural",
-  semi_rural: "Semirrural",
-  urban: "Urbano",
-  mixed: "Mixto",
-  unknown: "Sin clasificar",
-};
-
-const ASSET_STATUS_LABELS: Record<MunicipalAsset["status"], string> = {
-  active: "Activo",
-  inactive: "Inactivo",
-  retired: "Retirado",
-  archived: "Archivado",
-};
-
-const ASSET_CONDITION_LABELS: Record<
-  MunicipalAsset["condition_status"],
-  string
-> = {
-  good: "Buen estado",
-  fair: "Estado regular",
-  poor: "Requiere atención",
-  unknown: "Sin revisar",
-};
-
-const MAINTENANCE_STATUS_LABELS: Record<
-  MaintenanceOrder["status"],
-  string
-> = {
-  planned: "Planificada",
-  scheduled: "Programada",
-  in_progress: "En curso",
-  completed: "Completada",
-  cancelled: "Cancelada",
-};
-
-const MAINTENANCE_PRIORITY_LABELS: Record<
-  MaintenanceOrder["priority"],
-  string
-> = {
-  low: "Baja",
-  normal: "Normal",
-  high: "Alta",
-  urgent: "Urgente",
-};
-
-const ORDINANCE_MANAGEMENT_PERMISSIONS = [
-  "ordinances.create",
-  "ordinances.edit",
-  "ordinances.archive",
-  "ordinances.import",
-  "ordinances.review",
-  "ordinances.manage",
-];
-
-function getMunicipalContexts(user: User) {
-  return (user.organizations ?? [])
-    .flatMap<MunicipalContext>((organization) => {
-      if (organization.status === "archived" || !organization.municipality) {
-        return [];
-      }
-
-      return [{ organization, municipality: organization.municipality }];
-    })
-    .sort((left, right) => {
-      if (left.organization.status !== right.organization.status) {
-        return left.organization.status === "active" ? -1 : 1;
-      }
-      return left.organization.name.localeCompare(
-        right.organization.name,
-        "es",
-      );
-    });
-}
-
-function formatInteger(value: number | null) {
-  return value === null
-    ? "No consta"
-    : new Intl.NumberFormat("es-ES", { maximumFractionDigits: 0 }).format(
-        value,
-      );
-}
-
-function formatDecimal(value: number | null, suffix: string) {
-  if (value === null) {
-    return "No consta";
-  }
-  return `${new Intl.NumberFormat("es-ES", {
-    maximumFractionDigits: 2,
-  }).format(value)} ${suffix}`;
-}
-
-function formatDate(value: string | null) {
-  if (!value) {
-    return "Sin fecha";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "Sin fecha";
-  }
-  return new Intl.DateTimeFormat("es-ES", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    timeZone: "Europe/Madrid",
-  }).format(date);
-}
-
-function formatUpdatedAt(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "Fecha no disponible";
-  }
-  return new Intl.DateTimeFormat("es-ES", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Europe/Madrid",
-  }).format(date);
-}
-
-function getInitials(value: string) {
-  const initials = value
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-  return initials || "AY";
-}
-
-function withOrganization(path: string, organizationId: number) {
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}organization_id=${organizationId}`;
-}
-
-function permissionValue<T>(
-  canView: boolean,
-  data: MunicipalCollection<T> | null,
-  error: string,
-) {
-  if (!canView) {
-    return "Sin acceso";
-  }
-  if (error) {
-    return "No disponible";
-  }
-  return data?.total ?? "—";
-}
-
-function Metric({
-  icon: Icon,
-  label,
-  value,
-  detail,
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: number | string;
-  detail?: string;
-}) {
-  return (
-    <div className={styles.metric}>
-      <div className={styles.metricHeading}>
-        <span>{label}</span>
-        <Icon aria-hidden="true" size={18} strokeWidth={1.6} />
-      </div>
-      <strong className={typeof value === "number" ? undefined : styles.metricText}>
-        {value}
-      </strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
-}
-
-function SectionHeading({
-  eyebrow,
-  title,
-  description,
-  actions,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  actions?: ReactNode;
-}) {
-  return (
-    <header className={styles.sectionHeading}>
-      <div>
-        <p>{eyebrow}</p>
-        <h2>{title}</h2>
-        <span>{description}</span>
-      </div>
-      {actions ? <div className={styles.sectionActions}>{actions}</div> : null}
-    </header>
-  );
-}
-
-function NotConfigured({
-  icon: Icon,
-  title,
-  description,
-  wide = false,
-}: {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-  wide?: boolean;
-}) {
-  return (
-    <article
-      className={`${styles.notConfigured}${wide ? ` ${styles.notConfiguredWide}` : ""}`}
-    >
-      <span className={styles.notConfiguredIcon}>
-        <Icon aria-hidden="true" size={20} strokeWidth={1.6} />
-      </span>
-      <div>
-        <p>No configurado</p>
-        <h3>{title}</h3>
-        <span>{description}</span>
-      </div>
-    </article>
-  );
-}
-
-function ResourceState({
-  icon: Icon,
-  title,
-  description,
-  tone = "empty",
-  action,
-}: {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-  tone?: "empty" | "error" | "restricted";
-  action?: ReactNode;
-}) {
-  return (
-    <div
-      className={styles.resourceState}
-      data-tone={tone}
-      role={tone === "error" ? "alert" : undefined}
-    >
-      <Icon aria-hidden="true" size={24} strokeWidth={1.6} />
-      <div>
-        <h3>{title}</h3>
-        <p>{description}</p>
-        {action ? <div className={styles.resourceStateAction}>{action}</div> : null}
-      </div>
-    </div>
-  );
-}
-
-function SummaryTab({
-  municipality,
-  organization,
-  ordinances,
-  assets,
-  maintenance,
-  errors,
-  canViewOrdinances,
-  canViewAssets,
-  canViewMaintenance,
-  onTabChange,
-}: {
-  municipality: Municipality;
-  organization: Organization;
-  ordinances: MunicipalCollection<Ordinance> | null;
-  assets: MunicipalCollection<MunicipalAsset> | null;
-  maintenance: MunicipalCollection<MaintenanceOrder> | null;
-  errors: ResourceErrors;
-  canViewOrdinances: boolean;
-  canViewAssets: boolean;
-  canViewMaintenance: boolean;
-  onTabChange: (tab: WorkspaceTab) => void;
-}) {
-  return (
-    <div className={styles.tabContent}>
-      <div className={styles.metricsGrid}>
-        <Metric
-          detail="Padrón registrado en la ficha"
-          icon={Users}
-          label="Población"
-          value={formatInteger(municipality.population)}
-        />
-        <Metric
-          detail={formatDecimal(municipality.surface_km2, "km²")}
-          icon={MapPin}
-          label="Densidad"
-          value={formatDecimal(municipality.density, "hab./km²")}
-        />
-        <Metric
-          detail="Repositorio municipal"
-          icon={BookOpen}
-          label="Normas"
-          value={permissionValue(canViewOrdinances, ordinances, errors.ordinances)}
-        />
-        <Metric
-          detail="Inventario no archivado"
-          icon={Database}
-          label="Activos"
-          value={permissionValue(canViewAssets, assets, errors.assets)}
-        />
-        <Metric
-          detail="Órdenes abiertas"
-          icon={Hammer}
-          label="Mantenimiento"
-          value={permissionValue(
-            canViewMaintenance,
-            maintenance,
-            errors.maintenance,
-          )}
-        />
-        <Metric
-          detail="Directorio de la organización"
-          icon={UserRound}
-          label="Personas"
-          value={organization.users.length}
-        />
-      </div>
-
-      <div className={styles.summaryGrid}>
-        <article className={styles.card}>
-          <div className={styles.cardHeading}>
-            <div>
-              <p>Ficha oficial</p>
-              <h2>Identidad municipal</h2>
-            </div>
-            <span className={styles.statusPill} data-tone={municipality.status}>
-              {municipality.status === "active" ? "Activa" : "Archivada"}
-            </span>
-          </div>
-          <dl className={styles.definitionGrid}>
-            <div>
-              <dt>Código INE</dt>
-              <dd>{municipality.ine_code ?? "No consta"}</dd>
-            </div>
-            <div>
-              <dt>Código postal</dt>
-              <dd>{municipality.postal_codes ?? "No consta"}</dd>
-            </div>
-            <div>
-              <dt>Tipo</dt>
-              <dd>{MUNICIPALITY_TYPE_LABELS[municipality.municipality_type]}</dd>
-            </div>
-            <div>
-              <dt>Perfil territorial</dt>
-              <dd>
-                {RURAL_URBAN_PROFILE_LABELS[municipality.rural_urban_profile]}
-              </dd>
-            </div>
-            <div>
-              <dt>Provincia</dt>
-              <dd>{municipality.province}</dd>
-            </div>
-            <div>
-              <dt>Comunidad autónoma</dt>
-              <dd>{municipality.autonomous_community}</dd>
-            </div>
-          </dl>
-          <p className={styles.updatedAt}>
-            Actualizada el {formatUpdatedAt(municipality.updated_at)}
-          </p>
-        </article>
-
-        <article className={styles.card}>
-          <div className={styles.cardHeading}>
-            <div>
-              <p>Contexto</p>
-              <h2>Perfiles municipales</h2>
-            </div>
-          </div>
-          <dl className={styles.profileList}>
-            <div>
-              <dt>Actividad económica</dt>
-              <dd>{municipality.economic_profile ?? "No consta información."}</dd>
-            </div>
-            <div>
-              <dt>Turismo</dt>
-              <dd>{municipality.tourism_profile ?? "No consta información."}</dd>
-            </div>
-            <div>
-              <dt>Geografía</dt>
-              <dd>{municipality.geographic_notes ?? "No consta información."}</dd>
-            </div>
-            <div>
-              <dt>Administración</dt>
-              <dd>
-                {municipality.administrative_notes ?? "No consta información."}
-              </dd>
-            </div>
-          </dl>
-        </article>
-      </div>
-
-      <section className={styles.card}>
-        <SectionHeading
-          description="Accesos directos a la información que ya está conectada al backend."
-          eyebrow="Operativa"
-          title="Áreas municipales"
-        />
-        <div className={styles.areaGrid}>
-          <button type="button" onClick={() => onTabChange("ordinances")}>
-            <BookOpen aria-hidden="true" size={20} strokeWidth={1.6} />
-            <span>
-              <strong>Normativa</strong>
-              <small>
-                {canViewOrdinances && ordinances
-                  ? `${ordinances.total} documentos registrados`
-                  : "Consulta condicionada por permisos"}
-              </small>
-            </span>
-          </button>
-          <button type="button" onClick={() => onTabChange("facilities")}>
-            <Wrench aria-hidden="true" size={20} strokeWidth={1.6} />
-            <span>
-              <strong>Instalaciones</strong>
-              <small>Inventario, mapa y mantenimiento</small>
-            </span>
-          </button>
-          <button type="button" onClick={() => onTabChange("people")}>
-            <Users aria-hidden="true" size={20} strokeWidth={1.6} />
-            <span>
-              <strong>Personal</strong>
-              <small>{organization.users.length} personas en el directorio</small>
-            </span>
-          </button>
-          <button type="button" onClick={() => onTabChange("roadmap")}>
-            <ClipboardList aria-hidden="true" size={20} strokeWidth={1.6} />
-            <span>
-              <strong>Hoja de ruta</strong>
-              <small>Planificación municipal y trabajo pendiente</small>
-            </span>
-          </button>
-        </div>
-      </section>
-
-      <section>
-        <SectionHeading
-          description="El diseño contempla estas áreas, pero todavía no existe un modelo persistente que permita mostrarlas con garantías."
-          eyebrow="Siguiente capa de datos"
-          title="Pendiente de configuración"
-        />
-        <div className={styles.notConfiguredGrid}>
-          <NotConfigured
-            description="No hay un registro validado de alcaldía, concejalías u órganos colegiados."
-            icon={Building2}
-            title="Gobierno y corporación"
-          />
-          <NotConfigured
-            description="No existe una serie meteorológica municipal conectada y trazable."
-            icon={CloudSun}
-            title="Clima"
-          />
-          <NotConfigured
-            description="Analíticas, depósitos y red de abastecimiento requieren un módulo propio."
-            icon={Droplets}
-            title="Agua"
-          />
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function OrdinancesTab({
-  municipality,
-  ordinances,
-  error,
-  canView,
-  canManage,
-  onRetry,
-}: {
-  municipality: Municipality;
-  ordinances: MunicipalCollection<Ordinance> | null;
-  error: string;
-  canView: boolean;
-  canManage: boolean;
-  onRetry: () => void;
-}) {
-  const adminHref = `/admin/ordenanzas?q=${encodeURIComponent(municipality.name)}`;
-
-  return (
-    <div className={styles.tabContent}>
-      <SectionHeading
-        actions={
-          canManage ? (
-            <Link className={styles.primaryAction} href={adminHref}>
-              Gestionar repositorio
-              <ExternalLink aria-hidden="true" size={15} />
-            </Link>
-          ) : undefined
-        }
-        description="Ordenanzas y reglamentos vinculados a la ficha municipal, con su fuente y estado de vigencia."
-        eyebrow="Repositorio municipal"
-        title="Normativa"
-      />
-
-      {!canView ? (
-        <ResourceState
-          description="Tu cuenta no dispone del permiso ordinances.view para consultar el repositorio."
-          icon={ShieldCheck}
-          title="Consulta no autorizada"
-          tone="restricted"
-        />
-      ) : error ? (
-        <ResourceState
-          action={
-            <button className={styles.secondaryAction} onClick={onRetry} type="button">
-              Reintentar
-            </button>
-          }
-          description={error}
-          icon={CircleAlert}
-          title="No se pudo cargar la normativa"
-          tone="error"
-        />
-      ) : ordinances && ordinances.items.length > 0 ? (
-        <section className={styles.collectionCard}>
-          <div className={styles.collectionSummary}>
-            <div>
-              <strong>{ordinances.total}</strong>
-              <span>documentos no archivados</span>
-            </div>
-            <p>
-              Se muestran {ordinances.items.length} de {ordinances.total}.
-            </p>
-          </div>
-          <div className={styles.ordinanceList}>
-            {ordinances.items.map((ordinance) => (
-              <article key={ordinance.id}>
-                <div className={styles.ordinanceIcon}>
-                  <FileText aria-hidden="true" size={20} strokeWidth={1.6} />
-                </div>
-                <div className={styles.ordinanceMain}>
-                  <div className={styles.itemHeading}>
-                    <div>
-                      <span>{formatOrdinanceType(ordinance.ordinance_type)}</span>
-                      <h3>{ordinance.title}</h3>
-                    </div>
-                    <span
-                      className={styles.statusPill}
-                      data-tone={ordinance.status}
-                    >
-                      {formatOrdinanceStatus(ordinance.status)}
-                    </span>
-                  </div>
-                  <p>
-                    {ordinance.summary ??
-                      "El repositorio no incluye todavía un resumen de este documento."}
-                  </p>
-                  <div className={styles.itemMeta}>
-                    <span>{ordinance.topic}</span>
-                    {ordinance.subtopic ? <span>{ordinance.subtopic}</span> : null}
-                    <span>
-                      Publicación: {formatDate(ordinance.publication_date)}
-                    </span>
-                    {ordinance.official_bulletin ? (
-                      <span>{ordinance.official_bulletin}</span>
-                    ) : null}
-                  </div>
-                  {ordinance.source_url ? (
-                    <a
-                      href={ordinance.source_url}
-                      rel="noreferrer noopener"
-                      target="_blank"
-                    >
-                      Consultar fuente oficial
-                      <ExternalLink aria-hidden="true" size={14} />
-                    </a>
-                  ) : (
-                    <span className={styles.missingSource}>
-                      Fuente oficial sin enlace registrado
-                    </span>
-                  )}
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : (
-        <ResourceState
-          action={
-            canManage ? (
-              <Link className={styles.secondaryAction} href={adminHref}>
-                Añadir normativa
-              </Link>
-            ) : undefined
-          }
-          description="El municipio no tiene ordenanzas activas registradas en el repositorio."
-          icon={FileStack}
-          title="Repositorio vacío"
-        />
-      )}
-
-      <NotConfigured
-        description="Noticias, bandos, actas, páginas informativas y documentos generales necesitan un CMS municipal con revisión y publicación. No se sustituyen por contenido de demostración."
-        icon={FileStack}
-        title="Biblioteca y CMS municipal"
-        wide
-      />
-    </div>
-  );
-}
-
-function FacilitiesTab({
-  assets,
-  maintenance,
-  errors,
-  canViewAssets,
-  canViewMaintenance,
-  canViewMap,
-  organizationId,
-  onRetry,
-}: {
-  assets: MunicipalCollection<MunicipalAsset> | null;
-  maintenance: MunicipalCollection<MaintenanceOrder> | null;
-  errors: ResourceErrors;
-  canViewAssets: boolean;
-  canViewMaintenance: boolean;
-  canViewMap: boolean;
-  organizationId: number;
-  onRetry: () => void;
-}) {
-  const inventoryHref = withOrganization("/inventario", organizationId);
-  const maintenanceHref = withOrganization("/mantenimiento", organizationId);
-  const mapHref = withOrganization("/mapa", organizationId);
-
-  return (
-    <div className={styles.tabContent}>
-      <SectionHeading
-        actions={
-          <>
-            {canViewMap ? (
-              <Link className={styles.secondaryAction} href={mapHref}>
-                Abrir mapa
-                <MapPin aria-hidden="true" size={15} />
-              </Link>
-            ) : null}
-            {canViewAssets ? (
-              <Link className={styles.primaryAction} href={inventoryHref}>
-                Abrir inventario
-                <ExternalLink aria-hidden="true" size={15} />
-              </Link>
-            ) : null}
-          </>
-        }
-        description="Inventario municipal y órdenes de mantenimiento conectados a la organización seleccionada."
-        eyebrow="Patrimonio operativo"
-        title="Instalaciones"
-      />
-
-      <div className={styles.compactMetrics}>
-        <Metric
-          detail="Elementos no archivados"
-          icon={Database}
-          label="Activos registrados"
-          value={permissionValue(canViewAssets, assets, errors.assets)}
-        />
-        <Metric
-          detail="Planificadas, programadas o en curso"
-          icon={Hammer}
-          label="Órdenes abiertas"
-          value={permissionValue(
-            canViewMaintenance,
-            maintenance,
-            errors.maintenance,
-          )}
-        />
-      </div>
-
-      <div className={styles.facilitiesGrid}>
-        <section className={styles.card}>
-          <div className={styles.cardHeading}>
-            <div>
-              <p>Inventario</p>
-              <h2>Activos municipales</h2>
-            </div>
-            {canViewAssets ? (
-              <Link href={inventoryHref}>Ver todos</Link>
-            ) : null}
-          </div>
-
-          {!canViewAssets ? (
-            <ResourceState
-              description="Tu cuenta no dispone del permiso assets.view en esta organización."
-              icon={ShieldCheck}
-              title="Inventario no autorizado"
-              tone="restricted"
-            />
-          ) : errors.assets ? (
-            <ResourceState
-              action={
-                <button
-                  className={styles.secondaryAction}
-                  onClick={onRetry}
-                  type="button"
-                >
-                  Reintentar
-                </button>
-              }
-              description={errors.assets}
-              icon={CircleAlert}
-              title="Inventario no disponible"
-              tone="error"
-            />
-          ) : assets && assets.items.length > 0 ? (
-            <div className={styles.assetList}>
-              {assets.items.slice(0, 6).map((asset) => (
-                <article key={asset.id}>
-                  <span className={styles.assetIcon}>
-                    <Database aria-hidden="true" size={17} strokeWidth={1.6} />
-                  </span>
-                  <div>
-                    <Link
-                      href={
-                        canViewMap && asset.location_id
-                          ? withOrganization(
-                              `/mapa?entity_type=asset&entity_id=${asset.id}`,
-                              organizationId,
-                            )
-                          : inventoryHref
-                      }
-                    >
-                      {asset.name}
-                    </Link>
-                    <p>
-                      {asset.asset_type.category.name} · {asset.asset_type.name}
-                    </p>
-                    <div className={styles.itemMeta}>
-                      <span>{ASSET_STATUS_LABELS[asset.status]}</span>
-                      <span>{ASSET_CONDITION_LABELS[asset.condition_status]}</span>
-                      {asset.code ? <span>{asset.code}</span> : null}
-                    </div>
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <ResourceState
-              action={
-                <div className={styles.inlineActions}>
-                  <Link className={styles.primaryAction} href={inventoryHref}>
-                    Configurar inventario
-                  </Link>
-                  {canViewMap ? (
-                    <Link className={styles.secondaryAction} href={mapHref}>
-                      Revisar mapa
-                    </Link>
-                  ) : null}
-                </div>
-              }
-              description="Todavía no se han registrado edificios, redes, mobiliario u otros activos. El módulo está listo para recibir el inventario real."
-              icon={Database}
-              title="Inventario municipal sin datos"
-            />
-          )}
-        </section>
-
-        <section className={styles.card}>
-          <div className={styles.cardHeading}>
-            <div>
-              <p>Mantenimiento</p>
-              <h2>Trabajo abierto</h2>
-            </div>
-            {canViewMaintenance ? (
-              <Link href={maintenanceHref}>Ver órdenes</Link>
-            ) : null}
-          </div>
-
-          {!canViewMaintenance ? (
-            <ResourceState
-              description="Tu cuenta no dispone del permiso maintenance.view en esta organización."
-              icon={ShieldCheck}
-              title="Mantenimiento no autorizado"
-              tone="restricted"
-            />
-          ) : errors.maintenance ? (
-            <ResourceState
-              action={
-                <button
-                  className={styles.secondaryAction}
-                  onClick={onRetry}
-                  type="button"
-                >
-                  Reintentar
-                </button>
-              }
-              description={errors.maintenance}
-              icon={CircleAlert}
-              title="Mantenimiento no disponible"
-              tone="error"
-            />
-          ) : maintenance && maintenance.items.length > 0 ? (
-            <div className={styles.maintenanceList}>
-              {maintenance.items.slice(0, 6).map((order) => (
-                <article key={order.id}>
-                  <div className={styles.itemHeading}>
-                    <div>
-                      <span>{MAINTENANCE_PRIORITY_LABELS[order.priority]}</span>
-                      <h3>{order.title}</h3>
-                    </div>
-                    <span
-                      className={styles.statusPill}
-                      data-tone={order.status}
-                    >
-                      {MAINTENANCE_STATUS_LABELS[order.status]}
-                    </span>
-                  </div>
-                  <p>{order.asset.name}</p>
-                  <div className={styles.itemMeta}>
-                    <span>
-                      {order.scheduled_for
-                        ? `Prevista: ${formatDate(order.scheduled_for)}`
-                        : "Pendiente de programar"}
-                    </span>
-                    {order.assigned_to ? (
-                      <span>{order.assigned_to.full_name}</span>
-                    ) : (
-                      <span>Sin responsable</span>
-                    )}
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <ResourceState
-              action={
-                <Link className={styles.primaryAction} href={maintenanceHref}>
-                  Abrir mantenimiento
-                </Link>
-              }
-              description="No hay órdenes planificadas, programadas o en curso. Las nuevas actuaciones aparecerán aquí vinculadas a su activo."
-              icon={CheckCircle2}
-              title="Sin mantenimiento pendiente"
-            />
-          )}
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function PeopleTab({ organization }: { organization: Organization }) {
-  return (
-    <div className={styles.tabContent}>
-      <SectionHeading
-        description="Personas con acceso a la organización municipal. Este directorio no presupone una relación laboral."
-        eyebrow="Organización"
-        title="Personal y colaboradores"
-      />
-
-      <section className={styles.card}>
-        <div className={styles.cardHeading}>
-          <div>
-            <p>Directorio real</p>
-            <h2>{organization.users.length} personas</h2>
-          </div>
-          <span className={styles.statusPill} data-tone={organization.status}>
-            {organization.status === "active"
-              ? "Organización activa"
-              : organization.status === "paused"
-                ? "Organización pausada"
-                : "Organización archivada"}
-          </span>
-        </div>
-        {organization.description ? (
-          <p className={styles.organizationDescription}>
-            {organization.description}
-          </p>
-        ) : null}
-
-        {organization.users.length > 0 ? (
-          <div className={styles.peopleGrid}>
-            {organization.users.map((member) => (
-              <article key={member.id}>
-                <span className={styles.avatar} aria-hidden="true">
-                  {getInitials(member.full_name)}
-                </span>
-                <div>
-                  <h3>{member.full_name}</h3>
-                  <a href={`mailto:${member.email}`}>{member.email}</a>
-                  <div className={styles.itemMeta}>
-                    <span>{member.is_active ? "Acceso activo" : "Acceso inactivo"}</span>
-                    {member.is_superuser ? <span>Administración global</span> : null}
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <ResourceState
-            description="La organización no tiene personas asociadas en este momento."
-            icon={Users}
-            title="Directorio vacío"
-          />
-        )}
-      </section>
-
-      <NotConfigured
-        description="Puestos, contratos, horarios, ausencias, productividad, facturas y expedientes laborales requieren un dominio de RR. HH. separado, con permisos y conservación específicos."
-        icon={UserRound}
-        title="Gestión de recursos humanos"
-        wide
-      />
-    </div>
-  );
-}
-
-function RoadmapTab({
-  user,
-  ordinances,
-  assets,
-  maintenance,
-  canViewMap,
-  organizationId,
-}: {
-  user: User;
-  ordinances: MunicipalCollection<Ordinance> | null;
-  assets: MunicipalCollection<MunicipalAsset> | null;
-  maintenance: MunicipalCollection<MaintenanceOrder> | null;
-  canViewMap: boolean;
-  organizationId: number;
-}) {
-  const shortcuts = [
-    ...(shouldShowRequirementsPanel(user)
-      ? [
-          {
-            href: "/requisitos",
-            title: "Necesidades",
-            description: "Priorizar demandas y convertirlas en trabajo revisable.",
-            icon: CircleAlert,
-          },
-        ]
-      : []),
-    ...(shouldShowProjectsPanel(user)
-      ? [
-          {
-            href: "/proyectos",
-            title: "Proyectos",
-            description: "Seguir iniciativas, responsables y documentación.",
-            icon: FileStack,
-          },
-        ]
-      : []),
-    ...(canViewMap
-      ? [
-          {
-            href: withOrganization("/mapa", organizationId),
-            title: "Mapa municipal",
-            description: "Situar necesidades, proyectos y activos sobre el territorio.",
-            icon: MapPin,
-          },
-        ]
-      : []),
-    ...(userHasPermission(user, "assistant.use")
-      ? [
-          {
-            href: "/asistente",
-            title: "Anacleto",
-            description: "Preparar borradores y ordenar próximos pasos con supervisión.",
-            icon: ShieldCheck,
-          },
-        ]
-      : []),
-  ];
-
-  return (
-    <div className={styles.tabContent}>
-      <SectionHeading
-        description="Una vista de planificación deberá reunir objetivos, hitos, responsables, dependencias y resultados aprobados."
-        eyebrow="Planificación"
-        title="Hoja de ruta municipal"
-      />
-
-      <NotConfigured
-        description="No existe todavía una entidad persistente de hoja de ruta. Para evitar compromisos ficticios, esta vista no transforma automáticamente proyectos o necesidades en un plan aprobado."
-        icon={ClipboardList}
-        title="Plan municipal no configurado"
-        wide
-      />
-
-      <section className={styles.card}>
-        <SectionHeading
-          description="Módulos operativos que ya contienen información trazable y pueden alimentar la futura planificación."
-          eyebrow="Fuentes disponibles"
-          title="Trabajo conectado"
-        />
-        <div className={styles.areaGrid}>
-          {shortcuts.map(({ href, title, description, icon: Icon }) => (
-            <Link href={href} key={href}>
-              <Icon aria-hidden="true" size={20} strokeWidth={1.6} />
-              <span>
-                <strong>{title}</strong>
-                <small>{description}</small>
-              </span>
-            </Link>
-          ))}
-        </div>
-        <div className={styles.roadmapSignals}>
-          <div>
-            <BookOpen aria-hidden="true" size={17} />
-            <span>Normas registradas</span>
-            <strong>{ordinances?.total ?? "—"}</strong>
-          </div>
-          <div>
-            <Database aria-hidden="true" size={17} />
-            <span>Activos registrados</span>
-            <strong>{assets?.total ?? "—"}</strong>
-          </div>
-          <div>
-            <Hammer aria-hidden="true" size={17} />
-            <span>Mantenimiento abierto</span>
-            <strong>{maintenance?.total ?? "—"}</strong>
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
 
 function RestrictedState() {
   return (
@@ -1194,6 +175,31 @@ export function MunicipalWorkspace() {
   const [maintenance, setMaintenance] = useState<
     MunicipalCollection<MaintenanceOrder> | null
   >(null);
+  const [government, setGovernment] = useState<
+    MunicipalCollection<GovernmentMember> | null
+  >(null);
+  const [staffWorkers, setStaffWorkers] = useState<
+    MunicipalCollection<StaffWorker> | null
+  >(null);
+  const [staffPosts, setStaffPosts] = useState<
+    MunicipalCollection<StaffPost> | null
+  >(null);
+  // Las series son un adorno informativo: si fallan, la ficha sigue en pie y
+  // el bloque muestra su estado vacío, sin bandera de error propia.
+  const [padron, setPadron] = useState<PadronRecord[]>([]);
+  const [climate, setClimate] = useState<ClimateRecord[]>([]);
+  const [households, setHouseholds] = useState<HouseholdStat[]>([]);
+  const [officeHours, setOfficeHours] = useState<OfficeHour[]>([]);
+  const [licences, setLicences] = useState<MunicipalLicence[]>([]);
+  const [contracts, setContracts] = useState<MunicipalContract[]>([]);
+  const [grants, setGrants] = useState<MunicipalGrant[]>([]);
+  const [notices, setNotices] = useState<MunicipalNotice[]>([]);
+  const [budgets, setBudgets] = useState<MunicipalBudget[]>([]);
+  const [execution, setExecution] = useState<BudgetExecution | null>(null);
+  const [movements, setMovements] = useState<TreasuryMovement[]>([]);
+  const [sessions, setSessions] = useState<CouncilSession[]>([]);
+  const [heritage, setHeritage] = useState<HeritageAsset[]>([]);
+  const [archive, setArchive] = useState<ArchiveItem[]>([]);
   const [resourceErrors, setResourceErrors] = useState<ResourceErrors>(
     EMPTY_RESOURCE_ERRORS,
   );
@@ -1232,6 +238,33 @@ export function MunicipalWorkspace() {
       (userHasPermission(user, "map.view") ||
         userHasPermission(user, "map.manage")),
   );
+  const canViewGovernment = Boolean(user && hasGovernmentAccess(user));
+  const canViewStaff = Boolean(user && hasStaffAccess(user));
+  const canViewAdministration = Boolean(
+    user &&
+      (userHasPermission(user, "administration.view") ||
+        userHasPermission(user, "administration.manage")),
+  );
+  const canViewCommunications = Boolean(
+    user &&
+      (userHasPermission(user, "communications.view") ||
+        userHasPermission(user, "communications.manage")),
+  );
+  const canViewBudgets = Boolean(
+    user &&
+      (userHasPermission(user, "budgets.view") ||
+        userHasPermission(user, "budgets.manage")),
+  );
+  const canViewPlenos = Boolean(
+    user &&
+      (userHasPermission(user, "plenos.view") ||
+        userHasPermission(user, "plenos.manage")),
+  );
+  const canViewHeritage = Boolean(
+    user &&
+      (userHasPermission(user, "heritage.view") ||
+        userHasPermission(user, "heritage.manage")),
+  );
   const canManageOrdinances = Boolean(
     user &&
       ORDINANCE_MANAGEMENT_PERMISSIONS.some((permission) =>
@@ -1254,6 +287,31 @@ export function MunicipalWorkspace() {
       setOrdinances(null);
       setAssets(null);
       setMaintenance(null);
+      setGovernment(null);
+      setStaffWorkers(null);
+      setStaffPosts(null);
+      setPadron([]);
+      setClimate([]);
+      setHouseholds([]);
+      setOfficeHours([]);
+      setLicences([]);
+      setContracts([]);
+      setGrants([]);
+      setNotices([]);
+    setBudgets([]);
+    setExecution(null);
+    setMovements([]);
+    setSessions([]);
+    setHeritage([]);
+    setArchive([]);
+      setBudgets([]);
+      setExecution(null);
+      setMovements([]);
+      setSessions([]);
+    setHeritage([]);
+    setArchive([]);
+      setHeritage([]);
+      setArchive([]);
       setError("");
       setResourceErrors(EMPTY_RESOURCE_ERRORS);
       setIsLoading(false);
@@ -1270,6 +328,23 @@ export function MunicipalWorkspace() {
     setOrdinances(null);
     setAssets(null);
     setMaintenance(null);
+    setGovernment(null);
+    setStaffWorkers(null);
+    setStaffPosts(null);
+    setPadron([]);
+    setClimate([]);
+    setHouseholds([]);
+    setOfficeHours([]);
+    setLicences([]);
+    setContracts([]);
+    setGrants([]);
+    setNotices([]);
+    setBudgets([]);
+    setExecution(null);
+    setMovements([]);
+    setSessions([]);
+    setHeritage([]);
+    setArchive([]);
     setError("");
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setIsLoading(true);
@@ -1281,6 +356,22 @@ export function MunicipalWorkspace() {
         ordinanceResult,
         assetResult,
         maintenanceResult,
+        governmentResult,
+        staffWorkerResult,
+        staffPostResult,
+        padronResult,
+        climateResult,
+        householdResult,
+        officeHourResult,
+        licenceResult,
+        contractResult,
+        grantResult,
+        noticeResult,
+        budgetResult,
+        movementResult,
+        sessionResult,
+        heritageResult,
+        archiveResult,
       ] = await Promise.allSettled([
         fetchMunicipality(municipalityId, controller.signal),
         fetchMunicipalOrganization(organizationId, controller.signal),
@@ -1293,6 +384,28 @@ export function MunicipalWorkspace() {
         canViewMaintenance
           ? fetchMunicipalMaintenanceSummary(organizationId, controller.signal)
           : Promise.resolve(null),
+        canViewGovernment
+          ? fetchGovernmentMembers(organizationId, controller.signal)
+          : Promise.resolve(null),
+        canViewStaff
+          ? fetchStaffWorkers(organizationId, controller.signal)
+          : Promise.resolve(null),
+        canViewStaff
+          ? fetchStaffPosts(organizationId, controller.signal)
+          : Promise.resolve(null),
+        fetchPadronSeries(organizationId, controller.signal),
+        fetchClimateSeries(organizationId, undefined, controller.signal),
+        fetchHouseholdSeries(organizationId, controller.signal),
+        fetchOfficeHours(organizationId, controller.signal),
+        fetchLicences(organizationId, controller.signal),
+        fetchContracts(organizationId, controller.signal),
+        fetchGrants(organizationId, controller.signal),
+        fetchNotices(organizationId, controller.signal),
+        fetchBudgets(organizationId, controller.signal),
+        fetchTreasuryMovements(organizationId, controller.signal),
+        fetchCouncilSessions(organizationId, controller.signal),
+        fetchHeritageAssets(organizationId, controller.signal),
+        fetchArchiveItems(organizationId, controller.signal),
       ] as const);
 
       if (
@@ -1360,6 +473,98 @@ export function MunicipalWorkspace() {
             })),
           "No se pudo cargar el mantenimiento municipal.",
         );
+      }
+
+      if (governmentResult.status === "fulfilled") {
+        setGovernment(governmentResult.value);
+      } else {
+        handleRequestError(
+          governmentResult.reason,
+          (message) =>
+            setResourceErrors((current) => ({
+              ...current,
+              government: message,
+            })),
+          "No se pudo cargar la corporación municipal.",
+        );
+      }
+
+      // La plantilla y sus puestos comparten permiso y error: si una falla, la
+      // sección de personal no puede dibujarse con garantías.
+      if (staffWorkerResult.status === "fulfilled") {
+        setStaffWorkers(staffWorkerResult.value);
+      } else {
+        handleRequestError(
+          staffWorkerResult.reason,
+          (message) =>
+            setResourceErrors((current) => ({ ...current, staff: message })),
+          "No se pudo cargar el personal del ayuntamiento.",
+        );
+      }
+
+      if (staffPostResult.status === "fulfilled") {
+        setStaffPosts(staffPostResult.value);
+      } else {
+        handleRequestError(
+          staffPostResult.reason,
+          (message) =>
+            setResourceErrors((current) => ({ ...current, staff: message })),
+          "No se pudo cargar la plantilla municipal.",
+        );
+      }
+
+      // Las series no levantan bandera de error: sin permiso o sin datos el
+      // bloque enseña su estado vacío, que dice lo mismo sin alarmar.
+      if (padronResult.status === "fulfilled") {
+        setPadron(padronResult.value.items);
+      }
+      if (climateResult.status === "fulfilled") {
+        setClimate(climateResult.value.items);
+      }
+      if (householdResult.status === "fulfilled") {
+        setHouseholds(householdResult.value.items);
+      }
+      if (officeHourResult.status === "fulfilled") {
+        setOfficeHours(officeHourResult.value.items);
+      }
+      if (licenceResult.status === "fulfilled") {
+        setLicences(licenceResult.value.items);
+      }
+      if (contractResult.status === "fulfilled") {
+        setContracts(contractResult.value.items);
+      }
+      if (grantResult.status === "fulfilled") {
+        setGrants(grantResult.value.items);
+      }
+      if (noticeResult.status === "fulfilled") {
+        setNotices(noticeResult.value.items);
+      }
+      if (movementResult.status === "fulfilled") {
+        setMovements(movementResult.value.items);
+      }
+      if (sessionResult.status === "fulfilled") {
+        setSessions(sessionResult.value.items);
+      }
+      if (heritageResult.status === "fulfilled") {
+        setHeritage(heritageResult.value.items);
+      }
+      if (archiveResult.status === "fulfilled") {
+        setArchive(archiveResult.value.items);
+      }
+      if (budgetResult.status === "fulfilled") {
+        setBudgets(budgetResult.value.items);
+        // La ejecución se pide solo del ejercicio más reciente: es lo que la
+        // ficha enseña, y calcularla para todos sería trabajo tirado.
+        const latest = budgetResult.value.items[0];
+        if (latest) {
+          try {
+            setExecution(
+              await fetchBudgetExecution(latest.id, controller.signal),
+            );
+          } catch {
+            setExecution(null);
+          }
+        }
       }
     }
 
@@ -1451,6 +656,23 @@ export function MunicipalWorkspace() {
     setOrdinances(null);
     setAssets(null);
     setMaintenance(null);
+    setGovernment(null);
+    setStaffWorkers(null);
+    setStaffPosts(null);
+    setPadron([]);
+    setClimate([]);
+    setHouseholds([]);
+    setOfficeHours([]);
+    setLicences([]);
+    setContracts([]);
+    setGrants([]);
+    setNotices([]);
+    setBudgets([]);
+    setExecution(null);
+    setMovements([]);
+    setSessions([]);
+    setHeritage([]);
+    setArchive([]);
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setError("");
     setIsLoading(true);
@@ -1568,20 +790,62 @@ export function MunicipalWorkspace() {
             tone="error"
           />
         ) : activeTab === "summary" ? (
-          <SummaryTab
+          <InformacionMunicipio
             assets={assets}
             canViewAssets={canViewAssets}
             canViewMaintenance={canViewMaintenance}
             canViewOrdinances={canViewOrdinances}
             errors={resourceErrors}
+            governmentSection={
+              <EstructuraGobierno
+                canView={canViewGovernment}
+                error={resourceErrors.government}
+                members={government}
+                onRetry={retryWorkspace}
+              />
+            }
             maintenance={maintenance}
             municipality={municipality}
+            administrationSection={
+              <>
+                <Administracion
+                  canView={canViewAdministration}
+                  contracts={contracts}
+                  grants={grants}
+                  licences={licences}
+                  officeHours={officeHours}
+                />
+                <Comunicacion
+                  canView={canViewCommunications}
+                  notices={notices}
+                />
+                <Presupuestos
+                  budgets={budgets}
+                  canView={canViewBudgets}
+                  execution={execution}
+                  movements={movements}
+                />
+                <Plenos canView={canViewPlenos} sessions={sessions} />
+                <Patrimonio
+                  archive={archive}
+                  assets={heritage}
+                  canView={canViewHeritage}
+                />
+              </>
+            }
+            seriesSection={
+              <SeriesMunicipio
+                climate={climate}
+                households={households}
+                padron={padron}
+              />
+            }
             onTabChange={(tab) => selectWorkspaceTab(tab, true)}
             ordinances={ordinances}
             organization={organization}
           />
         ) : activeTab === "ordinances" ? (
-          <OrdinancesTab
+          <Normativa
             canManage={canManageOrdinances}
             canView={canViewOrdinances}
             error={resourceErrors.ordinances}
@@ -1590,7 +854,7 @@ export function MunicipalWorkspace() {
             ordinances={ordinances}
           />
         ) : activeTab === "facilities" ? (
-          <FacilitiesTab
+          <ServiciosMunicipales
             assets={assets}
             canViewAssets={canViewAssets}
             canViewMaintenance={canViewMaintenance}
@@ -1600,10 +864,22 @@ export function MunicipalWorkspace() {
             onRetry={retryWorkspace}
             organizationId={selectedContext.organization.id}
           />
+        ) : activeTab === "map" ? (
+          <MapaGeneral
+            canViewMap={canViewMap}
+            organizationId={selectedContext.organization.id}
+          />
         ) : activeTab === "people" ? (
-          <PeopleTab organization={organization} />
+          <Personal
+            canViewStaff={canViewStaff}
+            errors={resourceErrors}
+            onRetry={retryWorkspace}
+            organization={organization}
+            posts={staffPosts}
+            workers={staffWorkers}
+          />
         ) : (
-          <RoadmapTab
+          <HojaDeRuta
             assets={assets}
             canViewMap={canViewMap}
             maintenance={maintenance}

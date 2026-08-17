@@ -1,0 +1,102 @@
+.levels {
+  display: grid;
+  gap: 18px;
+}
+
+.level {
+  display: grid;
+  gap: 10px;
+}
+
+.levelHeading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.levelHeading h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.levelHeading span {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+}
+
+.members {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.member {
+  display: flex;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+}
+
+.member > div {
+  min-width: 0;
+}
+
+.member h4 {
+  margin: 0 0 2px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.group {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--fill);
+  font-size: 11px;
+}
+
+.contact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 8px;
+}
+
+.contact a,
+.contact span {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-decoration: none;
+}
+
+.contact a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.term {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+}

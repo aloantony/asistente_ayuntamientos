@@ -1,0 +1,86 @@
+.section {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 0 18px;
+  background: var(--surface);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  border: 0;
+  padding: 16px 0;
+  color: var(--text);
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.header:hover {
+  background: none;
+}
+
+.heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+}
+
+.icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.count {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--fill);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chevron {
+  flex: none;
+  color: var(--text-muted);
+  transition: transform 160ms ease;
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+.body {
+  padding-bottom: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chevron {
+    transition: none;
+  }
+}
