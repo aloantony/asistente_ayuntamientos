@@ -44,7 +44,15 @@ import {
   fetchNotices,
   fetchOfficeHours,
 } from "../lib/administration";
+import {
+  fetchBudgetExecution,
+  fetchBudgets,
+  fetchCouncilSessions,
+  fetchTreasuryMovements,
+} from "../lib/budgets";
 import { Administracion } from "./ayuntamiento/Administracion";
+import { Plenos } from "./ayuntamiento/Plenos";
+import { Presupuestos } from "./ayuntamiento/Presupuestos";
 import { Comunicacion } from "./ayuntamiento/Comunicacion";
 import { EstructuraGobierno } from "./ayuntamiento/EstructuraGobierno";
 import { SeriesMunicipio } from "./ayuntamiento/SeriesMunicipio";
@@ -63,7 +71,11 @@ import {
 import type { ResourceErrors, WorkspaceTab } from "./ayuntamiento/types";
 import {
   userHasPermission,
+  type BudgetExecution,
   type ClimateRecord,
+  type CouncilSession,
+  type MunicipalBudget,
+  type TreasuryMovement,
   type MunicipalContract,
   type MunicipalGrant,
   type MunicipalLicence,
@@ -175,6 +187,10 @@ export function MunicipalWorkspace() {
   const [contracts, setContracts] = useState<MunicipalContract[]>([]);
   const [grants, setGrants] = useState<MunicipalGrant[]>([]);
   const [notices, setNotices] = useState<MunicipalNotice[]>([]);
+  const [budgets, setBudgets] = useState<MunicipalBudget[]>([]);
+  const [execution, setExecution] = useState<BudgetExecution | null>(null);
+  const [movements, setMovements] = useState<TreasuryMovement[]>([]);
+  const [sessions, setSessions] = useState<CouncilSession[]>([]);
   const [resourceErrors, setResourceErrors] = useState<ResourceErrors>(
     EMPTY_RESOURCE_ERRORS,
   );
@@ -225,6 +241,16 @@ export function MunicipalWorkspace() {
       (userHasPermission(user, "communications.view") ||
         userHasPermission(user, "communications.manage")),
   );
+  const canViewBudgets = Boolean(
+    user &&
+      (userHasPermission(user, "budgets.view") ||
+        userHasPermission(user, "budgets.manage")),
+  );
+  const canViewPlenos = Boolean(
+    user &&
+      (userHasPermission(user, "plenos.view") ||
+        userHasPermission(user, "plenos.manage")),
+  );
   const canManageOrdinances = Boolean(
     user &&
       ORDINANCE_MANAGEMENT_PERMISSIONS.some((permission) =>
@@ -258,6 +284,14 @@ export function MunicipalWorkspace() {
       setContracts([]);
       setGrants([]);
       setNotices([]);
+    setBudgets([]);
+    setExecution(null);
+    setMovements([]);
+    setSessions([]);
+      setBudgets([]);
+      setExecution(null);
+      setMovements([]);
+      setSessions([]);
       setError("");
       setResourceErrors(EMPTY_RESOURCE_ERRORS);
       setIsLoading(false);
@@ -285,6 +319,10 @@ export function MunicipalWorkspace() {
     setContracts([]);
     setGrants([]);
     setNotices([]);
+    setBudgets([]);
+    setExecution(null);
+    setMovements([]);
+    setSessions([]);
     setError("");
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setIsLoading(true);
@@ -307,6 +345,9 @@ export function MunicipalWorkspace() {
         contractResult,
         grantResult,
         noticeResult,
+        budgetResult,
+        movementResult,
+        sessionResult,
       ] = await Promise.allSettled([
         fetchMunicipality(municipalityId, controller.signal),
         fetchMunicipalOrganization(organizationId, controller.signal),
@@ -336,6 +377,9 @@ export function MunicipalWorkspace() {
         fetchContracts(organizationId, controller.signal),
         fetchGrants(organizationId, controller.signal),
         fetchNotices(organizationId, controller.signal),
+        fetchBudgets(organizationId, controller.signal),
+        fetchTreasuryMovements(organizationId, controller.signal),
+        fetchCouncilSessions(organizationId, controller.signal),
       ] as const);
 
       if (
@@ -469,6 +513,27 @@ export function MunicipalWorkspace() {
       if (noticeResult.status === "fulfilled") {
         setNotices(noticeResult.value.items);
       }
+      if (movementResult.status === "fulfilled") {
+        setMovements(movementResult.value.items);
+      }
+      if (sessionResult.status === "fulfilled") {
+        setSessions(sessionResult.value.items);
+      }
+      if (budgetResult.status === "fulfilled") {
+        setBudgets(budgetResult.value.items);
+        // La ejecución se pide solo del ejercicio más reciente: es lo que la
+        // ficha enseña, y calcularla para todos sería trabajo tirado.
+        const latest = budgetResult.value.items[0];
+        if (latest) {
+          try {
+            setExecution(
+              await fetchBudgetExecution(latest.id, controller.signal),
+            );
+          } catch {
+            setExecution(null);
+          }
+        }
+      }
     }
 
     void loadWorkspace().finally(() => {
@@ -570,6 +635,10 @@ export function MunicipalWorkspace() {
     setContracts([]);
     setGrants([]);
     setNotices([]);
+    setBudgets([]);
+    setExecution(null);
+    setMovements([]);
+    setSessions([]);
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setError("");
     setIsLoading(true);
@@ -716,6 +785,13 @@ export function MunicipalWorkspace() {
                   canView={canViewCommunications}
                   notices={notices}
                 />
+                <Presupuestos
+                  budgets={budgets}
+                  canView={canViewBudgets}
+                  execution={execution}
+                  movements={movements}
+                />
+                <Plenos canView={canViewPlenos} sessions={sessions} />
               </>
             }
             seriesSection={

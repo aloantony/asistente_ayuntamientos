@@ -133,3 +133,82 @@
   font-size: 11px;
   text-align: right;
 }
+
+/* Presupuesto y plenos comparten estas piezas (ADR-041): son listas del mismo
+   tipo y duplicar el módulo solo habría duplicado el mantenimiento. */
+
+.facts {
+  display: grid;
+  gap: 8px 18px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--fill);
+}
+
+.meter span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agenda {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.agenda li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.agenda strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agenda small {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+}
+
+.emptyAgenda {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
