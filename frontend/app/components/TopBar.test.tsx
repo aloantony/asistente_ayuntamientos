@@ -20,8 +20,15 @@ describe("modelo de navegación municipal", () => {
     expect(
       sections.every((section) => section.items.every((item) => item.enabled)),
     ).toBe(true);
-    // El modelo completo sí conserva lo pendiente, como índice de lo que falta.
-    expect(TOP_NAV_SECTIONS.length).toBeGreaterThan(sections.length);
+    // El modelo completo conserva lo pendiente como índice de lo que falta.
+    // Con la sede ya construida todas las secciones están activas; lo que
+    // sigue pendiente son entradas sueltas, como el mapa general.
+    expect(TOP_NAV_SECTIONS.length).toBeGreaterThanOrEqual(sections.length);
+    expect(
+      TOP_NAV_SECTIONS.some((section) =>
+        section.items.some((item) => !item.enabled),
+      ),
+    ).toBe(true);
   });
 
   it("muestra la barra sólo en las rutas institucionales", () => {
@@ -47,8 +54,8 @@ describe("TopBar", () => {
     expect(screen.getByText("Fuentelcésped")).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Navegación municipal" })).toBeTruthy();
     expect(screen.getByText("AYUNTAMIENTO")).toBeTruthy();
-    // Sede electrónica todavía no tiene pantalla: no debe aparecer.
-    expect(screen.queryByText("SEDE ELECTRÓNICA")).toBeNull();
+    // La sede ya tiene pantalla propia (ADR-042).
+    expect(screen.getByText("SEDE ELECTRÓNICA")).toBeTruthy();
   });
 
   it("abre y cierra el desplegable de una sección con el teclado", () => {

@@ -593,3 +593,38 @@ huecos ambiguos.
 La revisión Alembic `20260805_0039` se serializa detrás de `20260805_0038`
 conforme a ADR-033, y ninguna tabla nueva referencia `municipalities` en directo,
 por lo aprendido en ADR-038 sobre los locks del downgrade.
+## ADR-042: La sede electrónica agrega, no duplica (2026-08-05)
+
+`backend/app/sede/` no guarda casi nada. Bandos, noticias, trámites,
+transparencia, contratos, plenos y normativa ya viven en sus dominios, y la sede
+sólo recoge lo que lleva `publish_to_sede`. Copiar esos datos a tablas propias
+habría creado dos verdades que envejecen por separado: retirar un bando dejaría
+de notarse en el portal, que es justo el fallo que un tablón no se puede
+permitir. El único dominio nuevo es `municipal_taxes`, porque un tributo no era
+ninguna de las cosas anteriores.
+
+**Publicar es una condición, no una copia.** Cada sección filtra por su propio
+criterio de «esto ya es público»: un bando debe estar `published` —un borrador o
+uno retirado no están expuestos, aunque consten en el histórico interno—, un
+contrato debe haber salido a licitación, y una ordenanza debe estar vigente y
+curada, porque la sede no es sitio para normativa pendiente de revisar. La
+respuesta lleva `Cache-Control: no-store`: retirar un bando tiene que notarse de
+inmediato.
+
+**Sigue exigiendo autenticación.** Es la vista previa de lo que verá la
+ciudadanía, no el portal público. Abrirla sin sesión habría expuesto por
+comodidad datos cuya publicación real es una decisión de despliegue —dominio,
+cabeceras, indexación— y no de este endpoint. Cuando exista ese portal, podrá
+consumir esta misma agregación.
+
+**Todo llega en una respuesta.** La sede de un municipio pequeño cabe de sobra, y
+siete peticiones para pintar siete pestañas serían siete comprobaciones de
+permiso y siete viajes para lo mismo. Cambiar de pestaña no vuelve a pedir nada.
+
+Un tributo puede existir sin su ordenanza fiscal digitalizada, así que
+`ordinance_id` es opcional. La cuota se expresa como tipo, importe fijo o tarifa,
+y un `CHECK` obliga a que los dos primeros traigan su número y la tercera su
+descripción: un tipo porcentual sin valor no dice cuánto se paga.
+
+La revisión Alembic `20260805_0040` se serializa detrás de `20260805_0039`
+conforme a ADR-033.
