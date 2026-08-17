@@ -27,6 +27,7 @@ from app.requirements.routes import router as requirements_router
 from app.reference_layers.routes import router as reference_layers_router
 from app.reference_layers.wms_middleware import ReferenceWMSVaryMiddleware
 from app.staff.routes import router as staff_router
+from app.tasks.routes import router as tasks_router
 from app.telegram.routes import router as telegram_router
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ for app_router in (
     maintenance_router,
     government_router,
     staff_router,
+    tasks_router,
     assistant_router,
     agent_office_router,
     telegram_router,

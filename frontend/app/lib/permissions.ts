@@ -70,6 +70,22 @@ export function canViewStaff(user: User) {
   );
 }
 
+// Hoja de ruta municipal. Como en el inventario, `manage` es el paraguas y los
+// niveles no se implican entre sí.
+export const TASK_PERMISSIONS = [
+  "tasks.view",
+  "tasks.create",
+  "tasks.edit",
+  "tasks.manage",
+];
+
+export function canViewTasks(user: User) {
+  return (
+    userHasPermission(user, "tasks.view") ||
+    userHasPermission(user, "tasks.manage")
+  );
+}
+
 export const PROJECT_PERMISSIONS = [
   "projects.view_all",
   "projects.create",
