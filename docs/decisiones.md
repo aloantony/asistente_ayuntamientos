@@ -718,3 +718,32 @@ El escaneo vive en `documents`, como el escudo en ADR-038 y las actas en ADR-041
 
 La revisión Alembic `20260805_0041` se serializa detrás de `20260805_0040`
 conforme a ADR-033.
+
+## ADR-046: Las piezas de la conversación salen del panel del asistente (2026-08-05)
+
+`AssistantPanel.tsx` había llegado a 2854 líneas y a 52 hooks en un único
+componente. La fase 9 del rediseño no toca su comportamiento: mueve a
+`frontend/app/components/asistente/conversationParts.tsx` las 500 líneas que
+estaban **antes** del componente y que no dependían de su estado —agrupar
+conversaciones por fecha o por carpeta, formatear fechas y tamaños, y pintar la
+cronología de acciones, el markdown y las tarjetas de adjunto—. El cuerpo movido
+es idéntico línea a línea al original; lo único que cambia es el `export` y el
+lado del `import`.
+
+**Por qué no se trocea el componente.** Repartir 52 hooks entre varios ficheros
+obligaría a subir estado o a inventar un contexto, y eso sí sería un cambio de
+comportamiento disfrazado de limpieza. Un componente grande con estado
+entrelazado se refactoriza cuando hay una razón funcional para hacerlo, no para
+bajar una cifra de líneas.
+
+**Lo que se gana es que ahora se puede probar.** Estas piezas eran inalcanzables
+desde un test sin montar el panel entero con su red y sus streams; ahora tienen
+14 tests propios que fijan cosas que antes nadie comprobaba: que una conversación
+archivada de hoy va a «Archivadas» y no a «Hoy», que una fecha ilegible cae al
+fondo en vez de romper el reparto, que borrar una carpeta no hace desaparecer sus
+conversaciones —caen a «Sin carpeta»—, y que un adjunto de 1 byte no se muestra
+como 0 KB.
+
+No hay dependencias nuevas ni componentes nuevos: el módulo importa lo mismo que
+importaba el bloque, y el panel dejó de importar los catorce símbolos que sólo
+usaba ese bloque.
