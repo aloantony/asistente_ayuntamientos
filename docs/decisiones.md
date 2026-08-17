@@ -747,3 +747,46 @@ como 0 KB.
 No hay dependencias nuevas ni componentes nuevos: el módulo importa lo mismo que
 importaba el bloque, y el panel dejó de importar los catorce símbolos que sólo
 usaba ese bloque.
+
+## ADR-047: Un despliegue con valores de desarrollo no arranca (2026-08-18)
+
+`SECRET_KEY` tenía como valor por defecto `change-me-in-development`, y nada
+comprobaba que cambiase. Esa clave firma los JWT, las autorizaciones de
+herramientas y las firmas del catálogo de ordenanzas; su valor por defecto está
+publicado en este repositorio. Un despliegue que arrancase con él permitiría a
+cualquiera fabricarse un token de administrador. Lo mismo, en menor grado, con
+el token de bootstrap —que crea el primer superusuario—, la contraseña de la
+base de datos y unos orígenes CORS apuntando a `localhost`.
+
+**Fallar al arrancar, no degradarse.** Cuando `ENVIRONMENT` no es `development`
+ni `test`, el validador de `Settings` rechaza esos cuatro valores y el proceso
+no levanta. Un aviso en el registro no sirve: nadie lee los registros de un
+servicio que responde, y una plataforma municipal firmando tokens con una clave
+pública no es un modo degradado, es una puerta abierta.
+
+**Se comprueban literales, no entropía.** La lista contiene exactamente las
+cadenas que aparecen en `.env.example` y como valores por defecto, más un
+mínimo de 32 caracteres para la clave de firma. Inventar una heurística de
+aleatoriedad daría falsos positivos con claves legítimas y falsos negativos con
+`password123`; lo que de verdad ocurre es que alguien copia la plantilla sin
+leerla.
+
+**Todos los problemas se informan a la vez.** Arreglar un despliegue a base de
+reinicios, descubriendo un fallo por vuelta, es la forma más rápida de que
+alguien se rinda a medias y deje dos valores sin cambiar.
+
+**CORS vacío es legítimo.** ADR-010 pone frontend y backend bajo el mismo host,
+donde no hay petición cross-origin que permitir. Exigir una entrada sería pedir
+ruido. Lo que sí se rechaza es un origen de loopback o en texto plano: la cookie
+de sesión se emite `Secure` fuera de desarrollo, así que un origen `http://` no
+puede sostener una sesión aunque se le autorice.
+
+La documentación interactiva de la API (`/docs`, `/redoc`, `/openapi.json`) pasa
+a servirse solo en desarrollo por la misma razón: describe cada endpoint, cada
+esquema y cada permiso, y los endpoints siguen exigiendo autenticación, pero no
+hay motivo para regalar el mapa.
+
+Los contenedores dejan de correr como root. Mantienen **un solo worker** de
+uvicorn: los limitadores de peticiones siguen siendo por proceso (ADR-015) y
+añadir workers los desactivaría de hecho. `docs/despliegue.md` recoge el
+procedimiento completo y lo que sigue abierto.
