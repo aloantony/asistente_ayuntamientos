@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { useCallback, useEffect, useId, useState } from "react";
 import { visibleTopNavSections, type TopNavSection } from "../lib/topNav";
+import { TopBarWeather } from "./TopBarWeather";
 import styles from "./TopBar.module.css";
 
 // Barra superior institucional (ADR-034): escudo y nombre del municipio a la
-// izquierda, navegación municipal fija en el centro. El bloque de la derecha
-// queda reservado para la temperatura del municipio, que llega con el dominio
-// de datos municipales.
+// izquierda, navegación municipal fija en el centro y la temperatura a la
+// derecha, leída en vivo de Open-Meteo (ADR-038).
 
 function ChevronIcon() {
   return (
@@ -56,12 +56,15 @@ type TopBarProps = {
   crestSrc?: string | null;
   /** Sección activa según la ruta, para resaltarla en la píldora. */
   activeSectionId?: string | null;
+  /** Municipio del que se lee la temperatura; sin él no se dibuja el bloque. */
+  municipalityId?: number | null;
 };
 
 export function TopBar({
   municipalityName,
   crestSrc,
   activeSectionId,
+  municipalityId = null,
 }: TopBarProps) {
   const sections = visibleTopNavSections();
   const [openSectionId, setOpenSectionId] = useState<string | null>(null);
@@ -135,7 +138,9 @@ export function TopBar({
           ))}
         </nav>
 
-        <div className={styles.aside} />
+        <div className={styles.aside}>
+          <TopBarWeather municipalityId={municipalityId} />
+        </div>
       </div>
     </div>
   );

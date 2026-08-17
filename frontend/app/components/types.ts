@@ -1877,3 +1877,66 @@ export type MunicipalTaskSummary = {
   /** Fecha del servidor con la que se ha decidido qué está vencido. */
   reference_date: string;
 };
+
+/** Lectura meteorológica en vivo (ADR-038). No se persiste en ninguna tabla. */
+export type MunicipalWeather = {
+  temperature_c: number;
+  apparent_temperature_c: number | null;
+  relative_humidity: number | null;
+  wind_speed_kmh: number | null;
+  weather_code: number | null;
+  is_day: boolean | null;
+  observed_at: string;
+  latitude: number;
+  longitude: number;
+  provider: string;
+};
+
+// Series municipales (ADR-037). Los decimales viajan como cadena.
+
+export type MunicipalDataSource = "municipal" | "ine" | "aemet" | "other";
+
+export type PadronRecord = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  population: number;
+  men: number | null;
+  women: number | null;
+  births: number | null;
+  deaths: number | null;
+  source: MunicipalDataSource;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ClimateRecord = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  /** Nulo significa el resumen del año entero. */
+  reference_month: number | null;
+  avg_temperature_c: string | null;
+  min_temperature_c: string | null;
+  max_temperature_c: string | null;
+  precipitation_mm: string | null;
+  source: MunicipalDataSource;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HouseholdStat = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  total_dwellings: number;
+  primary_dwellings: number | null;
+  secondary_dwellings: number | null;
+  empty_dwellings: number | null;
+  source: MunicipalDataSource;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
