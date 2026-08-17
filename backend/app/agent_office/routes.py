@@ -3,6 +3,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from sqlalchemy.orm import Session
 
+from app.agent_office.ordinance_corpus_analysis import (
+    ANALYZE_ORDINANCE_CORPUS_ACTION,
+)
 from app.agent_office.schemas import (
     AgentOfficeRoutineCreate,
     AgentOfficeRoutineRead,
@@ -11,16 +14,20 @@ from app.agent_office.schemas import (
     AgentOfficeTaskCreate,
     AgentOfficeTaskDetail,
     AgentOfficeTaskEnqueueRead,
+    AgentOfficeOrdinanceAnalysisItemRead,
     AgentOfficeTaskRead,
 )
 from app.agent_office.service import (
     OFFICE_AGENTS,
     approve_or_cancel_task,
+    build_agent_office_queue_job_id,
     create_routine,
     create_task,
+    enqueue_agent_office_task_execution,
     get_routine_for_user,
     get_task_for_user,
     list_routines_for_user,
+    list_ordinance_analysis_items_for_user,
     list_tasks_for_user,
     mark_task_queue_failed,
     mark_task_queued,
@@ -28,7 +35,6 @@ from app.agent_office.service import (
     trigger_routine,
 )
 from app.auth.dependencies import get_current_user
-from app.core.jobs import get_default_queue
 from app.db.session import get_db
 from app.users.models import User
 
@@ -100,6 +106,31 @@ def get_agent_office_task(
     return get_task_for_user(db, current_user, task_id)
 
 
+@router.get(
+    "/tasks/{task_id}/ordinance-analysis-items",
+    response_model=list[AgentOfficeOrdinanceAnalysisItemRead],
+)
+def list_agent_office_ordinance_analysis_items(
+    task_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    status_filter: Annotated[
+        str | None,
+        Query(alias="status"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    return list_ordinance_analysis_items_for_user(
+        db,
+        current_user,
+        task_id=task_id,
+        status_filter=status_filter,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.patch("/tasks/{task_id}/approval", response_model=AgentOfficeTaskDetail)
 def approve_agent_office_task(
     task_id: int,
@@ -124,18 +155,33 @@ def enqueue_agent_office_task(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AgentOfficeTaskEnqueueRead:
     task = get_task_for_user(db, current_user, task_id)
-    task = mark_task_queued(db, current_user, task)
+    queue_job_id = build_agent_office_queue_job_id(task.id)
+    task = mark_task_queued(
+        db,
+        current_user,
+        task,
+        queue_job_id=queue_job_id,
+    )
     try:
-        queue_job = get_default_queue().enqueue(run_agent_office_task, task.id)
+        queue_job = enqueue_agent_office_task_execution(
+            task,
+            queue_job_id=queue_job_id,
+        )
     except Exception as error:
-        mark_task_queue_failed(db, current_user, task.id, error)
+        mark_task_queue_failed(
+            db,
+            current_user,
+            task.id,
+            error,
+            queue_job_id=queue_job_id,
+        )
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Agent office queue is unavailable",
         ) from error
     return AgentOfficeTaskEnqueueRead(
         task_id=task.id,
-        status="queued",
+        status=task.status,
         queue_job_id=queue_job.id,
     )
 
@@ -147,6 +193,14 @@ def run_agent_office_task_inline(
     current_user: Annotated[User, Depends(get_current_user)],
 ):
     task = get_task_for_user(db, current_user, task_id)
+    if task.requested_action == ANALYZE_ORDINANCE_CORPUS_ACTION:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=(
+                "Durable ordinance analysis must run through the "
+                "agent office queue"
+            ),
+        )
     task = mark_task_queued(db, current_user, task)
     run_agent_office_task(task.id, db=db)
     return get_task_for_user(db, current_user, task_id)

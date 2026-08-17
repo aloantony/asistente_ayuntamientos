@@ -23,6 +23,12 @@ AgentOfficeTaskStatus = Literal[
     "failed",
     "cancelled",
 ]
+AgentOfficeOrdinanceAnalysisItemStatus = Literal[
+    "pending",
+    "running",
+    "completed",
+    "failed",
+]
 AgentOfficePriority = Literal["low", "medium", "high", "urgent"]
 AgentOfficeApprovalPolicy = Literal[
     "never",
@@ -45,6 +51,7 @@ class AgentOfficeAgentRead(BaseModel):
     assistant_agent_key: str
     tool_names: list[str]
     mutating_actions: list[str]
+    workflow_actions: list[str]
     requires_approval_by_default: bool
 
 
@@ -63,6 +70,26 @@ class AgentOfficeTaskEventRead(BaseModel):
     payload: dict = Field(default_factory=dict)
     created_by_id: int | None
     created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentOfficeOrdinanceAnalysisItemRead(BaseModel):
+    id: int
+    task_id: int
+    ordinance_id: int | None
+    source_ordinance_id: int
+    source_updated_at: datetime | None
+    source_hash: str | None
+    source_digest: str
+    status: AgentOfficeOrdinanceAnalysisItemStatus
+    attempts: int
+    error_message: str | None
+    result: dict = Field(default_factory=dict)
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
