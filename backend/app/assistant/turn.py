@@ -174,7 +174,12 @@ def tool_result_for_activity(tool_name: str, content: str) -> str:
             )
     limit = (
         MAX_ORDINANCE_TOOL_RESULT_CHARS
-        if tool_name == "semantic_search_ordinances"
+        if tool_name
+        in {
+            "semantic_search_ordinances",
+            "get_ordinance_corpus_manifest",
+            "list_ordinance_catalog",
+        }
         else MAX_TOOL_RESULT_CHARS
     )
     return content[:limit]
@@ -204,6 +209,17 @@ FINALIZATION_PENDING_TOOL_RESULT = (
     "No se ejecutó la herramienta porque el turno ya está cerrando su fase de "
     "consultas. Usa los resultados disponibles para responder al usuario."
 )
+
+
+def _tool_repetition_policy(
+    tool: ToolSpec | None,
+    tool_name: str,
+) -> tuple[bool, bool]:
+    """Return whether a call is read-only and whether to deduplicate it."""
+
+    read_call = tool is None or tool.read_only
+    refreshable_manifest = tool_name == "get_ordinance_corpus_manifest"
+    return read_call, read_call and not refreshable_manifest
 TOOL_LOOP_LIMIT_REPLY = (
     "He detenido las consultas para evitar un bucle. No he podido completar "
     "todas las comprobaciones; puedes pedirme que reintente la parte pendiente."
@@ -554,7 +570,14 @@ def _run_agent_turn_events(
                     },
                 )
                 signature = tool_call_signature(block.name, audited_tool_input)
-                track_repetition = tool is None or tool.read_only
+                # A catalogue page can report snapshot drift after the first
+                # manifest. Regenerating that read with the same filters is the
+                # only safe recovery path; the global call/round budgets still
+                # prevent loops.
+                read_call, track_repetition = _tool_repetition_policy(
+                    tool,
+                    block.name,
+                )
                 if attachment_tainted:
                     # The provider receives no tool definitions for attachment
                     # turns, but a hallucinated tool block must still fail
@@ -641,10 +664,14 @@ def _run_agent_turn_events(
                             attachment_tainted=False,
                         )
                     if track_repetition:
-                        seen_read_calls.add(signature)
-                        if _is_non_retryable_tool_failure(result):
+                        non_retryable_failure = (
+                            _is_non_retryable_tool_failure(result)
+                        )
+                        if result.ok or non_retryable_failure:
+                            seen_read_calls.add(signature)
+                        if non_retryable_failure:
                             unavailable_read_tools.add(block.name)
-                    elif result.ok:
+                    elif not read_call and result.ok:
                         # A successful mutation can make an identical read useful
                         # again later in this same turn.
                         seen_read_calls.clear()
@@ -875,6 +902,7 @@ def _is_non_retryable_tool_failure(result: ToolResult) -> bool:
             "error (401)",
             "error (403)",
             "error (503)",
+            "entrada inválida",
             "herramienta desconocida",
             "herramienta no disponible",
             "no está configurad",

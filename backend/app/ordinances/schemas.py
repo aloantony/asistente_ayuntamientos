@@ -397,6 +397,7 @@ class OrdinanceSemanticSearchResult(BaseModel):
     municipality_id: int
     municipality_name: str
     province: str
+    autonomous_community: str
     population: int | None
     topic: str
     status: OrdinanceStatus
