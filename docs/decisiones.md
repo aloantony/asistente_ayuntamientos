@@ -549,3 +549,47 @@ declararla ahora evita una migración que toque cuatro tablas más adelante.
 
 La revisión Alembic `20260805_0038` se serializa detrás de `20260804_0037`
 conforme a ADR-033.
+## ADR-041: Presupuesto derivado y tesorería independiente (2026-08-05)
+
+`backend/app/budgets/` guarda el presupuesto anual, sus partidas, las
+modificaciones de crédito, los gastos imputados y los movimientos de tesorería;
+`backend/app/plenos/`, las sesiones del pleno y su orden del día.
+
+**La ejecución presupuestaria no se guarda.** Ni el gasto ejecutado ni el
+crédito disponible son columnas: se calculan en cada consulta sumando partidas,
+modificaciones aprobadas y gastos. Guardarlos obligaría a recalcular en cada
+escritura y a convivir con un total que dejó de cuadrar tras un fallo a medio
+camino. Es el mismo criterio que «vencida» en ADR-036: un dato calculable que se
+almacena empieza a envejecer en cuanto cambia el que lo origina.
+
+**El importe de una partida es siempre positivo** y la dirección la marca
+`kind` (`income` o `expense`), para que sumar ingresos y gastos por separado no
+dependa de leer bien un signo. En las modificaciones, en cambio, el signo sí
+importa: una modificación de crédito puede retirarlo.
+
+**Un presupuesto en borrador se edita; uno aprobado se modifica.** Sobre un
+borrador se cambia la partida directamente y no caben modificaciones de crédito,
+porque no hay nada aprobado que modificar. Y una modificación solo mueve crédito
+cuando está aprobada —aprobarla pide `budgets.manage`—; en borrador es una
+intención, y la ejecución no la cuenta.
+
+**La tesorería no cuelga del presupuesto**, a propósito. El dinero entra y sale
+con su propio calendario: una factura puede imputarse a una partida de un año y
+pagarse en el siguiente. Atar `treasury_movements` a un presupuesto obligaría a
+mentir en una de las dos fechas o a inventar una imputación que nadie ha hecho.
+
+En los plenos, el acta es un documento de `documents` y no texto suelto, igual
+que el escudo en ADR-038. Aprobarla pide `plenos.manage` mientras que redactarla
+se queda en `edit`: aprobar es el acto que convierte el acta en el registro
+oficial de lo acordado. Un `CHECK` garantiza que un acta aprobada tiene
+documento, y que una sesión cancelada no produce acta ni orden del día, porque
+no llegó a celebrarse.
+
+Los votos de un punto del orden del día son **nulos mientras no se vota**: un
+punto informativo no tiene votación, y cero votos a favor no es lo mismo que no
+haberse votado. Un `UNIQUE` por sesión y posición mantiene el orden del día sin
+huecos ambiguos.
+
+La revisión Alembic `20260805_0039` se serializa detrás de `20260805_0038`
+conforme a ADR-033, y ninguna tabla nueva referencia `municipalities` en directo,
+por lo aprendido en ADR-038 sobre los locks del downgrade.

@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260805_0038"
+HEAD_REVISION = "20260805_0039"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1733,6 +1733,55 @@ ADMINISTRATION_TABLES = {
 }
 
 
+BUDGET_PLENO_TABLES = {
+    "municipal_budgets",
+    "budget_lines",
+    "budget_amendments",
+    "budget_expenses",
+    "treasury_movements",
+    "council_sessions",
+    "council_agenda_items",
+}
+
+
+def assert_budget_pleno_schema(inspector: Inspector) -> None:
+    """El presupuesto y los plenos existen, sin columnas derivadas guardadas."""
+    table_names = set(inspector.get_table_names())
+    assert BUDGET_PLENO_TABLES <= table_names
+
+    # La ejecucion se calcula al consultar: si alguien la materializa, este
+    # test tiene que enterarse.
+    budget_columns = {
+        column["name"] for column in inspector.get_columns("municipal_budgets")
+    }
+    assert budget_columns.isdisjoint(
+        {"executed_expense", "available_credit", "total_expense"}
+    )
+
+    # Un ano, un presupuesto; y un codigo de partida no se repite dentro de el.
+    assert "uq_municipal_budgets_org_year" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("municipal_budgets")
+    }
+    assert "uq_budget_lines_budget_code" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("budget_lines")
+    }
+
+    # La tesoreria no cuelga del presupuesto: el dinero tiene su calendario.
+    assert not any(
+        foreign_key["referred_table"] == "municipal_budgets"
+        for foreign_key in inspector.get_foreign_keys("treasury_movements")
+    )
+
+    # Ninguna tabla nueva apunta a `municipalities` (ADR-038).
+    for table_name in BUDGET_PLENO_TABLES:
+        assert not any(
+            foreign_key["referred_table"] == "municipalities"
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        )
+
+
 def assert_administration_schema(inspector: Inspector) -> None:
     """Administracion y comunicacion existen y siguen aisladas por organizacion."""
     table_names = set(inspector.get_table_names())
@@ -1972,6 +2021,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_roadmap_schema(upgraded_inspector)
         assert_municipal_data_schema(upgraded_inspector)
         assert_administration_schema(upgraded_inspector)
+        assert_budget_pleno_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(upgraded_inspector)
@@ -2013,6 +2063,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert ADMINISTRATION_TABLES.isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert BUDGET_PLENO_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -2031,6 +2084,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_roadmap_schema(reupgraded_inspector)
         assert_municipal_data_schema(reupgraded_inspector)
         assert_administration_schema(reupgraded_inspector)
+        assert_budget_pleno_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(reupgraded_inspector)
@@ -3345,6 +3399,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_roadmap_schema(inspect(engine))
         assert_municipal_data_schema(inspect(engine))
         assert_administration_schema(inspect(engine))
+        assert_budget_pleno_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
@@ -3371,6 +3426,9 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert ADMINISTRATION_TABLES.isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert BUDGET_PLENO_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -3389,6 +3447,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_roadmap_schema(inspect(engine))
         assert_municipal_data_schema(inspect(engine))
         assert_administration_schema(inspect(engine))
+        assert_budget_pleno_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))

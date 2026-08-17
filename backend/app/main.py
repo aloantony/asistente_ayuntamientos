@@ -12,6 +12,7 @@ from app.api.routes.health import router as health_router
 from app.assistant.routes import router as assistant_router
 from app.administration.routes import router as administration_router
 from app.assets.routes import router as assets_router
+from app.budgets.routes import router as budgets_router
 from app.communications.routes import router as communications_router
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -25,6 +26,7 @@ from app.ordinances.routes import router as ordinances_router
 from app.ordinances.seed import ensure_initial_official_legal_sources
 from app.organizations.branding_routes import router as branding_router
 from app.organizations.routes import router as organizations_router
+from app.plenos.routes import router as plenos_router
 from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
@@ -91,6 +93,8 @@ for app_router in (
     municipal_data_router,
     administration_router,
     communications_router,
+    budgets_router,
+    plenos_router,
     weather_router,
     branding_router,
     assistant_router,

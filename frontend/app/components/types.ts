@@ -2066,3 +2066,74 @@ export type MunicipalNotice = {
   updated_at: string;
   events: MunicipalNoticeEvent[];
 };
+
+// Presupuesto y plenos (ADR-041). Los importes viajan como cadena.
+
+export type BudgetStatus = "draft" | "approved" | "executing" | "settled";
+
+export type MunicipalBudget = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  status: BudgetStatus;
+  approved_on: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Derivada al consultar, nunca guardada. */
+export type BudgetExecution = {
+  budget_id: number;
+  reference_year: number;
+  status: BudgetStatus;
+  total_income: string;
+  total_expense: string;
+  approved_amendments: string;
+  executed_expense: string;
+  available_credit: string;
+};
+
+export type TreasuryMovement = {
+  id: number;
+  organization_id: number;
+  direction: "inflow" | "outflow";
+  concept: string;
+  amount: string;
+  moved_on: string;
+  account_label: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CouncilAgendaItem = {
+  id: number;
+  session_id: number;
+  organization_id: number;
+  position: number;
+  title: string;
+  description: string | null;
+  /** Nulos mientras no se vota: un punto informativo no tiene votación. */
+  votes_in_favour: number | null;
+  votes_against: number | null;
+  abstentions: number | null;
+  outcome: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CouncilSession = {
+  id: number;
+  organization_id: number;
+  kind: "ordinary" | "extraordinary" | "urgent" | "constitutive";
+  status: "convened" | "held" | "cancelled";
+  held_on: string;
+  summary: string | null;
+  minutes_status: "pending" | "draft" | "approved";
+  minutes_document_id: number | null;
+  publish_to_sede: boolean;
+  created_at: string;
+  updated_at: string;
+  agenda_items: CouncilAgendaItem[];
+};
