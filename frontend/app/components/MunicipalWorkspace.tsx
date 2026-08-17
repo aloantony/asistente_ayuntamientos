@@ -6,6 +6,7 @@ import {
   CircleAlert,
   ClipboardList,
   Landmark,
+  Map as MapIcon,
   RefreshCw,
   ShieldCheck,
   Users,
@@ -51,6 +52,7 @@ import {
   fetchTreasuryMovements,
 } from "../lib/budgets";
 import { Administracion } from "./ayuntamiento/Administracion";
+import { MapaGeneral } from "./ayuntamiento/MapaGeneral";
 import { Plenos } from "./ayuntamiento/Plenos";
 import { Presupuestos } from "./ayuntamiento/Presupuestos";
 import { Comunicacion } from "./ayuntamiento/Comunicacion";
@@ -106,6 +108,7 @@ const TAB_DEFINITIONS: TabDefinition[] = [
   { id: "summary", label: "Información", icon: Landmark },
   { id: "ordinances", label: "Normativa", icon: BookOpen },
   { id: "facilities", label: "Servicios municipales", icon: Wrench },
+  { id: "map", label: "Mapa general", icon: MapIcon },
   { id: "people", label: "Personal", icon: Users },
   { id: "roadmap", label: "Hoja de ruta", icon: ClipboardList },
 ];
@@ -823,6 +826,11 @@ export function MunicipalWorkspace() {
             errors={resourceErrors}
             maintenance={maintenance}
             onRetry={retryWorkspace}
+            organizationId={selectedContext.organization.id}
+          />
+        ) : activeTab === "map" ? (
+          <MapaGeneral
+            canViewMap={canViewMap}
             organizationId={selectedContext.organization.id}
           />
         ) : activeTab === "people" ? (
