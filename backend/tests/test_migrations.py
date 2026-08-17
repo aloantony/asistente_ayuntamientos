@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260722_0034"
+HEAD_REVISION = "20260807_0043"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1004,6 +1004,286 @@ ASSET_SUPPORTING_UNIQUE_CONSTRAINTS = {
     "geo_locations": {"uq_geo_locations_id_org_municipality"},
 }
 
+ROADMAP_SCHEMA = {
+    "municipal_tasks": {
+        "columns": {
+            "id",
+            "organization_id",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "due_date",
+            "blocked_reason",
+            "completed_at",
+            "assignee_worker_id",
+            "project_id",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_municipal_tasks_org_status_due",
+            "ix_municipal_tasks_assignee_status",
+            "ix_municipal_tasks_project_status",
+            "ix_municipal_tasks_created_by_id",
+            "ix_municipal_tasks_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("project_id", "organization_id"),
+            ("assignee_worker_id", "organization_id"),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_municipal_tasks_status",
+            "ck_municipal_tasks_priority",
+            "ck_municipal_tasks_title",
+            "ck_municipal_tasks_blocked_reason",
+            "ck_municipal_tasks_completed_at",
+        },
+        "unique_constraints": {"uq_municipal_tasks_id_org"},
+    },
+    "municipal_task_events": {
+        "columns": {
+            "id",
+            "task_id",
+            "organization_id",
+            "event_type",
+            "from_status",
+            "to_status",
+            "changed_fields",
+            "note",
+            "actor_id",
+            "created_at",
+        },
+        "indexes": {
+            "ix_municipal_task_events_task",
+            "ix_municipal_task_events_org_created",
+            "ix_municipal_task_events_actor_id",
+        },
+        "foreign_keys": {
+            ("task_id", "organization_id"),
+            ("actor_id",),
+        },
+        "checks": {
+            "ck_municipal_task_events_type",
+            "ck_municipal_task_events_from_status",
+            "ck_municipal_task_events_to_status",
+        },
+        "unique_constraints": set(),
+    },
+}
+
+GOVERNMENT_STAFF_SCHEMA = {
+    "government_members": {
+        "columns": {
+            "id",
+            "organization_id",
+            "level",
+            "full_name",
+            "role_title",
+            "political_group",
+            "email",
+            "phone",
+            "biography",
+            "term_start_date",
+            "term_end_date",
+            "sort_order",
+            "status",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_government_members_org_status_sort",
+            "ix_government_members_created_by_id",
+            "ix_government_members_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_government_members_level",
+            "ck_government_members_status",
+            "ck_government_members_sort_order",
+            "ck_government_members_term_range",
+        },
+        "unique_constraints": set(),
+    },
+    "staff_posts": {
+        "columns": {
+            "id",
+            "organization_id",
+            "parent_id",
+            "kind",
+            "label",
+            "description",
+            "sort_order",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {"ix_staff_posts_org_sort"},
+        "foreign_keys": {
+            ("organization_id",),
+            ("parent_id", "organization_id"),
+        },
+        "checks": {
+            "ck_staff_posts_kind",
+            "ck_staff_posts_sort_order",
+            "ck_staff_posts_parent_not_self",
+        },
+        "unique_constraints": {"uq_staff_posts_id_org"},
+    },
+    "staff_workers": {
+        "columns": {
+            "id",
+            "organization_id",
+            "post_id",
+            "full_name",
+            "email",
+            "phone",
+            "description",
+            "status",
+            "schedule_summary",
+            "schedule_days",
+            "weekly_hours",
+            "contract_type",
+            "contract_start_date",
+            "contract_end_date",
+            "vacation_days_limit",
+            "personal_days_limit",
+            "bills_invoices",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_staff_workers_org_status",
+            "ix_staff_workers_created_by_id",
+            "ix_staff_workers_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("post_id", "organization_id"),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_staff_workers_status",
+            "ck_staff_workers_contract_type",
+            "ck_staff_workers_contract_range",
+            "ck_staff_workers_vacation_limit",
+            "ck_staff_workers_personal_limit",
+            "ck_staff_workers_weekly_hours",
+        },
+        "unique_constraints": {
+            "uq_staff_workers_post",
+            "uq_staff_workers_id_org",
+        },
+    },
+    "staff_absences": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "absence_type",
+            "start_date",
+            "end_date",
+            "reason",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {"ix_staff_absences_worker_start"},
+        "foreign_keys": {("worker_id", "organization_id")},
+        "checks": {
+            "ck_staff_absences_type",
+            "ck_staff_absences_range",
+        },
+        "unique_constraints": set(),
+    },
+    "staff_reports": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "report_type",
+            "report_date",
+            "plan",
+            "closing",
+            "incident",
+            "author_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_staff_reports_worker_date",
+            "ix_staff_reports_author_id",
+        },
+        "foreign_keys": {
+            ("worker_id", "organization_id"),
+            ("author_id",),
+        },
+        "checks": {"ck_staff_reports_type"},
+        "unique_constraints": set(),
+    },
+    "staff_invoices": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "issued_on",
+            "concept",
+            "hours",
+            "amount",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {"ix_staff_invoices_worker_date"},
+        "foreign_keys": {("worker_id", "organization_id")},
+        "checks": {
+            "ck_staff_invoices_hours",
+            "ck_staff_invoices_amount",
+        },
+        "unique_constraints": set(),
+    },
+    "staff_history_events": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "event_type",
+            "from_status",
+            "to_status",
+            "changed_fields",
+            "note",
+            "actor_id",
+            "created_at",
+        },
+        "indexes": {
+            "ix_staff_history_events_worker",
+            "ix_staff_history_events_org_created",
+            "ix_staff_history_events_actor_id",
+        },
+        "foreign_keys": {
+            ("worker_id", "organization_id"),
+            ("actor_id",),
+        },
+        "checks": {
+            "ck_staff_history_events_type",
+            "ck_staff_history_events_from_status",
+            "ck_staff_history_events_to_status",
+        },
+        "unique_constraints": set(),
+    },
+}
+
 KNOWLEDGE_COLUMNS = {
     "id",
     "organization_id",
@@ -1430,6 +1710,206 @@ def assert_maintenance_schema(inspector: Inspector) -> None:
         } == expected["unique_constraints"]
 
 
+MUNICIPAL_DATA_TABLES = {
+    "padron_annual_records",
+    "climate_records",
+    "household_stats",
+    "utility_supplies",
+    "water_meters",
+    "water_meter_readings",
+}
+
+
+ADMINISTRATION_TABLES = {
+    "office_hours",
+    "municipal_procedures",
+    "municipal_licences",
+    "municipal_contracts",
+    "municipal_grants",
+    "transparency_items",
+    "municipal_news",
+    "municipal_notices",
+    "municipal_notice_events",
+}
+
+
+BUDGET_PLENO_TABLES = {
+    "municipal_budgets",
+    "budget_lines",
+    "budget_amendments",
+    "budget_expenses",
+    "treasury_movements",
+    "council_sessions",
+    "council_agenda_items",
+}
+
+
+def assert_budget_pleno_schema(inspector: Inspector) -> None:
+    """El presupuesto y los plenos existen, sin columnas derivadas guardadas."""
+    table_names = set(inspector.get_table_names())
+    assert BUDGET_PLENO_TABLES <= table_names
+
+    # La ejecucion se calcula al consultar: si alguien la materializa, este
+    # test tiene que enterarse.
+    budget_columns = {
+        column["name"] for column in inspector.get_columns("municipal_budgets")
+    }
+    assert budget_columns.isdisjoint(
+        {"executed_expense", "available_credit", "total_expense"}
+    )
+
+    # Un ano, un presupuesto; y un codigo de partida no se repite dentro de el.
+    assert "uq_municipal_budgets_org_year" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("municipal_budgets")
+    }
+    assert "uq_budget_lines_budget_code" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("budget_lines")
+    }
+
+    # La tesoreria no cuelga del presupuesto: el dinero tiene su calendario.
+    assert not any(
+        foreign_key["referred_table"] == "municipal_budgets"
+        for foreign_key in inspector.get_foreign_keys("treasury_movements")
+    )
+
+    # Ninguna tabla nueva apunta a `municipalities` (ADR-038).
+    for table_name in BUDGET_PLENO_TABLES:
+        assert not any(
+            foreign_key["referred_table"] == "municipalities"
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        )
+
+
+def assert_administration_schema(inspector: Inspector) -> None:
+    """Administracion y comunicacion existen y siguen aisladas por organizacion."""
+    table_names = set(inspector.get_table_names())
+    assert ADMINISTRATION_TABLES <= table_names
+
+    # Las referencias de expediente se numeran por municipio, asi que la misma
+    # en otro ayuntamiento es legitima.
+    for table_name, constraint_name in (
+        ("municipal_licences", "uq_municipal_licences_org_reference"),
+        ("municipal_contracts", "uq_municipal_contracts_org_reference"),
+        ("municipal_procedures", "uq_municipal_procedures_org_slug"),
+        ("municipal_news", "uq_municipal_news_org_slug"),
+    ):
+        assert constraint_name in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+
+    # El historial de un bando se ata por (id, organization_id): retirar uno no
+    # puede alcanzar al de otro ayuntamiento.
+    assert ("notice_id", "organization_id") in {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("municipal_notice_events")
+    }
+
+
+def assert_municipal_data_schema(inspector: Inspector) -> None:
+    """Las series municipales existen y siguen aisladas por organización.
+
+    No se fija cada columna una a una como en el inventario: lo que importa aquí
+    es que ninguna serie pueda cruzar de ayuntamiento, y eso lo garantiza la
+    clave ajena a `organizations` que se comprueba tabla por tabla.
+    """
+    table_names = set(inspector.get_table_names())
+    assert MUNICIPAL_DATA_TABLES <= table_names
+
+    # Una fila por periodo y organizacion: dos del mismo ano se contradicen y
+    # ninguna grafica sabria cual creer.
+    expected_uniques = {
+        "padron_annual_records": "uq_padron_annual_records_org_year",
+        "climate_records": "uq_climate_records_org_period",
+        "household_stats": "uq_household_stats_org_year",
+        "water_meters": "uq_water_meters_org_code",
+        "water_meter_readings": "uq_water_meter_readings_meter_date",
+    }
+    for table_name, constraint_name in expected_uniques.items():
+        assert constraint_name in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+
+    # Toda serie cuelga de una organizacion: es lo que impide que crucen de
+    # ayuntamiento aunque una consulta olvide filtrar.
+    for table_name in MUNICIPAL_DATA_TABLES:
+        assert any(
+            "organization_id" in foreign_key["constrained_columns"]
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        )
+
+    # Los contadores NO apuntan directamente a `municipalities`: esa clave
+    # obligaria a bloquear la tabla al soltarlos en un downgrade, y bastaria un
+    # escritor abierto para que la bajada esperase en vez de fallar.
+    assert not any(
+        foreign_key["referred_table"] == "municipalities"
+        for foreign_key in inspector.get_foreign_keys("water_meters")
+    )
+
+    # El escudo es una referencia a `documents`, no un almacen paralelo.
+    assert "organization_branding" in table_names
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("organization_branding")
+    } == {("organization_id",), ("crest_document_id",)}
+
+
+def assert_roadmap_schema(inspector: Inspector) -> None:
+    for table_name, expected in ROADMAP_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+    # "Vencida" no es una columna: es una lectura del calendario. Si algún día
+    # alguien la materializa, este test tiene que enterarse.
+    assert "overdue" not in {
+        column["name"] for column in inspector.get_columns("municipal_tasks")
+    }
+
+
+def assert_government_staff_schema(inspector: Inspector) -> None:
+    for table_name, expected in GOVERNMENT_STAFF_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+
+
 def assert_maintenance_trigger(engine: Engine) -> None:
     with engine.connect() as connection:
         assert connection.execute(
@@ -1537,6 +2017,11 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert PROTOTYPE_TABLES.isdisjoint(upgraded_inspector.get_table_names())
         assert_asset_inventory_schema(upgraded_inspector)
         assert_maintenance_schema(upgraded_inspector)
+        assert_government_staff_schema(upgraded_inspector)
+        assert_roadmap_schema(upgraded_inspector)
+        assert_municipal_data_schema(upgraded_inspector)
+        assert_administration_schema(upgraded_inspector)
+        assert_budget_pleno_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(upgraded_inspector)
@@ -1566,6 +2051,21 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert set(MAINTENANCE_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert set(GOVERNMENT_STAFF_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(ROADMAP_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert MUNICIPAL_DATA_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert ADMINISTRATION_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert BUDGET_PLENO_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -1580,6 +2080,11 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         )
         assert_asset_inventory_schema(reupgraded_inspector)
         assert_maintenance_schema(reupgraded_inspector)
+        assert_government_staff_schema(reupgraded_inspector)
+        assert_roadmap_schema(reupgraded_inspector)
+        assert_municipal_data_schema(reupgraded_inspector)
+        assert_administration_schema(reupgraded_inspector)
+        assert_budget_pleno_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(reupgraded_inspector)
@@ -2596,6 +3101,8 @@ def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
         assert refused.returncode != 0
         assert "immutable reference delivery evidence exists" in refused.stderr
         with engine.connect() as connection:
+            # El downgrade rechazado no puede mover el sello: la base sigue
+            # donde la dejó el `upgrade head` anterior, sea cual sea la cabeza.
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == HEAD_REVISION
@@ -2888,6 +3395,11 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         run_alembic(migration_database_url, "upgrade", "head")
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
+        assert_government_staff_schema(inspect(engine))
+        assert_roadmap_schema(inspect(engine))
+        assert_municipal_data_schema(inspect(engine))
+        assert_administration_schema(inspect(engine))
+        assert_budget_pleno_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
@@ -2900,6 +3412,21 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
             downgraded_inspector.get_table_names()
         )
         assert set(MAINTENANCE_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(GOVERNMENT_STAFF_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(ROADMAP_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert MUNICIPAL_DATA_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert ADMINISTRATION_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert BUDGET_PLENO_TABLES.isdisjoint(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
@@ -2916,6 +3443,11 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         run_alembic(migration_database_url, "check")
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
+        assert_government_staff_schema(inspect(engine))
+        assert_roadmap_schema(inspect(engine))
+        assert_municipal_data_schema(inspect(engine))
+        assert_administration_schema(inspect(engine))
+        assert_budget_pleno_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))

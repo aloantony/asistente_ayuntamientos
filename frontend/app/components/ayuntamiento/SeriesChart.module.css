@@ -1,0 +1,58 @@
+.chart {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.caption {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.lastPoint {
+  fill: var(--accent);
+}
+
+.bar {
+  fill: var(--accent);
+  opacity: 0.75;
+}
+
+.axisLabel {
+  fill: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 10px;
+}
+
+.reading {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.reading span {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-sans), system-ui, sans-serif;
+  font-size: 11.5px;
+  font-weight: 400;
+}

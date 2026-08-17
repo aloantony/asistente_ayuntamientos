@@ -10,6 +10,9 @@ from app.assets.access import (
     get_asset_organization_for_write,
     require_asset_permission,
 )
+from pydantic import BaseModel
+
+from app.assets.seed import ensure_initial_asset_taxonomy
 from app.assets.models import (
     MunicipalAsset,
     MunicipalAssetCategory,
@@ -17,6 +20,7 @@ from app.assets.models import (
 )
 from app.assets.schemas import (
     AssetCategoryCreate,
+    AssetTaxonomySeedRequest,
     AssetCategoryRead,
     AssetCategoryUpdate,
     AssetConditionStatus,
@@ -36,6 +40,46 @@ from app.db.session import get_db
 from app.users.models import User
 
 router = APIRouter(prefix="/assets", tags=["assets"])
+
+
+class AssetTaxonomySeedResult(BaseModel):
+    organization_id: int
+    created: list[str]
+
+
+@router.post(
+    "/taxonomy/seed",
+    response_model=AssetTaxonomySeedResult,
+    status_code=status.HTTP_201_CREATED,
+)
+def seed_asset_taxonomy(
+    payload: AssetTaxonomySeedRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AssetTaxonomySeedResult:
+    """Siembra la taxonomía de partida del inventario en una organización.
+
+    Bajo petición y no al arrancar: la taxonomía es un punto de partida que cada
+    ayuntamiento adapta, no un catálogo del producto. Repetir la llamada no
+    deshace nada — sólo se crea lo que falte.
+    """
+    get_asset_organization_for_write(db, payload.organization_id)
+    require_asset_permission(
+        db,
+        current_user,
+        payload.organization_id,
+        "assets.manage",
+    )
+
+    created = ensure_initial_asset_taxonomy(
+        db,
+        payload.organization_id,
+        created_by_id=current_user.id,
+    )
+    return AssetTaxonomySeedResult(
+        organization_id=payload.organization_id,
+        created=created,
+    )
 
 
 @router.get("/categories", response_model=list[AssetCategoryRead])

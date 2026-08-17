@@ -238,3 +238,9 @@ class MunicipalAssetUpdate(BaseModel):
             if field_name in self.model_fields_set and getattr(self, field_name) is None:
                 raise ValueError(f"{field_name} cannot be null")
         return self
+
+
+class AssetTaxonomySeedRequest(BaseModel):
+    organization_id: int
+
+    model_config = ConfigDict(extra="forbid")

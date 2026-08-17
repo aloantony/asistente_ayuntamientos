@@ -1694,3 +1694,617 @@ export function userHasPermission(user: User, permissionCode: string) {
     user.is_superuser || (user.permissions ?? []).includes(permissionCode)
   );
 }
+
+// Corporación municipal y plantilla (ADR-035). Los cargos electos y el personal
+// laboral son dominios distintos en el backend y se tipan por separado.
+
+export type GovernmentLevel =
+  | "alcaldia"
+  | "tenencia"
+  | "concejalia"
+  | "secretaria";
+
+export type GovernmentMemberStatus = "active" | "archived";
+
+export type GovernmentMember = {
+  id: number;
+  organization_id: number;
+  level: GovernmentLevel;
+  full_name: string;
+  role_title: string;
+  political_group: string | null;
+  email: string | null;
+  phone: string | null;
+  biography: string | null;
+  term_start_date: string | null;
+  term_end_date: string | null;
+  sort_order: number;
+  status: GovernmentMemberStatus;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffPostKind = "post" | "container";
+
+export type StaffWorkerStatus = "active" | "vacation" | "leave" | "archived";
+
+export type StaffAbsenceType = "vacation" | "personal" | "sick_leave" | "other";
+
+export type StaffReportType = "diary" | "report";
+
+export type StaffContractType =
+  | "permanent"
+  | "temporary"
+  | "interim"
+  | "external"
+  | "other";
+
+export type StaffScheduleDay =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+export type StaffPost = {
+  id: number;
+  organization_id: number;
+  parent_id: number | null;
+  kind: StaffPostKind;
+  label: string;
+  description: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffWorker = {
+  id: number;
+  organization_id: number;
+  post_id: number | null;
+  full_name: string;
+  email: string | null;
+  phone: string | null;
+  description: string | null;
+  status: StaffWorkerStatus;
+  schedule_summary: string | null;
+  schedule_days: StaffScheduleDay[];
+  // Los decimales viajan como cadena para no perder precisión en JSON.
+  weekly_hours: string | null;
+  contract_type: StaffContractType | null;
+  contract_start_date: string | null;
+  contract_end_date: string | null;
+  vacation_days_limit: number | null;
+  personal_days_limit: number | null;
+  bills_invoices: boolean;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  post: StaffPost | null;
+};
+
+export type StaffAbsence = {
+  id: number;
+  worker_id: number;
+  organization_id: number;
+  absence_type: StaffAbsenceType;
+  start_date: string;
+  end_date: string;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffReport = {
+  id: number;
+  worker_id: number;
+  organization_id: number;
+  report_type: StaffReportType;
+  report_date: string;
+  plan: string | null;
+  closing: string | null;
+  incident: string | null;
+  author_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffInvoice = {
+  id: number;
+  worker_id: number;
+  organization_id: number;
+  issued_on: string;
+  concept: string;
+  hours: string | null;
+  amount: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+// Hoja de ruta municipal. "Vencida" no aparece como campo: se deriva de
+// `due_date` contra la fecha del servidor, que llega en el resumen.
+
+export type MunicipalTaskStatus =
+  | "pending"
+  | "in_progress"
+  | "blocked"
+  | "completed"
+  | "cancelled";
+
+export type MunicipalTaskPriority = "low" | "normal" | "high" | "urgent";
+
+export type MunicipalTaskEventType =
+  | "created"
+  | "updated"
+  | "status_changed"
+  | "assigned";
+
+export type TaskAssignee = {
+  id: number;
+  full_name: string;
+};
+
+export type TaskProject = {
+  id: number;
+  name: string;
+};
+
+export type MunicipalTask = {
+  id: number;
+  organization_id: number;
+  title: string;
+  description: string | null;
+  status: MunicipalTaskStatus;
+  priority: MunicipalTaskPriority;
+  due_date: string | null;
+  blocked_reason: string | null;
+  completed_at: string | null;
+  assignee_worker_id: number | null;
+  project_id: number | null;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  assignee: TaskAssignee | null;
+  project: TaskProject | null;
+};
+
+export type MunicipalTaskEvent = {
+  id: number;
+  task_id: number;
+  organization_id: number;
+  event_type: MunicipalTaskEventType;
+  from_status: MunicipalTaskStatus | null;
+  to_status: MunicipalTaskStatus | null;
+  changed_fields: string[];
+  note: string | null;
+  actor_id: number | null;
+  created_at: string;
+};
+
+export type MunicipalTaskSummary = {
+  total: number;
+  pending: number;
+  in_progress: number;
+  blocked: number;
+  completed: number;
+  cancelled: number;
+  overdue: number;
+  unassigned: number;
+  /** Fecha del servidor con la que se ha decidido qué está vencido. */
+  reference_date: string;
+};
+
+/** Lectura meteorológica en vivo (ADR-038). No se persiste en ninguna tabla. */
+export type MunicipalWeather = {
+  temperature_c: number;
+  apparent_temperature_c: number | null;
+  relative_humidity: number | null;
+  wind_speed_kmh: number | null;
+  weather_code: number | null;
+  is_day: boolean | null;
+  observed_at: string;
+  latitude: number;
+  longitude: number;
+  provider: string;
+};
+
+// Series municipales (ADR-037). Los decimales viajan como cadena.
+
+export type MunicipalDataSource = "municipal" | "ine" | "aemet" | "other";
+
+export type PadronRecord = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  population: number;
+  men: number | null;
+  women: number | null;
+  births: number | null;
+  deaths: number | null;
+  source: MunicipalDataSource;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ClimateRecord = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  /** Nulo significa el resumen del año entero. */
+  reference_month: number | null;
+  avg_temperature_c: string | null;
+  min_temperature_c: string | null;
+  max_temperature_c: string | null;
+  precipitation_mm: string | null;
+  source: MunicipalDataSource;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HouseholdStat = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  total_dwellings: number;
+  primary_dwellings: number | null;
+  secondary_dwellings: number | null;
+  empty_dwellings: number | null;
+  source: MunicipalDataSource;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+// Administración y comunicación municipal (ADR-040).
+
+export type Weekday =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+export type OfficeHour = {
+  id: number;
+  organization_id: number;
+  office_name: string;
+  weekday: Weekday;
+  /** Minutos desde medianoche. */
+  opens_at: number;
+  closes_at: number;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LicenceKind =
+  | "works"
+  | "opening"
+  | "occupancy"
+  | "environmental"
+  | "other";
+
+export type LicenceStatus =
+  | "requested"
+  | "in_review"
+  | "granted"
+  | "denied"
+  | "expired"
+  | "withdrawn";
+
+export type MunicipalLicence = {
+  id: number;
+  organization_id: number;
+  reference: string;
+  kind: LicenceKind;
+  applicant: string;
+  address: string | null;
+  summary: string | null;
+  status: LicenceStatus;
+  requested_on: string;
+  resolved_on: string | null;
+  fee_amount: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ContractStatus =
+  | "draft"
+  | "published"
+  | "awarded"
+  | "executed"
+  | "cancelled";
+
+export type MunicipalContract = {
+  id: number;
+  organization_id: number;
+  reference: string;
+  title: string;
+  description: string | null;
+  procedure_type: "minor" | "open" | "negotiated" | "framework" | "other";
+  status: ContractStatus;
+  base_amount: string | null;
+  awarded_amount: string | null;
+  awarded_to: string | null;
+  published_on: string | null;
+  awarded_on: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GrantStatus = "open" | "applied" | "granted" | "denied" | "settled";
+
+export type MunicipalGrant = {
+  id: number;
+  organization_id: number;
+  title: string;
+  funder: string | null;
+  description: string | null;
+  status: GrantStatus;
+  requested_amount: string | null;
+  granted_amount: string | null;
+  application_deadline: string | null;
+  resolved_on: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NoticeStatus = "draft" | "published" | "withdrawn" | "expired";
+
+export type MunicipalNoticeEvent = {
+  id: number;
+  notice_id: number;
+  organization_id: number;
+  event_type: "created" | "updated" | "published" | "withdrawn";
+  from_status: NoticeStatus | null;
+  to_status: NoticeStatus | null;
+  note: string | null;
+  actor_id: number | null;
+  created_at: string;
+};
+
+export type MunicipalNotice = {
+  id: number;
+  organization_id: number;
+  kind: "bando" | "edicto" | "convocatoria" | "other";
+  title: string;
+  body: string | null;
+  status: NoticeStatus;
+  published_on: string | null;
+  expires_on: string | null;
+  publish_to_sede: boolean;
+  created_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  events: MunicipalNoticeEvent[];
+};
+
+// Presupuesto y plenos (ADR-041). Los importes viajan como cadena.
+
+export type BudgetStatus = "draft" | "approved" | "executing" | "settled";
+
+export type MunicipalBudget = {
+  id: number;
+  organization_id: number;
+  reference_year: number;
+  status: BudgetStatus;
+  approved_on: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Derivada al consultar, nunca guardada. */
+export type BudgetExecution = {
+  budget_id: number;
+  reference_year: number;
+  status: BudgetStatus;
+  total_income: string;
+  total_expense: string;
+  approved_amendments: string;
+  executed_expense: string;
+  available_credit: string;
+};
+
+export type TreasuryMovement = {
+  id: number;
+  organization_id: number;
+  direction: "inflow" | "outflow";
+  concept: string;
+  amount: string;
+  moved_on: string;
+  account_label: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CouncilAgendaItem = {
+  id: number;
+  session_id: number;
+  organization_id: number;
+  position: number;
+  title: string;
+  description: string | null;
+  /** Nulos mientras no se vota: un punto informativo no tiene votación. */
+  votes_in_favour: number | null;
+  votes_against: number | null;
+  abstentions: number | null;
+  outcome: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CouncilSession = {
+  id: number;
+  organization_id: number;
+  kind: "ordinary" | "extraordinary" | "urgent" | "constitutive";
+  status: "convened" | "held" | "cancelled";
+  held_on: string;
+  summary: string | null;
+  minutes_status: "pending" | "draft" | "approved";
+  minutes_document_id: number | null;
+  publish_to_sede: boolean;
+  created_at: string;
+  updated_at: string;
+  agenda_items: CouncilAgendaItem[];
+};
+
+// Sede electrónica (ADR-042): vista de solo lectura sobre lo ya publicado.
+
+export type SedeBoardEntry = {
+  /** `bando`, `edicto`, `convocatoria`, `other` o `noticia`. */
+  kind: string;
+  id: number;
+  title: string;
+  summary: string | null;
+  published_on: string | null;
+  expires_on: string | null;
+};
+
+export type SedeProcedure = {
+  id: number;
+  slug: string;
+  name: string;
+  description: string | null;
+  channel: string;
+  deadline_days: number | null;
+  fee_description: string | null;
+};
+
+export type SedeTax = {
+  id: number;
+  slug: string;
+  name: string;
+  kind: string;
+  rate_kind: string;
+  rate_value: string | null;
+  rate_description: string | null;
+  taxable_base: string | null;
+  ordinance_id: number | null;
+};
+
+export type SedeContract = {
+  id: number;
+  reference: string;
+  title: string;
+  procedure_type: string;
+  status: string;
+  base_amount: string | null;
+  awarded_amount: string | null;
+  awarded_to: string | null;
+  published_on: string | null;
+};
+
+export type SedeTransparencyItem = {
+  id: number;
+  area: string;
+  title: string;
+  description: string | null;
+  reference_period: string | null;
+  published_on: string | null;
+};
+
+export type SedeSession = {
+  id: number;
+  kind: string;
+  status: string;
+  held_on: string;
+  summary: string | null;
+  minutes_status: string;
+  minutes_document_id: number | null;
+};
+
+export type SedeOrdinance = {
+  id: number;
+  title: string;
+  topic: string;
+  ordinance_type: string;
+  status: string;
+  approval_date: string | null;
+  publication_date: string | null;
+};
+
+export type SedeContent = {
+  organization_id: number;
+  board: SedeBoardEntry[];
+  procedures: SedeProcedure[];
+  taxes: SedeTax[];
+  contracts: SedeContract[];
+  transparency: SedeTransparencyItem[];
+  sessions: SedeSession[];
+  ordinances: SedeOrdinance[];
+};
+
+// Patrimonio y archivo municipal (ADR-045).
+
+export type HeritageKind =
+  | "building"
+  | "archaeological"
+  | "natural"
+  | "movable"
+  | "intangible"
+  | "other";
+
+export type ProtectionLevel = "none" | "local" | "regional" | "bic" | "unesco";
+
+export type ConservationState = "good" | "fair" | "poor" | "ruin" | "unknown";
+
+export type HeritageAsset = {
+  id: number;
+  organization_id: number;
+  slug: string;
+  name: string;
+  kind: HeritageKind;
+  /** Texto libre: «siglo XVI», «finales del XIX», «indeterminada». */
+  period: string | null;
+  description: string | null;
+  protection_level: ProtectionLevel;
+  protection_reference: string | null;
+  conservation_state: ConservationState;
+  last_survey_date: string | null;
+  location_id: number | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ArchiveKind =
+  | "document"
+  | "photograph"
+  | "map"
+  | "book"
+  | "audio"
+  | "video"
+  | "other";
+
+export type DigitisationState = "not_digitised" | "in_progress" | "digitised";
+
+export type ArchiveItem = {
+  id: number;
+  organization_id: number;
+  reference: string;
+  title: string;
+  kind: ArchiveKind;
+  description: string | null;
+  start_year: number | null;
+  end_year: number | null;
+  physical_location: string | null;
+  conservation_state: ConservationState;
+  digitisation_state: DigitisationState;
+  document_id: number | null;
+  heritage_asset_id: number | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};

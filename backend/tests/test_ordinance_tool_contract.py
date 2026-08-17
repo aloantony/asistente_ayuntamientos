@@ -1,0 +1,187 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+from app.agent_office.service import _tool_input_for_task
+from app.assistant import prompts as assistant_prompts
+from app.assistant import tools as assistant_tools
+from app.assistant.turn import (
+    _is_non_retryable_tool_failure,
+    _tool_repetition_policy,
+)
+
+
+def _province_row(index: int) -> dict:
+    return {
+        "province": f"Provincia {index:02d}",
+        "municipalities_in_scope": 100 + index,
+        "municipalities_without_population": index % 3,
+        "eligible_municipalities": 90 + index,
+        "catalog_municipalities": 80 + index,
+        "catalog_ordinances": 200 + index,
+        "total_chunks": 1_000 + index,
+        "searchable_chunks": 900 + index,
+    }
+
+
+def test_large_manifest_uses_lossless_province_row_table():
+    payload = {
+        "snapshot_id": "a" * 64,
+        "catalog_cursor": "signed.cursor",
+        "filters": {},
+        "layers": {"catalog_ordinances": 1_800},
+        "reconciliation": {"ordinance_partition_balanced": True},
+        "completeness": {"manifest_counts_complete": True},
+        "by_province": [_province_row(index) for index in range(200)],
+    }
+
+    assert len(json.dumps(payload, ensure_ascii=False)) > (
+        assistant_tools.MAX_ORDINANCE_TOOL_RESULT_CHARS
+    )
+    serialized = assistant_tools._serialize_ordinance_manifest_payload(payload)
+    compact = json.loads(serialized)
+
+    assert len(serialized) < assistant_tools.MAX_ORDINANCE_TOOL_RESULT_CHARS
+    assert compact["snapshot_id"] == payload["snapshot_id"]
+    assert compact["catalog_cursor"] == payload["catalog_cursor"]
+    assert compact["reconciliation"] == payload["reconciliation"]
+    assert compact["completeness"] == payload["completeness"]
+    assert compact["payload_compacted"] is True
+    table = compact["by_province"]
+    assert table["format"] == "row_table"
+    assert len(table["rows"]) == len(payload["by_province"])
+    reconstructed = [
+        dict(zip(table["columns"], row, strict=True)) for row in table["rows"]
+    ]
+    assert reconstructed == payload["by_province"]
+
+
+@pytest.mark.parametrize(
+    "tool_input, message",
+    [
+        ({"unexpected": True}, "campos no permitidos"),
+        ({"municipality_id": True}, "municipality_id debe ser un entero"),
+        ({"population_gte": 5_000, "population_lt": 5_000}, "debe ser menor"),
+        ({"province": "x" * 256}, "province no puede superar"),
+        ({"include_pending": "yes"}, "include_pending debe ser booleano"),
+    ],
+)
+def test_manifest_input_validation_is_server_side(tool_input, message):
+    with pytest.raises(ValueError, match=message):
+        assistant_tools._validate_ordinance_manifest_tool_input(tool_input)
+
+
+@pytest.mark.parametrize(
+    "tool_input, message",
+    [
+        ({}, "cursor es obligatorio"),
+        ({"cursor": "valid", "limit": 0}, "limit debe ser un entero entre"),
+        ({"cursor": "valid", "limit": 11}, "limit debe ser un entero entre"),
+        ({"cursor": "valid", "limit": True}, "limit debe ser un entero entre"),
+        ({"cursor": "valid", "extra": 1}, "campos no permitidos"),
+    ],
+)
+def test_catalog_input_validation_is_server_side(tool_input, message):
+    with pytest.raises(ValueError, match=message):
+        assistant_tools._validate_ordinance_catalog_tool_input(tool_input)
+
+
+@pytest.mark.parametrize(
+    "tool_input, message",
+    [
+        ({"query": "agua", "extra": 1}, "campos no permitidos"),
+        ({"query": 123}, "query es obligatorio"),
+        ({"query": "agua", "municipality_id": True}, "municipality_id"),
+        ({"query": "agua", "limit": 21}, "limit debe ser un entero"),
+        ({"query": "agua", "offset": -1}, "offset debe ser un entero"),
+        ({"query": "agua", "include_pending": 1}, "debe ser booleano"),
+        ({"query": "agua", "result_scope": "all"}, "result_scope no válido"),
+        (
+            {"query": "agua", "population_gte": 5000, "population_lt": 5000},
+            "debe ser menor",
+        ),
+    ],
+)
+def test_semantic_search_input_validation_is_server_side(tool_input, message):
+    with pytest.raises(ValueError, match=message):
+        assistant_tools._validate_ordinance_search_tool_input(tool_input)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+    ],
+)
+def test_agent_office_removes_internal_organization_from_ordinance_input(action):
+    task = SimpleNamespace(
+        requested_action=action,
+        input={"organization_id": 42, "province": "Burgos"},
+        organization_id=42,
+        description="Consulta",
+        title="Inventario",
+        priority="medium",
+    )
+
+    tool_input = _tool_input_for_task(task)
+
+    assert "organization_id" not in tool_input
+    assert tool_input["province"] == "Burgos"
+
+
+def test_system_prompt_does_not_query_corpus_without_ordinance_tools(monkeypatch):
+    monkeypatch.setattr(
+        assistant_prompts,
+        "get_accessible_organizations_query",
+        lambda current_user: object(),
+    )
+
+    def forbidden_coverage_query(db):
+        raise AssertionError("coverage must remain behind ordinance RBAC")
+
+    monkeypatch.setattr(
+        assistant_prompts,
+        "build_ordinance_coverage_block",
+        forbidden_coverage_query,
+    )
+    scalar_result = SimpleNamespace(all=lambda: [])
+    db = SimpleNamespace(scalars=lambda statement: scalar_result)
+    user = SimpleNamespace(full_name="Sin permiso")
+
+    prompt = assistant_prompts.build_system_prompt(db, user, [])
+
+    assert "COBERTURA DE ORDENANZAS" not in prompt
+
+
+def test_refreshable_manifest_does_not_clear_other_read_deduplication():
+    read_tool = SimpleNamespace(read_only=True)
+    mutation = SimpleNamespace(read_only=False)
+
+    assert _tool_repetition_policy(
+        read_tool,
+        "get_ordinance_corpus_manifest",
+    ) == (True, False)
+    assert _tool_repetition_policy(
+        read_tool,
+        "semantic_search_ordinances",
+    ) == (True, True)
+    assert _tool_repetition_policy(mutation, "create_requirement") == (
+        False,
+        False,
+    )
+
+
+def test_transient_database_reads_can_retry_but_invalid_inputs_cannot():
+    transient = assistant_tools.ToolResult(
+        content="Error de base de datos al ejecutar la herramienta",
+        ok=False,
+    )
+    invalid = assistant_tools.ToolResult(
+        content="Entrada inválida: limit debe ser un entero",
+        ok=False,
+    )
+
+    assert _is_non_retryable_tool_failure(transient) is False
+    assert _is_non_retryable_tool_failure(invalid) is True

@@ -115,9 +115,18 @@ OFFICE_AGENTS: dict[str, AgentOfficeAgentSpec] = {
         key="ordinances",
         name="Agente de ordenanzas",
         department="ordinances",
-        description="Busca y compara normativa municipal ya importada y aprobada.",
+        description=(
+            "Inventaría, busca y compara normativa municipal ya importada "
+            "y aprobada."
+        ),
         assistant_agent_key="consultation",
-        tool_names=frozenset({"semantic_search_ordinances"}),
+        tool_names=frozenset(
+            {
+                "get_ordinance_corpus_manifest",
+                "list_ordinance_catalog",
+                "semantic_search_ordinances",
+            }
+        ),
         mutating_actions=frozenset(),
         requires_approval_by_default=False,
     ),
@@ -185,6 +194,8 @@ DEFAULT_ACTION_BY_DEPARTMENT = {
     "daily_briefing": "daily_briefing",
 }
 ACTION_TO_DEPARTMENT = {
+    "get_ordinance_corpus_manifest": "ordinances",
+    "list_ordinance_catalog": "ordinances",
     "semantic_search_ordinances": "ordinances",
     "list_projects": "projects",
     "get_map_items": "map",
@@ -206,6 +217,8 @@ TOOL_ACTIONS = {
     "add_requirement_message",
     "propose_memory_entry",
     "send_admin_feedback",
+    "get_ordinance_corpus_manifest",
+    "list_ordinance_catalog",
     "semantic_search_ordinances",
     "get_map_items",
 }
@@ -294,8 +307,6 @@ def get_task_for_user(db: Session, current_user: User, task_id: int) -> AgentOff
             detail="Agent office task not found",
         )
     return task
-
-
 def lock_task_for_transition(
     db: Session,
     task_id: int,
@@ -607,7 +618,14 @@ def mark_task_queue_failed(
 
 def _tool_input_for_task(task: AgentOfficeTask) -> dict:
     tool_input = dict(task.input)
-    tool_input["organization_id"] = task.organization_id
+    if task.requested_action in {
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+    }:
+        tool_input.pop("organization_id", None)
+    else:
+        tool_input["organization_id"] = task.organization_id
     if task.requested_action == "semantic_search_ordinances":
         tool_input.setdefault("query", task.description)
     if task.requested_action == "send_admin_feedback":

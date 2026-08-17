@@ -57,6 +57,13 @@ from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
 )
+from app.ordinances.catalog import (
+    OrdinanceCorpusFilters,
+    advance_ordinance_catalog_cursor,
+    build_ordinance_corpus_manifest,
+    decode_ordinance_catalog_cursor,
+    list_ordinance_catalog_from_cursor,
+)
 from app.ordinances.embeddings import embed_text_supervised
 from app.ordinances.search import OrdinanceSearchOptions, search_ordinance_chunks
 from app.projects.access import select_visible_projects
@@ -107,6 +114,7 @@ VALID_ADMIN_FEEDBACK_CATEGORIES = {
 MAX_WEB_RESULTS = 5
 MAX_WEB_TOOL_RESULT_CHARS = 4000
 MAX_ORDINANCE_QUERY_CHARS = 400
+MAX_ORDINANCE_FILTER_CHARS = 255
 DEFAULT_ORDINANCE_RESULTS = 10
 MAX_ORDINANCE_RESULTS = 20
 MAX_ORDINANCE_OFFSET = 2_147_483_647
@@ -397,6 +405,91 @@ _TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "get_ordinance_corpus_manifest",
+        "description": (
+            "Cuenta de forma exacta las ordenanzas elegibles del catálogo "
+            "interno y sus capas de fragmentación y recuperación. Con "
+            "include_pending y permiso de revisión añade métricas separadas "
+            "del pipeline de importación y curación. "
+            "Úsala primero para preguntas de cobertura, inventarios o peticiones "
+            "exhaustivas. No demuestra exhaustividad frente a todos los boletines "
+            "oficiales."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "autonomous_community": {
+                    "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
+                    "description": "Comunidad autónoma exacta, sin distinguir mayúsculas",
+                },
+                "province": {
+                    "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
+                    "description": "Provincia exacta, sin distinguir mayúsculas",
+                },
+                "municipality_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "ID de municipio concreto",
+                },
+                "municipality_name": {
+                    "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
+                    "description": "Nombre exacto del municipio",
+                },
+                "population_gte": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Población mínima inclusiva",
+                },
+                "population_lt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Población máxima exclusiva; menos de 5.000 usa 5000",
+                },
+                "include_pending": {
+                    "type": "boolean",
+                    "description": "Incluir curación pendiente; requiere permiso de revisión",
+                },
+                "include_inactive": {
+                    "type": "boolean",
+                    "description": "Incluir derogadas, sustituidas y archivadas",
+                },
+            },
+        },
+    },
+    {
+        "name": "list_ordinance_catalog",
+        "description": (
+            "Enumera una fila por ordenanza del catálogo interno, ordenada por "
+            "ordinance_id y sin ranking semántico. Requiere el cursor firmado "
+            "devuelto por get_ordinance_corpus_manifest y devuelve next_cursor. "
+            "Si el corpus cambia, la herramienta obliga a reiniciar. "
+            "Un catálogo interno completo no equivale a todos los boletines oficiales."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": "Cursor opaco emitido por el manifiesto o la página anterior",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Ordenanzas por página, máximo 10",
+                },
+            },
+            "required": ["cursor"],
+        },
+    },
+    {
         "name": "semantic_search_ordinances",
         "description": (
             "Busca en las ordenanzas municipales ya importadas, revisadas y "
@@ -408,9 +501,12 @@ _TOOL_DEFINITIONS: list[dict] = [
         ),
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "query": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_ORDINANCE_QUERY_CHARS,
                     "description": "Pregunta o texto breve a buscar en el corpus interno de ordenanzas",
                 },
                 "municipality_id": {
@@ -420,14 +516,22 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
                 "municipality_name": {
                     "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
                     "description": "Nombre del municipio cuando el usuario lo indique y no se conozca su ID",
+                },
+                "autonomous_community": {
+                    "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
+                    "description": "Filtrar por comunidad autónoma, sin distinguir mayúsculas",
                 },
                 "province": {
                     "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
                     "description": "Filtrar por provincia, sin distinguir mayúsculas",
                 },
                 "topic": {
                     "type": "string",
+                    "maxLength": MAX_ORDINANCE_FILTER_CHARS,
                     "description": (
                         "Preferencia temática que mejora el orden sin excluir otras "
                         "coincidencias. En búsquedas exploratorias, usa la materia en "
@@ -1076,6 +1180,10 @@ def execute_tool(
             content = _serialize_web_search_payload(result)
         elif name == "semantic_search_ordinances":
             content = _serialize_ordinance_search_payload(result)
+        elif name == "get_ordinance_corpus_manifest":
+            content = _serialize_ordinance_manifest_payload(result)
+        elif name == "list_ordinance_catalog":
+            content = _serialize_ordinance_catalog_payload(result)
         else:
             content = json.dumps(result, ensure_ascii=False)
         if spec.requires_confirmation:
@@ -1463,6 +1571,114 @@ def _serialize_ordinance_search_payload(payload: dict) -> str:
     return serialized
 
 
+def _serialize_ordinance_manifest_payload(payload: dict) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) < MAX_ORDINANCE_TOOL_RESULT_CHARS:
+        return serialized
+
+    provinces = payload.get("by_province")
+    if not isinstance(provinces, list):
+        raise ValueError("ordinance manifest exceeds the action result limit")
+    columns = (
+        "province",
+        "municipalities_in_scope",
+        "municipalities_without_population",
+        "eligible_municipalities",
+        "catalog_municipalities",
+        "catalog_ordinances",
+        "total_chunks",
+        "searchable_chunks",
+    )
+    compact = {
+        **payload,
+        "payload_compacted": True,
+        "by_province": {
+            "format": "row_table",
+            "columns": list(columns),
+            "rows": [
+                [province.get(column) for column in columns]
+                for province in provinces
+            ],
+        },
+    }
+    serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) >= MAX_ORDINANCE_TOOL_RESULT_CHARS:
+        raise ValueError("ordinance manifest metadata exceeds the action result limit")
+    return serialized
+
+
+def _serialize_ordinance_catalog_payload(payload: dict) -> str:
+    """Keep keyset pagination valid when a catalogue page must be compacted."""
+
+    results = list(payload.get("results") or [])
+    cursor_data = decode_ordinance_catalog_cursor(str(payload["cursor"]))
+    consumed_before = int(cursor_data["consumed"])
+    total = int(cursor_data["total"])
+    selected: list[dict] = []
+    for result in results:
+        candidate_results = [*selected, result]
+        candidate_has_more = len(candidate_results) < len(results) or bool(
+            payload.get("has_more")
+        )
+        candidate = {
+            **payload,
+            "page_candidates": len(results),
+            "returned": len(candidate_results),
+            "consumed": consumed_before + len(candidate_results),
+            "remaining": max(
+                total - consumed_before - len(candidate_results),
+                0,
+            ),
+            "payload_truncated": False,
+            "has_more": candidate_has_more,
+            "complete": not candidate_has_more,
+            "next_cursor": (
+                advance_ordinance_catalog_cursor(
+                    str(payload["cursor"]),
+                    after_id=candidate_results[-1]["ordinance_id"],
+                    returned=len(candidate_results),
+                )
+                if candidate_has_more
+                else None
+            ),
+            "results": candidate_results,
+        }
+        serialized = json.dumps(
+            candidate,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(serialized) >= MAX_ORDINANCE_TOOL_RESULT_CHARS:
+            break
+        selected.append(result)
+
+    has_more = len(selected) < len(results) or bool(payload.get("has_more"))
+    compact = {
+        **payload,
+        "page_candidates": len(results),
+        "returned": len(selected),
+        "consumed": consumed_before + len(selected),
+        "remaining": max(total - consumed_before - len(selected), 0),
+        "payload_truncated": len(selected) < len(results),
+        "has_more": has_more,
+        "complete": not has_more,
+        "next_cursor": (
+            advance_ordinance_catalog_cursor(
+                str(payload["cursor"]),
+                after_id=selected[-1]["ordinance_id"],
+                returned=len(selected),
+            )
+            if has_more and selected
+            else None
+        ),
+        "results": selected,
+    }
+    serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) >= MAX_ORDINANCE_TOOL_RESULT_CHARS:
+        raise ValueError("ordinance catalog metadata exceeds the action result limit")
+    return serialized
+
+
 def _compact_web_search_payload(
     *,
     query: str,
@@ -1502,6 +1718,233 @@ def _compact_web_search_payload(
     return payload
 
 
+def _ordinance_filter_values(
+    tool_input: dict,
+) -> dict:
+    municipality_id = tool_input.get("municipality_id")
+    population_gte = tool_input.get("population_gte")
+    population_lt = tool_input.get("population_lt")
+    return {
+        "autonomous_community": (
+            str(tool_input.get("autonomous_community") or "").strip() or None
+        ),
+        "province": str(tool_input.get("province") or "").strip() or None,
+        "municipality_id": (
+            int(municipality_id) if municipality_id is not None else None
+        ),
+        "municipality_name": (
+            str(tool_input.get("municipality_name") or "").strip() or None
+        ),
+        "population_gte": (int(population_gte) if population_gte is not None else None),
+        "population_lt": (int(population_lt) if population_lt is not None else None),
+        "include_pending": _optional_boolean(tool_input, "include_pending"),
+        "include_inactive": _optional_boolean(tool_input, "include_inactive"),
+    }
+
+
+def _validate_ordinance_manifest_tool_input(tool_input: dict) -> None:
+    allowed = {
+        "autonomous_community",
+        "province",
+        "municipality_id",
+        "municipality_name",
+        "population_gte",
+        "population_lt",
+        "include_pending",
+        "include_inactive",
+    }
+    unexpected = sorted(set(tool_input) - allowed)
+    if unexpected:
+        raise ValueError(f"campos no permitidos: {', '.join(unexpected)}")
+    for name in ("autonomous_community", "province", "municipality_name"):
+        if name not in tool_input:
+            continue
+        value = tool_input[name]
+        if not isinstance(value, str):
+            raise ValueError(f"{name} debe ser texto")
+        if len(value) > MAX_ORDINANCE_FILTER_CHARS:
+            raise ValueError(
+                f"{name} no puede superar {MAX_ORDINANCE_FILTER_CHARS} caracteres"
+            )
+    for name, minimum in (
+        ("municipality_id", 1),
+        ("population_gte", 0),
+        ("population_lt", 0),
+    ):
+        if name not in tool_input:
+            continue
+        value = tool_input[name]
+        if type(value) is not int or value < minimum:
+            raise ValueError(f"{name} debe ser un entero mayor o igual que {minimum}")
+    for name in ("include_pending", "include_inactive"):
+        if name in tool_input and not isinstance(tool_input[name], bool):
+            raise ValueError(f"{name} debe ser booleano")
+    population_gte = tool_input.get("population_gte")
+    population_lt = tool_input.get("population_lt")
+    if (
+        population_gte is not None
+        and population_lt is not None
+        and population_gte >= population_lt
+    ):
+        raise ValueError("population_gte debe ser menor que population_lt")
+
+
+def _validate_ordinance_catalog_tool_input(tool_input: dict) -> None:
+    unexpected = sorted(set(tool_input) - {"cursor", "limit"})
+    if unexpected:
+        raise ValueError(f"campos no permitidos: {', '.join(unexpected)}")
+    cursor = tool_input.get("cursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise ValueError("cursor es obligatorio y debe ser texto")
+    if len(cursor) > 4096:
+        raise ValueError("cursor supera el tamaño máximo")
+    if "limit" in tool_input:
+        limit = tool_input["limit"]
+        if type(limit) is not int or not 1 <= limit <= 10:
+            raise ValueError("limit debe ser un entero entre 1 y 10")
+
+
+def _validate_ordinance_search_tool_input(tool_input: dict) -> None:
+    allowed = {
+        "query",
+        "municipality_id",
+        "municipality_name",
+        "autonomous_community",
+        "province",
+        "topic",
+        "strict_topic",
+        "population_gte",
+        "population_lt",
+        "result_scope",
+        "include_pending",
+        "include_inactive",
+        "limit",
+        "offset",
+    }
+    unexpected = sorted(set(tool_input) - allowed)
+    if unexpected:
+        raise ValueError(f"campos no permitidos: {', '.join(unexpected)}")
+    query = tool_input.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query es obligatorio y debe ser texto no vacío")
+    if len(query.strip()) > MAX_ORDINANCE_QUERY_CHARS:
+        raise ValueError(
+            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
+        )
+    for name in (
+        "municipality_name",
+        "autonomous_community",
+        "province",
+        "topic",
+    ):
+        if name not in tool_input:
+            continue
+        value = tool_input[name]
+        if not isinstance(value, str):
+            raise ValueError(f"{name} debe ser texto")
+        if len(value) > MAX_ORDINANCE_FILTER_CHARS:
+            raise ValueError(
+                f"{name} no puede superar {MAX_ORDINANCE_FILTER_CHARS} caracteres"
+            )
+    for name, minimum, maximum in (
+        ("municipality_id", 1, None),
+        ("population_gte", 0, None),
+        ("population_lt", 0, None),
+        ("limit", 1, MAX_ORDINANCE_RESULTS),
+        ("offset", 0, MAX_ORDINANCE_OFFSET),
+    ):
+        if name not in tool_input:
+            continue
+        value = tool_input[name]
+        if type(value) is not int or value < minimum or (
+            maximum is not None and value > maximum
+        ):
+            range_description = (
+                f"entre {minimum} y {maximum}"
+                if maximum is not None
+                else f"mayor o igual que {minimum}"
+            )
+            raise ValueError(f"{name} debe ser un entero {range_description}")
+    for name in ("strict_topic", "include_pending", "include_inactive"):
+        if name in tool_input and not isinstance(tool_input[name], bool):
+            raise ValueError(f"{name} debe ser booleano")
+    result_scope = tool_input.get("result_scope", "fragments")
+    if result_scope not in {"fragments", "ordinances", "municipalities"}:
+        raise ValueError("result_scope no válido")
+    population_gte = tool_input.get("population_gte")
+    population_lt = tool_input.get("population_lt")
+    if (
+        population_gte is not None
+        and population_lt is not None
+        and population_gte >= population_lt
+    ):
+        raise ValueError("population_gte debe ser menor que population_lt")
+
+
+def _require_ordinance_catalog_access(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+) -> None:
+    if not _has_ordinance_tool_permission(db, current_user, "ordinances.compare"):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.compare",
+        )
+    if _optional_boolean(tool_input, "include_pending") and not (
+        _has_ordinance_tool_permission(db, current_user, "ordinances.review")
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.review",
+        )
+
+
+def _get_ordinance_corpus_manifest(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    _require_ordinance_catalog_access(db, current_user, tool_input)
+    _validate_ordinance_manifest_tool_input(tool_input)
+    return build_ordinance_corpus_manifest(
+        db,
+        embedding_model=settings.embeddings_model,
+        filters=OrdinanceCorpusFilters(**_ordinance_filter_values(tool_input)),
+    )
+
+
+def _list_ordinance_catalog(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    context: ToolContext,
+) -> dict:
+    if not _has_ordinance_tool_permission(db, current_user, "ordinances.compare"):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.compare",
+        )
+    _validate_ordinance_catalog_tool_input(tool_input)
+    cursor = tool_input["cursor"]
+    cursor_data = decode_ordinance_catalog_cursor(cursor)
+    if cursor_data["filters"]["include_pending"] and not (
+        _has_ordinance_tool_permission(db, current_user, "ordinances.review")
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.review",
+        )
+    limit = tool_input.get("limit", DEFAULT_ORDINANCE_RESULTS)
+    return list_ordinance_catalog_from_cursor(
+        db,
+        embedding_model=settings.embeddings_model,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
 def _semantic_search_ordinances(
     db: Session,
     current_user: User,
@@ -1513,6 +1956,7 @@ def _semantic_search_ordinances(
             status_code=403,
             detail="Permission required: ordinances.compare",
         )
+    _validate_ordinance_search_tool_input(tool_input)
     include_pending = _optional_boolean(tool_input, "include_pending")
     include_inactive = _optional_boolean(tool_input, "include_inactive")
     if include_pending and not _has_ordinance_tool_permission(
@@ -1525,31 +1969,14 @@ def _semantic_search_ordinances(
             detail="Permission required: ordinances.review",
         )
 
-    query_text = str(tool_input["query"]).strip()
-    if not query_text:
-        raise ValueError("query no puede estar vacío")
-    if len(query_text) > MAX_ORDINANCE_QUERY_CHARS:
-        raise ValueError(
-            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
-        )
+    query_text = tool_input["query"].strip()
 
-    limit = int(tool_input.get("limit") or DEFAULT_ORDINANCE_RESULTS)
-    if limit < 1:
-        raise ValueError("limit debe ser mayor o igual que 1")
-    limit = min(limit, MAX_ORDINANCE_RESULTS)
-    offset = int(tool_input.get("offset") or 0)
-    if offset < 0:
-        raise ValueError("offset debe ser mayor o igual que 0")
-    if offset > MAX_ORDINANCE_OFFSET:
-        raise ValueError(f"offset no puede superar {MAX_ORDINANCE_OFFSET}")
+    limit = tool_input.get("limit", DEFAULT_ORDINANCE_RESULTS)
+    offset = tool_input.get("offset", 0)
 
     population_gte = tool_input.get("population_gte")
-    if population_gte is not None:
-        population_gte = int(population_gte)
     population_lt = tool_input.get("population_lt")
-    if population_lt is not None:
-        population_lt = int(population_lt)
-    result_scope = str(tool_input.get("result_scope") or "fragments").strip()
+    result_scope = tool_input.get("result_scope", "fragments")
 
     prepared_embedding = context.prepared_ordinance_embedding
     if prepared_embedding is not None:
@@ -1579,9 +2006,12 @@ def _semantic_search_ordinances(
         }
 
     municipality_id = tool_input.get("municipality_id")
-    municipality_name = str(tool_input.get("municipality_name") or "").strip()
-    province = str(tool_input.get("province") or "").strip()
-    topic = str(tool_input.get("topic") or "").strip()
+    municipality_name = (tool_input.get("municipality_name") or "").strip()
+    autonomous_community = (
+        tool_input.get("autonomous_community") or ""
+    ).strip()
+    province = (tool_input.get("province") or "").strip()
+    topic = (tool_input.get("topic") or "").strip()
     search_page = search_ordinance_chunks(
         db,
         query_vector=query_vector,
@@ -1589,10 +2019,9 @@ def _semantic_search_ordinances(
         options=OrdinanceSearchOptions(
             include_pending=include_pending,
             include_inactive=include_inactive,
-            municipality_id=(
-                int(municipality_id) if municipality_id is not None else None
-            ),
+            municipality_id=municipality_id,
             municipality_name=municipality_name or None,
+            autonomous_community=autonomous_community or None,
             province=province or None,
             topic=topic or None,
             strict_topic=_optional_boolean(tool_input, "strict_topic"),
@@ -1606,6 +2035,7 @@ def _semantic_search_ordinances(
     return {
         "query": query_text,
         "municipality_name": municipality_name or None,
+        "autonomous_community": autonomous_community or None,
         "province": province or None,
         "topic": topic or None,
         **search_page,
@@ -1626,15 +2056,8 @@ def prepare_ordinance_search_embedding(
     querying the local corpus.
     """
 
-    if "query" not in tool_input:
-        raise ValueError("query es obligatorio")
-    query_text = str(tool_input["query"]).strip()
-    if not query_text:
-        raise ValueError("query no puede estar vacío")
-    if len(query_text) > MAX_ORDINANCE_QUERY_CHARS:
-        raise ValueError(
-            f"query no puede superar {MAX_ORDINANCE_QUERY_CHARS} caracteres"
-        )
+    _validate_ordinance_search_tool_input(tool_input)
+    query_text = tool_input["query"].strip()
     query_vector, embedding_model, embedding_status = embed_text_supervised(
         query_text,
         provider_deadline_at=provider_deadline_at,
@@ -2483,6 +2906,8 @@ _EXECUTORS = {
     "get_map_items": _get_map_items,
     "web_search": _web_search,
     "read_web_page": _read_web_page,
+    "get_ordinance_corpus_manifest": _get_ordinance_corpus_manifest,
+    "list_ordinance_catalog": _list_ordinance_catalog,
     "semantic_search_ordinances": _semantic_search_ordinances,
     "list_requirements": _list_requirements,
     "get_requirement": _get_requirement,
@@ -2535,6 +2960,22 @@ _TOOL_METADATA: dict[str, dict] = {
         "side_effect": "none",
         "approval_policy": "never",
         "required_permission": "assistant.web.search",
+    },
+    "get_ordinance_corpus_manifest": {
+        "label": "Comprobar cobertura del corpus",
+        "read_only": True,
+        "domain": "ordinances",
+        "side_effect": "none",
+        "approval_policy": "never",
+        "required_permission": "ordinances.compare",
+    },
+    "list_ordinance_catalog": {
+        "label": "Enumerar catálogo de ordenanzas",
+        "read_only": True,
+        "domain": "ordinances",
+        "side_effect": "none",
+        "approval_policy": "never",
+        "required_permission": "ordinances.compare",
     },
     "semantic_search_ordinances": {
         "label": "Buscar ordenanzas",
@@ -2627,6 +3068,17 @@ _TOOL_METADATA: dict[str, dict] = {
 
 
 def _build_tool_catalog() -> dict[str, ToolSpec]:
+    definition_names = [str(definition["name"]) for definition in _TOOL_DEFINITIONS]
+    if len(definition_names) != len(set(definition_names)):
+        raise ValueError("Duplicate assistant tool definitions")
+    defined = set(definition_names)
+    if defined != set(_EXECUTORS):
+        raise ValueError("Assistant tool definitions and executors differ")
+    if defined != set(_TOOL_METADATA):
+        raise ValueError("Assistant tool definitions and metadata differ")
+    if not set(_TOOL_INPUT_NORMALIZERS).issubset(defined):
+        raise ValueError("Assistant tool normalizer has no definition")
+
     catalog: dict[str, ToolSpec] = {}
     for definition in _TOOL_DEFINITIONS:
         name = definition["name"]

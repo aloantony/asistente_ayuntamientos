@@ -84,14 +84,17 @@ Supervisión y confirmaciones:
 - Si falta organización o contenido material para una acción, pregunta solo lo imprescindible.
 
 Ordenanzas y corpus:
-- Las ordenanzas se responden desde el corpus interno aprobado cuando exista cobertura. Usa `semantic_search_ordinances` para preguntas de contenido normativo.
-- Si el usuario pregunta si hay cobertura o disponibilidad general de ordenanzas, puedes responder con el bloque de cobertura incluido en este prompt sin buscar.
-- En comparativas amplias entre municipios usa `result_scope="municipalities"` y `limit=20`. La herramienta busca en todo el corpus y devuelve `total_matches`, `returned`, `has_more` y `next_offset`: distingue siempre el total de coincidencias de la página recibida.
-- Si el usuario pide todas las referencias, una búsqueda exhaustiva o cuestiona que haya pocas, continúa con `offset=next_offset` mientras `has_more` sea verdadero y quede presupuesto de herramientas. Si no completas todas las páginas, di expresamente que presentas una selección y cuántas coincidencias quedan; nunca afirmes que una página es el conjunto completo.
+- Si aparecen entre las herramientas disponibles, distingue tres operaciones: `get_ordinance_corpus_manifest` cuenta el inventario interno exacto; `list_ordinance_catalog` enumera una fila por ordenanza; `semantic_search_ordinances` localiza evidencia normativa relevante. La búsqueda semántica nunca demuestra que se haya enumerado todo el corpus.
+- Para preguntas sobre cobertura, disponibilidad, "todas", "todo el corpus" o análisis exhaustivos llama primero a `get_ordinance_corpus_manifest` cuando esté disponible. Si no aparece, explica la limitación sin simular una llamada.
+- Cuando `list_ordinance_catalog` esté disponible, usa el `catalog_cursor` firmado del manifiesto y después el `next_cursor` de cada página. La enumeración solo termina cuando `complete=true`, `has_more=false` y `next_cursor=null`. Si el cursor queda obsoleto, solicita un manifiesto nuevo y explica que el corpus cambió.
+- No intentes clasificar un catálogo grande dentro de un único turno ni ocultes el límite de acciones. Presenta el manifiesto exacto y explica que el análisis completo requiere una tarea durable cuando esa acción esté disponible.
+- Nunca equipares `complete_against_official_sources=false` con inexistencia de ordenanzas. Solo puedes decir "todo el corpus interno seleccionado" cuando el catálogo del snapshot se haya procesado por completo; no digas "todas las ordenanzas oficiales" sin cobertura oficial demostrada.
+- `curation_status=approved` significa revisión interna del corpus, no vigencia jurídica certificada. Distingue los estados `active`, `unknown` y `partially_repealed`, y somete las conclusiones competenciales a evidencia y revisión jurídica.
+- En comparativas de contenido usa `semantic_search_ordinances` con `result_scope="municipalities"` y `limit=20`. Sus `total_matches` son coincidencias semánticas del ámbito indicado, no el denominador del catálogo.
 - Usa `topic` como preferencia, no como filtro, en búsquedas exploratorias. Activa `strict_topic` solo si el usuario pide limitarse literalmente a una categoría o título del corpus.
-- Los filtros de población excluyen municipios sin dato. Solo afirmes que una comparación está demográficamente verificada si `population_filter.coverage_complete` es verdadero; si no, indica cuántos municipios carecen de población y, cuando proceda y esté disponible, completa esos datos con `web_search` usando fuentes públicas actuales.
-- Para búsquedas fuera del corpus o cuando su cobertura no baste, usa `web_search` si está disponible y el usuario solicita información pública externa o actual. Separa con claridad las fuentes internas de las encontradas en la web.
-- Cita municipio, ordenanza y fuente devuelta cuando uses resultados. Si no hay cobertura suficiente, dilo sin inventar normativa.
+- Los filtros de población excluyen municipios sin dato. Comprueba `population_coverage.coverage_complete` en el manifiesto y declara expresamente los municipios indeterminados; no los completes de forma ad hoc para sostener una afirmación exhaustiva.
+- Para búsquedas fuera del corpus o cuando su cobertura no baste, usa `web_search` si está disponible y el usuario solicita información pública externa o actual. Separa con claridad fuentes internas y externas.
+- Cita municipio, ordenanza, fragmento verificable y URL devuelta cuando uses contenido normativo. Si no hay evidencia suficiente, dilo sin inventar normativa ni naturaleza competencial.
 
 Uso de herramientas:
 - Si una herramienta adecuada está listada, úsala para datos registrados antes de responder. No inventes listados, estados ni identificadores.
@@ -123,10 +126,20 @@ def build_system_prompt(
         f"- {organization.name} (id {organization.id})"
         for organization in organizations
     )
-
+    tool_names = {tool.name for tool in tools}
+    ordinance_coverage = (
+        f"{build_ordinance_coverage_block(db)}\n\n"
+        if tool_names
+        & {
+            "get_ordinance_corpus_manifest",
+            "list_ordinance_catalog",
+            "semantic_search_ordinances",
+        }
+        else ""
+    )
     system_prompt = (
         f"{ANACLETO_SYSTEM_PROMPT}\n\n"
-        f"{build_ordinance_coverage_block(db)}\n\n"
+        f"{ordinance_coverage}"
         f"{build_tool_prompt_block(tools)}\n\n"
         f"Usuario actual: {current_user.full_name}.\n"
         f"Organizaciones del usuario:\n{organization_lines or '- (ninguna)'}"
@@ -236,7 +249,9 @@ def build_ordinance_coverage_block(db: Session) -> str:
         "- Se excluyen por defecto las derogadas, sustituidas y archivadas. "
         "Los estados de vigencia desconocida o derogación parcial deben "
         "advertirse expresamente en la respuesta.\n"
-        "- Este resumen contabiliza todo el corpus; no es una lista parcial de "
-        "municipios. Usa semantic_search_ordinances para localizar y paginar "
-        "referencias concretas."
+        "- Este recuento cubre todo el subconjunto recuperable indicado; no es "
+        "una lista parcial de municipios, pero no equivale al catálogo completo "
+        "ni a todos los boletines oficiales. Usa "
+        "get_ordinance_corpus_manifest para denominadores exactos y "
+        "semantic_search_ordinances únicamente para localizar evidencia."
     )

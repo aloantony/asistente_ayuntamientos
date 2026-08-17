@@ -4077,7 +4077,7 @@ def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     assert len(gateway.calls) == 1
     assert "Eres Anacleto" in gateway.calls[0]["system"]
     assert "HERRAMIENTAS DISPONIBLES" in gateway.calls[0]["system"]
-    assert "COBERTURA DE ORDENANZAS" in gateway.calls[0]["system"]
+    assert "COBERTURA DE ORDENANZAS" not in gateway.calls[0]["system"]
     assert gateway.calls[0]["messages"][-1] == {
         "role": "user",
         "content": "¿qué puedes hacer?",

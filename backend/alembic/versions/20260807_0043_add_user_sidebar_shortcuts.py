@@ -1,7 +1,7 @@
 """add per-user sidebar shortcuts
 
-Revision ID: 20260722_0034
-Revises: 20260717_0033
+Revision ID: 20260807_0043
+Revises: 20260806_0042
 Create Date: 2026-07-22
 """
 
@@ -10,8 +10,8 @@ from collections.abc import Sequence
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "20260722_0034"
-down_revision: str | None = "20260717_0033"
+revision: str = "20260807_0043"
+down_revision: str | None = "20260806_0042"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
