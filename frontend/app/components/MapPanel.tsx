@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -58,6 +59,35 @@ type MapPanelProps = {
 
 type CreatableMapEntityType = "requirement" | "project";
 type MapView = "territory" | "municipalities";
+
+export function resolveMapView(
+  searchParams: Pick<URLSearchParams, "get">,
+  canViewMap: boolean,
+  canViewMunicipalities: boolean,
+): MapView {
+  if (
+    searchParams.get("view") === "municipalities" &&
+    canViewMunicipalities
+  ) {
+    return "municipalities";
+  }
+  return canViewMap ? "territory" : "municipalities";
+}
+
+export function buildMapViewHref(
+  pathname: string,
+  searchParams: Pick<URLSearchParams, "toString">,
+  view: MapView,
+) {
+  const params = new URLSearchParams(searchParams.toString());
+  if (view === "territory") {
+    params.delete("view");
+  } else {
+    params.set("view", "municipalities");
+  }
+  const query = params.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
 
 type MapLayer = {
   key: string;
@@ -419,16 +449,20 @@ function formatIdentifyProperty(value: unknown) {
   }
 }
 
-export function MapPanel({ user }: MapPanelProps) {
+function MapPanelContent({ user }: MapPanelProps) {
   const canViewMap =
     userHasPermission(user, "map.view") || userHasPermission(user, "map.manage");
   const canViewMunicipalities =
     userHasPermission(user, "municipalities.view") ||
     userHasPermission(user, "municipalities.manage");
   const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
   const { getStoredToken, handleRequestError } = useSession();
-  const [activeView, setActiveView] = useState<MapView>(
-    canViewMap ? "territory" : "municipalities",
+  const activeView = resolveMapView(
+    searchParams,
+    canViewMap,
+    canViewMunicipalities,
   );
   const [includeArchived, setIncludeArchived] = useState(false);
   const [items, setItems] = useState<GeoMapItem[]>([]);
@@ -1739,7 +1773,9 @@ export function MapPanel({ user }: MapPanelProps) {
     setManualFocusLocation(location);
     setManualFocusZoom(MUNICIPAL_CAPITAL_ZOOM);
     setSelectedItem(null);
-    setActiveView("territory");
+    router.replace(buildMapViewHref(pathname, searchParams, "territory"), {
+      scroll: false,
+    });
   }
 
   if (!canViewMap && !canViewMunicipalities) {
@@ -1777,7 +1813,12 @@ export function MapPanel({ user }: MapPanelProps) {
           <button
             aria-selected={activeView === "territory"}
             className={activeView === "territory" ? "is-active" : ""}
-            onClick={() => setActiveView("territory")}
+            onClick={() =>
+              router.replace(
+                buildMapViewHref(pathname, searchParams, "territory"),
+                { scroll: false },
+              )
+            }
             role="tab"
             type="button"
           >
@@ -1788,7 +1829,12 @@ export function MapPanel({ user }: MapPanelProps) {
           <button
             aria-selected={activeView === "municipalities"}
             className={activeView === "municipalities" ? "is-active" : ""}
-            onClick={() => setActiveView("municipalities")}
+            onClick={() =>
+              router.replace(
+                buildMapViewHref(pathname, searchParams, "municipalities"),
+                { scroll: false },
+              )
+            }
             role="tab"
             type="button"
           >
@@ -2777,5 +2823,13 @@ export function MapPanel({ user }: MapPanelProps) {
         </div>
       ) : null}
     </section>
+  );
+}
+
+export function MapPanel(props: MapPanelProps) {
+  return (
+    <Suspense fallback={null}>
+      <MapPanelContent {...props} />
+    </Suspense>
   );
 }
