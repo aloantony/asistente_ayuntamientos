@@ -23,6 +23,7 @@ MODEL_MODULES = (
     "app.rbac.models",
     "app.requirements.models",
     "app.reference_layers.models",
+    "app.sede.models",
     "app.staff.models",
     "app.tasks.models",
     "app.telegram.models",

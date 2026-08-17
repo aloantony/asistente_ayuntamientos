@@ -2137,3 +2137,89 @@ export type CouncilSession = {
   updated_at: string;
   agenda_items: CouncilAgendaItem[];
 };
+
+// Sede electrónica (ADR-042): vista de solo lectura sobre lo ya publicado.
+
+export type SedeBoardEntry = {
+  /** `bando`, `edicto`, `convocatoria`, `other` o `noticia`. */
+  kind: string;
+  id: number;
+  title: string;
+  summary: string | null;
+  published_on: string | null;
+  expires_on: string | null;
+};
+
+export type SedeProcedure = {
+  id: number;
+  slug: string;
+  name: string;
+  description: string | null;
+  channel: string;
+  deadline_days: number | null;
+  fee_description: string | null;
+};
+
+export type SedeTax = {
+  id: number;
+  slug: string;
+  name: string;
+  kind: string;
+  rate_kind: string;
+  rate_value: string | null;
+  rate_description: string | null;
+  taxable_base: string | null;
+  ordinance_id: number | null;
+};
+
+export type SedeContract = {
+  id: number;
+  reference: string;
+  title: string;
+  procedure_type: string;
+  status: string;
+  base_amount: string | null;
+  awarded_amount: string | null;
+  awarded_to: string | null;
+  published_on: string | null;
+};
+
+export type SedeTransparencyItem = {
+  id: number;
+  area: string;
+  title: string;
+  description: string | null;
+  reference_period: string | null;
+  published_on: string | null;
+};
+
+export type SedeSession = {
+  id: number;
+  kind: string;
+  status: string;
+  held_on: string;
+  summary: string | null;
+  minutes_status: string;
+  minutes_document_id: number | null;
+};
+
+export type SedeOrdinance = {
+  id: number;
+  title: string;
+  topic: string;
+  ordinance_type: string;
+  status: string;
+  approval_date: string | null;
+  publication_date: string | null;
+};
+
+export type SedeContent = {
+  organization_id: number;
+  board: SedeBoardEntry[];
+  procedures: SedeProcedure[];
+  taxes: SedeTax[];
+  contracts: SedeContract[];
+  transparency: SedeTransparencyItem[];
+  sessions: SedeSession[];
+  ordinances: SedeOrdinance[];
+};

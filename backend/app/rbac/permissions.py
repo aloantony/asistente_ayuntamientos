@@ -45,6 +45,8 @@ INITIAL_PERMISSION_DEFINITIONS: dict[str, str] = {
     "staff.view": "Ver el personal del ayuntamiento",
     "staff.edit": "Editar fichas del personal del ayuntamiento",
     "staff.manage": "Gestionar el personal del ayuntamiento",
+    "sede.view": "Ver la sede electronica municipal",
+    "sede.manage": "Gestionar los tributos de la sede electronica",
     "budgets.view": "Ver el presupuesto municipal",
     "budgets.edit": "Editar el presupuesto municipal",
     "budgets.manage": "Gestionar el presupuesto municipal",

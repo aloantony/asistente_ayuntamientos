@@ -50,22 +50,24 @@ export const TOP_NAV_SECTIONS: TopNavSection[] = [
     id: "sede",
     label: "SEDE ELECTRÓNICA",
     href: "/sede",
-    enabled: false,
+    enabled: true,
     items: [
-      { label: "Tablón de anuncios", href: "/sede?seccion=tablon", enabled: false },
-      { label: "Trámites online", href: "/sede?seccion=tramites", enabled: false },
-      { label: "Tributos", href: "/sede?seccion=tributos", enabled: false },
+      { label: "Tablón de anuncios", href: "/sede?seccion=tablon", enabled: true },
+      { label: "Trámites online", href: "/sede?seccion=tramites", enabled: true },
+      { label: "Tributos", href: "/sede?seccion=tributos", enabled: true },
       {
         label: "Perfil de contratante",
         href: "/sede?seccion=contratante",
-        enabled: false,
+        enabled: true,
       },
       {
         label: "Transparencia",
         href: "/sede?seccion=transparencia",
-        enabled: false,
+        enabled: true,
       },
-      { label: "Plenos", href: "/sede?seccion=plenos", enabled: false },
+      { label: "Plenos", href: "/sede?seccion=plenos", enabled: true },
+      // La normativa completa vive en su propia pantalla, con buscador y
+      // comparador; la sede sólo enseña la vigente.
       { label: "Normativa", href: "/ordenanzas", enabled: true },
     ],
   },

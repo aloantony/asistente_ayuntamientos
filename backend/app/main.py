@@ -32,6 +32,7 @@ from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
 from app.reference_layers.routes import router as reference_layers_router
 from app.reference_layers.wms_middleware import ReferenceWMSVaryMiddleware
+from app.sede.routes import router as sede_router
 from app.staff.routes import router as staff_router
 from app.tasks.routes import router as tasks_router
 from app.telegram.routes import router as telegram_router
@@ -95,6 +96,7 @@ for app_router in (
     communications_router,
     budgets_router,
     plenos_router,
+    sede_router,
     weather_router,
     branding_router,
     assistant_router,
