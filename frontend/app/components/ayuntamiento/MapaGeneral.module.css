@@ -1,0 +1,142 @@
+.layout {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 260px) minmax(0, 1fr);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sidebar {
+  display: grid;
+  gap: 12px;
+}
+
+.search input {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.tree,
+.card {
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+}
+
+.tree h3,
+.card h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tree h3 svg,
+.card h3 svg {
+  color: var(--text-muted);
+}
+
+.tree ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tree label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+
+.swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.layerLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layerCount {
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+}
+
+.card p {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.card dt {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.card dd {
+  margin: 1px 0 0;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.map {
+  display: grid;
+  gap: 6px;
+}
+
+.map > div {
+  height: 520px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.counter {
+  margin: 0;
+  color: var(--text-muted);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+  text-align: right;
+}
+
+.empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}

@@ -659,3 +659,29 @@ Esta es la parte de backend de la fase del mapa general. La pantalla
 esos dos ficheros aparecen en tres PRs abiertos sin mergear (#15, #16, #28) y
 editarlos garantizaría un conflicto. `MunicipalMap.tsx` sí se reutiliza, porque
 su interfaz de props es estable y nadie la está tocando.
+## ADR-044: El árbol de capas se deriva de lo que hay en el mapa (2026-08-05)
+
+`MapaGeneral.tsx` entra como sub-pestaña de la pantalla del ayuntamiento y
+**construye su árbol de capas desde los propios elementos**, agrupando por el
+`layer_key`, `layer_label` y `layer_color` que `/geo/map-items` ya devuelve. No
+hay un catálogo de capas aparte que mantener sincronizado, y una capa sin nada
+dentro sencillamente no aparece: un árbol con doce ramas vacías no informa, sólo
+obliga a buscar.
+
+El filtrado —capas apagadas y búsqueda— es local. El mapa se carga entero una
+vez y apagar una capa o teclear en el buscador no vuelve a pedir nada al
+servidor, porque el inventario de un municipio pequeño cabe en memoria y la
+alternativa sería una petición por cada tecla.
+
+**No se tocan `MapPanel.tsx` ni `SiurLayerTree.tsx`.** Aparecen en tres PRs
+abiertos sin mergear (#15, #16, #28) y editarlos garantizaría un conflicto en
+ficheros de 2.781 y 400 líneas. `MunicipalMap.tsx` sí se reutiliza tal cual: su
+interfaz de props es estable, acepta `items`, `markerColors` y `selectedItemId`,
+y con eso basta para una vista propia. El resultado es que la fase del mapa
+—señalada como la de mayor riesgo en el plan— no modifica ni una línea del
+código en churn.
+
+Con «Mapa general» activo, **el menú fijo de ADR-034 queda completo**: todas las
+entradas declaradas tienen pantalla. `visibleTopNavSections` sigue filtrando por
+`enabled` aunque hoy no descarte nada, porque es lo que protegerá el día que se
+declare una entrada nueva antes de construirla.

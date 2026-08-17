@@ -20,13 +20,13 @@ describe("modelo de navegación municipal", () => {
     expect(
       sections.every((section) => section.items.every((item) => item.enabled)),
     ).toBe(true);
-    // El modelo completo conserva lo pendiente como índice de lo que falta.
-    // Con la sede ya construida todas las secciones están activas; lo que
-    // sigue pendiente son entradas sueltas, como el mapa general.
-    expect(TOP_NAV_SECTIONS.length).toBeGreaterThanOrEqual(sections.length);
+    // El modelo declarado y el visible ya coinciden: todas las pantallas del
+    // menú fijo de ADR-034 están construidas. `visibleTopNavSections` sigue
+    // filtrando, que es lo que protege el día que se declare una entrada nueva.
+    expect(sections.length).toBe(TOP_NAV_SECTIONS.length);
     expect(
-      TOP_NAV_SECTIONS.some((section) =>
-        section.items.some((item) => !item.enabled),
+      TOP_NAV_SECTIONS.every((section) =>
+        section.items.every((item) => item.enabled),
       ),
     ).toBe(true);
   });

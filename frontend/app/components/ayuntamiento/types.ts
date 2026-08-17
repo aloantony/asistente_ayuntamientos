@@ -7,6 +7,7 @@ export type WorkspaceTab =
   | "summary"
   | "ordinances"
   | "facilities"
+  | "map"
   | "people"
   | "roadmap";
 

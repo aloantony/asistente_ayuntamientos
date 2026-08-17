@@ -42,8 +42,7 @@ export const TOP_NAV_SECTIONS: TopNavSection[] = [
         href: "/ayuntamiento?tab=summary",
         enabled: true,
       },
-      // Llega en la fase del mapa general (árbol de capas del inventario).
-      { label: "Mapa general", href: "/ayuntamiento?tab=map", enabled: false },
+      { label: "Mapa general", href: "/ayuntamiento?tab=map", enabled: true },
     ],
   },
   {
