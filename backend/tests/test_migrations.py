@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0030"
+HEAD_REVISION = "20260806_0042"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -110,6 +111,175 @@ _MANAGED_GEOGRAPHY_TABLES = {
     "reference_dataset_versions",
     "municipality_geography_snapshots",
 }
+REFERENCE_CATALOG_TABLES = {
+    "reference_catalog_snapshots",
+    "reference_services",
+    "reference_layers",
+    "reference_layer_styles",
+    "organization_reference_layer_settings",
+}
+REFERENCE_DELIVERY_EVIDENCE_TABLES = {
+    "reference_wms_capabilities_snapshots",
+    "reference_license_reviews",
+    "reference_delivery_attestations",
+}
+REFERENCE_DELIVERY_EVIDENCE_COLUMNS = {
+    "reference_wms_capabilities_snapshots": {
+        "id",
+        "provider_key",
+        "service_id",
+        "raw_xml",
+        "raw_size_bytes",
+        "raw_sha256",
+        "normalized_sha256",
+        "normalization_version",
+        "wms_version",
+        "get_map_endpoint",
+        "get_legend_endpoint",
+        "get_feature_info_endpoint",
+        "get_map_formats_json",
+        "get_legend_formats_json",
+        "get_feature_info_formats_json",
+        "layer_manifest_json",
+        "created_at",
+    },
+    "reference_license_reviews": {
+        "id",
+        "provider_key",
+        "service_id",
+        "reviewed_document",
+        "document_size_bytes",
+        "evidence_sha256",
+        "review_sha256",
+        "supersedes_review_sha256",
+        "decision",
+        "reviewer",
+        "reviewed_at",
+        "license_name",
+        "license_url",
+        "license_terms",
+        "allow_proxy",
+        "allow_cache",
+        "created_at",
+    },
+    "reference_delivery_attestations": {
+        "id",
+        "provider_key",
+        "service_id",
+        "catalog_snapshot_id",
+        "catalog_definition_sha256",
+        "capabilities_snapshot_id",
+        "license_review_id",
+        "attestation_kind",
+        "sequence_number",
+        "previous_attestation_id",
+        "previous_attestation_sha256",
+        "attestation_sha256",
+        "created_at",
+    },
+}
+REFERENCE_CATALOG_COLUMNS = {
+    "reference_catalog_snapshots": {
+        "id",
+        "provider_key",
+        "source_url",
+        "content_sha256",
+        "definition_sha256",
+        "raw_catalog_json",
+        "normalized_definition_json",
+        "retrieved_at",
+        "service_count",
+        "group_count",
+        "layer_count",
+        "unresolved_count",
+        "status",
+        "is_current",
+        "created_at",
+        "updated_at",
+    },
+    "reference_services": {
+        "id",
+        "last_seen_snapshot_id",
+        "provider_key",
+        "source_key",
+        "title",
+        "upstream_protocol",
+        "base_url",
+        "capabilities_url",
+        "version",
+        "default_crs",
+        "default_format",
+        "attribution",
+        "license_name",
+        "license_url",
+        "license_status",
+        "cache_policy",
+        "capabilities_sha256",
+        "status",
+        "last_error",
+        "created_at",
+        "updated_at",
+    },
+    "reference_layers": {
+        "id",
+        "last_seen_snapshot_id",
+        "service_id",
+        "parent_id",
+        "provider_key",
+        "source_key",
+        "node_type",
+        "title",
+        "description",
+        "remote_name",
+        "role",
+        "renderer",
+        "delivery_mode",
+        "style_name",
+        "image_format",
+        "supported_crs_json",
+        "bounds_json",
+        "options_json",
+        "sort_order",
+        "default_visible",
+        "default_opacity",
+        "min_zoom",
+        "max_zoom",
+        "min_scale_denominator",
+        "max_scale_denominator",
+        "queryable",
+        "downloadable",
+        "legend_url",
+        "metadata_url",
+        "status",
+        "created_at",
+        "updated_at",
+    },
+    "reference_layer_styles": {
+        "id",
+        "last_seen_snapshot_id",
+        "layer_id",
+        "provider_key",
+        "source_key",
+        "title",
+        "description",
+        "legend_url",
+        "sort_order",
+        "is_default",
+        "status",
+        "created_at",
+        "updated_at",
+    },
+    "organization_reference_layer_settings": {
+        "id",
+        "organization_id",
+        "layer_id",
+        "visible",
+        "opacity",
+        "updated_by_id",
+        "created_at",
+        "updated_at",
+    },
+}
 
 ASSISTANT_ATTACHMENT_SCHEMA = {
     "columns": {
@@ -193,6 +363,42 @@ def assert_pgvector_extension(engine: Engine) -> None:
         ).scalar_one() is True
 
 
+def assert_postgis_extension(engine: Engine) -> None:
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_extension WHERE extname = 'postgis'"
+                ")"
+            )
+        ).scalar_one() is True
+
+
+def assert_spatial_extensions(engine: Engine) -> None:
+    assert_pgvector_extension(engine)
+    assert_postgis_extension(engine)
+    with engine.connect() as connection:
+        vector_distance = connection.execute(
+            text(
+                "SELECT '[1,2,3]'::vector(3) "
+                "<-> '[1,2,4]'::vector(3)"
+            )
+        ).scalar_one()
+        transformed = connection.execute(
+            text(
+                "SELECT ST_SRID(geom), ST_X(geom), ST_Y(geom) "
+                "FROM (SELECT ST_Transform("
+                "ST_SetSRID(ST_MakePoint(400000, 4600000), 25830), "
+                "4326) AS geom) AS transformed"
+            )
+        ).one()
+
+    assert float(vector_distance) == pytest.approx(1.0)
+    assert transformed[0] == 4326
+    assert -10 <= transformed[1] <= 5
+    assert 35 <= transformed[2] <= 45
+
+
 def assert_reference_geography_schema(inspector: Inspector) -> None:
     municipality_columns = {
         column["name"] for column in inspector.get_columns("municipalities")
@@ -228,6 +434,332 @@ def assert_reference_geography_schema(inspector: Inspector) -> None:
             "municipality_geography_snapshots"
         )
     } == {("municipality_id",), ("dataset_version_id",)}
+
+
+def assert_reference_catalog_schema(inspector: Inspector) -> None:
+    table_names = set(inspector.get_table_names())
+    assert REFERENCE_CATALOG_TABLES <= table_names
+    for table_name, expected_columns in REFERENCE_CATALOG_COLUMNS.items():
+        effective_columns = set(expected_columns)
+        if (
+            table_name == "reference_layer_styles"
+            and "reference_delivery_attestations" in table_names
+        ):
+            effective_columns.add("remote_name")
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == effective_columns
+
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_catalog_snapshots")
+        if not index.get("duplicates_constraint")
+    } == {"uq_reference_catalog_snapshots_current_provider"}
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_services")
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_services_snapshot",
+        "ix_reference_services_status",
+    }
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_layers")
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_layers_parent_order",
+        "ix_reference_layers_service_status",
+        "ix_reference_layers_snapshot",
+    }
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("reference_layer_styles")
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_reference_layer_styles_layer_order",
+        "ix_reference_layer_styles_snapshot",
+        "uq_reference_layer_styles_default",
+    }
+    style_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes("reference_layer_styles")
+        if not index.get("duplicates_constraint")
+    }
+    default_style_index = style_indexes["uq_reference_layer_styles_default"]
+    assert default_style_index["unique"] is True
+    assert default_style_index["column_names"] == [
+        "provider_key",
+        "layer_id",
+    ]
+    assert "is_default" in str(default_style_index.get("dialect_options", {}))
+    assert {
+        index["name"]
+        for index in inspector.get_indexes(
+            "organization_reference_layer_settings"
+        )
+        if not index.get("duplicates_constraint")
+    } == {
+        "ix_org_reference_layer_settings_layer",
+        "ix_org_reference_layer_settings_updated_by",
+    }
+
+    expected_snapshot_uniques = {
+        "uq_reference_catalog_snapshots_provider_hashes",
+        "uq_reference_catalog_snapshots_provider_id",
+    }
+    if "reference_delivery_attestations" in inspector.get_table_names():
+        expected_snapshot_uniques.add(
+            "uq_reference_catalog_snapshots_provider_id_definition"
+        )
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_catalog_snapshots"
+        )
+    } == expected_snapshot_uniques
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("reference_services")
+    } == {
+        "uq_reference_services_provider_id",
+        "uq_reference_services_provider_source",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("reference_layers")
+    } == {
+        "uq_reference_layers_provider_id",
+        "uq_reference_layers_provider_source",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_layer_styles"
+        )
+    } == {
+        "uq_reference_layer_styles_provider_id",
+        "uq_reference_layer_styles_provider_layer_source",
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("reference_services")
+    } == {("provider_key", "last_seen_snapshot_id")}
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("reference_layers")
+    } == {
+        ("provider_key", "last_seen_snapshot_id"),
+        ("provider_key", "service_id"),
+        ("provider_key", "parent_id"),
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_styles"
+        )
+    } == {
+        ("provider_key", "last_seen_snapshot_id"),
+        ("provider_key", "layer_id"),
+    }
+    style_foreign_keys = {
+        foreign_key["name"]: foreign_key
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_layer_styles"
+        )
+    }
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_snapshot"
+    ]["referred_table"] == "reference_catalog_snapshots"
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_snapshot"
+    ]["referred_columns"] == ["provider_key", "id"]
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_snapshot"
+    ]["options"]["ondelete"] == "RESTRICT"
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_layer"
+    ]["referred_table"] == "reference_layers"
+    assert style_foreign_keys[
+        "fk_reference_layer_styles_provider_layer"
+    ]["referred_columns"] == ["provider_key", "id"]
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_layer_styles"
+        )
+    } == {
+        "ck_reference_layer_styles_identity_nonempty",
+        "ck_reference_layer_styles_legend_url",
+        "ck_reference_layer_styles_sort_order",
+        "ck_reference_layer_styles_status",
+    }
+
+
+def assert_reference_delivery_evidence_schema(inspector: Inspector) -> None:
+    assert REFERENCE_DELIVERY_EVIDENCE_TABLES <= set(
+        inspector.get_table_names()
+    )
+    for table_name, expected_columns in (
+        REFERENCE_DELIVERY_EVIDENCE_COLUMNS.items()
+    ):
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected_columns
+
+    capability_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes(
+            "reference_wms_capabilities_snapshots"
+        )
+        if not index.get("duplicates_constraint")
+    }
+    assert set(capability_indexes) == {
+        "ix_reference_wms_capabilities_service_created"
+    }
+    assert capability_indexes[
+        "ix_reference_wms_capabilities_service_created"
+    ]["column_names"] == ["provider_key", "service_id", "id"]
+    review_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes("reference_license_reviews")
+        if not index.get("duplicates_constraint")
+    }
+    assert set(review_indexes) == {
+        "ix_reference_license_reviews_service_reviewed",
+        "uq_reference_license_reviews_genesis",
+        "uq_reference_license_reviews_successor",
+    }
+    assert review_indexes[
+        "ix_reference_license_reviews_service_reviewed"
+    ]["column_names"] == ["provider_key", "service_id", "id"]
+    assert review_indexes[
+        "uq_reference_license_reviews_genesis"
+    ]["column_names"] == ["provider_key", "service_id"]
+    assert review_indexes[
+        "uq_reference_license_reviews_successor"
+    ]["column_names"] == [
+        "provider_key",
+        "service_id",
+        "supersedes_review_sha256",
+    ]
+    attestation_indexes = {
+        index["name"]: index
+        for index in inspector.get_indexes("reference_delivery_attestations")
+        if not index.get("duplicates_constraint")
+    }
+    assert set(attestation_indexes) == {
+        "ix_reference_delivery_attestations_current_lookup",
+        "uq_reference_delivery_attestations_genesis",
+        "uq_reference_delivery_attestations_successor",
+    }
+    assert attestation_indexes[
+        "ix_reference_delivery_attestations_current_lookup"
+    ]["column_names"] == ["provider_key", "service_id", "sequence_number"]
+
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_wms_capabilities_snapshots"
+        )
+    } == {
+        "uq_reference_wms_capabilities_content",
+        "uq_reference_wms_capabilities_provider_service_id",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_license_reviews"
+        )
+    } == {
+        "uq_reference_license_reviews_content",
+        "uq_reference_license_reviews_provider_service_id",
+        "uq_reference_license_reviews_review_hash",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "reference_delivery_attestations"
+        )
+    } == {
+        "uq_reference_delivery_attestations_chain_target",
+        "uq_reference_delivery_attestations_hash",
+        "uq_reference_delivery_attestations_sequence",
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_delivery_attestations"
+        )
+    } == {
+        ("provider_key", "service_id"),
+        (
+            "provider_key",
+            "catalog_snapshot_id",
+            "catalog_definition_sha256",
+        ),
+        ("provider_key", "service_id", "capabilities_snapshot_id"),
+        ("provider_key", "service_id", "license_review_id"),
+        (
+            "provider_key",
+            "service_id",
+            "previous_attestation_id",
+            "previous_attestation_sha256",
+        ),
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_wms_capabilities_snapshots"
+        )
+    } == {
+        "ck_reference_wms_capabilities_provider_nonempty",
+        "ck_reference_wms_capabilities_raw_size",
+        "ck_reference_wms_capabilities_hashes",
+        "ck_reference_wms_capabilities_normalization",
+        "ck_reference_wms_capabilities_version",
+        "ck_reference_wms_capabilities_endpoints",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_license_reviews"
+        )
+    } == {
+        "ck_reference_license_reviews_required_text",
+        "ck_reference_license_reviews_document_size",
+        "ck_reference_license_reviews_hashes",
+        "ck_reference_license_reviews_decision",
+        "ck_reference_license_reviews_license_url",
+        "ck_reference_license_reviews_cache_requires_proxy",
+        "ck_reference_license_reviews_permissions_approved",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "reference_delivery_attestations"
+        )
+    } == {
+        "ck_reference_delivery_attestations_provider_nonempty",
+        "ck_reference_delivery_attestations_hashes",
+        "ck_reference_delivery_attestations_kind",
+        "ck_reference_delivery_attestations_chain",
+    }
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_wms_capabilities_snapshots"
+        )
+    } == {("provider_key", "service_id")}
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys(
+            "reference_license_reviews"
+        )
+    } == {
+        ("provider_key", "service_id"),
+        ("provider_key", "service_id", "supersedes_review_sha256"),
+    }
 
 
 def assert_assistant_attachment_schema(inspector: Inspector) -> None:
@@ -533,6 +1065,286 @@ MAINTENANCE_SCHEMA = {
 ASSET_SUPPORTING_UNIQUE_CONSTRAINTS = {
     "organizations": {"uq_organizations_id_municipality"},
     "geo_locations": {"uq_geo_locations_id_org_municipality"},
+}
+
+ROADMAP_SCHEMA = {
+    "municipal_tasks": {
+        "columns": {
+            "id",
+            "organization_id",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "due_date",
+            "blocked_reason",
+            "completed_at",
+            "assignee_worker_id",
+            "project_id",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_municipal_tasks_org_status_due",
+            "ix_municipal_tasks_assignee_status",
+            "ix_municipal_tasks_project_status",
+            "ix_municipal_tasks_created_by_id",
+            "ix_municipal_tasks_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("project_id", "organization_id"),
+            ("assignee_worker_id", "organization_id"),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_municipal_tasks_status",
+            "ck_municipal_tasks_priority",
+            "ck_municipal_tasks_title",
+            "ck_municipal_tasks_blocked_reason",
+            "ck_municipal_tasks_completed_at",
+        },
+        "unique_constraints": {"uq_municipal_tasks_id_org"},
+    },
+    "municipal_task_events": {
+        "columns": {
+            "id",
+            "task_id",
+            "organization_id",
+            "event_type",
+            "from_status",
+            "to_status",
+            "changed_fields",
+            "note",
+            "actor_id",
+            "created_at",
+        },
+        "indexes": {
+            "ix_municipal_task_events_task",
+            "ix_municipal_task_events_org_created",
+            "ix_municipal_task_events_actor_id",
+        },
+        "foreign_keys": {
+            ("task_id", "organization_id"),
+            ("actor_id",),
+        },
+        "checks": {
+            "ck_municipal_task_events_type",
+            "ck_municipal_task_events_from_status",
+            "ck_municipal_task_events_to_status",
+        },
+        "unique_constraints": set(),
+    },
+}
+
+GOVERNMENT_STAFF_SCHEMA = {
+    "government_members": {
+        "columns": {
+            "id",
+            "organization_id",
+            "level",
+            "full_name",
+            "role_title",
+            "political_group",
+            "email",
+            "phone",
+            "biography",
+            "term_start_date",
+            "term_end_date",
+            "sort_order",
+            "status",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_government_members_org_status_sort",
+            "ix_government_members_created_by_id",
+            "ix_government_members_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_government_members_level",
+            "ck_government_members_status",
+            "ck_government_members_sort_order",
+            "ck_government_members_term_range",
+        },
+        "unique_constraints": set(),
+    },
+    "staff_posts": {
+        "columns": {
+            "id",
+            "organization_id",
+            "parent_id",
+            "kind",
+            "label",
+            "description",
+            "sort_order",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {"ix_staff_posts_org_sort"},
+        "foreign_keys": {
+            ("organization_id",),
+            ("parent_id", "organization_id"),
+        },
+        "checks": {
+            "ck_staff_posts_kind",
+            "ck_staff_posts_sort_order",
+            "ck_staff_posts_parent_not_self",
+        },
+        "unique_constraints": {"uq_staff_posts_id_org"},
+    },
+    "staff_workers": {
+        "columns": {
+            "id",
+            "organization_id",
+            "post_id",
+            "full_name",
+            "email",
+            "phone",
+            "description",
+            "status",
+            "schedule_summary",
+            "schedule_days",
+            "weekly_hours",
+            "contract_type",
+            "contract_start_date",
+            "contract_end_date",
+            "vacation_days_limit",
+            "personal_days_limit",
+            "bills_invoices",
+            "created_by_id",
+            "updated_by_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_staff_workers_org_status",
+            "ix_staff_workers_created_by_id",
+            "ix_staff_workers_updated_by_id",
+        },
+        "foreign_keys": {
+            ("organization_id",),
+            ("post_id", "organization_id"),
+            ("created_by_id",),
+            ("updated_by_id",),
+        },
+        "checks": {
+            "ck_staff_workers_status",
+            "ck_staff_workers_contract_type",
+            "ck_staff_workers_contract_range",
+            "ck_staff_workers_vacation_limit",
+            "ck_staff_workers_personal_limit",
+            "ck_staff_workers_weekly_hours",
+        },
+        "unique_constraints": {
+            "uq_staff_workers_post",
+            "uq_staff_workers_id_org",
+        },
+    },
+    "staff_absences": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "absence_type",
+            "start_date",
+            "end_date",
+            "reason",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {"ix_staff_absences_worker_start"},
+        "foreign_keys": {("worker_id", "organization_id")},
+        "checks": {
+            "ck_staff_absences_type",
+            "ck_staff_absences_range",
+        },
+        "unique_constraints": set(),
+    },
+    "staff_reports": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "report_type",
+            "report_date",
+            "plan",
+            "closing",
+            "incident",
+            "author_id",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {
+            "ix_staff_reports_worker_date",
+            "ix_staff_reports_author_id",
+        },
+        "foreign_keys": {
+            ("worker_id", "organization_id"),
+            ("author_id",),
+        },
+        "checks": {"ck_staff_reports_type"},
+        "unique_constraints": set(),
+    },
+    "staff_invoices": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "issued_on",
+            "concept",
+            "hours",
+            "amount",
+            "created_at",
+            "updated_at",
+        },
+        "indexes": {"ix_staff_invoices_worker_date"},
+        "foreign_keys": {("worker_id", "organization_id")},
+        "checks": {
+            "ck_staff_invoices_hours",
+            "ck_staff_invoices_amount",
+        },
+        "unique_constraints": set(),
+    },
+    "staff_history_events": {
+        "columns": {
+            "id",
+            "worker_id",
+            "organization_id",
+            "event_type",
+            "from_status",
+            "to_status",
+            "changed_fields",
+            "note",
+            "actor_id",
+            "created_at",
+        },
+        "indexes": {
+            "ix_staff_history_events_worker",
+            "ix_staff_history_events_org_created",
+            "ix_staff_history_events_actor_id",
+        },
+        "foreign_keys": {
+            ("worker_id", "organization_id"),
+            ("actor_id",),
+        },
+        "checks": {
+            "ck_staff_history_events_type",
+            "ck_staff_history_events_from_status",
+            "ck_staff_history_events_to_status",
+        },
+        "unique_constraints": set(),
+    },
 }
 
 KNOWLEDGE_COLUMNS = {
@@ -961,6 +1773,206 @@ def assert_maintenance_schema(inspector: Inspector) -> None:
         } == expected["unique_constraints"]
 
 
+MUNICIPAL_DATA_TABLES = {
+    "padron_annual_records",
+    "climate_records",
+    "household_stats",
+    "utility_supplies",
+    "water_meters",
+    "water_meter_readings",
+}
+
+
+ADMINISTRATION_TABLES = {
+    "office_hours",
+    "municipal_procedures",
+    "municipal_licences",
+    "municipal_contracts",
+    "municipal_grants",
+    "transparency_items",
+    "municipal_news",
+    "municipal_notices",
+    "municipal_notice_events",
+}
+
+
+BUDGET_PLENO_TABLES = {
+    "municipal_budgets",
+    "budget_lines",
+    "budget_amendments",
+    "budget_expenses",
+    "treasury_movements",
+    "council_sessions",
+    "council_agenda_items",
+}
+
+
+def assert_budget_pleno_schema(inspector: Inspector) -> None:
+    """El presupuesto y los plenos existen, sin columnas derivadas guardadas."""
+    table_names = set(inspector.get_table_names())
+    assert BUDGET_PLENO_TABLES <= table_names
+
+    # La ejecucion se calcula al consultar: si alguien la materializa, este
+    # test tiene que enterarse.
+    budget_columns = {
+        column["name"] for column in inspector.get_columns("municipal_budgets")
+    }
+    assert budget_columns.isdisjoint(
+        {"executed_expense", "available_credit", "total_expense"}
+    )
+
+    # Un ano, un presupuesto; y un codigo de partida no se repite dentro de el.
+    assert "uq_municipal_budgets_org_year" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("municipal_budgets")
+    }
+    assert "uq_budget_lines_budget_code" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("budget_lines")
+    }
+
+    # La tesoreria no cuelga del presupuesto: el dinero tiene su calendario.
+    assert not any(
+        foreign_key["referred_table"] == "municipal_budgets"
+        for foreign_key in inspector.get_foreign_keys("treasury_movements")
+    )
+
+    # Ninguna tabla nueva apunta a `municipalities` (ADR-038).
+    for table_name in BUDGET_PLENO_TABLES:
+        assert not any(
+            foreign_key["referred_table"] == "municipalities"
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        )
+
+
+def assert_administration_schema(inspector: Inspector) -> None:
+    """Administracion y comunicacion existen y siguen aisladas por organizacion."""
+    table_names = set(inspector.get_table_names())
+    assert ADMINISTRATION_TABLES <= table_names
+
+    # Las referencias de expediente se numeran por municipio, asi que la misma
+    # en otro ayuntamiento es legitima.
+    for table_name, constraint_name in (
+        ("municipal_licences", "uq_municipal_licences_org_reference"),
+        ("municipal_contracts", "uq_municipal_contracts_org_reference"),
+        ("municipal_procedures", "uq_municipal_procedures_org_slug"),
+        ("municipal_news", "uq_municipal_news_org_slug"),
+    ):
+        assert constraint_name in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+
+    # El historial de un bando se ata por (id, organization_id): retirar uno no
+    # puede alcanzar al de otro ayuntamiento.
+    assert ("notice_id", "organization_id") in {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("municipal_notice_events")
+    }
+
+
+def assert_municipal_data_schema(inspector: Inspector) -> None:
+    """Las series municipales existen y siguen aisladas por organización.
+
+    No se fija cada columna una a una como en el inventario: lo que importa aquí
+    es que ninguna serie pueda cruzar de ayuntamiento, y eso lo garantiza la
+    clave ajena a `organizations` que se comprueba tabla por tabla.
+    """
+    table_names = set(inspector.get_table_names())
+    assert MUNICIPAL_DATA_TABLES <= table_names
+
+    # Una fila por periodo y organizacion: dos del mismo ano se contradicen y
+    # ninguna grafica sabria cual creer.
+    expected_uniques = {
+        "padron_annual_records": "uq_padron_annual_records_org_year",
+        "climate_records": "uq_climate_records_org_period",
+        "household_stats": "uq_household_stats_org_year",
+        "water_meters": "uq_water_meters_org_code",
+        "water_meter_readings": "uq_water_meter_readings_meter_date",
+    }
+    for table_name, constraint_name in expected_uniques.items():
+        assert constraint_name in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+
+    # Toda serie cuelga de una organizacion: es lo que impide que crucen de
+    # ayuntamiento aunque una consulta olvide filtrar.
+    for table_name in MUNICIPAL_DATA_TABLES:
+        assert any(
+            "organization_id" in foreign_key["constrained_columns"]
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        )
+
+    # Los contadores NO apuntan directamente a `municipalities`: esa clave
+    # obligaria a bloquear la tabla al soltarlos en un downgrade, y bastaria un
+    # escritor abierto para que la bajada esperase en vez de fallar.
+    assert not any(
+        foreign_key["referred_table"] == "municipalities"
+        for foreign_key in inspector.get_foreign_keys("water_meters")
+    )
+
+    # El escudo es una referencia a `documents`, no un almacen paralelo.
+    assert "organization_branding" in table_names
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("organization_branding")
+    } == {("organization_id",), ("crest_document_id",)}
+
+
+def assert_roadmap_schema(inspector: Inspector) -> None:
+    for table_name, expected in ROADMAP_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+    # "Vencida" no es una columna: es una lectura del calendario. Si algún día
+    # alguien la materializa, este test tiene que enterarse.
+    assert "overdue" not in {
+        column["name"] for column in inspector.get_columns("municipal_tasks")
+    }
+
+
+def assert_government_staff_schema(inspector: Inspector) -> None:
+    for table_name, expected in GOVERNMENT_STAFF_SCHEMA.items():
+        assert {
+            column["name"] for column in inspector.get_columns(table_name)
+        } == expected["columns"]
+        assert {
+            index["name"]
+            for index in inspector.get_indexes(table_name)
+            if not index.get("duplicates_constraint")
+        } == expected["indexes"]
+        assert {
+            tuple(foreign_key["constrained_columns"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected["foreign_keys"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        } == expected["checks"]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        } == expected["unique_constraints"]
+
+
 def assert_maintenance_trigger(engine: Engine) -> None:
     with engine.connect() as connection:
         assert connection.execute(
@@ -1068,8 +2080,13 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert PROTOTYPE_TABLES.isdisjoint(upgraded_inspector.get_table_names())
         assert_asset_inventory_schema(upgraded_inspector)
         assert_maintenance_schema(upgraded_inspector)
+        assert_government_staff_schema(upgraded_inspector)
+        assert_roadmap_schema(upgraded_inspector)
+        assert_municipal_data_schema(upgraded_inspector)
+        assert_administration_schema(upgraded_inspector)
+        assert_budget_pleno_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(upgraded_inspector)
         assert_assistant_attachment_schema(upgraded_inspector)
         assert_ordinance_analysis_schema(upgraded_inspector)
@@ -1098,6 +2115,21 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert set(MAINTENANCE_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert set(GOVERNMENT_STAFF_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(ROADMAP_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert MUNICIPAL_DATA_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert ADMINISTRATION_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert BUDGET_PLENO_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -1115,8 +2147,13 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         )
         assert_asset_inventory_schema(reupgraded_inspector)
         assert_maintenance_schema(reupgraded_inspector)
+        assert_government_staff_schema(reupgraded_inspector)
+        assert_roadmap_schema(reupgraded_inspector)
+        assert_municipal_data_schema(reupgraded_inspector)
+        assert_administration_schema(reupgraded_inspector)
+        assert_budget_pleno_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(reupgraded_inspector)
         assert_assistant_attachment_schema(reupgraded_inspector)
         assert_ordinance_analysis_schema(reupgraded_inspector)
@@ -1775,6 +2812,649 @@ def test_reconciliation_upgrade_has_bounded_schema_lock_wait(
         engine.dispose()
 
 
+def test_reference_catalog_migration_from_postgis_head_is_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0030")
+    engine = create_engine(migration_database_url)
+
+    try:
+        assert REFERENCE_CATALOG_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_catalog_schema(inspect(engine))
+        assert_spatial_extensions(engine)
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0030")
+        assert REFERENCE_CATALOG_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        assert_spatial_extensions(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0030"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_catalog_schema(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_reference_layer_styles_migration_is_isolated_and_reversible(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0031")
+    engine = create_engine(migration_database_url)
+
+    try:
+        before = inspect(engine)
+        assert "reference_layers" in before.get_table_names()
+        assert "reference_layer_styles" not in before.get_table_names()
+
+        run_alembic(migration_database_url, "upgrade", "20260717_0032")
+        assert_reference_catalog_schema(inspect(engine))
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0031")
+        downgraded = inspect(engine)
+        assert "reference_layers" in downgraded.get_table_names()
+        assert "reference_layer_styles" not in downgraded.get_table_names()
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0031"
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_reference_catalog_schema(inspect(engine))
+    finally:
+        engine.dispose()
+
+
+def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0032")
+    engine = create_engine(migration_database_url)
+
+    try:
+        assert REFERENCE_DELIVERY_EVIDENCE_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "20260717_0033")
+        assert_reference_catalog_schema(inspect(engine))
+        assert_reference_delivery_evidence_schema(inspect(engine))
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0032")
+        assert REFERENCE_DELIVERY_EVIDENCE_TABLES.isdisjoint(
+            inspect(engine).get_table_names()
+        )
+        run_alembic(migration_database_url, "upgrade", "head")
+        assert_reference_delivery_evidence_schema(inspect(engine))
+
+        with engine.begin() as connection:
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_snapshots (
+                        provider_key, source_url, content_sha256,
+                        definition_sha256, raw_catalog_json,
+                        normalized_definition_json, retrieved_at,
+                        service_count, group_count, layer_count,
+                        unresolved_count, status, is_current
+                    ) VALUES (
+                        'siur', 'https://example.test/settings.json', :content,
+                        :definition, CAST('{}' AS JSON), CAST('{}' AS JSON),
+                        now(), 1, 0, 1, 0, 'applied', true
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "c" * 64, "definition": "d" * 64},
+            ).scalar_one()
+            service_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_services (
+                        last_seen_snapshot_id, provider_key, source_key, title,
+                        upstream_protocol, base_url, version, license_status,
+                        cache_policy, status
+                    ) VALUES (
+                        :snapshot_id, 'siur', 'service:test', 'Test WMS',
+                        'wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        '1.3.0', 'pending', 'none', 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id},
+            ).scalar_one()
+            capabilities_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_wms_capabilities_snapshots (
+                        provider_key, service_id, raw_xml, raw_size_bytes,
+                        raw_sha256, normalized_sha256, normalization_version,
+                        wms_version, get_map_endpoint,
+                        get_legend_endpoint, get_feature_info_endpoint,
+                        get_map_formats_json, get_legend_formats_json,
+                        get_feature_info_formats_json, layer_manifest_json
+                    ) VALUES (
+                        'siur', :service_id, :raw_xml, :raw_size,
+                        :raw_hash, :normalized_hash,
+                        'siur-wms-capabilities-v1', '1.3.0',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        CAST('["image/png"]' AS JSON),
+                        CAST('["image/png"]' AS JSON),
+                        CAST('["application/json"]' AS JSON),
+                        CAST(:manifest AS JSON)
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "service_id": service_id,
+                    "raw_xml": b"<WMS_Capabilities/>",
+                    "raw_size": len(b"<WMS_Capabilities/>"),
+                    "raw_hash": "a" * 64,
+                    "normalized_hash": "b" * 64,
+                    "manifest": json.dumps(
+                        [
+                            {
+                                "name": "test:layer",
+                                "crs": ["EPSG:3857"],
+                                "queryable": True,
+                                "styles": [""],
+                            }
+                        ]
+                    ),
+                },
+            ).scalar_one()
+            review_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_license_reviews (
+                        provider_key, service_id, reviewed_document,
+                        document_size_bytes, evidence_sha256, review_sha256,
+                        decision, reviewer, reviewed_at, license_name,
+                        license_url, license_terms, allow_proxy, allow_cache
+                    ) VALUES (
+                        'siur', :service_id, :document, :document_size,
+                        :evidence_hash, :review_hash, 'approved',
+                        'Migration test reviewer', now(),
+                        'Synthetic migration test license',
+                        'https://example.test/license',
+                        'Synthetic only; not a real SIUR approval.', true, true
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "service_id": service_id,
+                    "document": b"{}",
+                    "document_size": 2,
+                    "evidence_hash": "e" * 64,
+                    "review_hash": "b" * 64,
+                },
+            ).scalar_one()
+            attestation_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_delivery_attestations (
+                        provider_key, service_id, catalog_snapshot_id,
+                        catalog_definition_sha256, capabilities_snapshot_id,
+                        license_review_id, attestation_kind, sequence_number,
+                        previous_attestation_id,
+                        previous_attestation_sha256, attestation_sha256
+                    ) VALUES (
+                        'siur', :service_id, :snapshot_id, :definition,
+                        :capabilities_id, :review_id, 'delivery', 1,
+                        NULL, NULL, :attestation_hash
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "service_id": service_id,
+                    "snapshot_id": snapshot_id,
+                    "definition": "d" * 64,
+                    "capabilities_id": capabilities_id,
+                    "review_id": review_id,
+                    "attestation_hash": "f" * 64,
+                },
+            ).scalar_one()
+
+        invalid_review_permissions = (
+            ("approved", False, True, "1" * 64, "2" * 64),
+            ("restricted", True, False, "3" * 64, "4" * 64),
+        )
+        for decision, allow_proxy, allow_cache, evidence_hash, review_hash in (
+            invalid_review_permissions
+        ):
+            with pytest.raises(DBAPIError) as error:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO reference_license_reviews (
+                                provider_key, service_id, reviewed_document,
+                                document_size_bytes, evidence_sha256,
+                                review_sha256, supersedes_review_sha256,
+                                decision, reviewer,
+                                reviewed_at, license_name, license_terms,
+                                allow_proxy, allow_cache
+                            ) VALUES (
+                                'siur', :service_id, CAST('{}' AS BYTEA), 2,
+                                :evidence_hash, :review_hash, :supersedes,
+                                :decision,
+                                'Invalid permissions test', now(),
+                                'Synthetic invalid license',
+                                'Synthetic invalid permissions only.',
+                                :allow_proxy, :allow_cache
+                            )
+                            """
+                        ),
+                        {
+                            "service_id": service_id,
+                            "evidence_hash": evidence_hash,
+                            "review_hash": review_hash,
+                            "supersedes": "b" * 64,
+                            "decision": decision,
+                            "allow_proxy": allow_proxy,
+                            "allow_cache": allow_cache,
+                        },
+                    )
+            assert error.value.orig.sqlstate == "23514"
+
+        lineage_insert = text(
+            """
+            INSERT INTO reference_license_reviews (
+                provider_key, service_id, reviewed_document,
+                document_size_bytes, evidence_sha256, review_sha256,
+                supersedes_review_sha256, decision, reviewer, reviewed_at,
+                license_name, license_terms, allow_proxy, allow_cache
+            ) VALUES (
+                'siur', :service_id, CAST('{}' AS BYTEA), 2,
+                :evidence_hash, :review_hash, :supersedes, 'approved',
+                :reviewer, now(), 'Synthetic lineage license',
+                'Synthetic lineage constraint test only.', false, false
+            )
+            """
+        )
+        with pytest.raises(DBAPIError) as duplicate_genesis:
+            with engine.begin() as connection:
+                connection.execute(
+                    lineage_insert,
+                    {
+                        "service_id": service_id,
+                        "evidence_hash": "5" * 64,
+                        "review_hash": "6" * 64,
+                        "supersedes": None,
+                        "reviewer": "Duplicate genesis test",
+                    },
+                )
+        assert duplicate_genesis.value.orig.sqlstate == "23505"
+
+        with engine.begin() as connection:
+            connection.execute(
+                lineage_insert,
+                {
+                    "service_id": service_id,
+                    "evidence_hash": "7" * 64,
+                    "review_hash": "8" * 64,
+                    "supersedes": "b" * 64,
+                    "reviewer": "First successor test",
+                },
+            )
+        with pytest.raises(DBAPIError) as forked_successor:
+            with engine.begin() as connection:
+                connection.execute(
+                    lineage_insert,
+                    {
+                        "service_id": service_id,
+                        "evidence_hash": "9" * 64,
+                        "review_hash": "a" * 64,
+                        "supersedes": "b" * 64,
+                        "reviewer": "Forked successor test",
+                    },
+                )
+        assert forked_successor.value.orig.sqlstate == "23505"
+
+        mutations = (
+            (
+                "UPDATE reference_wms_capabilities_snapshots "
+                "SET wms_version = '1.1.1' WHERE id = :row_id",
+                capabilities_id,
+            ),
+            (
+                "DELETE FROM reference_wms_capabilities_snapshots "
+                "WHERE id = :row_id",
+                capabilities_id,
+            ),
+            (
+                "UPDATE reference_license_reviews "
+                "SET reviewer = 'tampered' WHERE id = :row_id",
+                review_id,
+            ),
+            (
+                "DELETE FROM reference_license_reviews WHERE id = :row_id",
+                review_id,
+            ),
+            (
+                "UPDATE reference_delivery_attestations "
+                "SET attestation_sha256 = :hash WHERE id = :row_id",
+                attestation_id,
+            ),
+            (
+                "DELETE FROM reference_delivery_attestations "
+                "WHERE id = :row_id",
+                attestation_id,
+            ),
+        )
+        for statement, row_id in mutations:
+            with pytest.raises(DBAPIError) as error:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(statement),
+                        {"row_id": row_id, "hash": "0" * 64},
+                    )
+            assert error.value.orig.sqlstate == "55000"
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0032",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "immutable reference delivery evidence exists" in refused.stderr
+        with engine.connect() as connection:
+            # El downgrade rechazado no puede mover el sello: la base sigue
+            # donde la dejó el `upgrade head` anterior, sea cual sea la cabeza.
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_reference_delivery_evidence_downgrade_waits_for_concurrent_insert(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0033")
+    engine = create_engine(migration_database_url)
+    writer = engine.connect()
+    transaction = writer.begin()
+    migration_process: subprocess.Popen[str] | None = None
+
+    try:
+        snapshot_id = writer.execute(
+            text(
+                """
+                INSERT INTO reference_catalog_snapshots (
+                    provider_key, source_url, content_sha256,
+                    definition_sha256, raw_catalog_json,
+                    normalized_definition_json, retrieved_at,
+                    service_count, group_count, layer_count,
+                    unresolved_count, status, is_current
+                ) VALUES (
+                    'siur', 'https://example.test/settings.json', :content,
+                    :definition, CAST('{}' AS JSON), CAST('{}' AS JSON),
+                    now(), 1, 0, 1, 0, 'applied', true
+                ) RETURNING id
+                """
+            ),
+            {"content": "1" * 64, "definition": "2" * 64},
+        ).scalar_one()
+        service_id = writer.execute(
+            text(
+                """
+                INSERT INTO reference_services (
+                    last_seen_snapshot_id, provider_key, source_key, title,
+                    upstream_protocol, base_url, version, license_status,
+                    cache_policy, status
+                ) VALUES (
+                    :snapshot_id, 'siur', 'service:concurrent',
+                    'Concurrent WMS', 'wms',
+                    'https://idecyl.jcyl.es/geoserver/test/wms',
+                    '1.3.0', 'pending', 'none', 'active'
+                ) RETURNING id
+                """
+            ),
+            {"snapshot_id": snapshot_id},
+        ).scalar_one()
+        capabilities_id = writer.execute(
+            text(
+                """
+                INSERT INTO reference_wms_capabilities_snapshots (
+                    provider_key, service_id, raw_xml, raw_size_bytes,
+                    raw_sha256, normalized_sha256, normalization_version,
+                    wms_version, get_map_endpoint, get_legend_endpoint,
+                    get_feature_info_endpoint, get_map_formats_json,
+                    get_legend_formats_json,
+                    get_feature_info_formats_json, layer_manifest_json
+                ) VALUES (
+                    'siur', :service_id, :raw_xml, :raw_size,
+                    :raw_hash, :normalized_hash,
+                    'siur-wms-capabilities-v1', '1.3.0',
+                    'https://idecyl.jcyl.es/geoserver/test/wms', NULL, NULL,
+                    CAST('["image/png"]' AS JSON), CAST('[]' AS JSON),
+                    CAST('[]' AS JSON), CAST(:manifest AS JSON)
+                ) RETURNING id
+                """
+            ),
+            {
+                "service_id": service_id,
+                "raw_xml": b"<WMS_Capabilities/>",
+                "raw_size": len(b"<WMS_Capabilities/>"),
+                "raw_hash": "3" * 64,
+                "normalized_hash": "4" * 64,
+                "manifest": json.dumps(
+                    [
+                        {
+                            "name": "test:layer",
+                            "crs": ["EPSG:3857"],
+                            "queryable": False,
+                            "styles": [""],
+                        }
+                    ]
+                ),
+            },
+        ).scalar_one()
+
+        migration_process = start_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0032",
+        )
+        wait_for_exclusive_lock(
+            engine,
+            "reference_wms_capabilities_snapshots",
+            migration_process,
+        )
+        assert migration_process.poll() is None
+
+        transaction.commit()
+        stdout, stderr = migration_process.communicate(timeout=15)
+        assert migration_process.returncode != 0, stdout
+        assert "immutable reference delivery evidence exists" in stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0033"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "reference_wms_capabilities_snapshots WHERE id = :id"
+                ),
+                {"id": capabilities_id},
+            ).scalar_one() == 1
+    finally:
+        if migration_process is not None and migration_process.poll() is None:
+            migration_process.kill()
+            migration_process.communicate()
+        if transaction.is_active:
+            transaction.rollback()
+        writer.close()
+        engine.dispose()
+
+
+def test_reference_delivery_evidence_downgrade_preserves_exact_style_names(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0033")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            snapshot_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_catalog_snapshots (
+                        provider_key, source_url, content_sha256,
+                        definition_sha256, raw_catalog_json,
+                        normalized_definition_json, retrieved_at,
+                        service_count, group_count, layer_count,
+                        unresolved_count, status, is_current
+                    ) VALUES (
+                        'siur', 'https://example.test/settings.json', :content,
+                        :definition, CAST('{}' AS JSON), CAST('{}' AS JSON),
+                        now(), 1, 0, 1, 0, 'applied', true
+                    ) RETURNING id
+                    """
+                ),
+                {"content": "5" * 64, "definition": "6" * 64},
+            ).scalar_one()
+            service_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_services (
+                        last_seen_snapshot_id, provider_key, source_key, title,
+                        upstream_protocol, base_url, version, license_status,
+                        cache_policy, status
+                    ) VALUES (
+                        :snapshot_id, 'siur', 'service:style', 'Style WMS',
+                        'wms',
+                        'https://idecyl.jcyl.es/geoserver/test/wms',
+                        '1.3.0', 'pending', 'none', 'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id},
+            ).scalar_one()
+            layer_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layers (
+                        last_seen_snapshot_id, service_id, provider_key,
+                        source_key, node_type, title, remote_name, role,
+                        renderer, delivery_mode, sort_order, default_visible,
+                        default_opacity, queryable, downloadable, status
+                    ) VALUES (
+                        :snapshot_id, :service_id, 'siur', 'layer:style',
+                        'layer', 'Style layer', 'test:layer', 'overlay',
+                        'raster_tile', 'proxy', 0, false, 1, false, false,
+                        'active'
+                    ) RETURNING id
+                    """
+                ),
+                {"snapshot_id": snapshot_id, "service_id": service_id},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO reference_layer_styles (
+                        last_seen_snapshot_id, layer_id, provider_key,
+                        source_key, remote_name, title, sort_order,
+                        is_default, status
+                    ) VALUES (
+                        :snapshot_id, :layer_id, 'siur', 'mixed:style',
+                        'Mixed:Style', 'Mixed style', 0, true, 'active'
+                    )
+                    """
+                ),
+                {"snapshot_id": snapshot_id, "layer_id": layer_id},
+            )
+
+        refused = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0032",
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "exact remote style names would be lost" in refused.stderr
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0033"
+            assert connection.execute(
+                text(
+                    "SELECT remote_name FROM reference_layer_styles "
+                    "WHERE id = (SELECT max(id) FROM reference_layer_styles)"
+                )
+            ).scalar_one() == "Mixed:Style"
+    finally:
+        engine.dispose()
+
+
+def test_postgis_upgrade_from_reconciled_head_is_non_destructive(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0029")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community, ine_code
+                    ) VALUES (
+                        'PostGIS migration check', 'Burgos',
+                        'Castilla y León', '09998'
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+
+        assert_pgvector_extension(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT NOT EXISTS ("
+                    "SELECT 1 FROM pg_extension WHERE extname = 'postgis'"
+                    ")"
+                )
+            ).scalar_one() is True
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_spatial_extensions(engine)
+
+        run_alembic(migration_database_url, "downgrade", "20260717_0029")
+        assert_spatial_extensions(engine)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260717_0029"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM municipalities "
+                    "WHERE id = :municipality_id"
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one() == 1
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        assert_spatial_extensions(engine)
+    finally:
+        engine.dispose()
+
+
 def test_fresh_upgrade_and_asset_inventory_downgrade(
     migration_database_url: str,
 ) -> None:
@@ -1784,8 +3464,13 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         run_alembic(migration_database_url, "upgrade", "head")
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
+        assert_government_staff_schema(inspect(engine))
+        assert_roadmap_schema(inspect(engine))
+        assert_municipal_data_schema(inspect(engine))
+        assert_administration_schema(inspect(engine))
+        assert_budget_pleno_schema(inspect(engine))
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
         assert_ordinance_analysis_schema(inspect(engine))
@@ -1797,6 +3482,21 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
             downgraded_inspector.get_table_names()
         )
         assert set(MAINTENANCE_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(GOVERNMENT_STAFF_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert set(ROADMAP_SCHEMA).isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert MUNICIPAL_DATA_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert ADMINISTRATION_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
+        assert BUDGET_PLENO_TABLES.isdisjoint(
             downgraded_inspector.get_table_names()
         )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
@@ -1816,8 +3516,13 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         run_alembic(migration_database_url, "check")
         assert_asset_inventory_schema(inspect(engine))
         assert_maintenance_schema(inspect(engine))
+        assert_government_staff_schema(inspect(engine))
+        assert_roadmap_schema(inspect(engine))
+        assert_municipal_data_schema(inspect(engine))
+        assert_administration_schema(inspect(engine))
+        assert_budget_pleno_schema(inspect(engine))
         assert_maintenance_trigger(engine)
-        assert_pgvector_extension(engine)
+        assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
         assert_assistant_attachment_schema(inspect(engine))
         assert_ordinance_analysis_schema(inspect(engine))

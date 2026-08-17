@@ -9,12 +9,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { TopBar } from "../components/TopBar";
 import { userHasPermission, type User } from "../components/types";
 import { fetchRequirementsTotal } from "../lib/fetchers";
 import {
   canViewMunicipalHub,
   canViewOrdinanceLibrary,
 } from "../lib/permissions";
+import { activeTopNavSectionFor, shouldShowTopNav } from "../lib/topNav";
 import {
   consumePendingLoginRedirect,
   shouldShowAdminPanel,
@@ -557,6 +559,11 @@ export default function AppLayout({
       ? "app-content app-content-assistant"
       : "app-content app-content-wide";
 
+  // La barra superior municipal sólo acompaña a las pantallas institucionales
+  // (ADR-034); el resto del producto se navega desde el menú lateral.
+  const showTopNav = shouldShowTopNav(pathname);
+  const activeTopNavSectionId = activeTopNavSectionFor(pathname);
+
   return (
     <div
       className={`app-shell${isSidebarCollapsed ? " app-shell--sidebar-collapsed" : ""}`}
@@ -756,6 +763,13 @@ export default function AppLayout({
       ) : null}
       <div className="app-main">
         <main className={contentClassName}>
+          {showTopNav ? (
+            <TopBar
+              activeSectionId={activeTopNavSectionId}
+              municipalityId={user.organizations?.[0]?.municipality?.id ?? null}
+              municipalityName={brandName}
+            />
+          ) : null}
           {children}
         </main>
       </div>

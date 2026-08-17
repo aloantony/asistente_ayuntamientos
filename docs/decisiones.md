@@ -277,3 +277,473 @@ La revisión `20260716_0026` publicada en `main`, que cambia a `pending_review` 
 La sucesora `20260717_0029` reconcilia ambos caminos. Antes de modificar nada valida el default jurídico y la huella estructural gestionada —columnas, tipos, nullability, defaults, propiedad de secuencias, checks, claves, RLS e índices válidos— sobre PostgreSQL 17, fijado en Compose y CI. Crea el DDL histórico cuando está totalmente ausente, adopta sin tocar filas cuando coincide exactamente y aborta ante estados parciales o desconocidos. Después fija solo el default de futuras ordenanzas; no reclasifica decisiones existentes.
 
 En una base con la huella geográfica antigua, la primera operación mutante obligatoria es `upgrade 20260717_0029` o `upgrade head`; el entorno bloquea `downgrade` y `stamp` desde los ambiguos `0026`/`0027`/`0028` hasta reconciliar. Después, el downgrade solo elimina un esquema creado por `0029`, espera como máximo cinco segundos por los locks, cuenta con RLS desactivado o falla de forma cerrada y se niega si hay datasets, snapshots o procedencia municipal. Un esquema geográfico adoptado se preserva siempre. Las variantes aún más antiguas donde adjuntos también utilizó `0026`/`0027` requieren auditoría manual de la huella antes de cualquier `stamp`; no se infieren únicamente a partir del número de revisión.
+
+## ADR-034: Barra superior municipal fija y tipografía institucional (2026-08-03)
+
+El diseño municipal de referencia introduce una barra superior propia de las
+pantallas institucionales: escudo y nombre del municipio a la izquierda,
+navegación por secciones en el centro y un bloque de contexto a la derecha. Esa
+barra no sustituye al menú lateral de ADR-014, que sigue siendo la navegación
+del producto; convive con él y solo aparece en las rutas del ayuntamiento, la
+sede electrónica y la hoja de ruta. El resto del producto se navega igual que
+antes, de modo que un usuario sin acceso a las pantallas municipales no ve
+ningún cambio estructural.
+
+La navegación municipal es fija y vive en código (`frontend/app/lib/topNav.ts`).
+El diseño incluía un editor que permitía renombrar, reordenar, añadir y eliminar
+apartados desde la interfaz, y se descarta de forma deliberada: el menú de un
+ayuntamiento describe su organización, no una preferencia de quien lo mira, y
+mantenerlo declarado en el repositorio lo hace revisable, comparable entre
+municipios y consistente con el modelo de permisos. Las entradas cuyo destino
+todavía no existe se declaran con `enabled: false` y no se renderizan; sirven de
+índice de lo que falta y se activan en la fase que construye su pantalla, sin
+reescribir el modelo ni dejar enlaces rotos en producción.
+
+Se añade **Newsreader** vía `next/font` para el nombre del municipio, único uso
+de serif institucional en la barra. El diseño empleaba además Space Grotesk y
+Space Mono en detalles puntuales; no se incorporan, porque IBM Plex Sans y Mono
+—ya cargadas y autoalojadas— cubren esos usos sin ampliar el peso tipográfico
+que el navegador debe descargar. La decisión es reversible: si una revisión
+visual las echa en falta, añadirlas es un cambio local en el layout raíz.
+
+Las pantallas nuevas o rediseñadas usan CSS Modules, no `styles.css`. La hoja
+global supera las 6.000 líneas y concentra el riesgo de colisión entre cambios
+simultáneos; los módulos ya son el patrón de las superficies recientes. En
+`styles.css` solo se añaden tokens compartidos: `--status-blocked` y
+`--status-overdue`, que los estados de la hoja de ruta necesitan en ambos temas
+y que no pueden expresarse con `--danger-fg` o `--accent` sin perder significado.
+## ADR-035: Dominios tenant-scoped de gobierno y personal (2026-08-03)
+
+La pantalla del ayuntamiento necesita dos realidades que hasta ahora no existían
+en el modelo: quién gobierna el municipio y quién trabaja en él. Se separan en
+dos dominios, `backend/app/government/` y `backend/app/staff/`, porque responden
+a preguntas distintas y se rigen por reglas distintas. La corporación —alcaldía,
+tenencias, concejalías y secretaría— es información pública que acaba en la sede
+electrónica; la plantilla es información laboral, sensible, de acceso mucho más
+restringido. Mezclarlas en una tabla de «personas del ayuntamiento» habría
+obligado a filtrar por rol en cada consulta y a razonar sobre la confidencialidad
+caso por caso.
+
+Ambos dominios se anclan a `organizations`, no a `municipalities`. La
+organización es la unidad de aislamiento del producto y la que ya sostiene el
+modelo de permisos; el municipio describe el territorio. Un cargo o un puesto se
+pueden registrar antes de que el municipio esté dado de alta, así que —a
+diferencia del inventario, que sí exige municipio para poder situar un activo en
+el mapa— aquí las escrituras sólo requieren que la organización esté activa. Las
+lecturas se admiten también con la organización pausada, en modo consulta, igual
+que en el resto de superficies municipales. Las claves ajenas compuestas
+`(id, organization_id)` impiden que un puesto cuelgue de la plantilla de otro
+ayuntamiento o que una ausencia se enganche a una persona ajena: el aislamiento
+se sostiene en la base, no sólo en el filtro de la consulta.
+
+La plantilla se modela como puesto y persona separados, porque el puesto
+sobrevive a quien lo ocupa: en un municipio pequeño el arquitecto puede estar a
+tiempo parcial, vacante o compartido con otro ayuntamiento, y el histórico debe
+seguir siendo legible cuando cambia el titular. `staff_posts` admite además
+contenedores que agrupan puestos sin poder ocuparse, para reproducir la
+estructura por servicios del diseño. Un puesto lo ocupa como mucho una persona a
+la vez, garantizado por índice único; los ciclos del árbol se cierran en la ruta,
+porque la base sólo puede impedir que un puesto sea su propio padre.
+
+Los permisos siguen la gradación del inventario, adaptada a lo que cada dominio
+puede sufrir. Gobierno usa `government.view` y `government.manage`: la
+corporación cambia en bloque tras unas elecciones, no campo a campo, y no
+justifica un nivel intermedio. Personal usa `staff.view`, `staff.edit` y
+`staff.manage`: corregir un teléfono, anotar una ausencia o abrir un parte de
+trabajo es rutina diaria y vive en `edit`, mientras que tocar la estructura de
+puestos o archivar a una persona —que la retira de las vistas— exige `manage`.
+Los cargos y las fichas no se borran: se archivan, para que actas, acuerdos y
+partes antiguos sigan siendo interpretables.
+
+Toda modificación de una ficha de personal deja un evento en
+`staff_history_events`, append-only. Son datos laborales y su edición tiene que
+poder auditarse: un cambio de estado, de puesto o de campos queda registrado con
+su autor y su momento, en lugar de sobrescribirse en silencio. El diario y los
+partes (`staff_reports`) y las facturas del personal externo (`staff_invoices`)
+cuelgan de la persona y heredan su organización; facturar sólo se admite en
+quien está marcado como externo, porque en alguien de nómina sería casi siempre
+un error de captura.
+
+La revisión Alembic `20260803_0034` se serializa detrás de `20260717_0033`
+conforme a ADR-033, y `test_migrations.py` fija la huella estructural de las
+siete tablas nuevas en las dos direcciones del grafo.
+## ADR-036: La hoja de ruta y el estado "vencida" como lectura, no como dato (2026-08-04)
+
+La hoja de ruta municipal necesita un dominio propio, `backend/app/tasks/`, con
+`municipal_tasks` y su rastro append-only `municipal_task_events`. No se apoya en
+`maintenance_orders` porque aquel dominio existe para el mantenimiento de un
+activo concreto y exige uno; buena parte del trabajo de un ayuntamiento pequeño
+no cuelga de ningún activo ni de ningún expediente. Una tarea puede referirse a
+un proyecto y asignarse a alguien de la plantilla, pero ninguna de las dos cosas
+es obligatoria, y ambas se atan con claves ajenas compuestas
+`(id, organization_id)` para que no crucen de ayuntamiento.
+
+**"Vencida" no es un estado ni una columna.** El diseño la presenta junto a
+"bloqueada" o "en curso", pero no es de la misma naturaleza: bloqueada describe
+una decisión de alguien, vencida solo dice que la fecha límite ya pasó y la
+tarea sigue abierta. Materializarla obligaría a un proceso que reescribiese
+filas cada medianoche, y entre ejecución y ejecución la base contendría datos
+que ya no son ciertos. Se calcula en la consulta contra `current_date` del
+servidor, y `GET /tasks/summary` devuelve además el `reference_date` que ha
+usado, para que la interfaz decida con la misma fecha que el backend y no con el
+reloj del navegador. `test_migrations.py` comprueba que la columna no existe, de
+modo que un futuro intento de guardarla no pase inadvertido.
+
+El grafo de transiciones es explícito y una tarea cerrada no se edita: se reabre
+a `pending` y desde ahí vuelve a moverse. Así la reapertura queda en el
+histórico en lugar de disimularse como un salto directo. Bloquear exige motivo
+—una tarea bloqueada sin decir qué la bloquea no la puede desatascar nadie, y un
+`CHECK` lo garantiza en la base—, y cancelar o reabrir exigen explicación,
+porque borran o revierten una decisión anterior. Cancelar y reabrir piden
+`tasks.manage`; el resto del movimiento diario vive en `tasks.edit`.
+
+La pantalla deja de ser una pestaña de `/ayuntamiento` y pasa a ruta propia
+`/hoja-de-ruta`, con la entrada de la barra superior apuntando ahí. Cruza
+tareas, proyectos y corporación, y no cabe dentro de la ficha de un municipio.
+La revisión Alembic `20260804_0035` se serializa detrás de `20260803_0034`
+conforme a ADR-033.
+## ADR-037: Series municipales propias junto a las cifras oficiales (2026-08-04)
+
+La pantalla del municipio necesita empadronamiento, clima, parque de viviendas y
+abastecimiento de agua. Todo eso vive en `backend/app/municipal_data/`, separado
+de `municipalities`, porque responde a una pregunta distinta: `municipalities`
+guarda la ficha oficial del municipio —una fila, con su procedencia INE y su
+huella de descarga—, mientras que estas tablas guardan **series temporales que
+mantiene el ayuntamiento**. Meterlas en la ficha habría obligado a decidir qué
+año es "el" año.
+
+Padrón municipal y cifra oficial del INE conviven a propósito. El padrón se
+cierra antes que la cifra oficial y los ayuntamientos trabajan con él durante
+meses; presentarlos como el mismo dato llevaría a discusiones sobre cuál está
+mal. Por eso cada fila lleva `source` (`municipal`, `ine`, `aemet`, `other`) y la
+serie propia no sobreescribe la del INE que ya resuelve
+`municipalities/ine_population.py`.
+
+`climate_records` cubre año y mes en una sola tabla: `reference_month` nulo es el
+resumen anual y con mes la fila es mensual. Duplicar el esquema para lo mismo a
+dos granularidades habría obligado a mantener dos veces cada validación. La
+unicidad es por `(organización, año, mes)`, de modo que la fila anual y las doce
+mensuales del mismo año conviven sin chocar.
+
+Los contadores de agua son la única parte que se sitúa en el territorio, así que
+son los únicos que exigen que la organización tenga municipio, igual que el
+inventario; el resto de series no lo necesita y no lo pide. Las lecturas son una
+por contador y día —dos lecturas del mismo día se contradicen— y el consumo se
+deriva restando lecturas consecutivas en lugar de guardarse, por la misma razón
+que "vencida" no es columna en ADR-036: un dato calculable que se almacena
+empieza a envejecer en cuanto cambia el que lo origina.
+
+Los permisos son `municipal_data.view|edit|manage`. No hay `create` separado
+porque estas series se rellenan y se corrigen en el mismo gesto —una cifra de
+padrón mal tecleada se arregla, no se archiva—, y distinguir crear de editar solo
+habría añadido un permiso que nadie concedería por separado.
+
+La revisión Alembic `20260804_0036` se serializa detrás de `20260804_0035`
+conforme a ADR-033.
+## ADR-038: El tiempo se consulta en vivo; el escudo vive en `documents` (2026-08-04)
+
+**Open-Meteo sin tabla.** El tiempo que hace ahora no es un dato del
+ayuntamiento: es una lectura de fuera que caduca en minutos. Guardarla obligaría
+a decidir cuándo purgarla y a convivir con una base que afirma que hacen doce
+grados desde hace tres semanas. Se pide en vivo y se cachea en Redis treinta
+minutos, que es el orden en que el proveedor actualiza; sin caché, un municipio
+con varias personas trabajando generaría decenas de peticiones por minuto contra
+un servicio gratuito.
+
+Si Redis no responde, la consulta sigue adelante sin caché en lugar de fallar, y
+si el proveedor no responde el endpoint devuelve 503 y el bloque no se dibuja. El
+tiempo es contexto, no un dato del que dependa ninguna decisión municipal: nunca
+debe tumbar la pantalla.
+
+**El host lo fija el código, y aun así se verifica.** `api.open-meteo.com` es una
+allowlist de un solo elemento y ninguna parte de la petición viene del usuario,
+pero eso no basta: un DNS comprometido podría resolver ese nombre a una dirección
+interna. Siguiendo el patrón de `assistant/web_reader.py`, se resuelve primero,
+se exige que **todas** las direcciones devueltas sean públicas —basta una interna
+entre varias para abortar— y se conecta contra la dirección ya validada
+conservando el SNI, de modo que el certificado se comprueba contra el host real.
+La respuesta tiene tope de tamaño y una lectura sin temperatura o sin instante se
+descarta entera.
+
+**El escudo es una referencia, no un fichero nuevo.** `organization_branding`
+guarda el id de un documento ya subido, no bytes ni una ruta suelta: los ficheros
+de este producto viven en `documents`, con su control de acceso, su checksum y su
+ciclo de archivado, y estrenar un segundo almacén habría significado reimplantar
+todo eso. La clave primaria es la propia organización, porque no caben dos
+escudos. El documento debe pertenecer a la misma organización: si no, bastaría
+conocer un id ajeno para colgar la imagen de otro municipio.
+
+**Los contadores de agua no apuntan a `municipalities`.** La clave ajena directa
+existía en la primera versión y la CI la rechazó: soltar la tabla en un downgrade
+pedía un lock exclusivo sobre `municipalities`, y un solo escritor abierto bastaba
+para que la bajada esperase en vez de fallar rápido, que es justo lo que vigila
+`test_legacy_geography_downgrade_rejects_without_waiting_for_writer`. La
+integridad no cambia: la clave compuesta hacia `organizations(id,
+municipality_id)` ya obliga a que el municipio sea el de la organización, y esa
+columna apunta a su vez a `municipalities`. La lección es que una clave ajena
+redundante no es gratis: se paga en los locks del downgrade.
+## ADR-039: Gráficas propias en SVG y degradación silenciosa (2026-08-04)
+
+Las series del municipio se dibujan con dos componentes SVG escritos aquí,
+`LineChart` y `BarChart`, en lugar de incorporar una librería de gráficas. Son
+series de pocos puntos —un valor por año o por mes— con dos formas: una línea
+para lo continuo y unas barras para lo discreto. Cualquier librería del ramo pesa
+más que toda la pantalla que la usaría, y traería su propio modelo de temas justo
+cuando ADR-034 acaba de fijar que lo visual va en CSS Modules con los tokens del
+producto.
+
+El pie visible de la figura es también el nombre accesible del SVG,
+mediante `aria-labelledby`; la primera versión repetía el título dentro de un
+`<title>` y un lector de pantalla lo habría anunciado dos veces.
+
+**Los adornos informativos degradan en silencio.** El bloque de temperatura de la
+barra superior y las series de la ficha municipal comparten una regla: cuando su
+consulta falla, no se dibujan y no levantan bandera de error. Ninguno de los dos
+sostiene una decisión municipal, y un aviso rojo en la cabecera institucional le
+daría a una avería del servicio del tiempo el mismo peso visual que a un problema
+del ayuntamiento. Se distingue lo vacío de lo roto donde importa —el inventario,
+la plantilla, la hoja de ruta avisan— y se calla donde no.
+
+Las series se piden siempre, sin condicionarlas a un permiso en el cliente: si la
+cuenta no tiene `municipal_data.view`, la petición vuelve con 403 y el bloque
+enseña su estado vacío, que dice lo mismo sin duplicar la regla de autorización
+en dos sitios.
+## ADR-040: Administración y comunicación, con la publicación como transición (2026-08-05)
+
+La administración municipal entra en `backend/app/administration/` —horarios de
+atención, trámites, licencias, contratos, subvenciones y publicidad activa— y la
+comunicación en `backend/app/communications/`. Se separan porque tienen dueños
+distintos: la administración la lleva la secretaría y la comunicación, alcaldía.
+Compartir permisos habría obligado a que quien redacta un bando pudiera tocar
+expedientes de licencia.
+
+**Publicar un bando es una transición, no un campo.** Un bando nace en borrador
+y se expone mediante `POST /notices/{id}/publish`, con `communications.publish`,
+distinto de `communications.edit`. Redactar y exponer son actos diferentes:
+exponer produce efectos administrativos y suele corresponder a otra persona.
+Retirarlo exige motivo y **no borra `published_on`**, porque que el bando llegó a
+estar expuesto en esa fecha puede tener que demostrarse después; queda además el
+evento en `municipal_notice_events`, append-only. Reexponer lo retirado se
+rechaza: sería reescribir la historia, y lo correcto es publicar uno nuevo.
+
+Las reglas que expresan una verdad del dominio viven en la base, no solo en
+Pydantic. Una licencia resuelta tiene fecha de resolución y una sin resolver no
+—un `CHECK` con `(status in ('granted','denied')) = (resolved_on is not null)`—;
+un contrato adjudicado tiene adjudicatario e importe; una noticia publicada dice
+desde cuándo. Son afirmaciones que no dependen de qué endpoint escriba la fila.
+
+Los horarios guardan **minutos desde medianoche** en lugar de `TIME`. Comparar y
+ordenar franjas se vuelve aritmética simple y no arrastra la zona horaria que un
+`TIME WITH TIME ZONE` obligaría a razonar; la interfaz los formatea al leerlos.
+El orden de la semana se aplica al servir, porque alfabéticamente «friday» iría
+antes que «monday» y así no lee un horario nadie.
+
+Las referencias de expediente son únicas **por organización**, no globalmente:
+los ayuntamientos numeran sus expedientes por su cuenta y dos municipios pueden
+tener legítimamente el mismo `LIC-2026-01`.
+
+`publish_to_sede` aparece ya en trámites, transparencia, noticias y bandos, sin
+consumidor todavía. La sede electrónica de la fase 7 será read-only sobre estas
+tablas, y la bandera es el contrato que necesita para saber qué sale al público:
+declararla ahora evita una migración que toque cuatro tablas más adelante.
+
+La revisión Alembic `20260805_0038` se serializa detrás de `20260804_0037`
+conforme a ADR-033.
+## ADR-041: Presupuesto derivado y tesorería independiente (2026-08-05)
+
+`backend/app/budgets/` guarda el presupuesto anual, sus partidas, las
+modificaciones de crédito, los gastos imputados y los movimientos de tesorería;
+`backend/app/plenos/`, las sesiones del pleno y su orden del día.
+
+**La ejecución presupuestaria no se guarda.** Ni el gasto ejecutado ni el
+crédito disponible son columnas: se calculan en cada consulta sumando partidas,
+modificaciones aprobadas y gastos. Guardarlos obligaría a recalcular en cada
+escritura y a convivir con un total que dejó de cuadrar tras un fallo a medio
+camino. Es el mismo criterio que «vencida» en ADR-036: un dato calculable que se
+almacena empieza a envejecer en cuanto cambia el que lo origina.
+
+**El importe de una partida es siempre positivo** y la dirección la marca
+`kind` (`income` o `expense`), para que sumar ingresos y gastos por separado no
+dependa de leer bien un signo. En las modificaciones, en cambio, el signo sí
+importa: una modificación de crédito puede retirarlo.
+
+**Un presupuesto en borrador se edita; uno aprobado se modifica.** Sobre un
+borrador se cambia la partida directamente y no caben modificaciones de crédito,
+porque no hay nada aprobado que modificar. Y una modificación solo mueve crédito
+cuando está aprobada —aprobarla pide `budgets.manage`—; en borrador es una
+intención, y la ejecución no la cuenta.
+
+**La tesorería no cuelga del presupuesto**, a propósito. El dinero entra y sale
+con su propio calendario: una factura puede imputarse a una partida de un año y
+pagarse en el siguiente. Atar `treasury_movements` a un presupuesto obligaría a
+mentir en una de las dos fechas o a inventar una imputación que nadie ha hecho.
+
+En los plenos, el acta es un documento de `documents` y no texto suelto, igual
+que el escudo en ADR-038. Aprobarla pide `plenos.manage` mientras que redactarla
+se queda en `edit`: aprobar es el acto que convierte el acta en el registro
+oficial de lo acordado. Un `CHECK` garantiza que un acta aprobada tiene
+documento, y que una sesión cancelada no produce acta ni orden del día, porque
+no llegó a celebrarse.
+
+Los votos de un punto del orden del día son **nulos mientras no se vota**: un
+punto informativo no tiene votación, y cero votos a favor no es lo mismo que no
+haberse votado. Un `UNIQUE` por sesión y posición mantiene el orden del día sin
+huecos ambiguos.
+
+La revisión Alembic `20260805_0039` se serializa detrás de `20260805_0038`
+conforme a ADR-033, y ninguna tabla nueva referencia `municipalities` en directo,
+por lo aprendido en ADR-038 sobre los locks del downgrade.
+## ADR-042: La sede electrónica agrega, no duplica (2026-08-05)
+
+`backend/app/sede/` no guarda casi nada. Bandos, noticias, trámites,
+transparencia, contratos, plenos y normativa ya viven en sus dominios, y la sede
+sólo recoge lo que lleva `publish_to_sede`. Copiar esos datos a tablas propias
+habría creado dos verdades que envejecen por separado: retirar un bando dejaría
+de notarse en el portal, que es justo el fallo que un tablón no se puede
+permitir. El único dominio nuevo es `municipal_taxes`, porque un tributo no era
+ninguna de las cosas anteriores.
+
+**Publicar es una condición, no una copia.** Cada sección filtra por su propio
+criterio de «esto ya es público»: un bando debe estar `published` —un borrador o
+uno retirado no están expuestos, aunque consten en el histórico interno—, un
+contrato debe haber salido a licitación, y una ordenanza debe estar vigente y
+curada, porque la sede no es sitio para normativa pendiente de revisar. La
+respuesta lleva `Cache-Control: no-store`: retirar un bando tiene que notarse de
+inmediato.
+
+**Sigue exigiendo autenticación.** Es la vista previa de lo que verá la
+ciudadanía, no el portal público. Abrirla sin sesión habría expuesto por
+comodidad datos cuya publicación real es una decisión de despliegue —dominio,
+cabeceras, indexación— y no de este endpoint. Cuando exista ese portal, podrá
+consumir esta misma agregación.
+
+**Todo llega en una respuesta.** La sede de un municipio pequeño cabe de sobra, y
+siete peticiones para pintar siete pestañas serían siete comprobaciones de
+permiso y siete viajes para lo mismo. Cambiar de pestaña no vuelve a pedir nada.
+
+Un tributo puede existir sin su ordenanza fiscal digitalizada, así que
+`ordinance_id` es opcional. La cuota se expresa como tipo, importe fijo o tarifa,
+y un `CHECK` obliga a que los dos primeros traigan su número y la tercera su
+descripción: un tipo porcentual sin valor no dice cuánto se paga.
+
+La revisión Alembic `20260805_0040` se serializa detrás de `20260805_0039`
+conforme a ADR-033.
+## ADR-043: Taxonomía de partida del inventario, sembrada bajo petición (2026-08-05)
+
+El árbol de capas del diseño —vías, agua, saneamiento, alumbrado, mobiliario,
+parques, residuos, seguridad, deportivas, espacios públicos, cementerio,
+vehículos— no se modela como catálogo del producto sino como **semilla** en
+`backend/app/assets/seed.py`. Un ayuntamiento recién dado de alta que abre el
+mapa y encuentra un formulario vacío no sabe qué contestar; uno que encuentra
+trece categorías con sus tipos habituales sí, y a partir de ahí adapta.
+
+**Se siembra bajo petición, no al arrancar.** `POST /assets/taxonomy/seed` con
+`assets.manage`, por organización. Hacerlo automático en el `lifespan` habría
+impuesto la taxonomía a organizaciones que no la quieren y habría reintroducido
+categorías que alguien archivó a conciencia, cada vez que el servicio reinicia.
+
+**Y no reescribe nada.** El seed es idempotente y no destructivo: una categoría
+que ya existe se deja como esté —renombrada, con otro color o archivada— y sólo
+se completan los tipos que falten. Un ayuntamiento que llamó «Aguas del
+municipio» a su categoría de agua no debe encontrársela revertida tras un
+redespliegue; que archivó el cementerio porque lo lleva una junta vecinal,
+tampoco. Hay tests para ambos casos.
+
+Los códigos del seed se validan contra el mismo `CHECK` que impone la base
+—minúsculas ASCII con guiones—, en un test que recorre la tabla entera. La
+primera versión traía `frontón` con tilde y habría reventado la inserción en
+producción sin que ningún test de dominio lo notara.
+
+Esta es la parte de backend de la fase del mapa general. La pantalla
+`MapaGeneral.tsx` va aparte, y **no toca `MapPanel.tsx` ni `SiurLayerTree.tsx`**:
+esos dos ficheros aparecen en tres PRs abiertos sin mergear (#15, #16, #28) y
+editarlos garantizaría un conflicto. `MunicipalMap.tsx` sí se reutiliza, porque
+su interfaz de props es estable y nadie la está tocando.
+## ADR-044: El árbol de capas se deriva de lo que hay en el mapa (2026-08-05)
+
+`MapaGeneral.tsx` entra como sub-pestaña de la pantalla del ayuntamiento y
+**construye su árbol de capas desde los propios elementos**, agrupando por el
+`layer_key`, `layer_label` y `layer_color` que `/geo/map-items` ya devuelve. No
+hay un catálogo de capas aparte que mantener sincronizado, y una capa sin nada
+dentro sencillamente no aparece: un árbol con doce ramas vacías no informa, sólo
+obliga a buscar.
+
+El filtrado —capas apagadas y búsqueda— es local. El mapa se carga entero una
+vez y apagar una capa o teclear en el buscador no vuelve a pedir nada al
+servidor, porque el inventario de un municipio pequeño cabe en memoria y la
+alternativa sería una petición por cada tecla.
+
+**No se tocan `MapPanel.tsx` ni `SiurLayerTree.tsx`.** Aparecen en tres PRs
+abiertos sin mergear (#15, #16, #28) y editarlos garantizaría un conflicto en
+ficheros de 2.781 y 400 líneas. `MunicipalMap.tsx` sí se reutiliza tal cual: su
+interfaz de props es estable, acepta `items`, `markerColors` y `selectedItemId`,
+y con eso basta para una vista propia. El resultado es que la fase del mapa
+—señalada como la de mayor riesgo en el plan— no modifica ni una línea del
+código en churn.
+
+Con «Mapa general» activo, **el menú fijo de ADR-034 queda completo**: todas las
+entradas declaradas tienen pantalla. `visibleTopNavSections` sigue filtrando por
+`enabled` aunque hoy no descarte nada, porque es lo que protegerá el día que se
+declare una entrada nueva antes de construirla.
+## ADR-045: Patrimonio y archivo, separados del inventario (2026-08-05)
+
+`backend/app/heritage/` guarda los bienes patrimoniales y las piezas del archivo
+municipal. Se separa de `municipal_assets` a propósito: aquel dominio existe para
+**mantener** cosas —una farola se repara y se sustituye— y este para
+**conservarlas**. Una ermita del XVI y una luminaria no comparten ciclo de vida
+ni vocabulario, y mezclarlas obligaría a que cada consulta de mantenimiento
+filtrase lo que no debe tocar.
+
+**La época va en texto libre.** «Siglo XVI», «finales del XIX o principios del
+XX», «indeterminada». Forzar un año o un rango numérico sería inventar precisión
+que la fuente no tiene, y llenaría la base de fechas aproximadas que después
+alguien leería como exactas.
+
+**Sin declarar es una respuesta legítima.** `protection_level` admite `none`
+porque mucho patrimonio de un pueblo es valioso sin figura de protección; lo que
+sí exige un `CHECK` es que un bien declarado traiga la referencia de su
+declaración, porque sin expediente la declaración no consta.
+
+En el archivo, la **signatura y la ubicación física son lo primero**, no un
+adorno: un archivo de pueblo vive en cajas y estantes, y lo que más se busca es
+dónde está el papel. La búsqueda incluye `physical_location` por eso mismo. Los
+años se guardan sueltos —`start_year`, `end_year`— en vez de fechas, porque de
+una caja se conoce el periodo que abarca y casi nunca el día; «sin fechar» es una
+respuesta que la ficha da sin fingir un intervalo.
+
+**Digitalizado significa que el fichero existe.** Un `CHECK` exige el documento
+cuando el estado es `digitised`; `in_progress` sí puede no tenerlo todavía. Sin
+esa regla, «digitalizado» acabaría siendo una promesa que nadie puede comprobar.
+El escaneo vive en `documents`, como el escudo en ADR-038 y las actas en ADR-041.
+
+La revisión Alembic `20260805_0041` se serializa detrás de `20260805_0040`
+conforme a ADR-033.
+
+## ADR-046: Las piezas de la conversación salen del panel del asistente (2026-08-05)
+
+`AssistantPanel.tsx` había llegado a 2854 líneas y a 52 hooks en un único
+componente. La fase 9 del rediseño no toca su comportamiento: mueve a
+`frontend/app/components/asistente/conversationParts.tsx` las 500 líneas que
+estaban **antes** del componente y que no dependían de su estado —agrupar
+conversaciones por fecha o por carpeta, formatear fechas y tamaños, y pintar la
+cronología de acciones, el markdown y las tarjetas de adjunto—. El cuerpo movido
+es idéntico línea a línea al original; lo único que cambia es el `export` y el
+lado del `import`.
+
+**Por qué no se trocea el componente.** Repartir 52 hooks entre varios ficheros
+obligaría a subir estado o a inventar un contexto, y eso sí sería un cambio de
+comportamiento disfrazado de limpieza. Un componente grande con estado
+entrelazado se refactoriza cuando hay una razón funcional para hacerlo, no para
+bajar una cifra de líneas.
+
+**Lo que se gana es que ahora se puede probar.** Estas piezas eran inalcanzables
+desde un test sin montar el panel entero con su red y sus streams; ahora tienen
+14 tests propios que fijan cosas que antes nadie comprobaba: que una conversación
+archivada de hoy va a «Archivadas» y no a «Hoy», que una fecha ilegible cae al
+fondo en vez de romper el reparto, que borrar una carpeta no hace desaparecer sus
+conversaciones —caen a «Sin carpeta»—, y que un adjunto de 1 byte no se muestra
+como 0 KB.
+
+No hay dependencias nuevas ni componentes nuevos: el módulo importa lo mismo que
+importaba el bloque, y el panel dejó de importar los catorce símbolos que sólo
+usaba ese bloque.

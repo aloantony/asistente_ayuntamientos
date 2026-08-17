@@ -48,6 +48,44 @@ export function canCompareOrdinances(user: User) {
   );
 }
 
+// Corporación municipal y plantilla (ADR-035). Gobierno sólo distingue consulta
+// y gestión; personal añade un nivel intermedio de edición diaria.
+export const GOVERNMENT_PERMISSIONS = [
+  "government.view",
+  "government.manage",
+];
+
+export const STAFF_PERMISSIONS = ["staff.view", "staff.edit", "staff.manage"];
+
+export function canViewGovernment(user: User) {
+  return GOVERNMENT_PERMISSIONS.some((permissionCode) =>
+    userHasPermission(user, permissionCode),
+  );
+}
+
+export function canViewStaff(user: User) {
+  return (
+    userHasPermission(user, "staff.view") ||
+    userHasPermission(user, "staff.manage")
+  );
+}
+
+// Hoja de ruta municipal. Como en el inventario, `manage` es el paraguas y los
+// niveles no se implican entre sí.
+export const TASK_PERMISSIONS = [
+  "tasks.view",
+  "tasks.create",
+  "tasks.edit",
+  "tasks.manage",
+];
+
+export function canViewTasks(user: User) {
+  return (
+    userHasPermission(user, "tasks.view") ||
+    userHasPermission(user, "tasks.manage")
+  );
+}
+
 export const PROJECT_PERMISSIONS = [
   "projects.view_all",
   "projects.create",

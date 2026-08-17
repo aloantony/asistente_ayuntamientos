@@ -10,20 +10,34 @@ from app.agent_office.routes import router as agent_office_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.assistant.routes import router as assistant_router
+from app.administration.routes import router as administration_router
 from app.assets.routes import router as assets_router
+from app.budgets.routes import router as budgets_router
+from app.communications.routes import router as communications_router
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
 from app.geo.routes import router as geo_router
+from app.government.routes import router as government_router
+from app.heritage.routes import router as heritage_router
 from app.maintenance.routes import router as maintenance_router
+from app.municipal_data.routes import router as municipal_data_router
 from app.municipalities.routes import router as municipalities_router
 from app.ordinances.routes import router as ordinances_router
 from app.ordinances.seed import ensure_initial_official_legal_sources
+from app.organizations.branding_routes import router as branding_router
 from app.organizations.routes import router as organizations_router
+from app.plenos.routes import router as plenos_router
 from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
+from app.reference_layers.routes import router as reference_layers_router
+from app.reference_layers.wms_middleware import ReferenceWMSVaryMiddleware
+from app.sede.routes import router as sede_router
+from app.staff.routes import router as staff_router
+from app.tasks.routes import router as tasks_router
 from app.telegram.routes import router as telegram_router
+from app.weather.routes import router as weather_router
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +73,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Bootstrap-Admin-Token"],
     expose_headers=["X-Total-Count"],
 )
+app.add_middleware(ReferenceWMSVaryMiddleware)
 
 for app_router in (
     auth_router,
@@ -71,8 +86,21 @@ for app_router in (
     documents_router,
     requirements_router,
     geo_router,
+    reference_layers_router,
     assets_router,
     maintenance_router,
+    government_router,
+    staff_router,
+    tasks_router,
+    municipal_data_router,
+    administration_router,
+    communications_router,
+    budgets_router,
+    plenos_router,
+    sede_router,
+    heritage_router,
+    weather_router,
+    branding_router,
     assistant_router,
     agent_office_router,
     telegram_router,

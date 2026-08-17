@@ -131,63 +131,47 @@
   font-size: 0.76rem;
 }
 
+/* Sub-navegación de la pantalla municipal: botones planos sobre una línea
+ * inferior, con la pestaña activa en negativo. */
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
-  overflow-x: auto;
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: 13px;
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
-  scrollbar-width: thin;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
 }
 
 .tabs button {
-  position: relative;
   display: inline-flex;
   min-width: max-content;
-  flex: 1 0 auto;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  min-height: 44px;
-  padding: 8px 18px;
+  padding: 7px 13px;
   border: 0;
-  border-radius: 9px;
+  border-radius: 8px;
   color: var(--text-secondary);
   background: transparent;
   cursor: pointer;
-  font-size: 0.86rem;
+  font-size: 12.5px;
   font-weight: 600;
   transition:
     color 140ms ease,
-    background 140ms ease,
-    box-shadow 140ms ease;
+    background 140ms ease;
 }
 
 .tabs button:hover {
   color: var(--text);
-  background: var(--surface-muted);
+  background: var(--fill);
 }
 
 .tabs button[aria-selected="true"] {
-  color: var(--text);
-  background: var(--surface-raised);
-  box-shadow:
-    0 0 0 1px var(--border),
-    0 7px 18px color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--surface);
+  background: var(--text);
 }
 
-.tabs button[aria-selected="true"]::after {
-  position: absolute;
-  right: 24%;
-  bottom: -6px;
-  left: 24%;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--accent);
-  content: "";
+.tabs button[aria-selected="true"]:hover {
+  color: var(--surface);
+  background: var(--text);
 }
 
 .tabContent {

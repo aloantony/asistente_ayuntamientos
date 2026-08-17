@@ -1,7 +1,7 @@
 """create durable agent office ordinance analysis items
 
-Revision ID: 20260717_0030
-Revises: 20260717_0029
+Revision ID: 20260806_0042
+Revises: 20260805_0041
 Create Date: 2026-07-17
 """
 
@@ -10,8 +10,8 @@ from collections.abc import Sequence
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "20260717_0030"
-down_revision: str | None = "20260717_0029"
+revision: str = "20260806_0042"
+down_revision: str | None = "20260805_0041"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

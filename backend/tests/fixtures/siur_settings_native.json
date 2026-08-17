@@ -1,0 +1,193 @@
+{
+  "settings": [
+    {
+      "name": "fondo_imagen",
+      "wmcUrl": "assets/wmcs/default.xml",
+      "suggestedServices": {
+        "wms": [
+          "https://idecyl.jcyl.es/geoserver/urbanismo/wms"
+        ],
+        "wfs": [
+          "https://www.ign.es/wfs-inspire/unidades-administrativas"
+        ],
+        "wmts": [
+          "https://www.ign.es/wmts/pnoa-ma"
+        ]
+      },
+      "groupLayers": {
+        "name": "root",
+        "children": [
+          {
+            "name": "Urbanismo, vivienda y O.T.",
+            "children": [
+              {
+                "name": "Clasificación del suelo",
+                "endPoint": {
+                  "url": "https://www.ign.es/wms-inspire/unidades-administrativas",
+                  "layer": {
+                    "name": "plau_cyl_clasificacion",
+                    "extent": {
+                      "srs": "EPSG:25830",
+                      "minx": "146569.61819428788",
+                      "miny": "4430813.815909118",
+                      "maxx": "608202.6727624929",
+                      "maxy": "4798875.983524372"
+                    },
+                    "styles": [
+                      {
+                        "name": "plau_cyl_clasificacion_color",
+                        "title": "Clasificación por color"
+                      },
+                      {
+                        "name": "plau_cyl_clasificacion_trama",
+                        "title": "Clasificación por trama"
+                      }
+                    ],
+                    "legend": {
+                      "url": "https://idecyl.jcyl.es/geoserver/urbanismo/ows",
+                      "format": "image/png"
+                    },
+                    "metadata": {
+                      "url": "https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search#/metadata/urbanismo"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "Mapas topográficos",
+                "children": [
+                  {
+                    "name": "Mapa topográfico histórico",
+                    "endPoint": {
+                      "type": "wmts",
+                      "url": "https://www.ign.es/wmts/primera-edicion-mtn",
+                      "layer": {
+                        "name": "catastrones",
+                        "extent": {
+                          "srs": "EPSG:25830",
+                          "minx": "150000",
+                          "miny": "4400000",
+                          "maxx": "610000",
+                          "maxy": "4800000"
+                        },
+                        "styles": [
+                          {
+                            "name": "",
+                            "title": "Representación por defecto"
+                          }
+                        ],
+                        "metadata": {
+                          "url": "https://www.ign.es/web/catalogo-cartoteca"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "favoritesLayers": {
+        "categories": [
+          {
+            "name": "urbanismo",
+            "servers": [
+              {
+                "url": "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+                "layers": [
+                  "plau_cyl_clasificacion"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "tematicSearch": {
+        "themes": [
+          {
+            "name": "Planeamiento",
+            "layers": [
+              {
+                "name": "Clasificación del suelo",
+                "url": "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+                "layer": "plau_cyl_clasificacion",
+                "style": "plau_cyl_clasificacion_color",
+                "properties": [
+                  {
+                    "name": "clase",
+                    "label": "Clase",
+                    "type": "select",
+                    "required": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Rejillas cartográficas",
+            "categories": [
+              {
+                "name": "Hojas oficiales",
+                "layers": [
+                  {
+                    "name": "Hojas MTCyL50",
+                    "url": "https://idecyl.jcyl.es/geoserver/rejillas/wms",
+                    "layer": "rejilla-mtcyl.50 con espacios",
+                    "style": "rejillas:rejilla_seleccion_fucsia",
+                    "properties": [
+                      {
+                        "name": "c_mtn50",
+                        "label": "Hoja MTN50",
+                        "type": "select",
+                        "required": false
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "backMaps": [
+        {
+          "name": "IMAGEN",
+          "url": "https://www.ign.es/wmts/pnoa-ma",
+          "layer": "OI.OrthoimageCoverage",
+          "type": "WMTS"
+        },
+        {
+          "name": "MAPA",
+          "url": "https://www.ign.es/wmts/ign-base",
+          "layer": "IGNBaseTodo-nofondo",
+          "type": "WMTS"
+        },
+        {
+          "name": "RELIEVE",
+          "url": "https://tms-relieve.idee.es/1.0.0/relieve/{z}/{x}/{-y}.jpeg",
+          "layer": "_6fe95da0_a64f_4582_bfe3_6e7e7c818765",
+          "type": "XYZ"
+        },
+        {
+          "name": "SIN FONDO"
+        }
+      ],
+      "apps": [
+        {
+          "name": "Doble visor comparativo",
+          "image": "ico_idecyl_v_x2.png",
+          "external": false,
+          "url": "VisorDoublePageComponent"
+        },
+        {
+          "name": "Geoportal IDEE - IGN",
+          "image": "ico_idee_w_ppal.png",
+          "external": true,
+          "url": "https://www.idee.es/"
+        }
+      ]
+    }
+  ],
+  "selectedSetting": "fondo_imagen"
+}
