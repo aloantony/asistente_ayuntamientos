@@ -14,6 +14,7 @@ from app.communications import models as communication_models  # noqa: F401
 from app.documents import models as document_models  # noqa: F401
 from app.geo import models as geo_models  # noqa: F401
 from app.government import models as government_models  # noqa: F401
+from app.heritage import models as heritage_models  # noqa: F401
 from app.maintenance import models as maintenance_models  # noqa: F401
 from app.municipal_data import models as municipal_data_models  # noqa: F401
 from app.municipalities import models as municipality_models  # noqa: F401

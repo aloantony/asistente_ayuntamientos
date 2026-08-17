@@ -12,6 +12,7 @@ MODEL_MODULES = (
     "app.documents.models",
     "app.geo.models",
     "app.government.models",
+    "app.heritage.models",
     "app.maintenance.models",
     "app.municipal_data.models",
     "app.municipalities.models",

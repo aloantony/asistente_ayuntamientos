@@ -2223,3 +2223,66 @@ export type SedeContent = {
   sessions: SedeSession[];
   ordinances: SedeOrdinance[];
 };
+
+// Patrimonio y archivo municipal (ADR-045).
+
+export type HeritageKind =
+  | "building"
+  | "archaeological"
+  | "natural"
+  | "movable"
+  | "intangible"
+  | "other";
+
+export type ProtectionLevel = "none" | "local" | "regional" | "bic" | "unesco";
+
+export type ConservationState = "good" | "fair" | "poor" | "ruin" | "unknown";
+
+export type HeritageAsset = {
+  id: number;
+  organization_id: number;
+  slug: string;
+  name: string;
+  kind: HeritageKind;
+  /** Texto libre: «siglo XVI», «finales del XIX», «indeterminada». */
+  period: string | null;
+  description: string | null;
+  protection_level: ProtectionLevel;
+  protection_reference: string | null;
+  conservation_state: ConservationState;
+  last_survey_date: string | null;
+  location_id: number | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ArchiveKind =
+  | "document"
+  | "photograph"
+  | "map"
+  | "book"
+  | "audio"
+  | "video"
+  | "other";
+
+export type DigitisationState = "not_digitised" | "in_progress" | "digitised";
+
+export type ArchiveItem = {
+  id: number;
+  organization_id: number;
+  reference: string;
+  title: string;
+  kind: ArchiveKind;
+  description: string | null;
+  start_year: number | null;
+  end_year: number | null;
+  physical_location: string | null;
+  conservation_state: ConservationState;
+  digitisation_state: DigitisationState;
+  document_id: number | null;
+  heritage_asset_id: number | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
