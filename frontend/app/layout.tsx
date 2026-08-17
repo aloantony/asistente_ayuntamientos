@@ -4,6 +4,7 @@ import {
   IBM_Plex_Mono,
   IBM_Plex_Sans,
   Libre_Baskerville,
+  Newsreader,
 } from "next/font/google";
 import { SessionProvider } from "./lib/session";
 import "./styles.css";
@@ -33,6 +34,15 @@ const libreBaskerville = Libre_Baskerville({
   display: "swap",
 });
 
+// Serif de titulares institucionales: el nombre del municipio en la barra
+// superior. Se limita a los pesos que realmente se usan (medio y semibold).
+const newsreader = Newsreader({
+  subsets: ["latin"],
+  weight: ["500", "600"],
+  variable: "--font-newsreader",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "Anacleto",
   description: "Plataforma privada para asistencia municipal y administrativa",
@@ -55,7 +65,7 @@ export default function RootLayout({
   return (
     <html
       lang="es"
-      className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${libreBaskerville.variable}`}
+      className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} ${libreBaskerville.variable} ${newsreader.variable}`}
       suppressHydrationWarning
     >
       <body>

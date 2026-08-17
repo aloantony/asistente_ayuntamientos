@@ -277,3 +277,38 @@ La revisión `20260716_0026` publicada en `main`, que cambia a `pending_review` 
 La sucesora `20260717_0029` reconcilia ambos caminos. Antes de modificar nada valida el default jurídico y la huella estructural gestionada —columnas, tipos, nullability, defaults, propiedad de secuencias, checks, claves, RLS e índices válidos— sobre PostgreSQL 17, fijado en Compose y CI. Crea el DDL histórico cuando está totalmente ausente, adopta sin tocar filas cuando coincide exactamente y aborta ante estados parciales o desconocidos. Después fija solo el default de futuras ordenanzas; no reclasifica decisiones existentes.
 
 En una base con la huella geográfica antigua, la primera operación mutante obligatoria es `upgrade 20260717_0029` o `upgrade head`; el entorno bloquea `downgrade` y `stamp` desde los ambiguos `0026`/`0027`/`0028` hasta reconciliar. Después, el downgrade solo elimina un esquema creado por `0029`, espera como máximo cinco segundos por los locks, cuenta con RLS desactivado o falla de forma cerrada y se niega si hay datasets, snapshots o procedencia municipal. Un esquema geográfico adoptado se preserva siempre. Las variantes aún más antiguas donde adjuntos también utilizó `0026`/`0027` requieren auditoría manual de la huella antes de cualquier `stamp`; no se infieren únicamente a partir del número de revisión.
+
+## ADR-034: Barra superior municipal fija y tipografía institucional (2026-08-03)
+
+El diseño municipal de referencia introduce una barra superior propia de las
+pantallas institucionales: escudo y nombre del municipio a la izquierda,
+navegación por secciones en el centro y un bloque de contexto a la derecha. Esa
+barra no sustituye al menú lateral de ADR-014, que sigue siendo la navegación
+del producto; convive con él y solo aparece en las rutas del ayuntamiento, la
+sede electrónica y la hoja de ruta. El resto del producto se navega igual que
+antes, de modo que un usuario sin acceso a las pantallas municipales no ve
+ningún cambio estructural.
+
+La navegación municipal es fija y vive en código (`frontend/app/lib/topNav.ts`).
+El diseño incluía un editor que permitía renombrar, reordenar, añadir y eliminar
+apartados desde la interfaz, y se descarta de forma deliberada: el menú de un
+ayuntamiento describe su organización, no una preferencia de quien lo mira, y
+mantenerlo declarado en el repositorio lo hace revisable, comparable entre
+municipios y consistente con el modelo de permisos. Las entradas cuyo destino
+todavía no existe se declaran con `enabled: false` y no se renderizan; sirven de
+índice de lo que falta y se activan en la fase que construye su pantalla, sin
+reescribir el modelo ni dejar enlaces rotos en producción.
+
+Se añade **Newsreader** vía `next/font` para el nombre del municipio, único uso
+de serif institucional en la barra. El diseño empleaba además Space Grotesk y
+Space Mono en detalles puntuales; no se incorporan, porque IBM Plex Sans y Mono
+—ya cargadas y autoalojadas— cubren esos usos sin ampliar el peso tipográfico
+que el navegador debe descargar. La decisión es reversible: si una revisión
+visual las echa en falta, añadirlas es un cambio local en el layout raíz.
+
+Las pantallas nuevas o rediseñadas usan CSS Modules, no `styles.css`. La hoja
+global supera las 6.000 líneas y concentra el riesgo de colisión entre cambios
+simultáneos; los módulos ya son el patrón de las superficies recientes. En
+`styles.css` solo se añaden tokens compartidos: `--status-blocked` y
+`--status-overdue`, que los estados de la hoja de ruta necesitan en ambos temas
+y que no pueden expresarse con `--danger-fg` o `--accent` sin perder significado.
