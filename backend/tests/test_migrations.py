@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260804_0036"
+HEAD_REVISION = "20260804_0037"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1752,6 +1752,21 @@ def assert_municipal_data_schema(inspector: Inspector) -> None:
             "organization_id" in foreign_key["constrained_columns"]
             for foreign_key in inspector.get_foreign_keys(table_name)
         )
+
+    # Los contadores NO apuntan directamente a `municipalities`: esa clave
+    # obligaria a bloquear la tabla al soltarlos en un downgrade, y bastaria un
+    # escritor abierto para que la bajada esperase en vez de fallar.
+    assert not any(
+        foreign_key["referred_table"] == "municipalities"
+        for foreign_key in inspector.get_foreign_keys("water_meters")
+    )
+
+    # El escudo es una referencia a `documents`, no un almacen paralelo.
+    assert "organization_branding" in table_names
+    assert {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspector.get_foreign_keys("organization_branding")
+    } == {("organization_id",), ("crest_document_id",)}
 
 
 def assert_roadmap_schema(inspector: Inspector) -> None:

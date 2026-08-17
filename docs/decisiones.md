@@ -440,3 +440,45 @@ habría añadido un permiso que nadie concedería por separado.
 
 La revisión Alembic `20260804_0036` se serializa detrás de `20260804_0035`
 conforme a ADR-033.
+## ADR-038: El tiempo se consulta en vivo; el escudo vive en `documents` (2026-08-04)
+
+**Open-Meteo sin tabla.** El tiempo que hace ahora no es un dato del
+ayuntamiento: es una lectura de fuera que caduca en minutos. Guardarla obligaría
+a decidir cuándo purgarla y a convivir con una base que afirma que hacen doce
+grados desde hace tres semanas. Se pide en vivo y se cachea en Redis treinta
+minutos, que es el orden en que el proveedor actualiza; sin caché, un municipio
+con varias personas trabajando generaría decenas de peticiones por minuto contra
+un servicio gratuito.
+
+Si Redis no responde, la consulta sigue adelante sin caché en lugar de fallar, y
+si el proveedor no responde el endpoint devuelve 503 y el bloque no se dibuja. El
+tiempo es contexto, no un dato del que dependa ninguna decisión municipal: nunca
+debe tumbar la pantalla.
+
+**El host lo fija el código, y aun así se verifica.** `api.open-meteo.com` es una
+allowlist de un solo elemento y ninguna parte de la petición viene del usuario,
+pero eso no basta: un DNS comprometido podría resolver ese nombre a una dirección
+interna. Siguiendo el patrón de `assistant/web_reader.py`, se resuelve primero,
+se exige que **todas** las direcciones devueltas sean públicas —basta una interna
+entre varias para abortar— y se conecta contra la dirección ya validada
+conservando el SNI, de modo que el certificado se comprueba contra el host real.
+La respuesta tiene tope de tamaño y una lectura sin temperatura o sin instante se
+descarta entera.
+
+**El escudo es una referencia, no un fichero nuevo.** `organization_branding`
+guarda el id de un documento ya subido, no bytes ni una ruta suelta: los ficheros
+de este producto viven en `documents`, con su control de acceso, su checksum y su
+ciclo de archivado, y estrenar un segundo almacén habría significado reimplantar
+todo eso. La clave primaria es la propia organización, porque no caben dos
+escudos. El documento debe pertenecer a la misma organización: si no, bastaría
+conocer un id ajeno para colgar la imagen de otro municipio.
+
+**Los contadores de agua no apuntan a `municipalities`.** La clave ajena directa
+existía en la primera versión y la CI la rechazó: soltar la tabla en un downgrade
+pedía un lock exclusivo sobre `municipalities`, y un solo escritor abierto bastaba
+para que la bajada esperase en vez de fallar rápido, que es justo lo que vigila
+`test_legacy_geography_downgrade_rejects_without_waiting_for_writer`. La
+integridad no cambia: la clave compuesta hacia `organizations(id,
+municipality_id)` ya obliga a que el municipio sea el de la organización, y esa
+columna apunta a su vez a `municipalities`. La lección es que una clave ajena
+redundante no es gratis: se paga en los locks del downgrade.

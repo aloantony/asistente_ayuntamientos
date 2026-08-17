@@ -15,6 +15,7 @@ from app.maintenance import models as maintenance_models  # noqa: F401
 from app.municipal_data import models as municipal_data_models  # noqa: F401
 from app.municipalities import models as municipality_models  # noqa: F401
 from app.ordinances import models as ordinance_models  # noqa: F401
+from app.organizations import branding as organization_branding  # noqa: F401
 from app.organizations import models as organization_models  # noqa: F401
 from app.projects import models as project_models  # noqa: F401
 from app.rbac import models as rbac_models  # noqa: F401

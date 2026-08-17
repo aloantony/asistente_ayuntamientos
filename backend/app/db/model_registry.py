@@ -13,6 +13,7 @@ MODEL_MODULES = (
     "app.municipal_data.models",
     "app.municipalities.models",
     "app.ordinances.models",
+    "app.organizations.branding",
     "app.organizations.models",
     "app.projects.models",
     "app.rbac.models",
