@@ -5,18 +5,32 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException, status as http_status
-from sqlalchemy import or_, select
+from rq import Retry
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.agent_office.ordinance_corpus_analysis import (
+    ANALYZE_ORDINANCE_CORPUS_ACTION,
+    ORDINANCE_ANALYSIS_PAGES_PER_RQ_JOB,
+    initialize_ordinance_analysis_state,
+    ordinance_analysis_filters_from_task,
+    prepare_ordinance_analysis_resume,
+    process_ordinance_analysis_page,
+    reconcile_ordinance_analysis,
+    require_ordinance_analysis_access,
+    verify_ordinance_analysis_snapshot,
+)
 from app.agent_office.models import (
     AGENT_OFFICE_APPROVAL_POLICIES,
     AGENT_OFFICE_DEPARTMENTS,
+    AGENT_OFFICE_ORDINANCE_ANALYSIS_ITEM_STATUSES,
     AGENT_OFFICE_PRIORITIES,
     AGENT_OFFICE_ROUTINE_CADENCES,
     AGENT_OFFICE_ROUTINE_KINDS,
     AGENT_OFFICE_ROUTINE_STATUSES,
     AGENT_OFFICE_TARGET_CHANNELS,
     AgentOfficeRoutine,
+    AgentOfficeOrdinanceAnalysisItem,
     AgentOfficeTask,
     AgentOfficeTaskEvent,
 )
@@ -32,12 +46,17 @@ from app.assistant.tools import (
     prepare_ordinance_search_embedding,
 )
 from app.core.config import settings
+from app.core.jobs import get_default_queue
 from app.db.session import SessionLocal
 from app.organizations.access import get_user_organization_ids
 from app.organizations.models import Organization
 from app.ordinances.embeddings import (
     EmbeddingWorkerCleanupError,
     supervised_embedding_cleanup_margin_seconds,
+)
+from app.ordinances.catalog import (
+    OrdinanceCorpusFilters,
+    decode_ordinance_catalog_cursor,
 )
 from app.rbac.permissions import has_permission
 from app.requirements.models import Requirement
@@ -53,6 +72,7 @@ class AgentOfficeAgentSpec:
     assistant_agent_key: str
     tool_names: frozenset[str]
     mutating_actions: frozenset[str]
+    workflow_actions: frozenset[str] = frozenset()
     requires_approval_by_default: bool = True
 
     @property
@@ -65,6 +85,7 @@ class AgentOfficeAgentSpec:
             "assistant_agent_key": self.assistant_agent_key,
             "tool_names": sorted(self.tool_names),
             "mutating_actions": sorted(self.mutating_actions),
+            "workflow_actions": sorted(self.workflow_actions),
             "requires_approval_by_default": self.requires_approval_by_default,
         }
 
@@ -128,6 +149,9 @@ OFFICE_AGENTS: dict[str, AgentOfficeAgentSpec] = {
             }
         ),
         mutating_actions=frozenset(),
+        workflow_actions=frozenset(
+            {ANALYZE_ORDINANCE_CORPUS_ACTION}
+        ),
         requires_approval_by_default=False,
     ),
     "documents": AgentOfficeAgentSpec(
@@ -194,6 +218,7 @@ DEFAULT_ACTION_BY_DEPARTMENT = {
     "daily_briefing": "daily_briefing",
 }
 ACTION_TO_DEPARTMENT = {
+    ANALYZE_ORDINANCE_CORPUS_ACTION: "ordinances",
     "get_ordinance_corpus_manifest": "ordinances",
     "list_ordinance_catalog": "ordinances",
     "semantic_search_ordinances": "ordinances",
@@ -207,6 +232,24 @@ ACTION_TO_DEPARTMENT = {
     "update_requirement": "requirements",
     "add_requirement_message": "requirements",
 }
+WORKFLOW_ACTIONS = frozenset(
+    {ANALYZE_ORDINANCE_CORPUS_ACTION}
+)
+ORDINANCE_TASK_ACTIONS = frozenset(
+    {
+        ANALYZE_ORDINANCE_CORPUS_ACTION,
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+    }
+)
+ORDINANCE_ANALYSIS_RQ_JOB_TIMEOUT_SECONDS = 15 * 60
+ORDINANCE_ANALYSIS_RQ_RETRY_INTERVALS = [10, 30, 120]
+ORDINANCE_ANALYSIS_ACTIVE_LEASE_SECONDS = (
+    ORDINANCE_ANALYSIS_RQ_JOB_TIMEOUT_SECONDS
+    + max(ORDINANCE_ANALYSIS_RQ_RETRY_INTERVALS)
+    + 60
+)
 TOOL_ACTIONS = {
     "list_organizations",
     "list_projects",
@@ -231,6 +274,9 @@ MUTATING_ACTIONS = {
     "create_agent_office_task",
 }
 EXTERNAL_READ_ACTIONS = frozenset({"semantic_search_ordinances"})
+CANCELLABLE_RUNNING_ACTIONS = (
+    EXTERNAL_READ_ACTIONS | WORKFLOW_ACTIONS
+)
 EXTERNAL_READ_CLAIM_EVENT = "external_read_claimed"
 EXTERNAL_READ_QUARANTINE_EVENT = "external_read_quarantined"
 
@@ -294,6 +340,104 @@ def user_can_view_task(db: Session, current_user: User, task: AgentOfficeTask) -
     )
 
 
+def require_task_result_access(
+    db: Session,
+    current_user: User,
+    task: AgentOfficeTask,
+) -> None:
+    """Apply capability-specific checks before returning persisted results."""
+
+    if task.requested_action not in ORDINANCE_TASK_ACTIONS:
+        return
+    try:
+        include_pending = _ordinance_task_includes_pending(task)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    require_ordinance_analysis_access(
+        db,
+        current_user,
+        OrdinanceCorpusFilters(include_pending=include_pending),
+    )
+
+
+def _ordinance_task_includes_pending(task: AgentOfficeTask) -> bool:
+    if task.requested_action == ANALYZE_ORDINANCE_CORPUS_ACTION:
+        return ordinance_analysis_filters_from_task(task).include_pending
+    task_input = task.input
+    include_pending = task_input.get("include_pending", False)
+    if not isinstance(include_pending, bool):
+        raise ValueError("include_pending debe ser booleano")
+    cursor = task_input.get("cursor")
+    if cursor is not None:
+        if task.requested_action != "list_ordinance_catalog":
+            raise ValueError("cursor no está permitido para esta acción")
+        if not isinstance(cursor, str):
+            raise ValueError("cursor debe ser texto")
+        cursor_payload = decode_ordinance_catalog_cursor(cursor)
+        cursor_filters = cursor_payload.get("filters")
+        if not isinstance(cursor_filters, dict):
+            raise ValueError("el cursor no contiene filtros válidos")
+        cursor_include_pending = cursor_filters.get(
+            "include_pending",
+            False,
+        )
+        if not isinstance(cursor_include_pending, bool):
+            raise ValueError("el cursor contiene filtros no válidos")
+        include_pending = include_pending or cursor_include_pending
+    result_filters = task.result.get("filters")
+    if isinstance(result_filters, dict):
+        result_include_pending = result_filters.get(
+            "include_pending",
+            False,
+        )
+        if not isinstance(result_include_pending, bool):
+            raise ValueError("el resultado contiene filtros no válidos")
+        include_pending = include_pending or result_include_pending
+    return include_pending
+
+
+def _visible_task_results(
+    db: Session,
+    current_user: User,
+    tasks: list[AgentOfficeTask],
+) -> list[AgentOfficeTask]:
+    if not any(
+        task.requested_action in ORDINANCE_TASK_ACTIONS
+        for task in tasks
+    ):
+        return tasks
+    can_manage = current_user.is_superuser or has_permission(
+        current_user,
+        "ordinances.manage",
+        db,
+    )
+    can_compare = can_manage or has_permission(
+        current_user,
+        "ordinances.compare",
+        db,
+    )
+    can_review = can_manage or has_permission(
+        current_user,
+        "ordinances.review",
+        db,
+    )
+    visible: list[AgentOfficeTask] = []
+    for task in tasks:
+        if task.requested_action not in ORDINANCE_TASK_ACTIONS:
+            visible.append(task)
+            continue
+        try:
+            include_pending = _ordinance_task_includes_pending(task)
+        except ValueError:
+            continue
+        if can_compare and (not include_pending or can_review):
+            visible.append(task)
+    return visible
+
+
 def get_task_for_user(db: Session, current_user: User, task_id: int) -> AgentOfficeTask:
     task = db.scalar(
         select(AgentOfficeTask)
@@ -306,7 +450,10 @@ def get_task_for_user(db: Session, current_user: User, task_id: int) -> AgentOff
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Agent office task not found",
         )
+    require_task_result_access(db, current_user, task)
     return task
+
+
 def lock_task_for_transition(
     db: Session,
     task_id: int,
@@ -354,7 +501,56 @@ def list_tasks_for_user(
             visibility_filters.append(AgentOfficeTask.organization_id.in_(visible_org_ids))
         query = query.where(or_(*visibility_filters))
 
-    return list(db.scalars(query.limit(200)))
+    tasks = list(db.scalars(query.limit(200)))
+    return _visible_task_results(db, current_user, tasks)
+
+
+def list_ordinance_analysis_items_for_user(
+    db: Session,
+    current_user: User,
+    *,
+    task_id: int,
+    status_filter: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[AgentOfficeOrdinanceAnalysisItem]:
+    task = get_task_for_user(
+        db,
+        current_user,
+        task_id,
+    )
+    if task.requested_action != ANALYZE_ORDINANCE_CORPUS_ACTION:
+        raise HTTPException(
+            status_code=404,
+            detail="Ordinance corpus analysis not found",
+        )
+    if (
+        status_filter is not None
+        and status_filter
+        not in AGENT_OFFICE_ORDINANCE_ANALYSIS_ITEM_STATUSES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid ordinance analysis item status",
+        )
+    query = (
+        select(AgentOfficeOrdinanceAnalysisItem)
+        .where(
+            AgentOfficeOrdinanceAnalysisItem.task_id
+            == task.id
+        )
+        .order_by(
+            AgentOfficeOrdinanceAnalysisItem.source_ordinance_id
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    if status_filter is not None:
+        query = query.where(
+            AgentOfficeOrdinanceAnalysisItem.status
+            == status_filter
+        )
+    return list(db.scalars(query))
 
 
 def _json_dumps(value: dict | None) -> str | None:
@@ -406,6 +602,18 @@ def normalize_task_request(
     action = (requested_action or DEFAULT_ACTION_BY_DEPARTMENT[normalized_department]).strip()
     if not action:
         raise HTTPException(status_code=400, detail="requested_action cannot be empty")
+    if (
+        action in WORKFLOW_ACTIONS
+        and action
+        not in OFFICE_AGENTS[normalized_department].workflow_actions
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Workflow {action} is not available for department "
+                f"{normalized_department}"
+            ),
+        )
 
     policy = approval_policy or (
         "before_execution"
@@ -485,6 +693,8 @@ def create_task(
         source_message_id=source_message_id,
         requested_by_id=current_user.id,
     )
+    if action in ORDINANCE_TASK_ACTIONS:
+        require_task_result_access(db, current_user, task)
     db.add(task)
     db.flush()
     add_task_event(
@@ -529,7 +739,8 @@ def approve_or_cancel_task(
     if decision == "cancel":
         if task.status == "completed" or (
             task.status == "running"
-            and task.requested_action not in EXTERNAL_READ_ACTIONS
+            and task.requested_action
+            not in CANCELLABLE_RUNNING_ACTIONS
         ):
             raise HTTPException(status_code=409, detail="Task cannot be cancelled in its current status")
         task.status = "cancelled"
@@ -555,7 +766,13 @@ def approve_or_cancel_task(
     return get_task_for_user(db, current_user, task.id)
 
 
-def mark_task_queued(db: Session, current_user: User, task: AgentOfficeTask) -> AgentOfficeTask:
+def mark_task_queued(
+    db: Session,
+    current_user: User,
+    task: AgentOfficeTask,
+    *,
+    queue_job_id: str | None = None,
+) -> AgentOfficeTask:
     locked_task = lock_task_for_transition(db, task.id)
     if locked_task is None or not user_can_view_task(db, current_user, locked_task):
         raise HTTPException(status_code=404, detail="Agent office task not found")
@@ -574,11 +791,61 @@ def mark_task_queued(db: Session, current_user: User, task: AgentOfficeTask) -> 
                 "could not be confirmed"
             ),
         )
-    if task.status not in {"approved", "failed"}:
+    running_analysis_requeue = (
+        task.status == "running"
+        and task.requested_action
+        == ANALYZE_ORDINANCE_CORPUS_ACTION
+        and _running_analysis_is_recoverable(db, task)
+    )
+    if (
+        task.status not in {"approved", "failed"}
+        and not running_analysis_requeue
+    ):
         raise HTTPException(status_code=409, detail="Only approved or failed tasks can be queued")
+    if running_analysis_requeue:
+        add_task_event(
+            db,
+            task,
+            "analysis_requeued",
+            (
+                "Running ordinance analysis was requeued from its "
+                "durable checkpoint."
+            ),
+            payload=(
+                {"queue_job_id": queue_job_id}
+                if queue_job_id
+                else None
+            ),
+            created_by_id=current_user.id,
+        )
+        db.commit()
+        return get_task_for_user(db, current_user, task.id)
+    if (
+        task.status == "failed"
+        and task.requested_action
+        == ANALYZE_ORDINANCE_CORPUS_ACTION
+        and task.result.get("mode")
+        == "ordinance_corpus_analysis"
+    ):
+        checkpoint = dict(task.result)
+        checkpoint["resume_required"] = (
+            checkpoint.get("phase") == "enumeration_complete"
+        )
+        task.result_json = _json_dumps(checkpoint)
     task.status = "queued"
     task.error_message = None
-    add_task_event(db, task, "queued", "Task queued for agent office execution.", created_by_id=current_user.id)
+    add_task_event(
+        db,
+        task,
+        "queued",
+        "Task queued for agent office execution.",
+        payload=(
+            {"queue_job_id": queue_job_id}
+            if queue_job_id
+            else None
+        ),
+        created_by_id=current_user.id,
+    )
     db.commit()
     return get_task_for_user(db, current_user, task.id)
 
@@ -588,6 +855,8 @@ def mark_task_queue_failed(
     current_user: User,
     task_id: int,
     error: Exception,
+    *,
+    queue_job_id: str | None = None,
 ) -> AgentOfficeTask:
     task = lock_task_for_transition(db, task_id)
     if task is None or not user_can_view_task(db, current_user, task):
@@ -611,6 +880,39 @@ def mark_task_queue_failed(
         )
         db.commit()
         return get_task_for_user(db, current_user, task.id)
+    if (
+        task.status == "running"
+        and task.requested_action == ANALYZE_ORDINANCE_CORPUS_ACTION
+        and queue_job_id is not None
+        and _latest_ordinance_analysis_queue_job_id(db, task.id)
+        == queue_job_id
+    ):
+        if task.result.get("mode") == "ordinance_corpus_analysis":
+            checkpoint = dict(task.result)
+            checkpoint["resume_required"] = (
+                checkpoint.get("phase") == "enumeration_complete"
+            )
+            task.result_json = _json_dumps(checkpoint)
+        task.status = "failed"
+        task.error_message = str(error)[:2000]
+        task.completed_at = datetime.now(timezone.utc)
+        add_task_event(
+            db,
+            task,
+            "analysis_queue_failed",
+            "Recovered ordinance analysis could not be queued.",
+            payload={"queue_job_id": queue_job_id},
+            created_by_id=current_user.id,
+        )
+        add_task_event(
+            db,
+            task,
+            "failed",
+            task.error_message,
+            created_by_id=current_user.id,
+        )
+        db.commit()
+        return get_task_for_user(db, current_user, task.id)
     # A worker or reviewer won the row lock first. Never overwrite its state.
     db.rollback()
     return get_task_for_user(db, current_user, task.id)
@@ -618,11 +920,7 @@ def mark_task_queue_failed(
 
 def _tool_input_for_task(task: AgentOfficeTask) -> dict:
     tool_input = dict(task.input)
-    if task.requested_action in {
-        "get_ordinance_corpus_manifest",
-        "list_ordinance_catalog",
-        "semantic_search_ordinances",
-    }:
+    if task.requested_action in ORDINANCE_TASK_ACTIONS:
         tool_input.pop("organization_id", None)
     else:
         tool_input["organization_id"] = task.organization_id
@@ -856,6 +1154,68 @@ def _running_attempt_is_incomplete(
     return terminal_event is None
 
 
+def _running_analysis_is_recoverable(
+    db: Session,
+    task: AgentOfficeTask,
+) -> bool:
+    """Allow manual recovery only after the active worker lease has expired."""
+
+    if not _running_attempt_is_incomplete(db, task):
+        return False
+    activity_at = db.scalar(
+        select(AgentOfficeTaskEvent.created_at)
+        .where(
+            AgentOfficeTaskEvent.task_id == task.id,
+            AgentOfficeTaskEvent.event_type.in_(
+                {
+                    "started",
+                    "analysis_initialized",
+                    "analysis_checkpointed",
+                    "analysis_continuation_queued",
+                    "analysis_retry_pending",
+                    "analysis_requeued",
+                }
+            ),
+        )
+        .order_by(AgentOfficeTaskEvent.created_at.desc())
+        .limit(1)
+    )
+    if activity_at is None:
+        return False
+    if activity_at.tzinfo is None:
+        activity_at = activity_at.replace(tzinfo=timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        seconds=ORDINANCE_ANALYSIS_ACTIVE_LEASE_SECONDS
+    )
+    return activity_at <= cutoff
+
+
+def _latest_ordinance_analysis_queue_job_id(
+    db: Session,
+    task_id: int,
+) -> str | None:
+    events = db.scalars(
+        select(AgentOfficeTaskEvent)
+        .where(
+            AgentOfficeTaskEvent.task_id == task_id,
+            AgentOfficeTaskEvent.event_type.in_(
+                {
+                    "queued",
+                    "analysis_requeued",
+                    "analysis_continuation_queued",
+                }
+            ),
+        )
+        .order_by(AgentOfficeTaskEvent.id.desc())
+        .limit(50)
+    ).all()
+    for event in events:
+        queue_job_id = event.payload.get("queue_job_id")
+        if isinstance(queue_job_id, str) and queue_job_id:
+            return queue_job_id
+    return None
+
+
 def _latest_attempt_is_quarantined(db: Session, task_id: int) -> bool:
     attempt = _latest_task_execution_attempt(db, task_id)
     if attempt is None:
@@ -1059,6 +1419,417 @@ def _external_read_claim_is_current(
     )
 
 
+def build_agent_office_queue_job_id(
+    task_id: int,
+    *,
+    continuation: bool = False,
+) -> str:
+    kind = "continue" if continuation else "run"
+    return (
+        f"agent-office-{task_id}-{kind}-"
+        f"{uuid.uuid4().hex}"
+    )
+
+
+def mark_ordinance_analysis_rq_failed(
+    job,
+    connection,
+    exception_type,
+    exception_value,
+    traceback,
+) -> None:
+    """Make terminal RQ failure visible without persisting job payloads."""
+
+    del connection, traceback
+    retries_left = getattr(job, "retries_left", None)
+    if (
+        isinstance(retries_left, int)
+        and not isinstance(retries_left, bool)
+        and retries_left > 0
+    ):
+        # RQ invokes on_failure before deciding whether to retry.  Keep the
+        # task running while another execution attempt is still scheduled.
+        return
+    if not job.args:
+        return
+    try:
+        task_id = int(job.args[0])
+    except (TypeError, ValueError):
+        return
+    with SessionLocal() as db:
+        task = lock_task_for_transition(db, task_id)
+        if (
+            task is None
+            or task.requested_action
+            != ANALYZE_ORDINANCE_CORPUS_ACTION
+            or task.status
+            in {"completed", "failed", "cancelled", "waiting_approval"}
+        ):
+            db.rollback()
+            return
+        latest_queue_job_id = _latest_ordinance_analysis_queue_job_id(
+            db,
+            task.id,
+        )
+        if (
+            latest_queue_job_id is not None
+            and latest_queue_job_id != str(job.id)
+        ):
+            db.rollback()
+            return
+        error_message = (
+            f"{getattr(exception_type, '__name__', 'Error')}: "
+            f"{exception_value}"
+        )[:2000]
+        if (
+            task.result.get("mode")
+            == "ordinance_corpus_analysis"
+        ):
+            checkpoint = dict(task.result)
+            checkpoint["resume_required"] = (
+                checkpoint.get("phase") == "enumeration_complete"
+            )
+            task.result_json = _json_dumps(checkpoint)
+        task.status = "failed"
+        task.error_message = error_message
+        task.completed_at = datetime.now(timezone.utc)
+        add_task_event(
+            db,
+            task,
+            "analysis_failed",
+            "Ordinance corpus analysis exhausted its RQ retries.",
+            payload={
+                "queue_job_id": str(job.id),
+                "checkpoint_preserved": True,
+            },
+        )
+        add_task_event(
+            db,
+            task,
+            "failed",
+            error_message,
+        )
+        db.commit()
+
+
+def run_agent_office_task_job(task_id: int) -> int:
+    """RQ entry point that never returns an ORM graph to Redis."""
+
+    run_agent_office_task(task_id)
+    return task_id
+
+
+def enqueue_agent_office_task_execution(
+    task: AgentOfficeTask,
+    *,
+    queue_job_id: str | None = None,
+    continuation: bool = False,
+):
+    job_id = queue_job_id or build_agent_office_queue_job_id(
+        task.id,
+        continuation=continuation,
+    )
+    enqueue_options: dict[str, Any] = {
+        "job_id": job_id,
+        "result_ttl": 0,
+    }
+    if (
+        task.requested_action
+        == ANALYZE_ORDINANCE_CORPUS_ACTION
+    ):
+        enqueue_options.update(
+            {
+                "job_timeout": (
+                    ORDINANCE_ANALYSIS_RQ_JOB_TIMEOUT_SECONDS
+                ),
+                "retry": Retry(
+                    max=len(
+                        ORDINANCE_ANALYSIS_RQ_RETRY_INTERVALS
+                    ),
+                    interval=(
+                        ORDINANCE_ANALYSIS_RQ_RETRY_INTERVALS
+                    ),
+                ),
+                "on_failure": mark_ordinance_analysis_rq_failed,
+            }
+        )
+    return get_default_queue().enqueue(
+        run_agent_office_task_job,
+        task.id,
+        **enqueue_options,
+    )
+
+
+def _run_ordinance_corpus_analysis_locked(
+    db: Session,
+    task: AgentOfficeTask,
+    *,
+    page_budget: int | None,
+    enqueue_continuation: bool,
+) -> AgentOfficeTask:
+    if page_budget is not None and page_budget < 1:
+        raise ValueError("page_budget debe ser mayor o igual que 1")
+    if _task_is_terminal(task) or task.status == "pending_approval":
+        db.rollback()
+        return task
+
+    if task.status == "running":
+        if not _running_attempt_is_incomplete(db, task):
+            db.rollback()
+            return task
+    elif task.status in {"approved", "queued"}:
+        task.status = "running"
+        task.started_at = datetime.now(timezone.utc)
+        task.completed_at = None
+        task.error_message = None
+        add_task_event(
+            db,
+            task,
+            "started",
+            "Durable ordinance corpus analysis started.",
+            payload={
+                "workflow": ANALYZE_ORDINANCE_CORPUS_ACTION,
+            },
+        )
+        db.commit()
+        task = lock_task_for_transition(db, task.id)
+        if task is None:
+            raise ValueError("Agent office task disappeared")
+    else:
+        db.rollback()
+        return task
+
+    pages_processed = 0
+    while True:
+        task = lock_task_for_transition(db, task.id)
+        if task is None:
+            raise ValueError("Agent office task disappeared")
+        if task.status in {
+            "pending_approval",
+            "waiting_approval",
+            "completed",
+            "failed",
+            "cancelled",
+        }:
+            db.rollback()
+            return task
+
+        user = _task_execution_user(task)
+        filters = ordinance_analysis_filters_from_task(task)
+        require_ordinance_analysis_access(
+            db,
+            user,
+            filters,
+        )
+        state = task.result
+        if (
+            not state
+            or state.get("mode")
+            != "ordinance_corpus_analysis"
+        ):
+            existing_items = int(
+                db.scalar(
+                    select(
+                        func.count(
+                            AgentOfficeOrdinanceAnalysisItem.id
+                        )
+                    ).where(
+                        AgentOfficeOrdinanceAnalysisItem.task_id
+                        == task.id
+                    )
+                )
+                or 0
+            )
+            if existing_items:
+                raise ValueError(
+                    "Hay checkpoints por ordenanza pero falta el "
+                    "snapshot fijado de la tarea"
+                )
+            state = initialize_ordinance_analysis_state(
+                db,
+                task,
+                user,
+            )
+            task.result_json = _json_dumps(state)
+            add_task_event(
+                db,
+                task,
+                "analysis_initialized",
+                "Internal ordinance snapshot fixed for durable analysis.",
+                payload={
+                    "snapshot_id": state["snapshot_id"],
+                    "expected_ordinances": state[
+                        "expected_ordinances"
+                    ],
+                    "workflow_version": state[
+                        "workflow_version"
+                    ],
+                },
+            )
+            db.commit()
+            continue
+
+        resumed_state = prepare_ordinance_analysis_resume(
+            db,
+            task,
+            dict(state),
+        )
+        if resumed_state != state:
+            state = resumed_state
+            task.result_json = _json_dumps(state)
+            add_task_event(
+                db,
+                task,
+                "analysis_resumed",
+                "Incomplete ordinance items will be retried.",
+                payload={
+                    "snapshot_id": state["snapshot_id"],
+                    "resume_pass": state["resume_passes"],
+                },
+            )
+
+        if state["phase"] == "enumeration_complete":
+            verify_ordinance_analysis_snapshot(
+                db,
+                state,
+            )
+            final_result = reconcile_ordinance_analysis(
+                db,
+                task,
+                state,
+            )
+            task.result_json = _json_dumps(final_result)
+            task.error_message = None
+            task.completed_at = datetime.now(timezone.utc)
+            add_task_event(
+                db,
+                task,
+                "analysis_completed",
+                "Internal ordinance snapshot reconciled.",
+                payload={
+                    "snapshot_id": state["snapshot_id"],
+                    "completed_ordinances": (
+                        final_result["reconciliation"][
+                            "completed_items"
+                        ]
+                    ),
+                    "balanced": True,
+                },
+            )
+            if (
+                task.requires_human_approval
+                and task.approval_policy
+                in {"after_draft", "always"}
+            ):
+                task.status = "waiting_approval"
+                add_task_event(
+                    db,
+                    task,
+                    "draft_ready",
+                    (
+                        "Ordinance inventory result is waiting "
+                        "for human approval."
+                    ),
+                )
+            else:
+                task.status = "completed"
+                add_task_event(
+                    db,
+                    task,
+                    "completed",
+                    "Task completed by the agent office.",
+                )
+            db.commit()
+            return task
+
+        outcome = process_ordinance_analysis_page(
+            db,
+            task,
+            state,
+        )
+        state = outcome.state
+        task.result_json = _json_dumps(state)
+        task.error_message = None
+        add_task_event(
+            db,
+            task,
+            "analysis_checkpointed",
+            "Ordinance analysis page committed.",
+            payload={
+                "snapshot_id": state["snapshot_id"],
+                "page_candidates": outcome.page_candidates,
+                "created_items": outcome.created_items,
+                "completed_items": outcome.completed_items,
+                "failed_items": outcome.failed_items,
+                "skipped_completed_items": (
+                    outcome.skipped_completed_items
+                ),
+                "catalog_consumed": state["catalog_consumed"],
+                "expected_ordinances": state[
+                    "expected_ordinances"
+                ],
+                "complete": outcome.complete,
+            },
+        )
+        db.commit()
+        pages_processed += 1
+
+        if outcome.complete:
+            continue
+        if (
+            page_budget is None
+            or pages_processed < page_budget
+        ):
+            continue
+        if enqueue_continuation:
+            queue_job = enqueue_agent_office_task_execution(
+                task,
+                continuation=True,
+            )
+            task = lock_task_for_transition(db, task.id)
+            if task is None:
+                raise ValueError("Agent office task disappeared")
+            if task.status == "running":
+                add_task_event(
+                    db,
+                    task,
+                    "analysis_continuation_queued",
+                    "Next ordinance analysis page queued.",
+                    payload={
+                        "queue_job_id": str(queue_job.id),
+                        "snapshot_id": state["snapshot_id"],
+                    },
+                )
+                db.commit()
+            else:
+                db.rollback()
+        return task
+
+
+def run_ordinance_corpus_analysis_batch(
+    task_id: int,
+    db: Session,
+    *,
+    page_budget: int = 1,
+) -> AgentOfficeTask:
+    task = lock_task_for_transition(db, task_id)
+    if task is None:
+        raise ValueError(f"Agent office task not found: {task_id}")
+    if (
+        task.requested_action
+        != ANALYZE_ORDINANCE_CORPUS_ACTION
+    ):
+        raise ValueError(
+            "Task is not an ordinance corpus analysis"
+        )
+    return _run_ordinance_corpus_analysis_locked(
+        db,
+        task,
+        page_budget=page_budget,
+        enqueue_continuation=False,
+    )
+
+
 def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOfficeTask:
     owns_session = db is None
     session = db or SessionLocal()
@@ -1067,6 +1838,20 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
         task = lock_task_for_transition(session, task_id)
         if task is None:
             raise ValueError(f"Agent office task not found: {task_id}")
+        if (
+            task.requested_action
+            == ANALYZE_ORDINANCE_CORPUS_ACTION
+        ):
+            return _run_ordinance_corpus_analysis_locked(
+                session,
+                task,
+                page_budget=(
+                    ORDINANCE_ANALYSIS_PAGES_PER_RQ_JOB
+                    if owns_session
+                    else None
+                ),
+                enqueue_continuation=owns_session,
+            )
         if _task_is_terminal(task) or task.status == "pending_approval":
             session.rollback()
             return task
@@ -1184,6 +1969,52 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
     except Exception as error:
         session.rollback()
         task = lock_task_for_transition(session, task_id)
+        if (
+            task is not None
+            and task.requested_action
+            == ANALYZE_ORDINANCE_CORPUS_ACTION
+            and owns_session
+        ):
+            if task.status in {
+                "completed",
+                "failed",
+                "cancelled",
+                "waiting_approval",
+            }:
+                session.rollback()
+                return task
+            error_detail = getattr(error, "detail", None)
+            error_message = str(
+                error_detail
+                if error_detail is not None
+                else error
+            )[:2000]
+            if (
+                task.result.get("mode")
+                == "ordinance_corpus_analysis"
+            ):
+                checkpoint = dict(task.result)
+                checkpoint["resume_required"] = (
+                    checkpoint.get("phase")
+                    == "enumeration_complete"
+                )
+                task.result_json = _json_dumps(checkpoint)
+            task.error_message = error_message
+            add_task_event(
+                session,
+                task,
+                "analysis_retry_pending",
+                (
+                    "Ordinance analysis page failed; the durable "
+                    "checkpoint is preserved for RQ retry."
+                ),
+                payload={
+                    "error_type": type(error).__name__,
+                    "checkpoint_preserved": True,
+                },
+            )
+            session.commit()
+            raise
         if task is not None and isinstance(error, EmbeddingWorkerCleanupError):
             if not _latest_attempt_is_quarantined(session, task.id):
                 add_task_event(
@@ -1215,6 +2046,18 @@ def run_agent_office_task(task_id: int, db: Session | None = None) -> AgentOffic
             session.rollback()
             return task
         if task is not None and not _task_is_terminal(task):
+            if (
+                task.requested_action
+                == ANALYZE_ORDINANCE_CORPUS_ACTION
+                and task.result.get("mode")
+                == "ordinance_corpus_analysis"
+            ):
+                checkpoint = dict(task.result)
+                checkpoint["resume_required"] = (
+                    checkpoint.get("phase")
+                    == "enumeration_complete"
+                )
+                task.result_json = _json_dumps(checkpoint)
             task.status = "failed"
             task.error_message = str(error)[:2000]
             task.completed_at = datetime.now(timezone.utc)

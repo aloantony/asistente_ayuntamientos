@@ -2,13 +2,25 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.organizations.models import Organization
+    from app.ordinances.models import Ordinance
     from app.users.models import User
 
 
@@ -31,6 +43,12 @@ AGENT_OFFICE_TASK_STATUSES = (
     "completed",
     "failed",
     "cancelled",
+)
+AGENT_OFFICE_ORDINANCE_ANALYSIS_ITEM_STATUSES = (
+    "pending",
+    "running",
+    "completed",
+    "failed",
 )
 AGENT_OFFICE_PRIORITIES = ("low", "medium", "high", "urgent")
 AGENT_OFFICE_APPROVAL_POLICIES = (
@@ -155,6 +173,14 @@ class AgentOfficeTask(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="AgentOfficeTaskEvent.id",
     )
+    ordinance_analysis_items: Mapped[
+        list["AgentOfficeOrdinanceAnalysisItem"]
+    ] = relationship(
+        "AgentOfficeOrdinanceAnalysisItem",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="AgentOfficeOrdinanceAnalysisItem.id",
+    )
 
     @property
     def input(self) -> dict:
@@ -194,6 +220,102 @@ class AgentOfficeTaskEvent(Base):
     @property
     def payload(self) -> dict:
         return _decode_json_object(self.payload_json)
+
+
+class AgentOfficeOrdinanceAnalysisItem(TimestampMixin, Base):
+    __tablename__ = "agent_office_ordinance_analysis_items"
+    __table_args__ = (
+        CheckConstraint(
+            (
+                "status in "
+                f"({_sql_in(AGENT_OFFICE_ORDINANCE_ANALYSIS_ITEM_STATUSES)})"
+            ),
+            name="ck_agent_office_ord_analysis_items_status",
+        ),
+        CheckConstraint(
+            "attempts >= 0",
+            name="ck_agent_office_ord_analysis_items_attempts",
+        ),
+        CheckConstraint(
+            (
+                "ordinance_id is null or "
+                "ordinance_id = source_ordinance_id"
+            ),
+            name="ck_agent_office_ord_analysis_items_source_identity",
+        ),
+        UniqueConstraint(
+            "task_id",
+            "source_ordinance_id",
+            name="uq_agent_office_ord_analysis_task_ordinance",
+        ),
+        Index(
+            "ix_agent_office_ord_analysis_task_status_source",
+            "task_id",
+            "status",
+            "source_ordinance_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_office_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ordinance_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ordinances.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    source_ordinance_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    source_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    source_digest: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="pending",
+        server_default="pending",
+        nullable=False,
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    task: Mapped[AgentOfficeTask] = relationship(
+        "AgentOfficeTask",
+        back_populates="ordinance_analysis_items",
+    )
+    ordinance: Mapped["Ordinance | None"] = relationship(
+        "Ordinance"
+    )
+
+    @property
+    def result(self) -> dict:
+        return _decode_json_object(self.result_json)
 
 
 class AgentOfficeRoutine(TimestampMixin, Base):
