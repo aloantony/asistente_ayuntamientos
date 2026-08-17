@@ -37,6 +37,15 @@ import {
   fetchHouseholdSeries,
   fetchPadronSeries,
 } from "../lib/municipalData";
+import {
+  fetchContracts,
+  fetchGrants,
+  fetchLicences,
+  fetchNotices,
+  fetchOfficeHours,
+} from "../lib/administration";
+import { Administracion } from "./ayuntamiento/Administracion";
+import { Comunicacion } from "./ayuntamiento/Comunicacion";
 import { EstructuraGobierno } from "./ayuntamiento/EstructuraGobierno";
 import { SeriesMunicipio } from "./ayuntamiento/SeriesMunicipio";
 import { HojaDeRuta } from "./ayuntamiento/HojaDeRuta";
@@ -55,6 +64,11 @@ import type { ResourceErrors, WorkspaceTab } from "./ayuntamiento/types";
 import {
   userHasPermission,
   type ClimateRecord,
+  type MunicipalContract,
+  type MunicipalGrant,
+  type MunicipalLicence,
+  type MunicipalNotice,
+  type OfficeHour,
   type GovernmentMember,
   type HouseholdStat,
   type PadronRecord,
@@ -156,6 +170,11 @@ export function MunicipalWorkspace() {
   const [padron, setPadron] = useState<PadronRecord[]>([]);
   const [climate, setClimate] = useState<ClimateRecord[]>([]);
   const [households, setHouseholds] = useState<HouseholdStat[]>([]);
+  const [officeHours, setOfficeHours] = useState<OfficeHour[]>([]);
+  const [licences, setLicences] = useState<MunicipalLicence[]>([]);
+  const [contracts, setContracts] = useState<MunicipalContract[]>([]);
+  const [grants, setGrants] = useState<MunicipalGrant[]>([]);
+  const [notices, setNotices] = useState<MunicipalNotice[]>([]);
   const [resourceErrors, setResourceErrors] = useState<ResourceErrors>(
     EMPTY_RESOURCE_ERRORS,
   );
@@ -196,6 +215,16 @@ export function MunicipalWorkspace() {
   );
   const canViewGovernment = Boolean(user && hasGovernmentAccess(user));
   const canViewStaff = Boolean(user && hasStaffAccess(user));
+  const canViewAdministration = Boolean(
+    user &&
+      (userHasPermission(user, "administration.view") ||
+        userHasPermission(user, "administration.manage")),
+  );
+  const canViewCommunications = Boolean(
+    user &&
+      (userHasPermission(user, "communications.view") ||
+        userHasPermission(user, "communications.manage")),
+  );
   const canManageOrdinances = Boolean(
     user &&
       ORDINANCE_MANAGEMENT_PERMISSIONS.some((permission) =>
@@ -224,6 +253,11 @@ export function MunicipalWorkspace() {
       setPadron([]);
       setClimate([]);
       setHouseholds([]);
+      setOfficeHours([]);
+      setLicences([]);
+      setContracts([]);
+      setGrants([]);
+      setNotices([]);
       setError("");
       setResourceErrors(EMPTY_RESOURCE_ERRORS);
       setIsLoading(false);
@@ -246,6 +280,11 @@ export function MunicipalWorkspace() {
     setPadron([]);
     setClimate([]);
     setHouseholds([]);
+    setOfficeHours([]);
+    setLicences([]);
+    setContracts([]);
+    setGrants([]);
+    setNotices([]);
     setError("");
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setIsLoading(true);
@@ -263,6 +302,11 @@ export function MunicipalWorkspace() {
         padronResult,
         climateResult,
         householdResult,
+        officeHourResult,
+        licenceResult,
+        contractResult,
+        grantResult,
+        noticeResult,
       ] = await Promise.allSettled([
         fetchMunicipality(municipalityId, controller.signal),
         fetchMunicipalOrganization(organizationId, controller.signal),
@@ -287,6 +331,11 @@ export function MunicipalWorkspace() {
         fetchPadronSeries(organizationId, controller.signal),
         fetchClimateSeries(organizationId, undefined, controller.signal),
         fetchHouseholdSeries(organizationId, controller.signal),
+        fetchOfficeHours(organizationId, controller.signal),
+        fetchLicences(organizationId, controller.signal),
+        fetchContracts(organizationId, controller.signal),
+        fetchGrants(organizationId, controller.signal),
+        fetchNotices(organizationId, controller.signal),
       ] as const);
 
       if (
@@ -405,6 +454,21 @@ export function MunicipalWorkspace() {
       if (householdResult.status === "fulfilled") {
         setHouseholds(householdResult.value.items);
       }
+      if (officeHourResult.status === "fulfilled") {
+        setOfficeHours(officeHourResult.value.items);
+      }
+      if (licenceResult.status === "fulfilled") {
+        setLicences(licenceResult.value.items);
+      }
+      if (contractResult.status === "fulfilled") {
+        setContracts(contractResult.value.items);
+      }
+      if (grantResult.status === "fulfilled") {
+        setGrants(grantResult.value.items);
+      }
+      if (noticeResult.status === "fulfilled") {
+        setNotices(noticeResult.value.items);
+      }
     }
 
     void loadWorkspace().finally(() => {
@@ -501,6 +565,11 @@ export function MunicipalWorkspace() {
     setPadron([]);
     setClimate([]);
     setHouseholds([]);
+    setOfficeHours([]);
+    setLicences([]);
+    setContracts([]);
+    setGrants([]);
+    setNotices([]);
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setError("");
     setIsLoading(true);
@@ -634,6 +703,21 @@ export function MunicipalWorkspace() {
             }
             maintenance={maintenance}
             municipality={municipality}
+            administrationSection={
+              <>
+                <Administracion
+                  canView={canViewAdministration}
+                  contracts={contracts}
+                  grants={grants}
+                  licences={licences}
+                  officeHours={officeHours}
+                />
+                <Comunicacion
+                  canView={canViewCommunications}
+                  notices={notices}
+                />
+              </>
+            }
             seriesSection={
               <SeriesMunicipio
                 climate={climate}

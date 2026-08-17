@@ -36,6 +36,7 @@ export function InformacionMunicipio({
   canViewMaintenance,
   governmentSection,
   seriesSection,
+  administrationSection,
   onTabChange,
 }: {
   municipality: Municipality;
@@ -51,6 +52,8 @@ export function InformacionMunicipio({
   governmentSection: ReactNode;
   /** Series del municipio (padrón, clima, viviendas), montadas igual. */
   seriesSection: ReactNode;
+  /** Administración y comunicación municipal, montadas igual. */
+  administrationSection: ReactNode;
   onTabChange: (tab: WorkspaceTab) => void;
 }) {
   return (
@@ -175,6 +178,8 @@ export function InformacionMunicipio({
       {governmentSection}
 
       {seriesSection}
+
+      {administrationSection}
 
       <section className={styles.card}>
         <SectionHeading

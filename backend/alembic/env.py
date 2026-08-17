@@ -7,7 +7,9 @@ from app.core.config import settings
 from app.db.base import Base
 from app.agent_office import models as agent_office_models  # noqa: F401
 from app.assistant import models as assistant_models  # noqa: F401
+from app.administration import models as administration_models  # noqa: F401
 from app.assets import models as asset_models  # noqa: F401
+from app.communications import models as communication_models  # noqa: F401
 from app.documents import models as document_models  # noqa: F401
 from app.geo import models as geo_models  # noqa: F401
 from app.government import models as government_models  # noqa: F401
