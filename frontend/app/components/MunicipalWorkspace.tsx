@@ -52,7 +52,9 @@ import {
   fetchTreasuryMovements,
 } from "../lib/budgets";
 import { Administracion } from "./ayuntamiento/Administracion";
+import { fetchArchiveItems, fetchHeritageAssets } from "../lib/heritage";
 import { MapaGeneral } from "./ayuntamiento/MapaGeneral";
+import { Patrimonio } from "./ayuntamiento/Patrimonio";
 import { Plenos } from "./ayuntamiento/Plenos";
 import { Presupuestos } from "./ayuntamiento/Presupuestos";
 import { Comunicacion } from "./ayuntamiento/Comunicacion";
@@ -73,7 +75,9 @@ import {
 import type { ResourceErrors, WorkspaceTab } from "./ayuntamiento/types";
 import {
   userHasPermission,
+  type ArchiveItem,
   type BudgetExecution,
+  type HeritageAsset,
   type ClimateRecord,
   type CouncilSession,
   type MunicipalBudget,
@@ -194,6 +198,8 @@ export function MunicipalWorkspace() {
   const [execution, setExecution] = useState<BudgetExecution | null>(null);
   const [movements, setMovements] = useState<TreasuryMovement[]>([]);
   const [sessions, setSessions] = useState<CouncilSession[]>([]);
+  const [heritage, setHeritage] = useState<HeritageAsset[]>([]);
+  const [archive, setArchive] = useState<ArchiveItem[]>([]);
   const [resourceErrors, setResourceErrors] = useState<ResourceErrors>(
     EMPTY_RESOURCE_ERRORS,
   );
@@ -254,6 +260,11 @@ export function MunicipalWorkspace() {
       (userHasPermission(user, "plenos.view") ||
         userHasPermission(user, "plenos.manage")),
   );
+  const canViewHeritage = Boolean(
+    user &&
+      (userHasPermission(user, "heritage.view") ||
+        userHasPermission(user, "heritage.manage")),
+  );
   const canManageOrdinances = Boolean(
     user &&
       ORDINANCE_MANAGEMENT_PERMISSIONS.some((permission) =>
@@ -291,10 +302,16 @@ export function MunicipalWorkspace() {
     setExecution(null);
     setMovements([]);
     setSessions([]);
+    setHeritage([]);
+    setArchive([]);
       setBudgets([]);
       setExecution(null);
       setMovements([]);
       setSessions([]);
+    setHeritage([]);
+    setArchive([]);
+      setHeritage([]);
+      setArchive([]);
       setError("");
       setResourceErrors(EMPTY_RESOURCE_ERRORS);
       setIsLoading(false);
@@ -326,6 +343,8 @@ export function MunicipalWorkspace() {
     setExecution(null);
     setMovements([]);
     setSessions([]);
+    setHeritage([]);
+    setArchive([]);
     setError("");
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setIsLoading(true);
@@ -351,6 +370,8 @@ export function MunicipalWorkspace() {
         budgetResult,
         movementResult,
         sessionResult,
+        heritageResult,
+        archiveResult,
       ] = await Promise.allSettled([
         fetchMunicipality(municipalityId, controller.signal),
         fetchMunicipalOrganization(organizationId, controller.signal),
@@ -383,6 +404,8 @@ export function MunicipalWorkspace() {
         fetchBudgets(organizationId, controller.signal),
         fetchTreasuryMovements(organizationId, controller.signal),
         fetchCouncilSessions(organizationId, controller.signal),
+        fetchHeritageAssets(organizationId, controller.signal),
+        fetchArchiveItems(organizationId, controller.signal),
       ] as const);
 
       if (
@@ -522,6 +545,12 @@ export function MunicipalWorkspace() {
       if (sessionResult.status === "fulfilled") {
         setSessions(sessionResult.value.items);
       }
+      if (heritageResult.status === "fulfilled") {
+        setHeritage(heritageResult.value.items);
+      }
+      if (archiveResult.status === "fulfilled") {
+        setArchive(archiveResult.value.items);
+      }
       if (budgetResult.status === "fulfilled") {
         setBudgets(budgetResult.value.items);
         // La ejecución se pide solo del ejercicio más reciente: es lo que la
@@ -642,6 +671,8 @@ export function MunicipalWorkspace() {
     setExecution(null);
     setMovements([]);
     setSessions([]);
+    setHeritage([]);
+    setArchive([]);
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setError("");
     setIsLoading(true);
@@ -795,6 +826,11 @@ export function MunicipalWorkspace() {
                   movements={movements}
                 />
                 <Plenos canView={canViewPlenos} sessions={sessions} />
+                <Patrimonio
+                  archive={archive}
+                  assets={heritage}
+                  canView={canViewHeritage}
+                />
               </>
             }
             seriesSection={

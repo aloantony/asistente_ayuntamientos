@@ -685,3 +685,36 @@ Con «Mapa general» activo, **el menú fijo de ADR-034 queda completo**: todas 
 entradas declaradas tienen pantalla. `visibleTopNavSections` sigue filtrando por
 `enabled` aunque hoy no descarte nada, porque es lo que protegerá el día que se
 declare una entrada nueva antes de construirla.
+## ADR-045: Patrimonio y archivo, separados del inventario (2026-08-05)
+
+`backend/app/heritage/` guarda los bienes patrimoniales y las piezas del archivo
+municipal. Se separa de `municipal_assets` a propósito: aquel dominio existe para
+**mantener** cosas —una farola se repara y se sustituye— y este para
+**conservarlas**. Una ermita del XVI y una luminaria no comparten ciclo de vida
+ni vocabulario, y mezclarlas obligaría a que cada consulta de mantenimiento
+filtrase lo que no debe tocar.
+
+**La época va en texto libre.** «Siglo XVI», «finales del XIX o principios del
+XX», «indeterminada». Forzar un año o un rango numérico sería inventar precisión
+que la fuente no tiene, y llenaría la base de fechas aproximadas que después
+alguien leería como exactas.
+
+**Sin declarar es una respuesta legítima.** `protection_level` admite `none`
+porque mucho patrimonio de un pueblo es valioso sin figura de protección; lo que
+sí exige un `CHECK` es que un bien declarado traiga la referencia de su
+declaración, porque sin expediente la declaración no consta.
+
+En el archivo, la **signatura y la ubicación física son lo primero**, no un
+adorno: un archivo de pueblo vive en cajas y estantes, y lo que más se busca es
+dónde está el papel. La búsqueda incluye `physical_location` por eso mismo. Los
+años se guardan sueltos —`start_year`, `end_year`— en vez de fechas, porque de
+una caja se conoce el periodo que abarca y casi nunca el día; «sin fechar» es una
+respuesta que la ficha da sin fingir un intervalo.
+
+**Digitalizado significa que el fichero existe.** Un `CHECK` exige el documento
+cuando el estado es `digitised`; `in_progress` sí puede no tenerlo todavía. Sin
+esa regla, «digitalizado» acabaría siendo una promesa que nadie puede comprobar.
+El escaneo vive en `documents`, como el escudo en ADR-038 y las actas en ADR-041.
+
+La revisión Alembic `20260805_0041` se serializa detrás de `20260805_0040`
+conforme a ADR-033.

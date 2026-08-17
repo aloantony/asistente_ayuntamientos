@@ -19,6 +19,7 @@ from app.db.session import SessionLocal
 from app.documents.routes import router as documents_router
 from app.geo.routes import router as geo_router
 from app.government.routes import router as government_router
+from app.heritage.routes import router as heritage_router
 from app.maintenance.routes import router as maintenance_router
 from app.municipal_data.routes import router as municipal_data_router
 from app.municipalities.routes import router as municipalities_router
@@ -97,6 +98,7 @@ for app_router in (
     budgets_router,
     plenos_router,
     sede_router,
+    heritage_router,
     weather_router,
     branding_router,
     assistant_router,
