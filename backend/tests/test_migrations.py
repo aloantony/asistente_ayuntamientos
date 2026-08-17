@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260804_0035"
+HEAD_REVISION = "20260804_0036"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1710,6 +1710,50 @@ def assert_maintenance_schema(inspector: Inspector) -> None:
         } == expected["unique_constraints"]
 
 
+MUNICIPAL_DATA_TABLES = {
+    "padron_annual_records",
+    "climate_records",
+    "household_stats",
+    "utility_supplies",
+    "water_meters",
+    "water_meter_readings",
+}
+
+
+def assert_municipal_data_schema(inspector: Inspector) -> None:
+    """Las series municipales existen y siguen aisladas por organización.
+
+    No se fija cada columna una a una como en el inventario: lo que importa aquí
+    es que ninguna serie pueda cruzar de ayuntamiento, y eso lo garantiza la
+    clave ajena a `organizations` que se comprueba tabla por tabla.
+    """
+    table_names = set(inspector.get_table_names())
+    assert MUNICIPAL_DATA_TABLES <= table_names
+
+    # Una fila por periodo y organizacion: dos del mismo ano se contradicen y
+    # ninguna grafica sabria cual creer.
+    expected_uniques = {
+        "padron_annual_records": "uq_padron_annual_records_org_year",
+        "climate_records": "uq_climate_records_org_period",
+        "household_stats": "uq_household_stats_org_year",
+        "water_meters": "uq_water_meters_org_code",
+        "water_meter_readings": "uq_water_meter_readings_meter_date",
+    }
+    for table_name, constraint_name in expected_uniques.items():
+        assert constraint_name in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+
+    # Toda serie cuelga de una organizacion: es lo que impide que crucen de
+    # ayuntamiento aunque una consulta olvide filtrar.
+    for table_name in MUNICIPAL_DATA_TABLES:
+        assert any(
+            "organization_id" in foreign_key["constrained_columns"]
+            for foreign_key in inspector.get_foreign_keys(table_name)
+        )
+
+
 def assert_roadmap_schema(inspector: Inspector) -> None:
     for table_name, expected in ROADMAP_SCHEMA.items():
         assert {
@@ -1872,6 +1916,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_maintenance_schema(upgraded_inspector)
         assert_government_staff_schema(upgraded_inspector)
         assert_roadmap_schema(upgraded_inspector)
+        assert_municipal_data_schema(upgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(upgraded_inspector)
@@ -1907,6 +1952,9 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert set(ROADMAP_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert MUNICIPAL_DATA_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -1923,6 +1971,7 @@ def test_reconciles_deployed_revision_and_reversible_schema(
         assert_maintenance_schema(reupgraded_inspector)
         assert_government_staff_schema(reupgraded_inspector)
         assert_roadmap_schema(reupgraded_inspector)
+        assert_municipal_data_schema(reupgraded_inspector)
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(reupgraded_inspector)
@@ -3235,6 +3284,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_maintenance_schema(inspect(engine))
         assert_government_staff_schema(inspect(engine))
         assert_roadmap_schema(inspect(engine))
+        assert_municipal_data_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))
@@ -3255,6 +3305,9 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert set(ROADMAP_SCHEMA).isdisjoint(
             downgraded_inspector.get_table_names()
         )
+        assert MUNICIPAL_DATA_TABLES.isdisjoint(
+            downgraded_inspector.get_table_names()
+        )
         assert_asset_supporting_constraints_absent(downgraded_inspector)
         assert "assistant_message_attachments" not in (
             downgraded_inspector.get_table_names()
@@ -3271,6 +3324,7 @@ def test_fresh_upgrade_and_asset_inventory_downgrade(
         assert_maintenance_schema(inspect(engine))
         assert_government_staff_schema(inspect(engine))
         assert_roadmap_schema(inspect(engine))
+        assert_municipal_data_schema(inspect(engine))
         assert_maintenance_trigger(engine)
         assert_spatial_extensions(engine)
         assert_reference_geography_schema(inspect(engine))

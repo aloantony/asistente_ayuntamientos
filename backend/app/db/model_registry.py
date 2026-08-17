@@ -10,6 +10,7 @@ MODEL_MODULES = (
     "app.geo.models",
     "app.government.models",
     "app.maintenance.models",
+    "app.municipal_data.models",
     "app.municipalities.models",
     "app.ordinances.models",
     "app.organizations.models",

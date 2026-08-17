@@ -17,6 +17,7 @@ from app.documents.routes import router as documents_router
 from app.geo.routes import router as geo_router
 from app.government.routes import router as government_router
 from app.maintenance.routes import router as maintenance_router
+from app.municipal_data.routes import router as municipal_data_router
 from app.municipalities.routes import router as municipalities_router
 from app.ordinances.routes import router as ordinances_router
 from app.ordinances.seed import ensure_initial_official_legal_sources
@@ -83,6 +84,7 @@ for app_router in (
     government_router,
     staff_router,
     tasks_router,
+    municipal_data_router,
     assistant_router,
     agent_office_router,
     telegram_router,
