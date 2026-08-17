@@ -83,5 +83,5 @@ La distinción central del dominio:
 - Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
 - Los rate limiters (login, cambio de contraseña) son por proceso; al pasar a varios workers deben moverse a Redis (y valorar entonces un límite secundario por cuenta frente a password spraying, ADR-015).
 - El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
-- Sin pipeline de CI; validación local según README §9.
-- Contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost.
+- Los contenedores corren sin privilegios y un despliegue con valores de desarrollo se niega a arrancar (ADR-047), pero siguen con **un único worker** porque los limitadores por proceso lo exigen, y **no traen TLS**: la terminación es responsabilidad del proxy inverso, descrita en `docs/despliegue.md`.
+- Sin copias de seguridad automatizadas de `postgres_data` ni `document_storage`.

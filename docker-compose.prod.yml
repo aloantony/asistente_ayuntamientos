@@ -1,0 +1,36 @@
+# Superposición de producción. Se aplica sobre docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Lo que este fichero NO hace, a propósito: no elige alojamiento, no monta un
+# proxy inverso y no gestiona certificados. Esas decisiones dependen de dónde
+# se despliegue y están descritas en docs/despliegue.md. Aquí solo queda lo
+# que es cierto en cualquier servidor.
+#
+# Sigue con un único worker de uvicorn: los limitadores de peticiones son por
+# proceso (ADR-015) y hasta que estén en Redis, añadir workers los desactiva de
+# hecho.
+
+services:
+  backend:
+    restart: unless-stopped
+    # Sigue escuchando solo en loopback: el proxy inverso vive en el mismo
+    # host y es el único que debe poder alcanzarlo.
+    command:
+      ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
+
+  worker:
+    restart: unless-stopped
+
+  frontend:
+    restart: unless-stopped
+
+  postgres:
+    restart: unless-stopped
+    # Sin publicar puertos: en producción nadie se conecta a la base de datos
+    # desde fuera del host. Para una consulta puntual, `docker compose exec`.
+    ports: []
+
+  redis:
+    restart: unless-stopped
+    ports: []

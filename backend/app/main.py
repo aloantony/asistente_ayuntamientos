@@ -63,7 +63,19 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+# La documentación interactiva describe cada endpoint, cada esquema y cada
+# permiso. Es útil mientras se desarrolla y es un mapa regalado en cuanto la
+# aplicación es alcanzable desde internet, así que se sirve solo en desarrollo.
+_INTERACTIVE_DOCS = settings.is_development_like
+
+app = FastAPI(
+    title=settings.app_name,
+    version=settings.app_version,
+    lifespan=lifespan,
+    docs_url="/docs" if _INTERACTIVE_DOCS else None,
+    redoc_url="/redoc" if _INTERACTIVE_DOCS else None,
+    openapi_url="/openapi.json" if _INTERACTIVE_DOCS else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
