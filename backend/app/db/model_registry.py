@@ -8,6 +8,7 @@ MODEL_MODULES = (
     "app.assets.models",
     "app.documents.models",
     "app.geo.models",
+    "app.government.models",
     "app.maintenance.models",
     "app.municipalities.models",
     "app.ordinances.models",
@@ -16,6 +17,7 @@ MODEL_MODULES = (
     "app.rbac.models",
     "app.requirements.models",
     "app.reference_layers.models",
+    "app.staff.models",
     "app.telegram.models",
     "app.users.models",
 )

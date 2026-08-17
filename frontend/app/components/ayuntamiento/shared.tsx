@@ -8,9 +8,14 @@ import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import styles from "../MunicipalWorkspace.module.css";
 import type {
+  GovernmentLevel,
   MaintenanceOrder,
   Municipality,
   MunicipalAsset,
+  StaffAbsenceType,
+  StaffContractType,
+  StaffScheduleDay,
+  StaffWorkerStatus,
   User,
 } from "../types";
 import type { MunicipalCollection } from "../../lib/municipalWorkspace";
@@ -20,6 +25,8 @@ export const EMPTY_RESOURCE_ERRORS: ResourceErrors = {
   ordinances: "",
   assets: "",
   maintenance: "",
+  government: "",
+  staff: "",
 };
 
 export const MUNICIPALITY_TYPE_LABELS: Record<
@@ -79,6 +86,57 @@ export const MAINTENANCE_PRIORITY_LABELS: Record<
   normal: "Normal",
   high: "Alta",
   urgent: "Urgente",
+};
+
+export const GOVERNMENT_LEVEL_LABELS: Record<GovernmentLevel, string> = {
+  alcaldia: "Alcaldía",
+  tenencia: "Tenencia de alcaldía",
+  concejalia: "Concejalía",
+  secretaria: "Secretaría",
+};
+
+export const STAFF_WORKER_STATUS_LABELS: Record<StaffWorkerStatus, string> = {
+  active: "En activo",
+  vacation: "De vacaciones",
+  leave: "De baja",
+  archived: "Archivado",
+};
+
+export const STAFF_ABSENCE_TYPE_LABELS: Record<StaffAbsenceType, string> = {
+  vacation: "Vacaciones",
+  personal: "Asuntos propios",
+  sick_leave: "Baja médica",
+  other: "Otra ausencia",
+};
+
+export const STAFF_CONTRACT_TYPE_LABELS: Record<StaffContractType, string> = {
+  permanent: "Fijo",
+  temporary: "Temporal",
+  interim: "Interino",
+  external: "Externo",
+  other: "Otro",
+};
+
+// Lunes a domingo: el diseño muestra la semana completa porque alguacil y
+// servicios sí trabajan fin de semana.
+export const STAFF_SCHEDULE_DAYS: { day: StaffScheduleDay; label: string }[] = [
+  { day: "monday", label: "L" },
+  { day: "tuesday", label: "M" },
+  { day: "wednesday", label: "X" },
+  { day: "thursday", label: "J" },
+  { day: "friday", label: "V" },
+  { day: "saturday", label: "S" },
+  { day: "sunday", label: "D" },
+];
+
+export const STAFF_SCHEDULE_DAY_NAMES: Record<StaffScheduleDay, string> = {
+  monday: "lunes",
+  tuesday: "martes",
+  wednesday: "miércoles",
+  thursday: "jueves",
+  friday: "viernes",
+  saturday: "sábado",
+  sunday: "domingo",
 };
 
 export const ORDINANCE_MANAGEMENT_PERMISSIONS = [

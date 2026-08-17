@@ -16,15 +16,23 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { fetchMunicipality } from "../lib/fetchers";
 import {
+  fetchGovernmentMembers,
   fetchMunicipalAssetSummary,
   fetchMunicipalMaintenanceSummary,
   fetchMunicipalOrdinances,
   fetchMunicipalOrganization,
+  fetchStaffPosts,
+  fetchStaffWorkers,
   type MunicipalCollection,
 } from "../lib/municipalWorkspace";
-import { canViewMunicipalHub } from "../lib/permissions";
+import {
+  canViewGovernment as hasGovernmentAccess,
+  canViewMunicipalHub,
+  canViewStaff as hasStaffAccess,
+} from "../lib/permissions";
 import { useSession } from "../lib/session";
 import styles from "./MunicipalWorkspace.module.css";
+import { EstructuraGobierno } from "./ayuntamiento/EstructuraGobierno";
 import { HojaDeRuta } from "./ayuntamiento/HojaDeRuta";
 import { InformacionMunicipio } from "./ayuntamiento/InformacionMunicipio";
 import { Normativa } from "./ayuntamiento/Normativa";
@@ -40,11 +48,14 @@ import {
 import type { ResourceErrors, WorkspaceTab } from "./ayuntamiento/types";
 import {
   userHasPermission,
+  type GovernmentMember,
   type MaintenanceOrder,
   type Municipality,
   type MunicipalAsset,
   type Organization,
   type Ordinance,
+  type StaffPost,
+  type StaffWorker,
   type User,
 } from "./types";
 
@@ -122,6 +133,15 @@ export function MunicipalWorkspace() {
   const [maintenance, setMaintenance] = useState<
     MunicipalCollection<MaintenanceOrder> | null
   >(null);
+  const [government, setGovernment] = useState<
+    MunicipalCollection<GovernmentMember> | null
+  >(null);
+  const [staffWorkers, setStaffWorkers] = useState<
+    MunicipalCollection<StaffWorker> | null
+  >(null);
+  const [staffPosts, setStaffPosts] = useState<
+    MunicipalCollection<StaffPost> | null
+  >(null);
   const [resourceErrors, setResourceErrors] = useState<ResourceErrors>(
     EMPTY_RESOURCE_ERRORS,
   );
@@ -160,6 +180,8 @@ export function MunicipalWorkspace() {
       (userHasPermission(user, "map.view") ||
         userHasPermission(user, "map.manage")),
   );
+  const canViewGovernment = Boolean(user && hasGovernmentAccess(user));
+  const canViewStaff = Boolean(user && hasStaffAccess(user));
   const canManageOrdinances = Boolean(
     user &&
       ORDINANCE_MANAGEMENT_PERMISSIONS.some((permission) =>
@@ -182,6 +204,9 @@ export function MunicipalWorkspace() {
       setOrdinances(null);
       setAssets(null);
       setMaintenance(null);
+      setGovernment(null);
+      setStaffWorkers(null);
+      setStaffPosts(null);
       setError("");
       setResourceErrors(EMPTY_RESOURCE_ERRORS);
       setIsLoading(false);
@@ -198,6 +223,9 @@ export function MunicipalWorkspace() {
     setOrdinances(null);
     setAssets(null);
     setMaintenance(null);
+    setGovernment(null);
+    setStaffWorkers(null);
+    setStaffPosts(null);
     setError("");
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setIsLoading(true);
@@ -209,6 +237,9 @@ export function MunicipalWorkspace() {
         ordinanceResult,
         assetResult,
         maintenanceResult,
+        governmentResult,
+        staffWorkerResult,
+        staffPostResult,
       ] = await Promise.allSettled([
         fetchMunicipality(municipalityId, controller.signal),
         fetchMunicipalOrganization(organizationId, controller.signal),
@@ -220,6 +251,15 @@ export function MunicipalWorkspace() {
           : Promise.resolve(null),
         canViewMaintenance
           ? fetchMunicipalMaintenanceSummary(organizationId, controller.signal)
+          : Promise.resolve(null),
+        canViewGovernment
+          ? fetchGovernmentMembers(organizationId, controller.signal)
+          : Promise.resolve(null),
+        canViewStaff
+          ? fetchStaffWorkers(organizationId, controller.signal)
+          : Promise.resolve(null),
+        canViewStaff
+          ? fetchStaffPosts(organizationId, controller.signal)
           : Promise.resolve(null),
       ] as const);
 
@@ -287,6 +327,44 @@ export function MunicipalWorkspace() {
               maintenance: message,
             })),
           "No se pudo cargar el mantenimiento municipal.",
+        );
+      }
+
+      if (governmentResult.status === "fulfilled") {
+        setGovernment(governmentResult.value);
+      } else {
+        handleRequestError(
+          governmentResult.reason,
+          (message) =>
+            setResourceErrors((current) => ({
+              ...current,
+              government: message,
+            })),
+          "No se pudo cargar la corporación municipal.",
+        );
+      }
+
+      // La plantilla y sus puestos comparten permiso y error: si una falla, la
+      // sección de personal no puede dibujarse con garantías.
+      if (staffWorkerResult.status === "fulfilled") {
+        setStaffWorkers(staffWorkerResult.value);
+      } else {
+        handleRequestError(
+          staffWorkerResult.reason,
+          (message) =>
+            setResourceErrors((current) => ({ ...current, staff: message })),
+          "No se pudo cargar el personal del ayuntamiento.",
+        );
+      }
+
+      if (staffPostResult.status === "fulfilled") {
+        setStaffPosts(staffPostResult.value);
+      } else {
+        handleRequestError(
+          staffPostResult.reason,
+          (message) =>
+            setResourceErrors((current) => ({ ...current, staff: message })),
+          "No se pudo cargar la plantilla municipal.",
         );
       }
     }
@@ -379,6 +457,9 @@ export function MunicipalWorkspace() {
     setOrdinances(null);
     setAssets(null);
     setMaintenance(null);
+    setGovernment(null);
+    setStaffWorkers(null);
+    setStaffPosts(null);
     setResourceErrors(EMPTY_RESOURCE_ERRORS);
     setError("");
     setIsLoading(true);
@@ -502,6 +583,14 @@ export function MunicipalWorkspace() {
             canViewMaintenance={canViewMaintenance}
             canViewOrdinances={canViewOrdinances}
             errors={resourceErrors}
+            governmentSection={
+              <EstructuraGobierno
+                canView={canViewGovernment}
+                error={resourceErrors.government}
+                members={government}
+                onRetry={retryWorkspace}
+              />
+            }
             maintenance={maintenance}
             municipality={municipality}
             onTabChange={(tab) => selectWorkspaceTab(tab, true)}
@@ -529,7 +618,14 @@ export function MunicipalWorkspace() {
             organizationId={selectedContext.organization.id}
           />
         ) : activeTab === "people" ? (
-          <Personal organization={organization} />
+          <Personal
+            canViewStaff={canViewStaff}
+            errors={resourceErrors}
+            onRetry={retryWorkspace}
+            organization={organization}
+            posts={staffPosts}
+            workers={staffWorkers}
+          />
         ) : (
           <HojaDeRuta
             assets={assets}

@@ -21,3 +21,4 @@ postgres_data/
 frontend/tsconfig.tsbuildinfo
 .claude/settings.local.json
 .codex-sessions/
+backend/.venv/

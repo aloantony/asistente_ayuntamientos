@@ -75,17 +75,35 @@ export const TOP_NAV_SECTIONS: TopNavSection[] = [
     href: "/ayuntamiento?tab=people",
     enabled: true,
     items: [
-      // Puestos del municipio de referencia. Se convertirán en enlaces a la
-      // ficha real de cada puesto cuando exista el dominio de personal.
-      { label: "Secretario", href: "/ayuntamiento?tab=people", enabled: false },
-      { label: "Arquitecto", href: "/ayuntamiento?tab=people", enabled: false },
+      // Puestos del municipio de referencia. `?puesto=` abre la ficha del
+      // puesto cuyo rótulo coincide con el slug; si el ayuntamiento no tiene
+      // ese puesto en su plantilla, la pantalla muestra la plantilla completa
+      // en lugar de dejar un enlace roto.
+      {
+        label: "Secretario",
+        href: "/ayuntamiento?tab=people&puesto=secretario",
+        enabled: true,
+      },
+      {
+        label: "Arquitecto",
+        href: "/ayuntamiento?tab=people&puesto=arquitecto",
+        enabled: true,
+      },
       {
         label: "Administrativo",
-        href: "/ayuntamiento?tab=people",
-        enabled: false,
+        href: "/ayuntamiento?tab=people&puesto=administrativo",
+        enabled: true,
       },
-      { label: "Técnico", href: "/ayuntamiento?tab=people", enabled: false },
-      { label: "Alguacil", href: "/ayuntamiento?tab=people", enabled: false },
+      {
+        label: "Técnico",
+        href: "/ayuntamiento?tab=people&puesto=tecnico",
+        enabled: true,
+      },
+      {
+        label: "Alguacil",
+        href: "/ayuntamiento?tab=people&puesto=alguacil",
+        enabled: true,
+      },
     ],
   },
   {

@@ -1672,3 +1672,134 @@ export function userHasPermission(user: User, permissionCode: string) {
     user.is_superuser || (user.permissions ?? []).includes(permissionCode)
   );
 }
+
+// Corporación municipal y plantilla (ADR-035). Los cargos electos y el personal
+// laboral son dominios distintos en el backend y se tipan por separado.
+
+export type GovernmentLevel =
+  | "alcaldia"
+  | "tenencia"
+  | "concejalia"
+  | "secretaria";
+
+export type GovernmentMemberStatus = "active" | "archived";
+
+export type GovernmentMember = {
+  id: number;
+  organization_id: number;
+  level: GovernmentLevel;
+  full_name: string;
+  role_title: string;
+  political_group: string | null;
+  email: string | null;
+  phone: string | null;
+  biography: string | null;
+  term_start_date: string | null;
+  term_end_date: string | null;
+  sort_order: number;
+  status: GovernmentMemberStatus;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffPostKind = "post" | "container";
+
+export type StaffWorkerStatus = "active" | "vacation" | "leave" | "archived";
+
+export type StaffAbsenceType = "vacation" | "personal" | "sick_leave" | "other";
+
+export type StaffReportType = "diary" | "report";
+
+export type StaffContractType =
+  | "permanent"
+  | "temporary"
+  | "interim"
+  | "external"
+  | "other";
+
+export type StaffScheduleDay =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+export type StaffPost = {
+  id: number;
+  organization_id: number;
+  parent_id: number | null;
+  kind: StaffPostKind;
+  label: string;
+  description: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffWorker = {
+  id: number;
+  organization_id: number;
+  post_id: number | null;
+  full_name: string;
+  email: string | null;
+  phone: string | null;
+  description: string | null;
+  status: StaffWorkerStatus;
+  schedule_summary: string | null;
+  schedule_days: StaffScheduleDay[];
+  // Los decimales viajan como cadena para no perder precisión en JSON.
+  weekly_hours: string | null;
+  contract_type: StaffContractType | null;
+  contract_start_date: string | null;
+  contract_end_date: string | null;
+  vacation_days_limit: number | null;
+  personal_days_limit: number | null;
+  bills_invoices: boolean;
+  created_by_id: number | null;
+  updated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+  post: StaffPost | null;
+};
+
+export type StaffAbsence = {
+  id: number;
+  worker_id: number;
+  organization_id: number;
+  absence_type: StaffAbsenceType;
+  start_date: string;
+  end_date: string;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffReport = {
+  id: number;
+  worker_id: number;
+  organization_id: number;
+  report_type: StaffReportType;
+  report_date: string;
+  plan: string | null;
+  closing: string | null;
+  incident: string | null;
+  author_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StaffInvoice = {
+  id: number;
+  worker_id: number;
+  organization_id: number;
+  issued_on: string;
+  concept: string;
+  hours: string | null;
+  amount: string | null;
+  created_at: string;
+  updated_at: string;
+};

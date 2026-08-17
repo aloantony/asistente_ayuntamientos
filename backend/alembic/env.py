@@ -10,6 +10,7 @@ from app.assistant import models as assistant_models  # noqa: F401
 from app.assets import models as asset_models  # noqa: F401
 from app.documents import models as document_models  # noqa: F401
 from app.geo import models as geo_models  # noqa: F401
+from app.government import models as government_models  # noqa: F401
 from app.maintenance import models as maintenance_models  # noqa: F401
 from app.municipalities import models as municipality_models  # noqa: F401
 from app.ordinances import models as ordinance_models  # noqa: F401
@@ -18,6 +19,7 @@ from app.projects import models as project_models  # noqa: F401
 from app.rbac import models as rbac_models  # noqa: F401
 from app.requirements import models as requirement_models  # noqa: F401
 from app.reference_layers import models as reference_layer_models  # noqa: F401
+from app.staff import models as staff_models  # noqa: F401
 from app.telegram import models as telegram_models  # noqa: F401
 from app.users import models as user_models  # noqa: F401
 

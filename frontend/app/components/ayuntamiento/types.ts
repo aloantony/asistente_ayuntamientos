@@ -20,4 +20,6 @@ export type ResourceErrors = {
   ordinances: string;
   assets: string;
   maintenance: string;
+  government: string;
+  staff: string;
 };
