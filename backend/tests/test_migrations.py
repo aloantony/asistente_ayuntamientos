@@ -20,11 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-<<<<<<< HEAD
-HEAD_REVISION = "20260807_0043"
-=======
-HEAD_REVISION = "20260731_0049"
->>>>>>> origin/servidor-main-backup
+HEAD_REVISION = "20260806_0042"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -6022,8 +6018,6 @@ def test_reference_delivery_evidence_migration_is_immutable_and_guarded(
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == HEAD_REVISION
-<<<<<<< HEAD
-=======
     finally:
         engine.dispose()
 
@@ -6896,7 +6890,6 @@ def test_reference_mirror_migration_is_reversible_immutable_and_guarded(
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == HEAD_REVISION
->>>>>>> origin/servidor-main-backup
     finally:
         engine.dispose()
 
