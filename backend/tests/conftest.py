@@ -14,6 +14,10 @@ os.environ["DOCUMENT_STORAGE_ROOT"] = _TEST_DOCUMENT_STORAGE_ROOT
 # Product behavior must not depend on the developer's selected local runtime.
 # Runtime-specific tests override this setting explicitly after app import.
 os.environ["ASSISTANT_RUNTIME"] = "anthropic"
+# The suite has no Redis; the per-process window is equivalent for the
+# single-threaded TestClient. RedisSlidingWindowRateLimiter is covered
+# directly in tests/test_rate_limit.py against a scripted fake.
+os.environ["RATE_LIMIT_BACKEND"] = "memory"
 
 import pytest
 from fastapi.testclient import TestClient
