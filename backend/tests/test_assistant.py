@@ -7936,7 +7936,12 @@ def test_hermes_blocking_timeout_is_classified_as_turn_timeout(monkeypatch):
     def raise_timeout(*args, **kwargs):
         raise TimeoutError("socket deadline")
 
-    monkeypatch.setattr(assistant_gateway.urlrequest, "urlopen", raise_timeout)
+    # El gateway sale por `urlopen_without_redirects` (ADR-036), no por
+    # `urlrequest.urlopen`: parchear el seam viejo dejaba pasar una
+    # conexión real y el fallo llegaba como caída, no como plazo agotado.
+    monkeypatch.setattr(
+        assistant_gateway, "urlopen_without_redirects", raise_timeout
+    )
 
     with pytest.raises(AssistantTimeoutError):
         assistant_gateway.complete_hermes_agent(

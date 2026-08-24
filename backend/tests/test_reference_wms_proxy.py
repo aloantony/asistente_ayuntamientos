@@ -1694,7 +1694,10 @@ def test_invalid_upstream_identify_is_a_generic_bad_gateway(
 
 
 def test_public_contract_has_no_arbitrary_wms_or_url_parameters(client) -> None:
-    schema = client.get("/openapi.json").json()
+    # El esquema se toma de la aplicación, no de `/openapi.json`: esa ruta solo
+    # se publica en desarrollo (ADR-036) y aquí lo que se contrasta es el
+    # contrato, no si se sirve.
+    schema = client.app.openapi()
     relevant = {
         path: item
         for path, item in schema["paths"].items()
