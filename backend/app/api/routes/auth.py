@@ -15,7 +15,12 @@ from app.auth.schemas import (
     Token,
 )
 from app.core.config import settings
-from app.core.rate_limit import change_password_rate_limiter, login_rate_limiter
+from app.core.rate_limit import (
+    RateLimiter,
+    RateLimitUnavailable,
+    change_password_rate_limiter,
+    login_rate_limiter,
+)
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
@@ -32,6 +37,32 @@ from app.users.schemas import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 ACCESS_TOKEN_COOKIE = "access_token"
+
+
+def acquire_rate_limit_slot(limiter: RateLimiter, key: str) -> str | None:
+    try:
+        return limiter.try_acquire(key)
+    except RateLimitUnavailable:
+        # Fail closed: authenticating without a checkable budget would hand
+        # an attacker unlimited attempts. The error carries no Redis URL or
+        # logical key, so an outage cannot leak them to the client.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication temporarily unavailable",
+        ) from None
+
+
+def refund_rate_limit_slot(
+    limiter: RateLimiter,
+    key: str,
+    reservation_id: str,
+) -> None:
+    try:
+        limiter.refund(key, reservation_id)
+    except RateLimitUnavailable:
+        # The guarded check already succeeded; the reservation expires with
+        # the window on its own, so a failed refund must not fail the request.
+        return
 
 
 def set_session_cookie(response: Response, access_token: str) -> None:
@@ -61,7 +92,8 @@ def login(
     # success: only failed attempts end up consuming quota.
     client_host = request.client.host if request.client else "unknown"
     rate_key = f"{client_host}:{str(payload.email).lower()}"
-    if not login_rate_limiter.try_acquire(rate_key):
+    reservation_id = acquire_rate_limit_slot(login_rate_limiter, rate_key)
+    if reservation_id is None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts",
@@ -74,7 +106,7 @@ def login(
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    login_rate_limiter.refund(rate_key)
+    refund_rate_limit_slot(login_rate_limiter, rate_key, reservation_id)
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -110,7 +142,8 @@ def change_password(
     # session; without an attempt limit it would be brute-forceable. The slot
     # is reserved atomically and refunded only when the check passes.
     rate_key = str(current_user.id)
-    if not change_password_rate_limiter.try_acquire(rate_key):
+    reservation_id = acquire_rate_limit_slot(change_password_rate_limiter, rate_key)
+    if reservation_id is None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many password attempts",
@@ -120,7 +153,7 @@ def change_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
         )
-    change_password_rate_limiter.refund(rate_key)
+    refund_rate_limit_slot(change_password_rate_limiter, rate_key, reservation_id)
 
     current_user.hashed_password = hash_password(payload.new_password)
     current_user.password_changed_at = datetime.now(UTC)

@@ -28,7 +28,7 @@ La distinción central del dominio:
 
 ## Control de acceso
 
-- Autenticación: JWT HS256 de acceso (60 min, con `iat`) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia y exige sesión); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id, nunca recortadas; cambio self-service (`POST /auth/change-password`, reemite la cookie) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios); ambos revocan los tokens emitidos antes (`iat` vs `users.password_changed_at`, ADR-015). Rate limiting en memoria por cliente+cuenta en login y cambio de contraseña: solo los intentos fallidos consumen cupo.
+- Autenticación: JWT HS256 de acceso (60 min, con `iat`) entregado en cookie httpOnly SameSite=Lax al navegador (`POST /auth/logout` la limpia y exige sesión); la cabecera Bearer sigue aceptada para API/tests. Contraseñas con Argon2id, nunca recortadas; cambio self-service (`POST /auth/change-password`, reemite la cookie) y reset por administradores (con guarda: solo superusuarios resetean a superusuarios); ambos revocan los tokens emitidos antes (`iat` vs `users.password_changed_at`, ADR-015). Rate limiting distribuido en Redis por cliente+cuenta en login y cambio de contraseña (ventana deslizante en scripts Lua, ADR-048): solo los intentos fallidos consumen cupo, la clave lógica viaja como HMAC y, si Redis no responde, se falla cerrado con 503.
 - Autorización: cadena RBAC usuario → grupo → rol → permiso. Los permisos de un grupo solo cuentan si el usuario es además miembro de la organización del grupo, lo que hace el modelo consciente del tenant.
 - `is_superuser` puentea todos los chequeos. Conceder o retirar superusuario es operación de superusuarios.
 - Operaciones globales reservadas a superusuarios: crear/editar/borrar roles y permisos, asignar permisos a roles, crear organizaciones (tenants).
@@ -81,7 +81,7 @@ La distinción central del dominio:
 ## Carencias conocidas (deuda aceptada conscientemente)
 
 - Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
-- Los rate limiters (login, cambio de contraseña) son por proceso; al pasar a varios workers deben moverse a Redis (y valorar entonces un límite secundario por cuenta frente a password spraying, ADR-015).
+- Los rate limiters de credenciales ya son distribuidos (ADR-048), pero la clave sigue siendo cliente+cuenta: falta un límite secundario por cuenta frente a password spraying desde muchas IP (ADR-015). Los topes del proxy WMS siguen siendo por proceso, a propósito.
 - El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
-- Los contenedores corren sin privilegios y un despliegue con valores de desarrollo se niega a arrancar (ADR-047), pero siguen con **un único worker** porque los limitadores por proceso lo exigen, y **no traen TLS**: la terminación es responsabilidad del proxy inverso, descrita en `docs/despliegue.md`.
+- Los contenedores corren sin privilegios y un despliegue con valores de desarrollo se niega a arrancar (ADR-047), pero siguen con **un único worker** por prudencia —ADR-048 ya quitó el impedimento de los limitadores de credenciales— y **no traen TLS**: la terminación es responsabilidad del proxy inverso, descrita en `docs/despliegue.md`.
 - Sin copias de seguridad automatizadas de `postgres_data` ni `document_storage`.

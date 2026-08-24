@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
-from app.core.rate_limit import SlidingWindowRateLimiter
+from app.core.rate_limit import InMemorySlidingWindowRateLimiter
 from app.db.session import get_db
 from app.reference_layers.access import require_catalog_view
 from app.reference_layers.models import (
@@ -62,9 +62,11 @@ TILE_STALE_SECONDS = 24 * 60 * 60
 LEGEND_FRESH_SECONDS = 24 * 60 * 60
 LEGEND_STALE_SECONDS = 7 * 24 * 60 * 60
 
-_tile_rate_limiter = SlidingWindowRateLimiter(240, 60)
-_legend_rate_limiter = SlidingWindowRateLimiter(60, 60)
-_identify_rate_limiter = SlidingWindowRateLimiter(60, 60)
+_tile_rate_limiter = InMemorySlidingWindowRateLimiter(240, 60, namespace="wms-tile")
+_legend_rate_limiter = InMemorySlidingWindowRateLimiter(60, 60, namespace="wms-legend")
+_identify_rate_limiter = InMemorySlidingWindowRateLimiter(
+    60, 60, namespace="wms-identify"
+)
 
 
 @dataclass(frozen=True)
@@ -452,11 +454,13 @@ def _etag_matches(value: str | None, etag: str) -> bool:
 
 
 def _require_rate_limit(
-    limiter: SlidingWindowRateLimiter,
+    limiter: InMemorySlidingWindowRateLimiter,
     operation: str,
     user_id: int,
 ) -> None:
-    if limiter.try_acquire(f"{operation}:{user_id}"):
+    # try_acquire() now returns a reservation id (or None); these throttles
+    # never refund, so only the truthiness matters.
+    if limiter.try_acquire(f"{operation}:{user_id}") is not None:
         return
     raise HTTPException(
         status_code=429,

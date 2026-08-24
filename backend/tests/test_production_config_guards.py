@@ -33,6 +33,21 @@ def build(**overrides) -> Settings:
     return Settings(**{**PRODUCTION_BASE, **overrides})
 
 
+def test_an_in_memory_rate_limiter_is_rejected_in_production() -> None:
+    # Una ventana por proceso multiplica el presupuesto de login por el numero
+    # de workers, y es justo el despliegue que escala el que deja de notarlo.
+    with pytest.raises(ValueError) as error:
+        build(rate_limit_backend="memory")
+
+    assert "RATE_LIMIT_BACKEND" in str(error.value)
+
+
+def test_the_default_rate_limiter_backend_is_the_shared_one() -> None:
+    # El valor por defecto debe ser el seguro: olvidarse de la variable no
+    # puede dejar el limite en memoria.
+    assert build().rate_limit_backend == "redis"
+
+
 def test_a_correctly_configured_production_starts() -> None:
     settings = build()
 

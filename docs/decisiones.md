@@ -790,3 +790,53 @@ Los contenedores dejan de correr como root. Mantienen **un solo worker** de
 uvicorn: los limitadores de peticiones siguen siendo por proceso (ADR-015) y
 añadir workers los desactivaría de hecho. `docs/despliegue.md` recoge el
 procedimiento completo y lo que sigue abierto.
+
+## ADR-048: El presupuesto de intentos de login vive en Redis (2026-08-18)
+
+Hasta ahora `app/core/rate_limit.py` guardaba la ventana deslizante en un `dict`
+de proceso. Con un único worker de uvicorn eso bastaba, y ADR-010 lo dejó dicho
+por escrito: había que llevarlo a Redis **antes** de escalar. Publicar en web es
+exactamente ese momento. Un limitador por proceso no es que proteja menos: es que
+multiplica el presupuesto por el número de workers, y quien prueba contraseñas no
+elige a qué worker le toca. Diez intentos por minuto con cuatro workers son
+cuarenta.
+
+La ventana se implementa como un **sorted set con dos scripts Lua**. `ZADD` de la
+reserva, `ZREMRANGEBYSCORE` de lo que ya salió de la ventana y `PEXPIRE` para que
+la clave no sobreviva a su propio periodo. Va en Lua y no en un `MULTI` porque el
+límite hay que **leerlo y escribirlo en el mismo paso**: entre un `ZCARD` y su
+`ZADD` caben todos los intentos que el atacante quiera meter en paralelo. El
+tiempo lo pone `TIME` de Redis, no el proceso, para que los relojes de los
+workers no abran hueco.
+
+**La reserva se identifica.** `try_acquire()` deja de devolver un booleano y
+devuelve el identificador de la reserva; `refund()` exige ese identificador y
+borra esa entrada concreta. Antes se devolvía «la más nueva», que con varios
+workers compitiendo podía ser la de otro: un login acertado le regalaba el hueco
+al que estaba fallando al lado.
+
+**La clave lógica no viaja a Redis.** El correo y la IP entran en un HMAC-SHA256
+con `SECRET_KEY` y lo que se almacena es el digest bajo `RATE_LIMIT_KEY_PREFIX`.
+Quien tenga lectura del Redis compartido ve cuántos intentos hay, no de quién.
+
+**Se falla cerrado.** Si Redis no responde, `try_acquire()` levanta
+`RateLimitUnavailable` y el login contesta 503, no 200: autenticar sin poder
+comprobar el presupuesto es conceder intentos ilimitados justo cuando peor viene.
+El error no lleva la URL de Redis ni la clave lógica, que es lo que arrastraría la
+excepción original de la librería. El reembolso es la excepción a la regla: si
+falla, la contraseña ya se verificó bien y la reserva caduca sola con la ventana,
+así que no se tumba una sesión legítima por un parpadeo de Redis.
+
+`RATE_LIMIT_BACKEND=memory` sigue existiendo para desarrollo y para la suite de
+tests, que no levanta Redis. Fuera de development/test el arranque lo rechaza,
+por la misma lógica de ADR-047: un valor de desarrollo que sobrevive al
+despliegue no es un modo degradado, es un límite que no existe.
+
+Esto **levanta la restricción que ADR-047 daba por vigente**: los limitadores de
+credenciales ya no impiden añadir workers. Los tres topes de
+`reference_layers/wms_routes.py` se quedan en memoria a propósito y con varios
+workers pasarían a contar por worker; son topes de cortesía por usuario sobre un
+upstream ya cacheado, no un presupuesto de credenciales, y no compensa pagarles
+un viaje a Redis por tesela.
+
+No hay dependencia nueva: `redis==5.2.1` ya estaba en `requirements.txt`.

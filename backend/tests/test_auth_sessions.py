@@ -1,4 +1,8 @@
 from conftest import headers_for
+from redis.exceptions import ConnectionError as RedisConnectionError
+
+from app.api.routes import auth as auth_routes
+from app.core.rate_limit import RateLimitUnavailable
 
 
 def test_login_sets_httponly_cookie_usable_for_session(client, make_user):
@@ -95,6 +99,35 @@ def test_login_rate_limit_returns_429(client, make_user):
     )
     assert blocked.status_code == 429
     assert blocked.json()["detail"] == "Too many login attempts"
+
+
+def test_login_fails_closed_when_shared_rate_limiter_is_unavailable(
+    client,
+    monkeypatch,
+):
+    class UnavailableRateLimiter:
+        def try_acquire(self, _key: str) -> str | None:
+            raise RateLimitUnavailable from RedisConnectionError(
+                "redis://user:secret@private.example"
+            )
+
+        def refund(self, _key: str, _reservation_id: str) -> None:
+            raise AssertionError("refund must not run without an acquired slot")
+
+        def reset(self) -> None:
+            pass
+
+    monkeypatch.setattr(auth_routes, "login_rate_limiter", UnavailableRateLimiter())
+
+    response = client.post(
+        "/auth/login",
+        json={"email": "private@example.com", "password": "never-logged"},
+    )
+
+    # 503, not 401/200: without a checkable budget the attempt is refused
+    # outright, and the body must not carry the Redis URL from the cause.
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Authentication temporarily unavailable"}
 
 
 def test_admin_can_reset_member_password(
