@@ -27,8 +27,16 @@ vi.mock("next/link", () => ({
 
 vi.mock("next/navigation", () => {
   const searchParams = new URLSearchParams();
+  // La vista del mapa vive en la URL, así que el panel lee también la ruta y
+  // el router para reescribirla sin recargar.
   return {
     useSearchParams: () => searchParams,
+    usePathname: () => "/mapa",
+    useRouter: () => ({
+      replace: () => {},
+      push: () => {},
+      refresh: () => {},
+    }),
   };
 });
 
