@@ -31,6 +31,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: git diff --check "${BASE_SHA}...${GITHUB_SHA}"
 
+      # Los contratos de Compose de `scripts/tests` resuelven el fichero de
+      # desarrollo, y su servicio `backend` declara `env_file: .env`. El job de
+      # GeoWebCache hace lo mismo por la misma razón.
+      - name: Provide the development env file
+        run: cp .env.example .env
+
       - name: Test Codex session coordination helper
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
