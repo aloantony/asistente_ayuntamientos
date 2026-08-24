@@ -29,7 +29,9 @@ from app.reference_layers import models as reference_layer_models  # noqa: F401
 from app.sede import models as sede_models  # noqa: F401
 from app.staff import models as staff_models  # noqa: F401
 from app.tasks import models as task_models  # noqa: F401
+from app.security import models as security_models  # noqa: F401
 from app.telegram import models as telegram_models  # noqa: F401
+from app.town_hall import models as town_hall_models  # noqa: F401
 from app.users import models as user_models  # noqa: F401
 
 config = context.config

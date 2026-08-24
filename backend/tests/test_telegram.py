@@ -95,6 +95,20 @@ def test_telegram_webhook_rejects_invalid_secret(client, monkeypatch):
     assert response.json()["detail"] == "Invalid Telegram webhook secret"
 
 
+def test_telegram_webhook_fails_closed_without_a_secret(client, monkeypatch):
+    """Sin secreto la verificación se saltaba entera y quedaba abierta (ADR-036)."""
+    monkeypatch.setattr(settings, "telegram_enabled", True)
+    monkeypatch.setattr(settings, "telegram_webhook_secret", None)
+
+    response = client.post(
+        "/telegram/webhook",
+        json={"message": {"chat": {"id": 1}, "text": "/start"}},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Telegram webhook secret is not configured"
+
+
 def test_telegram_webhook_transcribes_voice_message_for_linked_user(
     client,
     db,

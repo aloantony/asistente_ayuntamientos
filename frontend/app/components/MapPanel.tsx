@@ -19,16 +19,22 @@ import {
   fetchMunicipalAssets,
 } from "../lib/geo";
 import {
+  applyLocalBaseMapSelection,
   buildReferenceLayerTree,
   buildSiurMapLayers,
   fetchReferenceCatalog,
   fetchReferenceIdentify,
+  listLocalBaseMapLayers,
+  parseStoredMapBaseLayerPreference,
   reconcileSiurPreferences,
+  resolveLocalBaseMapLayerId,
+  serializeMapBaseLayerPreference,
   type ReferenceCatalog,
   type ReferenceIdentifyFeature,
   type SiurIdentifyPoint,
   type SiurLayerControl,
   type SiurMapPreferences,
+  type StoredMapBaseLayerPreference,
 } from "../lib/referenceLayers";
 import { useSession } from "../lib/session";
 import { AssetMaintenancePanel } from "./AssetMaintenancePanel";
@@ -36,11 +42,8 @@ import {
   MunicipalityMapDirectory,
   type MunicipalityMapFocus,
 } from "./MunicipalityMapDirectory";
-import {
-  MunicipalMap,
-  type MapBaseLayer,
-  type MapBounds,
-} from "./MunicipalMap";
+import { LocalBaseMapSelect } from "./LocalBaseMapSelect";
+import { MunicipalMap, type MapBounds } from "./MunicipalMap";
 import { SiurLayerTree } from "./SiurLayerTree";
 import type {
   AssetStatus,
@@ -108,6 +111,7 @@ type LayeredGeoMapItem = GeoMapItem & {
 
 const MAP_PREFERENCES_KEY = "municipal-map-preferences-v1";
 const SIUR_PREFERENCES_PREFIX = "siur-map-preferences-v1";
+const SIUR_CATALOG_REFRESH_INTERVAL_MS = 15_000;
 const MUNICIPAL_CAPITAL_ZOOM = 14;
 const MAP_LAYER_COLORS: Record<GeoEntityType, string> = {
   requirement: "#c0603a",
@@ -477,7 +481,8 @@ function MapPanelContent({ user }: MapPanelProps) {
   const [visibleStatuses, setVisibleStatuses] = useState<
     Record<string, boolean>
   >({});
-  const [baseLayer, setBaseLayer] = useState<MapBaseLayer>("street");
+  const [baseLayerPreference, setBaseLayerPreference] =
+    useState<StoredMapBaseLayerPreference>(undefined);
   const [fitRequest, setFitRequest] = useState(0);
   const [locateRequest, setLocateRequest] = useState(0);
   const [areaSelectionEnabled, setAreaSelectionEnabled] = useState(false);
@@ -489,6 +494,10 @@ function MapPanelContent({ user }: MapPanelProps) {
   const [siurPreferences, setSiurPreferences] =
     useState<SiurMapPreferences | null>(null);
   const [siurCatalogError, setSiurCatalogError] = useState("");
+  const [siurRenderError, setSiurRenderError] = useState<{
+    layerId: number;
+    message: string;
+  } | null>(null);
   const [isLoadingSiurCatalog, setIsLoadingSiurCatalog] = useState(false);
   const [siurIdentify, setSiurIdentify] = useState<SiurIdentifyState | null>(
     null,
@@ -520,6 +529,7 @@ function MapPanelContent({ user }: MapPanelProps) {
   const assetRequestSequenceRef = useRef(0);
   const mapAbortControllerRef = useRef<AbortController | null>(null);
   const siurCatalogAbortControllerRef = useRef<AbortController | null>(null);
+  const siurCatalogRefreshRef = useRef<(() => void) | null>(null);
   const siurIdentifyAbortControllerRef = useRef<AbortController | null>(null);
   const assetAbortControllerRef = useRef<AbortController | null>(null);
   const assetSearchRef = useRef<HTMLInputElement | null>(null);
@@ -704,68 +714,110 @@ function MapPanelContent({ user }: MapPanelProps) {
       setSiurCatalog(null);
       setSiurPreferences(null);
       setSiurCatalogError("");
+      setSiurRenderError(null);
       setIsLoadingSiurCatalog(false);
       return;
     }
 
-    const controller = new AbortController();
-    siurCatalogAbortControllerRef.current = controller;
+    let disposed = false;
+    let hasLoadedCatalog = false;
+    let requestInFlight = false;
     setSiurCatalog(null);
     setSiurPreferences(null);
     setSiurCatalogError("");
+    setSiurRenderError(null);
     setIsLoadingSiurCatalog(true);
 
-    fetchReferenceCatalog(
-      siurOrganizationId,
-      getStoredToken(),
-      controller.signal,
-    )
-      .then((catalog) => {
-        if (controller.signal.aborted) {
+    const readStoredPreferences = () => {
+      let storedPreferences: Partial<SiurMapPreferences> | null = null;
+      try {
+        const serialized = window.localStorage.getItem(
+          siurPreferencesKey(siurOrganizationId),
+        );
+        storedPreferences = serialized
+          ? (JSON.parse(serialized) as Partial<SiurMapPreferences>)
+          : null;
+      } catch {
+        // A valid catalog must remain usable when browser storage is denied.
+        storedPreferences = null;
+      }
+      return storedPreferences;
+    };
+
+    const refreshCatalog = async () => {
+      if (disposed || requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
+      const controller = new AbortController();
+      siurCatalogAbortControllerRef.current?.abort();
+      siurCatalogAbortControllerRef.current = controller;
+      try {
+        const catalog = await fetchReferenceCatalog(
+          siurOrganizationId,
+          getStoredToken(),
+          controller.signal,
+        );
+        if (disposed || controller.signal.aborted) {
           return;
-        }
-        let storedPreferences: Partial<SiurMapPreferences> | null = null;
-        try {
-          const serialized = window.localStorage.getItem(
-            siurPreferencesKey(siurOrganizationId),
-          );
-          storedPreferences = serialized
-            ? (JSON.parse(serialized) as Partial<SiurMapPreferences>)
-            : null;
-        } catch {
-          // A valid catalog must remain usable when browser storage is denied.
-          storedPreferences = null;
         }
         setSiurCatalog(catalog);
-        setSiurPreferences(
-          reconcileSiurPreferences(catalog, storedPreferences),
+        setSiurPreferences((current) =>
+          reconcileSiurPreferences(
+            catalog,
+            current ?? readStoredPreferences(),
+          ),
         );
-      })
-      .catch((error) => {
-        if (controller.signal.aborted || isAbortError(error)) {
+        setSiurCatalogError("");
+        hasLoadedCatalog = true;
+      } catch (error) {
+        if (disposed || controller.signal.aborted || isAbortError(error)) {
           return;
         }
-        setSiurCatalog(null);
-        setSiurPreferences(null);
+        if (!hasLoadedCatalog) {
+          setSiurCatalog(null);
+          setSiurPreferences(null);
+        }
         handleRequestErrorRef.current(
           error,
           setSiurCatalogError,
-          "No se pudo cargar la cartografía SIUR.",
+          hasLoadedCatalog
+            ? "No se pudo actualizar la cartografía SIUR; se mantiene la versión cargada."
+            : "No se pudo cargar la cartografía SIUR.",
         );
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
+      } finally {
+        requestInFlight = false;
+        if (!disposed) {
           setIsLoadingSiurCatalog(false);
         }
-      });
+      }
+    };
+
+    const requestRefresh = () => {
+      void refreshCatalog();
+    };
+    siurCatalogRefreshRef.current = requestRefresh;
+    requestRefresh();
+    const refreshTimer = window.setInterval(
+      requestRefresh,
+      SIUR_CATALOG_REFRESH_INTERVAL_MS,
+    );
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        requestRefresh();
+      }
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
 
     return () => {
-      controller.abort();
+      disposed = true;
+      window.clearInterval(refreshTimer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      siurCatalogAbortControllerRef.current?.abort();
+      siurCatalogRefreshRef.current = null;
       siurIdentifyAbortControllerRef.current?.abort();
       siurIdentifyAbortControllerRef.current = null;
-      if (siurCatalogAbortControllerRef.current === controller) {
-        siurCatalogAbortControllerRef.current = null;
-      }
+      siurCatalogAbortControllerRef.current = null;
     };
   }, [canViewMap, getStoredToken, siurOrganizationId]);
 
@@ -852,6 +904,20 @@ function MapPanelContent({ user }: MapPanelProps) {
         : [],
     [siurCatalog, siurPreferences],
   );
+  const localBaseMapLayers = useMemo(
+    () => listLocalBaseMapLayers(siurMapLayers),
+    [siurMapLayers],
+  );
+  const localBaseMapLayerIds = useMemo(
+    () => new Set(localBaseMapLayers.map((layer) => layer.layerId)),
+    [localBaseMapLayers],
+  );
+  const baseLayerId = useMemo(
+    () =>
+      resolveLocalBaseMapLayerId(siurMapLayers, baseLayerPreference),
+    [baseLayerPreference, siurMapLayers],
+  );
+  const baseLayerResolved = siurCatalog !== null && siurPreferences !== null;
 
   const availableStatuses = useMemo(
     () =>
@@ -928,7 +994,8 @@ function MapPanelContent({ user }: MapPanelProps) {
           layerPanelOpen?: boolean;
           stateLayerEnabled?: boolean;
           visibleStatuses?: Record<string, boolean>;
-          baseLayer?: MapBaseLayer;
+          baseLayerId?: unknown;
+          baseLayer?: unknown;
         };
         if (preferences.visibleLayerKeys) {
           setVisibleLayerKeys(preferences.visibleLayerKeys);
@@ -945,12 +1012,9 @@ function MapPanelContent({ user }: MapPanelProps) {
         if (preferences.visibleStatuses) {
           setVisibleStatuses(preferences.visibleStatuses);
         }
-        if (
-          preferences.baseLayer === "street" ||
-          preferences.baseLayer === "topographic"
-        ) {
-          setBaseLayer(preferences.baseLayer);
-        }
+        setBaseLayerPreference(
+          parseStoredMapBaseLayerPreference(preferences),
+        );
       }
     } catch {
       window.localStorage.removeItem(MAP_PREFERENCES_KEY);
@@ -979,6 +1043,12 @@ function MapPanelContent({ user }: MapPanelProps) {
       return;
     }
     try {
+      const serializedBaseLayerPreference =
+        serializeMapBaseLayerPreference(
+          baseLayerPreference,
+          baseLayerId,
+          baseLayerResolved,
+        );
       window.localStorage.setItem(
         MAP_PREFERENCES_KEY,
         JSON.stringify({
@@ -987,14 +1057,16 @@ function MapPanelContent({ user }: MapPanelProps) {
           layerPanelOpen,
           stateLayerEnabled,
           visibleStatuses,
-          baseLayer,
+          ...serializedBaseLayerPreference,
         }),
       );
     } catch {
       // Preferences are optional when browser storage is unavailable.
     }
   }, [
-    baseLayer,
+    baseLayerId,
+    baseLayerPreference,
+    baseLayerResolved,
     layerOrder,
     layerPanelOpen,
     preferencesReady,
@@ -1002,6 +1074,20 @@ function MapPanelContent({ user }: MapPanelProps) {
     visibleLayerKeys,
     visibleStatuses,
   ]);
+
+  useEffect(() => {
+    if (!baseLayerResolved) {
+      return;
+    }
+    setBaseLayerPreference((current) =>
+      current === baseLayerId ? current : baseLayerId,
+    );
+    setSiurPreferences((current) =>
+      current
+        ? applyLocalBaseMapSelection(siurMapLayers, current, baseLayerId)
+        : current,
+    );
+  }, [baseLayerId, baseLayerResolved, siurMapLayers]);
 
   useEffect(() => {
     if (!siurPreferences || siurOrganizationId === null) {
@@ -1156,11 +1242,22 @@ function MapPanelContent({ user }: MapPanelProps) {
 
   const handleSiurControlChange = useCallback(
     (layerId: number, control: SiurLayerControl) => {
+      const isBaseLayer = localBaseMapLayerIds.has(layerId);
+      const selectedBaseLayerId = isBaseLayer
+        ? control.visible
+          ? layerId
+          : baseLayerId === layerId
+            ? null
+            : baseLayerId
+        : baseLayerId;
+      if (isBaseLayer) {
+        setBaseLayerPreference(selectedBaseLayerId);
+      }
       setSiurPreferences((current) => {
         if (!current || !current.layers[String(layerId)]) {
           return current;
         }
-        return {
+        const nextPreferences = {
           ...current,
           layers: {
             ...current.layers,
@@ -1170,9 +1267,32 @@ function MapPanelContent({ user }: MapPanelProps) {
             },
           },
         };
+        return isBaseLayer
+          ? applyLocalBaseMapSelection(
+              siurMapLayers,
+              nextPreferences,
+              selectedBaseLayerId,
+            )
+          : nextPreferences;
       });
     },
-    [],
+    [
+      baseLayerId,
+      localBaseMapLayerIds,
+      siurMapLayers,
+    ],
+  );
+
+  const handleBaseMapSelect = useCallback(
+    (layerId: number | null) => {
+      setBaseLayerPreference(layerId);
+      setSiurPreferences((current) =>
+        current
+          ? applyLocalBaseMapSelection(siurMapLayers, current, layerId)
+          : current,
+      );
+    },
+    [siurMapLayers],
   );
 
   const handleSiurMove = useCallback(
@@ -1256,6 +1376,23 @@ function MapPanelContent({ user }: MapPanelProps) {
     },
     [getStoredToken],
   );
+
+  const handleSiurTileError = useCallback(
+    (layerId: number, layerTitle: string) => {
+      setSiurRenderError({
+        layerId,
+        message: `No se pudo renderizar «${layerTitle}». Se está comprobando su versión local.`,
+      });
+      siurCatalogRefreshRef.current?.();
+    },
+    [],
+  );
+
+  const handleSiurTileLoad = useCallback((layerId: number) => {
+    setSiurRenderError((current) =>
+      current?.layerId === layerId ? null : current,
+    );
+  }, []);
 
   const handleSelectItem = useCallback((item: GeoMapItem) => {
     siurIdentifyAbortControllerRef.current?.abort();
@@ -1906,18 +2043,11 @@ function MapPanelContent({ user }: MapPanelProps) {
             </div>
           ) : null}
         </div>
-        <label className="map-base-layer-control">
-          Mapa base
-          <select
-            onChange={(event) =>
-              setBaseLayer(event.target.value as MapBaseLayer)
-            }
-            value={baseLayer}
-          >
-            <option value="street">Calles</option>
-            <option value="topographic">Topográfico</option>
-          </select>
-        </label>
+        <LocalBaseMapSelect
+          layers={siurMapLayers}
+          onSelect={handleBaseMapSelect}
+          selectedLayerId={baseLayerId}
+        />
         <label className="checkbox-row map-archive-filter">
           <input
             checked={includeArchived}
@@ -2064,7 +2194,7 @@ function MapPanelContent({ user }: MapPanelProps) {
               })}
               <SiurLayerTree
                 catalog={siurCatalog}
-                error={siurCatalogError}
+                error={siurRenderError?.message ?? siurCatalogError}
                 isLoading={isLoadingSiurCatalog}
                 onControlChange={handleSiurControlChange}
                 onMove={handleSiurMove}
@@ -2130,7 +2260,7 @@ function MapPanelContent({ user }: MapPanelProps) {
           <MunicipalMap
             areaBounds={areaBounds}
             areaSelectionEnabled={areaSelectionEnabled}
-            baseLayer={baseLayer}
+            baseLayerId={baseLayerId}
             fitRequest={fitRequest}
             focusLocation={
               manualFocusLocation ??
@@ -2146,6 +2276,8 @@ function MapPanelContent({ user }: MapPanelProps) {
             onMapContextMenu={handleMapContextMenu}
             onSelectItem={handleSelectItem}
             onSiurIdentify={handleSiurIdentify}
+            onSiurTileError={handleSiurTileError}
+            onSiurTileLoad={handleSiurTileLoad}
             selectedItemId={selectedItem ? getItemKey(selectedItem) : null}
             siurLayers={siurMapLayers}
           />

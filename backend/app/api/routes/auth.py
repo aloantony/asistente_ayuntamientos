@@ -15,13 +15,31 @@ from app.auth.schemas import (
     Token,
 )
 from app.core.config import settings
-from app.core.rate_limit import change_password_rate_limiter, login_rate_limiter
+from app.core.rate_limit import (
+    bootstrap_admin_rate_limiter,
+    change_password_rate_limiter,
+    login_ip_rate_limiter,
+    login_rate_limiter,
+    require_rate_limit_slot,
+)
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.organizations.access import get_accessible_organizations_query
 from app.organizations.models import Organization
 from app.rbac.permissions import get_user_permission_codes
 from app.users.crud import count_users, create_user, get_user_by_email
+from app.security.events import (
+    BOOTSTRAP_ADMIN_CREATED,
+    BOOTSTRAP_ADMIN_REJECTED,
+    LOGIN_BLOCKED,
+    LOGIN_FAILED,
+    LOGIN_INACTIVE,
+    LOGIN_SUCCEEDED,
+    LOGOUT,
+    PASSWORD_CHANGE_FAILED,
+    PASSWORD_CHANGED,
+    record_security_event,
+)
 from app.users.models import User
 from app.users.schemas import (
     SidebarShortcutsRead,
@@ -62,6 +80,32 @@ def login(
     client_host = request.client.host if request.client else "unknown"
     rate_key = f"{client_host}:{str(payload.email).lower()}"
     if not login_rate_limiter.try_acquire(rate_key):
+        record_security_event(
+            db,
+            event_type=LOGIN_BLOCKED,
+            outcome="blocked",
+            request=request,
+            actor_label=str(payload.email),
+            detail="per-account rate limit",
+            commit=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts",
+        )
+    # Segundo cupo, solo por IP: la clave anterior incluye la cuenta, así que
+    # por sí sola no frena el rociado de una contraseña contra muchas cuentas.
+    if not login_ip_rate_limiter.try_acquire(client_host):
+        login_rate_limiter.refund(rate_key)
+        record_security_event(
+            db,
+            event_type=LOGIN_BLOCKED,
+            outcome="blocked",
+            request=request,
+            actor_label=str(payload.email),
+            detail="per-IP rate limit",
+            commit=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts",
@@ -69,18 +113,45 @@ def login(
 
     user = get_user_by_email(db, str(payload.email))
     if user is None or not verify_password(payload.password, user.hashed_password):
+        record_security_event(
+            db,
+            event_type=LOGIN_FAILED,
+            outcome="failure",
+            request=request,
+            user_id=user.id if user is not None else None,
+            actor_label=str(payload.email),
+            commit=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
     login_rate_limiter.refund(rate_key)
+    login_ip_rate_limiter.refund(client_host)
     if not user.is_active:
+        record_security_event(
+            db,
+            event_type=LOGIN_INACTIVE,
+            outcome="failure",
+            request=request,
+            user_id=user.id,
+            actor_label=str(payload.email),
+            commit=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Inactive user",
         )
 
+    record_security_event(
+        db,
+        event_type=LOGIN_SUCCEEDED,
+        request=request,
+        user_id=user.id,
+        actor_label=str(payload.email),
+        commit=True,
+    )
     access_token = create_access_token(subject=str(user.id))
     # httpOnly session cookie for the browser; the token is also returned in
     # the body for API clients and tests using Authorization: Bearer.
@@ -90,11 +161,21 @@ def login(
 
 @router.post("/logout", response_model=DetailResponse)
 def logout(
+    request: Request,
     response: Response,
-    _current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> DetailResponse:
     # Requiring a session prevents a cross-site form from logging the victim
     # out (the deleting Set-Cookie would apply in a first-party context).
+    record_security_event(
+        db,
+        event_type=LOGOUT,
+        request=request,
+        user_id=current_user.id,
+        actor_label=current_user.email,
+        commit=True,
+    )
     response.delete_cookie(ACCESS_TOKEN_COOKIE, path="/")
     return DetailResponse(detail="Logged out")
 
@@ -102,6 +183,7 @@ def logout(
 @router.post("/change-password", response_model=DetailResponse)
 def change_password(
     payload: ChangePasswordRequest,
+    request: Request,
     response: Response,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
@@ -116,6 +198,15 @@ def change_password(
             detail="Too many password attempts",
         )
     if not verify_password(payload.current_password, current_user.hashed_password):
+        record_security_event(
+            db,
+            event_type=PASSWORD_CHANGE_FAILED,
+            outcome="failure",
+            request=request,
+            user_id=current_user.id,
+            actor_label=current_user.email,
+            commit=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
@@ -124,6 +215,13 @@ def change_password(
 
     current_user.hashed_password = hash_password(payload.new_password)
     current_user.password_changed_at = datetime.now(UTC)
+    record_security_event(
+        db,
+        event_type=PASSWORD_CHANGED,
+        request=request,
+        user_id=current_user.id,
+        actor_label=current_user.email,
+    )
     db.commit()
     # Previously issued tokens are now revoked; refresh the cookie so the
     # user's own session stays alive.
@@ -180,12 +278,21 @@ def reset_sidebar_shortcuts(
 )
 def bootstrap_admin(
     payload: BootstrapAdminRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     bootstrap_token: Annotated[
         str | None,
         Header(alias="X-Bootstrap-Admin-Token"),
     ] = None,
 ) -> User:
+    # Ruta anónima: sin límite quedaba margen para adivinar el token contra una
+    # base recién creada, que es cuando concede superusuario (ADR-036).
+    client_host = request.client.host if request.client else "unknown"
+    require_rate_limit_slot(
+        bootstrap_admin_rate_limiter,
+        client_host,
+        detail="Too many bootstrap attempts",
+    )
     if not settings.bootstrap_admin_token:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -195,6 +302,15 @@ def bootstrap_admin(
         bootstrap_token or "",
         settings.bootstrap_admin_token,
     ):
+        record_security_event(
+            db,
+            event_type=BOOTSTRAP_ADMIN_REJECTED,
+            outcome="failure",
+            request=request,
+            actor_label=str(payload.email),
+            detail="invalid bootstrap token",
+            commit=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid bootstrap admin token",
@@ -206,7 +322,7 @@ def bootstrap_admin(
         )
 
     try:
-        return create_user(
+        created = create_user(
             db,
             email=str(payload.email),
             password=payload.password,
@@ -220,3 +336,16 @@ def bootstrap_admin(
             status_code=status.HTTP_409_CONFLICT,
             detail="User already exists",
         ) from None
+
+    # El primer superusuario del sistema: el evento más sensible que existe.
+    record_security_event(
+        db,
+        event_type=BOOTSTRAP_ADMIN_CREATED,
+        request=request,
+        user_id=created.id,
+        actor_label=created.email,
+        target_type="user",
+        target_id=created.id,
+        commit=True,
+    )
+    return created

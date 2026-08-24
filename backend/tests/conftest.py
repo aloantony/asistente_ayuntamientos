@@ -22,7 +22,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import Session
 
-from app.core.rate_limit import change_password_rate_limiter, login_rate_limiter
+from app.core.rate_limit import reset_all_rate_limiters
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.session import get_db
@@ -145,8 +145,9 @@ def db(engine: Engine) -> Generator[Session, None, None]:
 
 @pytest.fixture(autouse=True)
 def reset_rate_limiters() -> Generator[None, None, None]:
-    login_rate_limiter.reset()
-    change_password_rate_limiter.reset()
+    # Se reinician todos por registro: enumerarlos aquí uno a uno se
+    # desincronizaba en cuanto se añadía un limitador nuevo.
+    reset_all_rate_limiters()
     yield
 
 

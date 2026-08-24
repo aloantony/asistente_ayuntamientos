@@ -10,7 +10,11 @@ Asistente Ayuntamientos: FastAPI + Next.js platform for municipal management (do
 
 - `backend/`: FastAPI, SQLAlchemy 2, Alembic, PostgreSQL 17 (psycopg 3), JWT auth + RBAC. Deps pinned exactly in `backend/requirements.txt`.
 - `frontend/`: Next.js 15 App Router, React 19, TypeScript strict. Multi-route app (ADR-014): `(auth)/login` plus an `(app)` route group whose sidebar shell (`app/(app)/layout.tsx`) gates nav items with the same permission predicates as the routes — `/asistente`, `/requisitos`, `/proyectos`, `/cuenta`, `/admin/*`. Session state and the 401 funnel live in `SessionProvider` (`app/lib/session.tsx`, mounted in the root layout); the route guard is client-side. Each route mounts only its own controller — admin is split into per-domain hooks under `app/lib/admin/`, cross-domain lists go through `app/lib/fetchers.ts` — and selection/filters/page state live in the URL (deep links and back button must keep working). API access goes through helpers in `app/lib/api.ts` (native fetch, `credentials: "include"`), except login (`app/(auth)/login/page.tsx`), logout (`app/lib/session.tsx`) and the document download (`app/lib/useProjectsController.ts`), which call fetch directly. Browser auth is an httpOnly SameSite=Lax cookie: frontend and backend must share the same host — localhost in dev (ADR-010).
+<<<<<<< HEAD
 - Orchestration: Docker Compose — backend on 127.0.0.1:8000, frontend on 127.0.0.1:3000, postgres and redis internal. Redis backs job scheduling (`app/core/jobs.py`) and read-through caches (`app/weather/service.py`, `app/reference_layers/wms_cache.py`), each degrading gracefully when it is unavailable. The backend intentionally runs a single uvicorn worker: the login rate limiter (`app/core/rate_limit.py`) is still in-memory per-process and must move to Redis before going multi-worker (ADR-010).
+=======
+- Orchestration: Docker Compose — backend on 127.0.0.1:8000, frontend on 127.0.0.1:3000, postgres and redis internal. Redis backs a real RQ queue (`app/core/jobs.py`): ordinance imports and agent-office tasks enqueue jobs and the `worker` service consumes them. The backend intentionally runs a single uvicorn worker: the login rate limiter (`app/core/rate_limit.py`) is in-memory per-process and must move to Redis before going multi-worker (ADR-010).
+>>>>>>> origin/servidor-main-backup
 
 ## Commands
 
@@ -23,7 +27,7 @@ Backend tests (require the postgres compose service; run inside Docker against a
 
 ```bash
 docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
-  sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q"
+  sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q -o cache_dir=/tmp/pytest_cache"
 ```
 
 The runtime backend image intentionally excludes `pytest`; install
@@ -44,12 +48,48 @@ docker compose exec backend alembic current
 git diff --check
 ```
 
+<<<<<<< HEAD
 CI runs on every pull request (`.github/workflows/ci.yml`): a Backend job, a Frontend job and a `CI gate` that the `main` ruleset requires before merging, with branches kept up to date. The frontend has a linter (`npm --prefix frontend run lint`) and a type checker (`npm --prefix frontend run typecheck`); the backend has neither. Pre-handoff validation remains useful locally, but CI is the gate. Match the existing code style and do not introduce new tooling without recording an ADR.
+=======
+CI runs on GitHub Actions (`.github/workflows/ci.yml`: whitespace gate, backend migrations + pytest, frontend typecheck/lint/build), but no linter, formatter or type checker is configured for the backend; pre-handoff validation — always including the test suite — is the substitute. Match the existing code style and do not introduce new tooling without recording an ADR.
+
+## Production deployment
+
+Production runs from `docker-compose.prod.yml` (a separate file, not an override:
+the dev file uses `network_mode: host`). Runbook in `docs/despliegue.md`, decisions
+in ADR-035/032/033, data-protection posture in `docs/proteccion-datos.md`.
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+```
+
+- One hostname: frontend at `/`, API under `/api`. Forced by the `SameSite=Lax`
+  cookie with no `Domain` (ADR-010) and by `/admin/roles` colliding between backend
+  routes and frontend pages. Caddy strips the `/api` prefix; the backend runs with
+  `--root-path /api`.
+- `NEXT_PUBLIC_API_BASE_URL` is baked at build time — changing domain means
+  rebuilding the frontend image.
+- The backend refuses to boot in production with the placeholder `SECRET_KEY`,
+  non-https CORS origins or `ALLOWED_HOSTS=*`. `environment` must be exactly one of
+  `development|test|staging|production`, unnormalized, because ADR-024's Codex gate
+  compares the literal string.
+- Containers run non-root (uid 10001). A pre-existing `document_storage` volume
+  needs a one-time `chown`; never delete the volume.
+- `security_events` is append-only, immutable via a Postgres trigger covering
+  UPDATE and DELETE. Only the retention purge (`ops/purge_security_events.sh`)
+  disables it, explicitly and inside a transaction.
+- Rate limiters are still in-memory per process, so production stays on a single
+  uvicorn worker (ADR-010/015). Moving to several workers requires Redis first.
+- Never commit `.env` or `.env.production`.
+>>>>>>> origin/servidor-main-backup
 
 ## Hard rules
 
 - Never commit or edit `.env`. `.env.example` is the documented template.
 - Never delete the `postgres_data` or `document_storage` volumes by any means (`docker compose down -v`/`--volumes`, `docker volume rm`, `prune`, ...); they are persistent user data.
+- **This machine also hosts the public production stack** (Compose project `anacleto`, deployed from a separate clone in `/opt/anacleto`) alongside development. Two rules follow, and they are not optional:
+  - **Never run `docker system prune -a --volumes` or `docker volume prune`.** To reclaim disk use `docker builder prune` (the build cache is what actually grows). Prune only deletes volumes no container references, so production data is safe *while its containers exist* — which is exactly why the next rule matters.
+  - **Never `down` the production stack; use `stop`/`start`.** `down` removes the containers, leaving `anacleto_postgres_data` and `anacleto_document_storage` unreferenced and therefore eligible for the next prune.
 - Keep services bound to localhost; never expose PostgreSQL or Redis.
 - External AI calls and private agent runtime calls go through the Privacy/AI Gateway (`backend/app/assistant/gateway.py`); voice STT/TTS egresses only through `backend/app/assistant/speech.py` (ADR-021), and controlled public web queries only through `backend/app/assistant/web_search.py` (ADR-022). No other module may call those services. Only conversation text, approved institutional memory and user-typed structured fields may be sent to the LLM; web search may send only the explicit normalized public query and must never fall back to another provider. Never send original documents or stored municipal files. Log metadata only (runtime, model, stop reason, token counts), never conversation, query or result content. Keep LLM runtime-specific code inside `gateway.py`; runtime selection comes from `ASSISTANT_RUNTIME` (ADR-013, ADR-016, ADR-023).
 - Voice capture and playback stay in the browser, but STT/TTS cloud egress happens only through `backend/app/assistant/speech.py`; when the configured runtime is disabled or unavailable the voice UI stays unavailable — never fall back to browser cloud speech recognition or `speechSynthesis` (ADR-021).

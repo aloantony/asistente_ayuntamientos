@@ -104,7 +104,15 @@ async def telegram_webhook(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram is not enabled",
         )
-    if settings.telegram_webhook_secret and not secrets.compare_digest(
+    # Falla cerrado: sin secreto configurado el webhook queda inservible en vez
+    # de aceptar cualquier actualización de Internet. Detrás de esta ruta hay
+    # vinculación de cuentas y turnos de LLM de pago. Ver ADR-036.
+    if not settings.telegram_webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram webhook secret is not configured",
+        )
+    if not secrets.compare_digest(
         secret_token or "",
         settings.telegram_webhook_secret,
     ):

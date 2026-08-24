@@ -1,0 +1,19 @@
+[Unit]
+# Copia diaria de la base de datos y los documentos, más la purga de la traza
+# de seguridad por retención. Ver ADR-033.
+Description=Copia de seguridad de Anacleto
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Ajusta la ruta si el despliegue no está en /opt/anacleto.
+WorkingDirectory=/opt/anacleto
+ExecStart=/opt/anacleto/ops/backup.sh
+ExecStartPost=/opt/anacleto/ops/purge_security_events.sh
+# Necesita root para escribir en /var/backups y para hablar con el socket de
+# Docker; el resto del endurecimiento se deja al propio contenedor.
+User=root
+# La salida va al journal: journalctl -u anacleto-backup.service
+StandardOutput=journal
+StandardError=journal

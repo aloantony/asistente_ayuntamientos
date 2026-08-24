@@ -1,36 +1,223 @@
-# Superposición de producción. Se aplica sobre docker-compose.yml:
+# Stack de producción. Ver ADR-031 y ADR-032.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Se usa con -f explícito, no como override, porque el fichero de desarrollo usa
+# `network_mode: host` y eso no se puede retirar limpiamente en una capa de
+# merge. El flujo de desarrollo de README/CLAUDE.md sigue igual:
 #
-# Lo que este fichero NO hace, a propósito: no elige alojamiento, no monta un
-# proxy inverso y no gestiona certificados. Esas decisiones dependen de dónde
-# se despliegue y están descritas en docs/despliegue.md. Aquí solo queda lo
-# que es cierto en cualquier servidor.
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+#   docker compose --env-file .env.production -f docker-compose.prod.yml exec backend alembic upgrade head
 #
-# Sigue con un único worker de uvicorn: los limitadores de peticiones son por
-# proceso (ADR-015) y hasta que estén en Redis, añadir workers los desactiva de
-# hecho.
+# Diferencias con el de desarrollo, todas deliberadas:
+#   - Sin network_mode: host. Dos redes; `data` sin salida a Internet.
+#   - Postgres y Redis no publican ningún puerto: solo Caddy publica 80/443.
+#   - restart: unless-stopped en todo (con docker.service habilitado esto ya
+#     cubre el reinicio del servidor; no hace falta unidad systemd).
+#   - Contenedores sin privilegios, raíz de solo lectura y capacidades retiradas.
+#   - Postgres fijado por digest, el mismo que usa CI.
+
+name: anacleto
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
-  backend:
+  caddy:
+    image: caddy:2.10-alpine
     restart: unless-stopped
-    # Sigue escuchando solo en loopback: el proxy inverso vive en el mismo
-    # host y es el único que debe poder alcanzarlo.
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?define PUBLIC_HOSTNAME}
+      APEX_HOSTNAME: ${APEX_HOSTNAME:?define APEX_HOSTNAME}
+      ACME_EMAIL: ${ACME_EMAIL:?define ACME_EMAIL}
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Los certificados viven aquí: perder este volumen obliga a reemitirlos y
+      # Let's Encrypt tiene cupos semanales.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge:
+        # IP fija para que el backend pueda confiar en sus X-Forwarded-For sin
+        # abrir la puerta con "*".
+        ipv4_address: 172.28.0.10
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    # --proxy-headers con --forwarded-allow-ips fijado a la IP estática de Caddy:
+    # sin ello el limitador de login metería a todos los clientes en el mismo
+    # cubo, y con "*" cualquiera podría falsear X-Forwarded-For y esquivarlo.
+    # --root-path /api acompaña al handle_path del Caddyfile, que quita el
+    # prefijo antes de reenviar.
     command:
-      ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "172.28.0.10"
+      - --root-path
+      - /api
+    volumes:
+      - document_storage:/var/lib/asistente_ayuntamientos/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - edge
+      - data
+    read_only: true
+    # Starlette vuelca el multipart completo a disco antes de que corra el
+    # handler, así que /tmp tiene que existir y ser escribible.
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    cpus: 1.5
+    logging: *default-logging
 
   worker:
+    build:
+      context: ./backend
     restart: unless-stopped
+    env_file:
+      - .env.production
+    command: ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
+    volumes:
+      - document_storage:/var/lib/asistente_ayuntamientos/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - data
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    logging: *default-logging
 
   frontend:
+    build:
+      context: ./frontend
+      args:
+        # Se hornea en el bundle del navegador. Cambiar de dominio obliga a
+        # reconstruir esta imagen (ADR-031).
+        NEXT_PUBLIC_API_BASE_URL: https://${PUBLIC_HOSTNAME:?define PUBLIC_HOSTNAME}/api
     restart: unless-stopped
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /app/.next/cache:size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    logging: *default-logging
 
   postgres:
+    # Fijado por digest, el mismo que CI: un tag flotante puede cambiar de
+    # versión mayor menor bajo los pies entre dos despliegues.
+    image: pgvector/pgvector:0.8.0-pg17@sha256:40b404964359299eefdd5f8518facf1886c562848cf4de13b6eaf91cb70c2b87
     restart: unless-stopped
-    # Sin publicar puertos: en producción nadie se conecta a la base de datos
-    # desde fuera del host. Para una consulta puntual, `docker compose exec`.
-    ports: []
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD}
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    logging: *default-logging
 
   redis:
+    image: redis:7-alpine
     restart: unless-stopped
-    ports: []
+    # Con persistencia: al contrario de lo que decía CLAUDE.md, Redis ya tiene
+    # consumidores reales (app/core/jobs.py; encolan las importaciones de
+    # ordenanzas y las tareas de la oficina de agentes). Perder Redis es perder
+    # trabajos en vuelo. noeviction para que no se descarten trabajos en carga.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 384m
+    logging: *default-logging
+
+networks:
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        # Subred fija para poder declarar la IP de Caddy en
+        # --forwarded-allow-ips del backend.
+        - subnet: 172.28.0.0/24
+  data:
+    driver: bridge
+    # Sin salida a Internet: Postgres y Redis no tienen nada que buscar fuera.
+    internal: true
+
+volumes:
+  postgres_data:
+  document_storage:
+  redis_data:
+  caddy_data:
+  caddy_config:

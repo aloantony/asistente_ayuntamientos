@@ -1,0 +1,1278 @@
+{
+  "capture": {
+    "audit_sha256": "86f9d379d0c775473bf7bea53dfa59f9b400b73474b6822b0d5ec6d469b4e275",
+    "bundle_resource": "evidence/idecyl_exact/records-20260727.xml",
+    "bundle_sha256": "9e7eb47a169eb22303267378cd762357abe0c97137267e37e6e80c4f720e07d5",
+    "captured_at": "2026-07-27T01:55:14",
+    "curated_layer_count": 31,
+    "curated_record_count": 30,
+    "official_catalog_url": "https://idecyl.jcyl.es/geonetwork/srv/spa/csw?service=CSW&request=GetCapabilities&version=2.0.2",
+    "source_record_count": 197,
+    "source_snapshot_sha256": "ed7b6ea8256313aa1977e6cad89bd0694d752bf519a55705d5c562ecf5180a56"
+  },
+  "records": [
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcylbasentnucdispob",
+      "record_raw_sha256": "be724ff8e4057152331454fe3d950c8cec1b31fbbc88abb7892b1447d9557e2c",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Entidades de población: Poblaciones CyL",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcylbasentnuceatelm",
+      "record_raw_sha256": "ebb24fcbb15825364f8a9f928305584cb478502a5a715f0cdc22da5c49e2b6a0",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Entidades de población CyL: entidades locales menores",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León",
+        "Instituto Geográfico Nacional / BDLJE"
+      ],
+      "attribution_statements": [
+        "BDLJE CC-BY 4.0 Instituto Geográfico Nacional https://www.ign.es/",
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcylbasuadlimautesp",
+      "record_raw_sha256": "92455e9321ea4e3ed57cb46952fb446756662932a67c797391b07e092782e037",
+      "terms_urls": [
+        "https://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf",
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Autonomías de España",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León",
+        "Instituto Geográfico Nacional / BDLJE"
+      ],
+      "attribution_statements": [
+        "BDLJE CC-BY 4.0 Instituto Geográfico Nacional https://www.ign.es/",
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcylbasuadlimproesp",
+      "record_raw_sha256": "8407cfb082da6175972bf36a2df486c7e28655cac50d979c70d1adbf0af195d8",
+      "terms_urls": [
+        "https://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf",
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Provincias de España",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León",
+        "Instituto Geográfico Nacional / BDLJE"
+      ],
+      "attribution_statements": [
+        "BDLJE CC-BY 4.0 Instituto Geográfico Nacional https://www.ign.es/",
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcylbasuadlinmuncyl",
+      "record_raw_sha256": "8eed4b0039ca8ca9ebd0f93f858e0d5aa31a10231165e56bd95f5b3796bd4dd3",
+      "terms_urls": [
+        "https://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf",
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Lineas-límite municipales de CyL",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Instituto Geográfico Nacional / BDLJE"
+      ],
+      "attribution_statements": [
+        "CC BY 4.0 ign.es http://www.scne.es/productos.html#MDT"
+      ],
+      "fid": "SPAGOBCYLCITDTSHYCAL",
+      "record_raw_sha256": "03df404626749e64ced5946efb038145aea62da876d919de6fb349f4219abaf6",
+      "terms_urls": [
+        "http://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf"
+      ],
+      "title": "Hidrografía CyL: cursos fluviales",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLCITDTSMRCMC",
+      "record_raw_sha256": "40cb54fc65946bd026146a773ccfe485717f3c365ed0957cb2d32098c4d8f975",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Catastro Minero CyL: cuadrícula",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLCITDTSTNRCV",
+      "record_raw_sha256": "b52f744b5c8f2e2a1bd6bd3c7558194f7559434a92d03e48fb74bdf102875233",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Carreteras CyL: red viaria",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\"."
+      ],
+      "fid": "SPAGOBCYLMNADTSAMMCR",
+      "record_raw_sha256": "e10f8f6c0050ce5cca38cf7e0de976acfcc21d2ab75fb588c30147daaea61b5d",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Montes CyL: montes contratados",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLMNADTSAMMPA",
+      "record_raw_sha256": "f74f7fff1774a750fdb911667f034b7938fb64aaefc96c8f9014f6f03f93f39b",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Montes CyL: montes propiedad CA CyL",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLMNADTSAMPZC",
+      "record_raw_sha256": "f91a66b0b56c6a4426e706fa58a8b160d618f19949a100456d7a52e79da92d22",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Pesca CyL: tramos pesca cangrejo",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLMNADTSAMVPE",
+      "record_raw_sha256": "960b6ccd8cbb97a9495728fe80acf42674a1f1e09c519198ff00dfb6fa441323",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Vías pecuarias CyL: ejes",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLMNADTSPSACE",
+      "record_raw_sha256": "e3ebba5378eb37671f40302788c3dcb6f4843a2a468fad3720312b3cb979f67f",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Fauna CyL: áreas críticas de especies protegidas",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLMNADTSPSZEC",
+      "record_raw_sha256": "ba0c686a1bea71cb4760a869135d93ab4ca082cccf0dc9dbe55957ab1d8d7f32",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Red Natura 2000: ZEC CyL",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "SPAGOBCYLMNADTSPSZHC",
+      "record_raw_sha256": "34b991df7c0652b77e49f71a09bf1405a02ef344c6ccf89a8c738458ae368d7e",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Catálogo de Zonas Húmedas de Interés Especial",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcylsoscoanitagusub",
+      "record_raw_sha256": "64bef65731a89209af3bd8a6c25160426527b8b1397a286dfca29f2b2798dd73",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Contaminación agraria CyL: nitratos aguas subterráneas",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemagrspac22rec",
+      "record_raw_sha256": "45113c5907d6a7efafd00b478227216355a2c6d5dd894d990e384128aee52b45",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "SIGPAC CyL 2022: recintos",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemagrspac24rec",
+      "record_raw_sha256": "1f60500b58eb6ea14907d74717d2da108892f8f9bcb67016574032b1ac3826cc",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "SIGPAC CyL 2024: recintos",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemecla26punobv",
+      "record_raw_sha256": "2ece3767a3982a3ab3ecd0704d6175f4a870e5f25bc9c4f9e748f8af79718038",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Eclipse 2026: puntos recomendados",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemenerensenacr",
+      "record_raw_sha256": "0651f42b05f0a618886b148b06e0962e850a06a1bd82c87f701bdf8677ce618c",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Renovables CyL: zonas sensibles actv críticas",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemenerensenafl",
+      "record_raw_sha256": "8f5cb80d7c8550f3d14c5525094c49a90275674f1e8f4c8e93d3c0323f76f758",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Renovables CyL: zonas sensibles flora",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemgesforrodale",
+      "record_raw_sha256": "419b931b2e545b9393b5a1651b8ac7ddc5343eb0542182c3ee859512b6b61051",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Gestión forestal CyL: rodal de ordenación",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemhabvegesprn2",
+      "record_raw_sha256": "8684cb522941565f9b0ea6f391ce14a9de0421dde5db2a32a477906cfbc9a2d9",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Vegetacion CyL en Red Natura 2000",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemoteapsmigurb",
+      "record_raw_sha256": "a7ed2539101c818644396a3f6319dcac21f2ef942707f6ab160352a3d4e2053a",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Ordenación territorial CyL: mancomunidades interés general",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemotereginsamb",
+      "record_raw_sha256": "d835bfde47c9068aecb391fee5b2bc899c9a7a50a50c00747ce8656633582660",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Ordenación territorial CyL: instrumentos",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemplamunsecdes",
+      "record_raw_sha256": "05e8bce8b745be28767a86eb03344406913c04f25dd827edf3b0b5b8f9db81db",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Planeamiento urbanístico CyL: suelo desclasificado",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltempobinehab2015",
+      "record_raw_sha256": "1a81bab82e28d2b43f302270e3a12cf18033a4ab83cca82cbae8e753a5728a72",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Población CyL: habitantes 2015",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltempobinehab2024",
+      "record_raw_sha256": "face28cecdc6bea940ee83fc57bbf248432ac3fdd6a6ec04804748198f677141",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Población CyL: habitantes 2024",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemtlccobmovcar",
+      "record_raw_sha256": "200b764090aa2a481b862ae3f074df80da5198a0ff9a3a0d93f2a34dc3547569",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Telefonía móvil CyL: cobertura carreteras 2025",
+      "use_constraint_codes": [
+        "license"
+      ]
+    },
+    {
+      "access_constraint_codes": [
+        "otherRestrictions"
+      ],
+      "attribution_labels": [
+        "Junta de Castilla y León"
+      ],
+      "attribution_statements": [
+        "Sin validez jurídica, carácter informativo. Uso libre y gratuito. Cita obligada a la propiedad de la fuente: \"Junta de Castilla y León\". Condiciones detalladas en:"
+      ],
+      "fid": "spagobcyltemzonecla26nor",
+      "record_raw_sha256": "a453e5df98a0f64754f3d77e07c7e61f5af4e1f26264cbaf9c6fcd616a0bbb8f",
+      "terms_urls": [
+        "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_"
+      ],
+      "title": "Eclipse 2026: zonas no recomendadas",
+      "use_constraint_codes": [
+        "license"
+      ]
+    }
+  ],
+  "schema": "siur-idecyl-exact-evidence-manifest/v1",
+  "sources": [
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 39,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "telefonia_movil_cyl_cobertura_carreteras",
+        "url": "https://opendata.jcyl.es/ficheros/carto/comunicaciones/telecom/telefonia_movil_cyl_cobertura_carreteras_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/telecom/wms",
+      "catalog_layer_source_key": "layer:siur:f34d56365774d1024d2177e62358751dbb7f604b7584481aad56e1e8f06f5f0b",
+      "catalog_remote_name": "telefonia_movil_cyl_cobertura_carreteras",
+      "metadata_fid": "spagobcyltemtlccobmovcar",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemtlccobmovcar/formatters/xml",
+      "profile": "idecyl-exact-telefonia_movil_cyl_cobertura_carreteras-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/telecom/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "telefonia_movil_cyl_cobertura_carreteras",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 65,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "eclipse_2026_puntos_recomendados",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/espaciosnaturales/eclipse_2026_puntos_recomendados_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wms",
+      "catalog_layer_source_key": "layer:siur:b74272c0ad12156ef2bb66dd45312e725129b5ffcd2232272ec2e421639f7f33",
+      "catalog_remote_name": "eclipse_2026_puntos_recomendados",
+      "metadata_fid": "spagobcyltemecla26punobv",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemecla26punobv/formatters/xml",
+      "profile": "idecyl-exact-eclipse_2026_puntos_recomendados-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "eclipse_2026_puntos_recomendados",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 66,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "eclipse_2026_zonas_no_recomendadas",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/espaciosnaturales/eclipse_2026_zonas_no_recomendadas_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wms",
+      "catalog_layer_source_key": "layer:siur:852921134bb055a0d9824bcaa2e85453b5b00c8488a7c30869ea6cd2c4fe9f2b",
+      "catalog_remote_name": "eclipse_2026_zonas_no_recomendadas",
+      "metadata_fid": "spagobcyltemzonecla26nor",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemzonecla26nor/formatters/xml",
+      "profile": "idecyl-exact-eclipse_2026_zonas_no_recomendadas-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "eclipse_2026_zonas_no_recomendadas",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 78,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "znie_cyl_vvpp_ejes",
+        "url": "https://idecyl.jcyl.es/geoserver/montes/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wms",
+      "catalog_layer_source_key": "layer:siur:0bf65314c3077347c97bba8853f2814d167080d085e55e0eb4928aa543688a98",
+      "catalog_remote_name": "znie_cyl_vvpp_ejes",
+      "metadata_fid": "SPAGOBCYLMNADTSAMVPE",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSAMVPE/formatters/xml",
+      "profile": "idecyl-exact-znie_cyl_vvpp_ejes-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "znie_cyl_vvpp_ejes",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 84,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "carr_cyl_red_vias",
+        "url": "https://idecyl.jcyl.es/geoserver/viascomunicacion/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/viascomunicacion/wms",
+      "catalog_layer_source_key": "layer:siur:5dc36981faa4b70b8976b2cc9401389dd3a6b1614d8b0de692d6e4aaf4ce4e28",
+      "catalog_remote_name": "carr_cyl_red_vias",
+      "metadata_fid": "SPAGOBCYLCITDTSTNRCV",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLCITDTSTNRCV/formatters/xml",
+      "profile": "idecyl-exact-carr_cyl_red_vias-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/viascomunicacion/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "carr_cyl_red_vias",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 86,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "cami_cyl_cuadricula",
+        "url": "https://opendata.jcyl.es/ficheros/carto/industria/mineria/cami_cyl_cuadricula_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/mineria/wms",
+      "catalog_layer_source_key": "layer:siur:7c51e023e8eb888f7d969ebf5cc42257f15c098823e34cd0deec85adfecd92df",
+      "catalog_remote_name": "cami_cyl_cuadricula",
+      "metadata_fid": "SPAGOBCYLCITDTSMRCMC",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLCITDTSMRCMC/formatters/xml",
+      "profile": "idecyl-exact-cami_cyl_cuadricula-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/mineria/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "cami_cyl_cuadricula",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 98,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "ot_cyl_instrumentos_ambito",
+        "url": "https://opendata.jcyl.es/ficheros/carto/urbanismo/ot_cyl_instrumentos_ambito_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+      "catalog_layer_source_key": "layer:siur:aec88c4161007515eceb1788ebf341d6c6260d4442700d683987e2a1fedf07bb",
+      "catalog_remote_name": "ot_cyl_instrumentos_ambito",
+      "metadata_fid": "spagobcyltemotereginsamb",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemotereginsamb/formatters/xml",
+      "profile": "idecyl-exact-ot_cyl_instrumentos_ambito-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/urbanismo/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "ot_cyl_instrumentos_ambito",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 105,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "ZIP vector dataset",
+        "kind": "download_archive",
+        "remote_layer_key": "hidro_cyl_cursos",
+        "url": "https://opendata.jcyl.es/ficheros/carto/a1t08_hidrografia/hy%2Ehidro_cyl_cursos.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/hidrografia/wms",
+      "catalog_layer_source_key": "layer:siur:fba63ec08e8bd31f23aa83a42526666c829ec4ae146a6ec7445feaf5cfea6832",
+      "catalog_remote_name": "hidro_cyl_cursos",
+      "metadata_fid": "SPAGOBCYLCITDTSHYCAL",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLCITDTSHYCAL/formatters/xml",
+      "profile": "idecyl-exact-hidro_cyl_cursos-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/hidrografia/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "hidro_cyl_cursos",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 118,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "pesca_cyl_cangrejo_v",
+        "url": "https://idecyl.jcyl.es/geoserver/pesca/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/pesca/wms",
+      "catalog_layer_source_key": "layer:siur:27a35c09ab9b50f1ae5a799cde0564aab07fa4919ce3a479fe834f79b5115c0b",
+      "catalog_remote_name": "pesca_cyl_cangrejo_v",
+      "metadata_fid": "SPAGOBCYLMNADTSAMPZC",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSAMPZC/formatters/xml",
+      "profile": "idecyl-exact-pesca_cyl_cangrejo_v-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/pesca/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "pesca_cyl_cangrejo_v",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 123,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "Official SIGPAC directory",
+        "kind": "directory_download",
+        "remote_layer_key": "spac_recinto_24",
+        "url": "http://ftp.itacyl.es/cartografia/05_SIGPAC/2024_ETRS89/"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/agricultura/wms",
+      "catalog_layer_source_key": "layer:siur:43ed2a49fa78cdd0bc59801328e3b53ee479e9a798aa7396c3d2fe1a71cd23d6",
+      "catalog_remote_name": "spac_recinto_24",
+      "metadata_fid": "spagobcyltemagrspac24rec",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemagrspac24rec/formatters/xml",
+      "profile": "idecyl-exact-spac_recinto_24-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/agricultura/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "spac_recinto_24",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 137,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "en_cyl_rednatura2000_zec_vw",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/espaciosnaturales/en_cyl_rednatura2000_zec_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wms",
+      "catalog_layer_source_key": "layer:siur:e30ddf631b307b3ff8b40a6f24efcc43685c9da8f24bbdd3dffeb12bcefb9192",
+      "catalog_remote_name": "en_cyl_rednatura2000_zec_vw",
+      "metadata_fid": "SPAGOBCYLMNADTSPSZEC",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSPSZEC/formatters/xml",
+      "profile": "idecyl-exact-en_cyl_rednatura2000_zec_vw-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "en_cyl_rednatura2000_zec_vw",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 142,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "montes_cyl_propiedad_cyl_vw",
+        "url": "https://idecyl.jcyl.es/geoserver/montes/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wms",
+      "catalog_layer_source_key": "layer:siur:05d220c187e3fe8670ab629a5ebf80ffbbf579e103138df17a16ad8ef38ee9bf",
+      "catalog_remote_name": "montes_cyl_propiedad_cyl_vw",
+      "metadata_fid": "SPAGOBCYLMNADTSAMMPA",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSAMMPA/formatters/xml",
+      "profile": "idecyl-exact-montes_cyl_propiedad_cyl_vw-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "montes_cyl_propiedad_cyl_vw",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 151,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "ot_cyl_mancomunidades_interes_general",
+        "url": "https://opendata.jcyl.es/ficheros/carto/urbanismo/ot_cyl_mancomunidades_interes_general_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+      "catalog_layer_source_key": "layer:siur:74dd4a1c03c4cc4aad05e2d989e6adb91197a1d1772a77a1657b57f82c2c1053",
+      "catalog_remote_name": "ot_cyl_mancomunidades_interes_general",
+      "metadata_fid": "spagobcyltemoteapsmigurb",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemoteapsmigurb/formatters/xml",
+      "profile": "idecyl-exact-ot_cyl_mancomunidades_interes_general-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/urbanismo/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "ot_cyl_mancomunidades_interes_general",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 161,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "energia_cyl_renov_zonas_sens_amb_flora",
+        "url": "https://idecyl.jcyl.es/geoserver/energia/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/energia/wms",
+      "catalog_layer_source_key": "layer:siur:26e1645243983c5ffbc7a4ce4e0e1f4ea6bb046340aba35eaae02af8208c7e88",
+      "catalog_remote_name": "energia_cyl_renov_zonas_sens_amb_flora",
+      "metadata_fid": "spagobcyltemenerensenafl",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemenerensenafl/formatters/xml",
+      "profile": "idecyl-exact-energia_cyl_renov_zonas_sens_amb_flora-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/energia/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "energia_cyl_renov_zonas_sens_amb_flora",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 166,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "Official SIGPAC directory",
+        "kind": "directory_download",
+        "remote_layer_key": "spac_recinto_22",
+        "url": "http://ftp.itacyl.es/cartografia/05_SIGPAC/2022_ETRS89/"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/agricultura/wms",
+      "catalog_layer_source_key": "layer:siur:b551dbbbb4b11e49f639e783e28b3150efdb7f6ade22eac8df62f28df7b92c79",
+      "catalog_remote_name": "spac_recinto_22",
+      "metadata_fid": "spagobcyltemagrspac22rec",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemagrspac22rec/formatters/xml",
+      "profile": "idecyl-exact-spac_recinto_22-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/agricultura/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "spac_recinto_22",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 171,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "montes_cyl_contratados_jcyl_vw",
+        "url": "https://idecyl.jcyl.es/geoserver/montes/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wms",
+      "catalog_layer_source_key": "layer:siur:dfa5a6fb4f19b5adc264b1e85a1596b1f81191ce9a1648a71920fb3e168aecad",
+      "catalog_remote_name": "montes_cyl_contratados_jcyl_vw",
+      "metadata_fid": "SPAGOBCYLMNADTSAMMCR",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSAMMCR/formatters/xml",
+      "profile": "idecyl-exact-montes_cyl_contratados_jcyl_vw-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "montes_cyl_contratados_jcyl_vw",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 194,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "energia_cyl_renov_zonas_sens_actv_crit",
+        "url": "https://idecyl.jcyl.es/geoserver/energia/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/energia/wms",
+      "catalog_layer_source_key": "layer:siur:afa057415cdc98f3192feda0d782aa92a2700f657167b6508483321c1b8556b6",
+      "catalog_remote_name": "energia_cyl_renov_zonas_sens_actv_crit",
+      "metadata_fid": "spagobcyltemenerensenacr",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemenerensenacr/formatters/xml",
+      "profile": "idecyl-exact-energia_cyl_renov_zonas_sens_actv_crit-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/energia/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "energia_cyl_renov_zonas_sens_actv_crit",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 197,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "plau_cyl_sectores_desclasif",
+        "url": "https://opendata.jcyl.es/ficheros/carto/urbanismo/plau_cyl_sectores_desclasif_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+      "catalog_layer_source_key": "layer:siur:6b76ee4ae40a54e171b16abd1c063632f61afef369cd84912b50ded60ad86f48",
+      "catalog_remote_name": "plau_cyl_sectores_desclasif",
+      "metadata_fid": "spagobcyltemplamunsecdes",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemplamunsecdes/formatters/xml",
+      "profile": "idecyl-exact-plau_cyl_sectores_desclasif-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/urbanismo/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "plau_cyl_sectores_desclasif",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 213,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "en_cyl_znie_zhie_vw",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/espaciosnaturales/en_cyl_znie_zhie_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wms",
+      "catalog_layer_source_key": "layer:siur:20baaacf749e226c047132ab57d4de94ced31a4e418fea100b77e3d55942ee89",
+      "catalog_remote_name": "en_cyl_znie_zhie_vw",
+      "metadata_fid": "SPAGOBCYLMNADTSPSZHC",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSPSZHC/formatters/xml",
+      "profile": "idecyl-exact-en_cyl_znie_zhie_vw-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "en_cyl_znie_zhie_vw",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 223,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "limites_esp_autonomias",
+        "url": "https://opendata.jcyl.es/ficheros/carto/referencia/limites/limites_esp_autonomias_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/limites/wms",
+      "catalog_layer_source_key": "layer:siur:94eaea7b3d42f35abf3f5a740a38f2b45592492d5f6923e31d3f56329b5fbc0f",
+      "catalog_remote_name": "limites_esp_autonomias",
+      "metadata_fid": "spagobcylbasuadlimautesp",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcylbasuadlimautesp/formatters/xml",
+      "profile": "idecyl-exact-limites_esp_autonomias-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/limites/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "limites_esp_autonomias",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 225,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "especies_prot_cyl_areas_criticas_vw",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/florafauna/especies_prot_cyl_areas_criticas_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/florafauna/wms",
+      "catalog_layer_source_key": "layer:siur:a0892bc9d49759b7b799bfe9bf3abeebaccd6fe3f44f7780dab1b15b91b833b2",
+      "catalog_remote_name": "especies_prot_cyl_areas_criticas_vw",
+      "metadata_fid": "SPAGOBCYLMNADTSPSACE",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSPSACE/formatters/xml",
+      "profile": "idecyl-exact-especies_prot_cyl_areas_criticas_vw-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/florafauna/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "especies_prot_cyl_areas_criticas_vw",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 230,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP; select ZPP layer",
+        "kind": "download_archive",
+        "remote_layer_key": "en_cyl_znie_zhie_zpp_vw",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/espaciosnaturales/en_cyl_znie_zhie_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wms",
+      "catalog_layer_source_key": "layer:siur:4d14002682b97d38b20ee872dbd8c61596969b1262092dcc5675e8b6a41eb6a7",
+      "catalog_remote_name": "en_cyl_znie_zhie_zpp_vw",
+      "metadata_fid": "SPAGOBCYLMNADTSPSZHC",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/SPAGOBCYLMNADTSPSZHC/formatters/xml",
+      "profile": "idecyl-exact-en_cyl_znie_zhie_zpp_vw-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "en_cyl_znie_zhie_zpp_vw",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 232,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "vegetacion_cyl_rednatura2000_vw",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/vegetacion/vegetacion_cyl_rednatura2000_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/vegetacion/wms",
+      "catalog_layer_source_key": "layer:siur:6ec1a7ed91b44b82360785a605b78b7724676d68366b8467898ec149ac404645",
+      "catalog_remote_name": "vegetacion_cyl_rednatura2000_vw",
+      "metadata_fid": "spagobcyltemhabvegesprn2",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemhabvegesprn2/formatters/xml",
+      "profile": "idecyl-exact-vegetacion_cyl_rednatura2000_vw-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/vegetacion/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "vegetacion_cyl_rednatura2000_vw",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 234,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "limites_esp_provincias",
+        "url": "https://opendata.jcyl.es/ficheros/carto/referencia/limites/limites_esp_provincias_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/limites/wms",
+      "catalog_layer_source_key": "layer:siur:780d5988625831d7e0e03bad3cf5c812af0f65083c60c84c8aa70de761f7d627",
+      "catalog_remote_name": "limites_esp_provincias",
+      "metadata_fid": "spagobcylbasuadlimproesp",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcylbasuadlimproesp/formatters/xml",
+      "profile": "idecyl-exact-limites_esp_provincias-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/limites/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "limites_esp_provincias",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 237,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "nucleos_cyl_poblaciones",
+        "url": "https://opendata.jcyl.es/ficheros/carto/referencia/entidades/nucleos_cyl_poblaciones_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/entidades/wms",
+      "catalog_layer_source_key": "layer:siur:b9bd7a1d9a87ba5274a8df1aae356c656239f412dcf7675dbedd67920eaaa423",
+      "catalog_remote_name": "nucleos_cyl_poblaciones",
+      "metadata_fid": "spagobcylbasentnucdispob",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcylbasentnucdispob/formatters/xml",
+      "profile": "idecyl-exact-nucleos_cyl_poblaciones-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/entidades/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "nucleos_cyl_poblaciones",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 243,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "habitantes_cyl_2024",
+        "url": "https://idecyl.jcyl.es/geoserver/poblacion/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/poblacion/wms",
+      "catalog_layer_source_key": "layer:siur:fcc2c810a2c281629a5bfbeab814b532668b264f227fd9ae7655131f29e29b02",
+      "catalog_remote_name": "habitantes_cyl_2024",
+      "metadata_fid": "spagobcyltempobinehab2024",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltempobinehab2024/formatters/xml",
+      "profile": "idecyl-exact-habitantes_cyl_2024-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/poblacion/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "habitantes_cyl_2024",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 246,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "Keep exact WFS geometry; direct distribution located only as XLSX",
+        "kind": "wfs_exact",
+        "remote_layer_key": "limites_cyl_entidad_local_menor",
+        "url": "https://idecyl.jcyl.es/geoserver/entidades/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/entidades/wms",
+      "catalog_layer_source_key": "layer:siur:073475a47cc9ecb3baa36a11ffb00d3145db4bd9bbd7fef80f78c52c0ca92f05",
+      "catalog_remote_name": "limites_cyl_entidad_local_menor",
+      "metadata_fid": "spagobcylbasentnuceatelm",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcylbasentnuceatelm/formatters/xml",
+      "profile": "idecyl-exact-limites_cyl_entidad_local_menor-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/entidades/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "limites_cyl_entidad_local_menor",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 268,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "coad_cyl_nitrat_aguas_subterr",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/sostenibilidad/coad_cyl_nitrat_aguas_subterr_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/sostenibilidad/wms",
+      "catalog_layer_source_key": "layer:siur:0083cafe24d858674fbbba8d1d614ab0f6f371dd34342fc8d368bdb3b48f63ce",
+      "catalog_remote_name": "coad_cyl_nitrat_aguas_subterr",
+      "metadata_fid": "spagobcylsoscoanitagusub",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcylsoscoanitagusub/formatters/xml",
+      "profile": "idecyl-exact-coad_cyl_nitrat_aguas_subterr-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/sostenibilidad/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "coad_cyl_nitrat_aguas_subterr",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 279,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "lineas_limite_cyl_municipales",
+        "url": "https://opendata.jcyl.es/ficheros/carto/referencia/limites/lineas_limite_cyl_municipales_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/limites/wms",
+      "catalog_layer_source_key": "layer:siur:b2e23a134ee5a8ca4967054b61751a82b250673463a1ca3e2f8bae70eea548d8",
+      "catalog_remote_name": "lineas_limite_cyl_municipales",
+      "metadata_fid": "spagobcylbasuadlinmuncyl",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcylbasuadlinmuncyl/formatters/xml",
+      "profile": "idecyl-exact-lineas_limite_cyl_municipales-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/limites/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "lineas_limite_cyl_municipales",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 281,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "WFS GetFeature as GeoPackage",
+        "kind": "wfs_exact",
+        "remote_layer_key": "habitantes_cyl_2015",
+        "url": "https://idecyl.jcyl.es/geoserver/poblacion/wfs"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/poblacion/wms",
+      "catalog_layer_source_key": "layer:siur:5d790d152a7278822e650b996551346539d83666c35a0b73c1474d6e6ea9e481",
+      "catalog_remote_name": "habitantes_cyl_2015",
+      "metadata_fid": "spagobcyltempobinehab2015",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltempobinehab2015/formatters/xml",
+      "profile": "idecyl-exact-habitantes_cyl_2015-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/poblacion/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "habitantes_cyl_2015",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    },
+    {
+      "acquisition_safety": "bounded_exact_wfs_with_live_capabilities_probe",
+      "audit_layer_id": 296,
+      "audit_proposed_acquisition": {
+        "format_or_selection": "GeoPackage ZIP",
+        "kind": "download_archive",
+        "remote_layer_key": "gesfor_cyl_rodal",
+        "url": "https://opendata.jcyl.es/ficheros/carto/medioambiente/montes/gesfor_cyl_rodal_gpkg.zip"
+      },
+      "catalog_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wms",
+      "catalog_layer_source_key": "layer:siur:1b49070d2249ecd6dc2ad31f6edb45af96729a02e98a6c5313e4f02e384098e9",
+      "catalog_remote_name": "gesfor_cyl_rodal",
+      "metadata_fid": "spagobcyltemgesforrodale",
+      "metadata_url": "https://idecyl.jcyl.es/geonetwork/srv/api/records/spagobcyltemgesforrodale/formatters/xml",
+      "profile": "idecyl-exact-gesfor_cyl_rodal-20260727-v1",
+      "selected_endpoint_url": "https://idecyl.jcyl.es/geoserver/montes/wfs",
+      "selected_protocol": "wfs",
+      "selected_remote_name": "gesfor_cyl_rodal",
+      "selected_sync_strategy": "paged_snapshot",
+      "selected_target_kind": "vector"
+    }
+  ]
+}

@@ -384,6 +384,7 @@ def test_list_users_scoped_to_admin_organizations(
     response = client.get("/admin/users", headers=headers_for(admin))
 
     assert response.status_code == 200
+    assert response.headers["X-Total-Count"] == "2"
     listed_ids = {user["id"] for user in response.json()}
     assert admin.id in listed_ids
     assert user_in_a.id in listed_ids

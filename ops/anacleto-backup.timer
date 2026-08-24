@@ -1,0 +1,13 @@
+[Unit]
+Description=Lanza la copia de seguridad de Anacleto a diario
+
+[Timer]
+# 03:30 hora del servidor, con dispersión para no coincidir con otras tareas.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15m
+# Si el servidor estuvo apagado a esa hora, se ejecuta al arrancar.
+Persistent=true
+Unit=anacleto-backup.service
+
+[Install]
+WantedBy=timers.target

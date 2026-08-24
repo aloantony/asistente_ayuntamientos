@@ -1,0 +1,434 @@
+{
+  "schema_version": "siur-reviewed-ign-pnoa-historico-profile/v1",
+  "audit_date": "2026-07-27",
+  "catalog_identity": {
+    "endpoint_url": "https://orto.wms.itacyl.es/WMS",
+    "layer_prefix": "Ortofoto_"
+  },
+  "catalog_capabilities_snapshot": {
+    "url": "https://orto.wms.itacyl.es/WMS?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0",
+    "local_resource": "evidence/ign_pnoa_historico/itacyl-capabilities-20260727.xml",
+    "sha256": "70f38ef5aee1e78cdc2ac64985e804a7b3f38ab37e13bc435c093c69bbac98ff",
+    "service_version": "1.3.0"
+  },
+  "selected_source": {
+    "endpoint_url": "https://www.ign.es/wms/pnoa-historico",
+    "protocol": "wms_tiles",
+    "target_kind": "tiles",
+    "image_format": "image/jpeg",
+    "style_name": ""
+  },
+  "capabilities_snapshot": {
+    "url": "https://www.ign.es/wms/pnoa-historico?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0",
+    "local_resource": "evidence/ign_pnoa_historico/capabilities-20260727.xml",
+    "sha256": "1a0fede7e1d1bfd2746656b7b2e731df6376e5c42f55d8f7c70cf3b1b5e9c8e8",
+    "service_version": "1.3.0",
+    "update_sequence": "2619"
+  },
+  "license_evidence": {
+    "name": "Creative Commons Attribution 4.0 International (CC BY 4.0)",
+    "url": "https://www.ign.es/resources/licencia/Condiciones_licenciaUso_IGN.pdf",
+    "attribution_rule": "official_product_and_date_derived_work_formula"
+  },
+  "operational_profile": {
+    "bounds": {
+      "west": -7.6,
+      "south": 39.9,
+      "east": -1.3,
+      "north": 43.4
+    },
+    "min_zoom": 0,
+    "max_zoom": 15,
+    "coverage_profile": "siur-castilla-y-leon-ortho-native-z15-v1",
+    "wms_supertile_size": 8,
+    "max_tile_count": 2000000
+  },
+  "mappings": [
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2023-v1",
+      "catalog_layer": "Ortofoto_2023",
+      "selected_layer": "PNOA2023",
+      "selected_title": "PNOA 2023",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2023. Abarca las Comunidades Autónomas de Castilla y León y Comunidad de Madrid con una resolución de 25 cm y La Rioja, Cantabria, País Vasco y Galicia este con una resolución de 15 cm.",
+      "metadata_record_id": "spaignPNOA2023",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2023",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: IGN PNOA2023 declara Castilla y León a 25 cm, pero ITACyL incorpora bordes de máxima actualidad y Valladolid a 10 cm. Se conserva la diferencia y no se afirma paridad píxel a píxel.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "itacyl_border_and_valladolid_difference",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_pixel_equivalence_claim",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2021-pnoa2020-v2",
+      "catalog_layer": "Ortofoto_2021",
+      "selected_layer": "PNOA2020",
+      "selected_title": "PNOA 2020",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2020. Abarca las Comunidades Autónomas de Asturias, Castilla y León, La Rioja, Madrid, País Vasco y Comunidad Foral de Navarra a una resolución de 0,25 m y Galicia y Cantabria a 0,15 m.",
+      "metadata_record_id": "spaignPNOA2020",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2020",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: Ortofoto_2021 de ITACyL declara únicamente el sector oriental de Castilla y León a 25 cm, mientras que IGN PNOA2020 cubre Castilla y León con una anualidad distinta. Se conserva la diferencia y no se afirma equivalencia temporal ni píxel a píxel.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "selected_official_pnoa2020_full_castilla_y_leon_coverage",
+        "itacyl_2021_partial_east_coverage",
+        "different_capture_year",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_pixel_equivalence_claim",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2020-v1",
+      "catalog_layer": "Ortofoto_2020",
+      "selected_layer": "PNOA2020",
+      "selected_title": "PNOA 2020",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2020. Abarca las Comunidades Autónomas de Asturias, Castilla y León, La Rioja, Madrid, País Vasco y Comunidad Foral de Navarra a una resolución de 0,25 m y Galicia y Cantabria a 0,15 m.",
+      "metadata_record_id": "spaignPNOA2020",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2020",
+      "equivalence_status": "exact",
+      "public_notice": "Sustitución oficial IGN por PNOA2020, del mismo producto PNOA y año. La cobertura efectiva es la declarada por IGN y debe superar la paridad de teselas antes de promoverse.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_nonempty_coverage",
+        "declared_coverage_mask_review",
+        "representative_tile_pixel_parity",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2017-v1",
+      "catalog_layer": "Ortofoto_2017",
+      "selected_layer": "PNOA2017",
+      "selected_title": "PNOA 2017",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2017. Abarca las Comunidades Autónomas de Asturias, Cantabria, Castilla y León, Galicia, La Rioja, Madrid, Navarra, País Vasco y Alicante a una resolución de 0,25 m",
+      "metadata_record_id": "spaignPNOA2017",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2017",
+      "equivalence_status": "exact",
+      "public_notice": "Sustitución oficial IGN por PNOA2017, del mismo producto PNOA y año. La cobertura efectiva es la declarada por IGN y debe superar la paridad de teselas antes de promoverse.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_nonempty_coverage",
+        "declared_coverage_mask_review",
+        "representative_tile_pixel_parity",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2014-v1",
+      "catalog_layer": "Ortofoto_2014",
+      "selected_layer": "PNOA2014",
+      "selected_title": "PNOA 2014",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2014. Abarca las Comunidades Autónomas de Asturias, Cantabria, Galicia, La Rioja, Madrid, País Vasco y Alicante a una resolución de 0,25 m, Castilla y León y Navarra a una resolución de 0.50 m y las ciudades de Ceuta y Melilla a una resolución de 0.10 m.",
+      "metadata_record_id": "spaignPNOA2014",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2014",
+      "equivalence_status": "exact",
+      "public_notice": "Sustitución oficial IGN por PNOA2014, del mismo producto PNOA y año. La cobertura efectiva es la declarada por IGN y debe superar la paridad de teselas antes de promoverse.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_nonempty_coverage",
+        "declared_coverage_mask_review",
+        "representative_tile_pixel_parity",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2011-v1",
+      "catalog_layer": "Ortofoto_2011",
+      "selected_layer": "PNOA2011",
+      "selected_title": "PNOA 2011",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2011. Abarca las Comunidades Autónomas de Norte de Andalucía, Norte de Castilla y León, SE de Extremadura, y Murcia a una resolución de 0,50 m y Sur de Castilla y León, Cataluña, SW de Extremadura, Galicia, Madrid y Asturias a una resolución de 0,25 m.",
+      "metadata_record_id": "spaignPNOA2011",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2011",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: IGN PNOA2011 declara norte a 50 cm y sur a 25 cm; ITACyL enumera SW 25 cm y NW/NE 50 cm sin declarar el cuadrante SE. Hace falta una máscara de cobertura para demostrar paridad.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_mask_comparison",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_full_regional_coverage_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2010-v1",
+      "catalog_layer": "Ortofoto_2010",
+      "selected_layer": "PNOA2010",
+      "selected_title": "PNOA 2010",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2010. Abarca las Comunidades Autónomas de Sur de Andalucía, NW de Castilla y León, NW de Extremadura a una resolución de 0,50m y Las Illes Balears, Cantabria, SE de Castilla y León, Cataluña, NE de Extremadura, Galicia, País Vasco y Comunitat Valenciana a una resolución de 0.25 m",
+      "metadata_record_id": "spaignPNOA2010",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2010",
+      "equivalence_status": "exact",
+      "public_notice": "Fuente IGN del mismo PNOA y año: ambos GetCapabilities declaran NW a 50 cm y SE a 25 cm en Castilla y León. La entrega conserva la evidencia de ambas declaraciones.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_product_year_match",
+        "catalog_and_selected_coverage_signature_match",
+        "catalog_and_selected_resolution_signature_match",
+        "representative_tile_pixel_review",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2009-v1",
+      "catalog_layer": "Ortofoto_2009",
+      "selected_layer": "PNOA2009",
+      "selected_title": "PNOA 2009",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2009. Abarca las Comunidades Autónomas de Norte de Andalucía, Aragón, SW de Castilla y León, SW y NE de Extremadura y Madrid a una resolución de 0,50m y la Comunitat Valenciana, Murcia, La Rioja, Galicia, SE de Extremadura, Cataluña, NE de Castilla y León, Castilla-La Mancha, Islas Canarias y Asturias a una resolución de 0,25 m",
+      "metadata_record_id": "spaignPNOA2009",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2009",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: ITACyL declara NW a 50 cm y SE a 25 cm, mientras IGN declara SW a 50 cm y NE a 25 cm. Los cuadrantes no coinciden y no se afirma equivalencia.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_quadrant_mismatch",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_pixel_equivalence_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2008-v1",
+      "catalog_layer": "Ortofoto_2008",
+      "selected_layer": "PNOA2008",
+      "selected_title": "PNOA 2008",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2008. Abarca las Comunidades Autónomas de Sur de Andalucía, Baleares, SE de Castilla y León, Cataluña y Comunitat Valenciana a una resolución de 0,50m y NW de Castilla y León, Capitales de provincia de Cataluña, Extremadura, Galicia, Navarra y País Vasco a una resolución de 0.25 m",
+      "metadata_record_id": "spaignPNOA2008",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2008",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: ITACyL declara NE a 25 cm y SW a 50 cm, mientras IGN declara NW a 25 cm y SE a 50 cm. Los cuadrantes no coinciden y no se afirma equivalencia.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_quadrant_mismatch",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_pixel_equivalence_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2007-v1",
+      "catalog_layer": "Ortofoto_2007",
+      "selected_layer": "PNOA2007",
+      "selected_title": "PNOA 2007",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2007. Abarca las Comunidades Autónomas de N de Andalucía, Norte de Castilla y León, Cataluña, SW de Extremadura, País Vasco y Comunitat Valenciana con una resolución de 0,5 m y Cantabria, SW de Castilla y León, Se de Extremadura, Galicia y Murcia con resolución de 0,25 m.",
+      "metadata_record_id": "spaignPNOA2007",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2007",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: ITACyL declara SW a 25 cm y NE a 50 cm; IGN declara SW a 25 cm y el norte a 50 cm. La posible diferencia NW/NE requiere comparar máscaras antes de afirmar equivalencia.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_mask_comparison",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_pixel_equivalence_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2006-v1",
+      "catalog_layer": "Ortofoto_2006",
+      "selected_layer": "PNOA2006",
+      "selected_title": "PNOA 2006",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2006. Abarca las Comunidades Autónomas de Andalucía, Aragón, Isalas Baleares, Castilla-La Mancha, NW de CAstilla y León, Cataluña, Extremadura, La Rioja, Madrid, Comunitat Valenciana y las ciudades de Ceuta y Melilla con una resolución de 0,5 m y País Vasco, Navarra, SE de Castilla y León y Asturias con una resolución de 0,25 m",
+      "metadata_record_id": "spaignPNOA2006",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2006",
+      "equivalence_status": "exact",
+      "public_notice": "Fuente IGN del mismo PNOA y año: ambos GetCapabilities declaran SE a 25 cm y NW a 50 cm en Castilla y León. La entrega conserva la evidencia de ambas declaraciones.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_product_year_match",
+        "catalog_and_selected_coverage_signature_match",
+        "catalog_and_selected_resolution_signature_match",
+        "representative_tile_pixel_review",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2005-v1",
+      "catalog_layer": "Ortofoto_2005",
+      "selected_layer": "PNOA2005",
+      "selected_title": "PNOA 2005",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2005. Abarca las Comunidades Autónomas de Andalucía, Cantabria, SW de Castilla y León, Cataluña, Comunitat Valenciana, Extremadura, Galicia y País Vasco con una resolución de 0,5 m y la parte NE de Castilla y León con resolución de 0,25 m y Canarias con resolución de 0,40 m",
+      "metadata_record_id": "spaignPNOA2005",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2005",
+      "equivalence_status": "exact",
+      "public_notice": "Fuente IGN del mismo PNOA y año: ambos GetCapabilities declaran NE a 25 cm y SW a 50 cm en Castilla y León. La entrega conserva la evidencia de ambas declaraciones.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_product_year_match",
+        "catalog_and_selected_coverage_signature_match",
+        "catalog_and_selected_resolution_signature_match",
+        "representative_tile_pixel_review",
+        "jpeg_dimensions_and_content_type"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2004-v1",
+      "catalog_layer": "Ortofoto_2004",
+      "selected_layer": "PNOA2004",
+      "selected_title": "PNOA 2004",
+      "selected_abstract": "Ortoimagen PNOA correspondiente al año 2004. Abarca las Comunidades de Andalucía, Castilla y León, Cataluña, Comunitat Valenciana, Galicia y Murcia con resolución de 0,5m y País Vasco y La Rioja con resolución de 0,25 m",
+      "metadata_record_id": "spaignPNOA2004",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignPNOA2004",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Entrega local degradada: ITACyL declara NW a 25 cm y SE a 50 cm, mientras IGN PNOA2004 declara Castilla y León a 50 cm. La diferencia de cobertura/resolución se conserva explícitamente.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "catalog_and_selected_resolution_mismatch",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_pixel_equivalence_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2002-v1",
+      "catalog_layer": "Ortofoto_2002",
+      "selected_layer": "SIGPAC",
+      "selected_title": "SIGPAC (1997-2003)",
+      "selected_abstract": "Ortoimágenes del vuelo SIGPAC realizadas entre 1997 y 2003 sobre la totalidad del territorio español. El vuelo fue realizado por el Ministerio de Agricultura, a través del Fondo Español de Garantía Agraria (FEGA), junto con aportaciones de algunas CCAA, con el objetivo de generar las ortofotos que sirvieran de referencia para el Sistema de Identificación de Parcelas Agrícolas (SIGPAC). Esta capa permite consultar las fechas de vuelo y la resolución de la ortofoto en cada zona",
+      "metadata_record_id": "spaignSIGPAC",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Sustituto degradado: Ortofoto_2002 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_sheet_date_inventory",
+        "requested_year_coverage_report",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_full_annual_coverage_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2001-v1",
+      "catalog_layer": "Ortofoto_2001",
+      "selected_layer": "SIGPAC",
+      "selected_title": "SIGPAC (1997-2003)",
+      "selected_abstract": "Ortoimágenes del vuelo SIGPAC realizadas entre 1997 y 2003 sobre la totalidad del territorio español. El vuelo fue realizado por el Ministerio de Agricultura, a través del Fondo Español de Garantía Agraria (FEGA), junto con aportaciones de algunas CCAA, con el objetivo de generar las ortofotos que sirvieran de referencia para el Sistema de Identificación de Parcelas Agrícolas (SIGPAC). Esta capa permite consultar las fechas de vuelo y la resolución de la ortofoto en cada zona",
+      "metadata_record_id": "spaignSIGPAC",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Sustituto degradado: Ortofoto_2001 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_sheet_date_inventory",
+        "requested_year_coverage_report",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_full_annual_coverage_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-2000-v1",
+      "catalog_layer": "Ortofoto_2000",
+      "selected_layer": "SIGPAC",
+      "selected_title": "SIGPAC (1997-2003)",
+      "selected_abstract": "Ortoimágenes del vuelo SIGPAC realizadas entre 1997 y 2003 sobre la totalidad del territorio español. El vuelo fue realizado por el Ministerio de Agricultura, a través del Fondo Español de Garantía Agraria (FEGA), junto con aportaciones de algunas CCAA, con el objetivo de generar las ortofotos que sirvieran de referencia para el Sistema de Identificación de Parcelas Agrícolas (SIGPAC). Esta capa permite consultar las fechas de vuelo y la resolución de la ortofoto en cada zona",
+      "metadata_record_id": "spaignSIGPAC",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Sustituto degradado: Ortofoto_2000 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_sheet_date_inventory",
+        "requested_year_coverage_report",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_full_annual_coverage_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-1999-v1",
+      "catalog_layer": "Ortofoto_1999",
+      "selected_layer": "SIGPAC",
+      "selected_title": "SIGPAC (1997-2003)",
+      "selected_abstract": "Ortoimágenes del vuelo SIGPAC realizadas entre 1997 y 2003 sobre la totalidad del territorio español. El vuelo fue realizado por el Ministerio de Agricultura, a través del Fondo Español de Garantía Agraria (FEGA), junto con aportaciones de algunas CCAA, con el objetivo de generar las ortofotos que sirvieran de referencia para el Sistema de Identificación de Parcelas Agrícolas (SIGPAC). Esta capa permite consultar las fechas de vuelo y la resolución de la ortofoto en cada zona",
+      "metadata_record_id": "spaignSIGPAC",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Sustituto degradado: Ortofoto_1999 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_sheet_date_inventory",
+        "requested_year_coverage_report",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_full_annual_coverage_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-1997-v1",
+      "catalog_layer": "Ortofoto_1997",
+      "selected_layer": "SIGPAC",
+      "selected_title": "SIGPAC (1997-2003)",
+      "selected_abstract": "Ortoimágenes del vuelo SIGPAC realizadas entre 1997 y 2003 sobre la totalidad del territorio español. El vuelo fue realizado por el Ministerio de Agricultura, a través del Fondo Español de Garantía Agraria (FEGA), junto con aportaciones de algunas CCAA, con el objetivo de generar las ortofotos que sirvieran de referencia para el Sistema de Identificación de Parcelas Agrícolas (SIGPAC). Esta capa permite consultar las fechas de vuelo y la resolución de la ortofoto en cada zona",
+      "metadata_record_id": "spaignSIGPAC",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignSIGPAC",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Sustituto degradado: Ortofoto_1997 se obtiene de la capa IGN SIGPAC 1997-2003; la fecha y la resolución varían espacialmente y no equivalen a un mosaico anual completo.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_sheet_date_inventory",
+        "requested_year_coverage_report",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_full_annual_coverage_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-1973_83-v1",
+      "catalog_layer": "Ortofoto_1973-83",
+      "selected_layer": "Interministerial_1973-1986",
+      "selected_title": "Interministerial (1973-1986)",
+      "selected_abstract": "Ortoimágenes del vuelo realizado entre noviembre de 1976 y julio de 1986 por el Ministerio de Agricultura, el M.O.P.U , Hacienda y el Ministerio del Aire. La resolución de la ortoimagen es de 0,5 m.",
+      "metadata_record_id": "spaignOrtofotosInterministerial",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignOrtofotosInterministerial",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Sustituto degradado: la capa IGN Interministerial declara 1973-1986 y su resumen describe vuelos 1976-1986; no equivale exactamente al intervalo SIUR 1973-83 ni garantiza la misma cobertura.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_sheet_date_inventory",
+        "1973_1983_overlap_coverage_report",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_exact_interval_claim",
+        "representative_tile_pixel_review"
+      ]
+    },
+    {
+      "profile": "ign-pnoa-historico-ortofoto-1956-v1",
+      "catalog_layer": "Ortofoto_1956",
+      "selected_layer": "AMS_1956-1957",
+      "selected_title": "Americano (Serie B, 1956-1957)",
+      "selected_abstract": "Ortoimágenes del vuelo realizado por el Army Map Service de EEUU entre enero de 1956 y noviembre de 1957 sobre parte del territorio español, conocido como Vuelo Americano, serie B. Esta capa permite consultar la resolución de la ortoimagen que varía entre 0,5m para Cantabria, País Vasco, La Rioja, parte de Aragón y de Castilla-La Mancha y 1 metro para el resto",
+      "metadata_record_id": "spaignAMSserieB",
+      "metadata_url": "https://www.idee.es/csw-inspire-idee/srv/spa/csw?SERVICE=CSW&VERSION=2.0.2&REQUEST=GetRecordById&outputSchema=http://www.isotc211.org/2005/gmd&ElementSetName=full&ID=spaignAMSserieB",
+      "equivalence_status": "substitute_degraded",
+      "public_notice": "Sustituto degradado: la capa IGN Americano Serie B cubre 1956-1957 y solo parte del territorio español; no equivale exactamente a una cobertura completa y exclusivamente de 1956.",
+      "review_notes": [
+        "exact_remote_layer_identity",
+        "castilla_y_leon_sheet_date_inventory",
+        "1956_only_coverage_report",
+        "explicit_public_degradation_notice",
+        "immutable_degraded_delivery_classification",
+        "no_full_1956_coverage_claim",
+        "representative_tile_pixel_review"
+      ]
+    }
+  ]
+}

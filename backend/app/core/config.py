@@ -1,9 +1,10 @@
+import re
 from functools import lru_cache
 from math import isfinite
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Environments where placeholder credentials are the point rather than a
@@ -35,11 +36,79 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
+    # Techo por IP frente a password spraying: la clave del limitador anterior
+    # incluye la cuenta, así que sin esto cada cuenta nueva estrena cupo.
+    login_ip_rate_limit_attempts: int = 50
+    login_ip_rate_limit_window_seconds: int = 300
+    bootstrap_admin_rate_limit_attempts: int = 5
+    bootstrap_admin_rate_limit_window_seconds: int = 3600
+    # Límites de los endpoints que cuestan dinero o CPU por llamada (ADR-036).
+    assistant_rate_limit_attempts: int = 30
+    assistant_rate_limit_window_seconds: int = 300
+    speech_rate_limit_attempts: int = 40
+    speech_rate_limit_window_seconds: int = 300
+    upload_rate_limit_attempts: int = 60
+    upload_rate_limit_window_seconds: int = 3600
+    ordinance_import_rate_limit_attempts: int = 10
+    ordinance_import_rate_limit_window_seconds: int = 3600
     bootstrap_admin_token: str | None = None
     jwt_algorithm: str = "HS256"
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Hosts que el backend acepta en la cabecera Host. "*" solo es admisible
+    # fuera de producción: en un dominio público hay que fijarlo para cerrar la
+    # inyección de Host. Ver ADR-036.
+    allowed_hosts: str = "*"
+    log_level: str = "INFO"
+    # Prefijo con el que el proxy inverso publica la API. El proxy lo elimina
+    # antes de reenviar, así que aquí solo sirve para que FastAPI genere
+    # redirecciones y esquema coherentes. Vacío en desarrollo. Ver ADR-035.
+    api_root_path: str = ""
     document_storage_root: str = "/var/lib/asistente_ayuntamientos/documents"
     document_max_upload_bytes: int = 25 * 1024 * 1024
+    reference_storage_root: str = (
+        "/var/lib/asistente_ayuntamientos/reference-artifacts"
+    )
+    reference_transient_root: str = (
+        "/var/lib/asistente_ayuntamientos/reference-transient"
+    )
+    reference_blob_max_bytes: int = 256 * 1024 * 1024 * 1024
+    reference_storage_quota_bytes: int | None = 1024 * 1024 * 1024 * 1024
+    reference_storage_min_free_bytes: int = 20 * 1024 * 1024 * 1024
+    reference_staging_retention_seconds: int = 24 * 60 * 60
+    reference_mirror_scheduler_poll_seconds: float = 15.0
+    reference_catalog_watcher_poll_seconds: float = 300.0
+    reference_mirror_worker_poll_seconds: float = 2.0
+    reference_mirror_enqueue_limit: int = 100
+    reference_mirror_lease_seconds: int = 600
+    reference_mirror_heartbeat_seconds: float = 60.0
+    reference_tile_archive_max_bytes: int = 256 * 1024 * 1024 * 1024
+    reference_tile_max_count: int = 10_000_000
+    reference_tile_concurrency: int = 4
+    reference_tile_batch_size: int = 64
+    reference_tile_change_check_samples: int = 16
+    reference_geo_max_source_bytes: int = 8 * 1024 * 1024 * 1024
+    reference_geo_timeout_seconds: int = 3600
+    reference_remote_proxy_enabled: bool = False
+    local_geoserver_base_url: str = "http://127.0.0.1:8081/geoserver"
+    local_geoserver_workspace: str = "siur"
+    local_geoserver_timeout_seconds: float = 8.0
+    geoserver_admin_user: str | None = None
+    geoserver_admin_password: SecretStr | None = None
+    geowebcache_disk_quota_gib: int = 20
+    geowebcache_disk_quota_min_free_gib: int = 5
+    geowebcache_disk_quota_cleanup_seconds: int = 10
+    geowebcache_disk_quota_policy: str = "LRU"
+    geowebcache_physical_hard_limit_gib: int = 28
+    geowebcache_physical_burst_margin_gib: int = 2
+    local_geoserver_postgis_host: str = "postgres"
+    local_geoserver_postgis_port: int = 5432
+    local_geoserver_postgis_database: str = "app"
+    local_geoserver_postgis_user: str = "app"
+    local_geoserver_postgis_password: SecretStr | None = None
+    municipal_shield_max_upload_bytes: int = 2 * 1024 * 1024
+    municipal_attachment_max_upload_bytes: int = 25 * 1024 * 1024
+    municipal_weather_timeout_seconds: float = 5.0
+    municipal_weather_cache_seconds: int = 1800
     assistant_runtime: str = "anthropic"
     anthropic_api_key: str | None = None
     assistant_model: str = "claude-opus-4-8"
@@ -127,6 +196,11 @@ class Settings(BaseSettings):
     speech_transcription_runtime: str = "disabled"
     speech_transcription_language_code: str = "multi"
     speech_transcription_max_bytes: int = 20 * 1024 * 1024
+    # Cota temporal del reconocimiento remoto y del transcodificado local. Sin
+    # ellas una conexión colgada o un ffmpeg atascado bloquean el único worker
+    # de uvicorn indefinidamente (ADR-036).
+    speech_transcription_timeout_seconds: float = 30.0
+    speech_transcode_timeout_seconds: float = 20.0
     nvidia_api_key: str | None = None
     nvidia_riva_server: str = "grpc.nvcf.nvidia.com:443"
     nvidia_whisper_function_id: str | None = None
@@ -155,6 +229,359 @@ class Settings(BaseSettings):
     def prefer_psycopg_driver(cls, value: str) -> str:
         if value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+psycopg://", 1)
+        return value
+
+    @field_validator("local_geoserver_base_url")
+    @classmethod
+    def validate_local_geoserver_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        try:
+            parsed = urlsplit(normalized)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("local_geoserver_base_url is invalid") from error
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is None
+            or not 1 <= port <= 65535
+            or parsed.netloc != f"127.0.0.1:{port}"
+            or parsed.path != "/geoserver"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "local_geoserver_base_url must be an explicit loopback "
+                "HTTP URL ending in /geoserver"
+            )
+        return f"http://127.0.0.1:{port}/geoserver"
+
+    @field_validator("reference_storage_root", "reference_transient_root")
+    @classmethod
+    def validate_reference_directory_root(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("reference storage directory is invalid")
+        path = Path(normalized)
+        if not path.is_absolute() or path == Path("/"):
+            raise ValueError(
+                "reference storage directories must be absolute"
+            )
+        return str(path.resolve(strict=False))
+
+    @field_validator(
+        "reference_blob_max_bytes",
+        "reference_tile_archive_max_bytes",
+        "reference_geo_max_source_bytes",
+    )
+    @classmethod
+    def validate_reference_large_byte_limits(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1024 * 1024 <= value <= 1024**5:
+            raise ValueError(
+                "reference artifact byte limits must be between 1 MiB and 1 PiB"
+            )
+        return value
+
+    @field_validator("reference_storage_quota_bytes")
+    @classmethod
+    def validate_reference_storage_quota(cls, value: int | None) -> int | None:
+        if value is not None and (
+            isinstance(value, bool) or not 1024 * 1024 <= value <= 1024**5
+        ):
+            raise ValueError(
+                "reference_storage_quota_bytes must be null or between 1 MiB and 1 PiB"
+            )
+        return value
+
+    @field_validator("reference_storage_min_free_bytes")
+    @classmethod
+    def validate_reference_storage_reserve(cls, value: int) -> int:
+        if isinstance(value, bool) or not 0 <= value <= 1024**5:
+            raise ValueError(
+                "reference_storage_min_free_bytes must be between 0 and 1 PiB"
+            )
+        return value
+
+    @field_validator("reference_staging_retention_seconds")
+    @classmethod
+    def validate_reference_staging_retention(cls, value: int) -> int:
+        if isinstance(value, bool) or not 3_600 <= value <= 30 * 24 * 60 * 60:
+            raise ValueError(
+                "reference_staging_retention_seconds must be between "
+                "3600 and 2592000"
+            )
+        return value
+
+    @field_validator(
+        "reference_mirror_scheduler_poll_seconds",
+        "reference_catalog_watcher_poll_seconds",
+        "reference_mirror_worker_poll_seconds",
+        "reference_mirror_heartbeat_seconds",
+    )
+    @classmethod
+    def validate_reference_poll_intervals(cls, value: float) -> float:
+        if not isfinite(value) or not 0.1 <= value <= 3600.0:
+            raise ValueError(
+                "reference mirror poll/heartbeat intervals must be finite and "
+                "between 0.1 and 3600 seconds"
+            )
+        return value
+
+    @field_validator("reference_mirror_enqueue_limit")
+    @classmethod
+    def validate_reference_enqueue_limit(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 10_000:
+            raise ValueError(
+                "reference_mirror_enqueue_limit must be between 1 and 10000"
+            )
+        return value
+
+    @field_validator("reference_mirror_lease_seconds")
+    @classmethod
+    def validate_reference_lease_seconds(cls, value: int) -> int:
+        if isinstance(value, bool) or not 30 <= value <= 86_400:
+            raise ValueError(
+                "reference_mirror_lease_seconds must be between 30 and 86400"
+            )
+        return value
+
+    @field_validator("reference_tile_max_count")
+    @classmethod
+    def validate_reference_tile_count(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 10_000_000:
+            raise ValueError(
+                "reference_tile_max_count must be between 1 and 10000000"
+            )
+        return value
+
+    @field_validator("reference_tile_concurrency")
+    @classmethod
+    def validate_reference_tile_concurrency(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 16:
+            raise ValueError(
+                "reference_tile_concurrency must be between 1 and 16"
+            )
+        return value
+
+    @field_validator("reference_tile_batch_size")
+    @classmethod
+    def validate_reference_tile_batch_size(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 64:
+            raise ValueError(
+                "reference_tile_batch_size must be between 1 and 64"
+            )
+        return value
+
+    @field_validator("reference_tile_change_check_samples")
+    @classmethod
+    def validate_reference_tile_change_check_samples(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 256:
+            raise ValueError(
+                "reference_tile_change_check_samples must be between 1 and 256"
+            )
+        return value
+
+    @field_validator("reference_geo_timeout_seconds")
+    @classmethod
+    def validate_reference_geo_timeout(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 86_400:
+            raise ValueError(
+                "reference_geo_timeout_seconds must be between 1 and 86400"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_reference_mirror_limits(self):
+        persistent = Path(self.reference_storage_root)
+        transient = Path(self.reference_transient_root)
+        if (
+            persistent == transient
+            or persistent in transient.parents
+            or transient in persistent.parents
+        ):
+            raise ValueError(
+                "reference_transient_root must not overlap "
+                "reference_storage_root"
+            )
+        if (
+            self.reference_storage_quota_bytes is not None
+            and self.reference_blob_max_bytes
+            > self.reference_storage_quota_bytes
+        ):
+            raise ValueError(
+                "reference_blob_max_bytes cannot exceed the storage quota"
+            )
+        if self.reference_tile_archive_max_bytes > self.reference_blob_max_bytes:
+            raise ValueError(
+                "reference_tile_archive_max_bytes cannot exceed reference_blob_max_bytes"
+            )
+        if self.reference_mirror_heartbeat_seconds * 2 >= self.reference_mirror_lease_seconds:
+            raise ValueError(
+                "reference_mirror_heartbeat_seconds must be less than half the lease"
+            )
+        if self.reference_tile_batch_size < self.reference_tile_concurrency:
+            raise ValueError(
+                "reference_tile_batch_size cannot be below tile concurrency"
+            )
+        return self
+
+    @field_validator("local_geoserver_workspace")
+    @classmethod
+    def validate_local_geoserver_workspace(cls, value: str) -> str:
+        normalized = value.strip()
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", normalized) is None:
+            raise ValueError("local_geoserver_workspace is invalid")
+        return normalized
+
+    @field_validator("local_geoserver_timeout_seconds")
+    @classmethod
+    def validate_local_geoserver_timeout(cls, value: float) -> float:
+        if not isfinite(value) or not 0.1 <= value <= 30.0:
+            raise ValueError(
+                "local_geoserver_timeout_seconds must be finite and between "
+                "0.1 and 30 seconds"
+            )
+        return value
+
+    @field_validator(
+        "geowebcache_disk_quota_gib",
+        "geowebcache_disk_quota_min_free_gib",
+        "geowebcache_disk_quota_cleanup_seconds",
+        "geowebcache_physical_hard_limit_gib",
+        "geowebcache_physical_burst_margin_gib",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_geowebcache_numbers(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("GeoWebCache numeric settings cannot be boolean")
+        return value
+
+    @field_validator(
+        "geowebcache_disk_quota_gib",
+        "geowebcache_disk_quota_min_free_gib",
+        "geowebcache_physical_hard_limit_gib",
+        "geowebcache_physical_burst_margin_gib",
+    )
+    @classmethod
+    def validate_geowebcache_disk_sizes(cls, value: int) -> int:
+        if isinstance(value, bool) or not 0 <= value <= 1024:
+            raise ValueError(
+                "GeoWebCache disk sizes must be between 0 and 1024 GiB"
+            )
+        return value
+
+    @field_validator("geowebcache_disk_quota_cleanup_seconds")
+    @classmethod
+    def validate_geowebcache_cleanup_seconds(cls, value: int) -> int:
+        if isinstance(value, bool) or value != 10:
+            raise ValueError(
+                "geowebcache_disk_quota_cleanup_seconds must be exactly 10"
+            )
+        return value
+
+    @field_validator("geowebcache_disk_quota_policy")
+    @classmethod
+    def validate_geowebcache_policy(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in {"LRU", "LFU"}:
+            raise ValueError(
+                "geowebcache_disk_quota_policy must be LRU or LFU"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_geowebcache_quota(self):
+        if self.geowebcache_disk_quota_gib < 1:
+            raise ValueError(
+                "geowebcache_disk_quota_gib must be at least 1 GiB"
+            )
+        if (
+            self.geowebcache_disk_quota_gib
+            + self.geowebcache_disk_quota_min_free_gib
+            + self.geowebcache_physical_burst_margin_gib
+            > self.geowebcache_physical_hard_limit_gib
+        ):
+            raise ValueError(
+                "GeoWebCache physical hard limit must contain the soft quota, "
+                "free reserve and burst margin"
+            )
+        return self
+
+    @field_validator("geoserver_admin_user")
+    @classmethod
+    def validate_geoserver_admin_user(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", normalized) is None:
+            raise ValueError("geoserver_admin_user is invalid")
+        return normalized
+
+    @field_validator(
+        "geoserver_admin_password",
+        "local_geoserver_postgis_password",
+        mode="before",
+    )
+    @classmethod
+    def empty_local_geoserver_secret_is_unconfigured(
+        cls,
+        value: object,
+    ) -> object:
+        return None if value == "" else value
+
+    @field_validator(
+        "geoserver_admin_password",
+        "local_geoserver_postgis_password",
+    )
+    @classmethod
+    def validate_local_geoserver_secret(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value()
+        if not secret or len(secret) > 1024 or "\x00" in secret:
+            raise ValueError("local GeoServer secret is invalid")
+        return value
+
+    @field_validator("local_geoserver_postgis_host")
+    @classmethod
+    def validate_local_geoserver_postgis_host(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if (
+            len(normalized) > 253
+            or re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?",
+                normalized,
+            )
+            is None
+            or ".." in normalized
+        ):
+            raise ValueError("local_geoserver_postgis_host is invalid")
+        return normalized
+
+    @field_validator(
+        "local_geoserver_postgis_database",
+        "local_geoserver_postgis_user",
+    )
+    @classmethod
+    def validate_local_geoserver_postgis_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", normalized) is None:
+            raise ValueError("local GeoServer PostGIS name is invalid")
+        return normalized
+
+    @field_validator("local_geoserver_postgis_port")
+    @classmethod
+    def validate_local_geoserver_postgis_port(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 65535:
+            raise ValueError("local_geoserver_postgis_port is invalid")
         return value
 
     @field_validator("assistant_runtime")
@@ -349,6 +776,16 @@ class Settings(BaseSettings):
             raise ValueError("assistant timeouts must be finite and greater than zero")
         return value
 
+    @field_validator(
+        "speech_transcription_timeout_seconds",
+        "speech_transcode_timeout_seconds",
+    )
+    @classmethod
+    def validate_speech_timeouts(cls, value: float) -> float:
+        if not isfinite(value) or value <= 0:
+            raise ValueError("speech timeouts must be finite and greater than zero")
+        return value
+
     @field_validator("assistant_max_attachments_per_message")
     @classmethod
     def validate_assistant_attachment_count(cls, value: int) -> int:
@@ -482,6 +919,91 @@ class Settings(BaseSettings):
             raise ValueError("speech_synthesis_runtime must be 'disabled' or 'azure'")
         return normalized
 
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        """Exige el valor canónico exacto, sin normalizar.
+
+        No se hace `strip().lower()` a propósito: varias guardas comparan
+        `environment` con la cadena literal, y ADR-024 exige que el puente Codex
+        solo arranque con `development` exactamente. Normalizar convertiría
+        `Development` o ` development ` en válidos y ablandaría esa puerta, así
+        que una grafía no canónica es un error de configuración explícito.
+        """
+        if value not in {"development", "test", "staging", "production"}:
+            raise ValueError(
+                "environment must be exactly 'development', 'test', 'staging' "
+                "or 'production' in lowercase"
+            )
+        return value
+
+    @field_validator("api_root_path")
+    @classmethod
+    def validate_api_root_path(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            return ""
+        if not normalized.startswith("/"):
+            raise ValueError("api_root_path must start with '/'")
+        return normalized
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            raise ValueError(
+                "log_level must be CRITICAL, ERROR, WARNING, INFO or DEBUG"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def require_hardened_production_configuration(self):
+        """Se niega a arrancar en producción con configuración de desarrollo.
+
+        Sin esto, un despliegue público arranca sin queja con la clave de firma
+        de ejemplo y orígenes en claro: el `.env` de desarrollo se copia con
+        facilidad y el fallo sería silencioso. Ver ADR-036.
+        """
+        if self.environment != "production":
+            return self
+
+        insecure_secrets = {
+            "change-me-in-development",
+            "change-this-secret-key-in-real-environments",
+        }
+        if self.secret_key in insecure_secrets:
+            raise ValueError(
+                "SECRET_KEY still holds the documented development placeholder; "
+                "generate a unique value before serving production traffic"
+            )
+        if len(self.secret_key) < 32:
+            raise ValueError(
+                "SECRET_KEY must be at least 32 characters in production"
+            )
+
+        if not self.cors_origins:
+            raise ValueError("CORS_ALLOWED_ORIGINS must be set in production")
+        for origin in self.cors_origins:
+            if origin == "*":
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must not be '*' in production: with "
+                    "credentialed requests it echoes any Origin back"
+                )
+            if not origin.startswith("https://"):
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must use https:// in production; "
+                    f"got {origin!r}"
+                )
+
+        if "*" in self.allowed_hosts_list:
+            raise ValueError(
+                "ALLOWED_HOSTS must list the real hostnames in production, "
+                "not '*'"
+            )
+
+        return self
+
     @property
     def cors_origins(self) -> list[str]:
         return [
@@ -489,6 +1011,23 @@ class Settings(BaseSettings):
             for origin in self.cors_allowed_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def allowed_hosts_list(self) -> list[str]:
+        return [host.strip() for host in self.allowed_hosts.split(",") if host.strip()]
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def docs_enabled(self) -> bool:
+        """La documentación interactiva solo se publica en desarrollo.
+
+        `/openapi.json` describe las ~132 rutas, sus esquemas y la cabecera del
+        token de bootstrap: es un mapa del ataque servido sin autenticar.
+        """
+        return self.environment == "development"
 
     @property
     def is_development_like(self) -> bool:

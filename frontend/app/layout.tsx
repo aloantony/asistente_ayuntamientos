@@ -34,11 +34,12 @@ const libreBaskerville = Libre_Baskerville({
   display: "swap",
 });
 
-// Serif de titulares institucionales: el nombre del municipio en la barra
-// superior. Se limita a los pesos que realmente se usan (medio y semibold).
+// Serif institucional del nombre del municipio en la barra del Ayuntamiento.
+// Se cargan los tres pesos en uso: 400 en los bloques configurables y
+// 500/600 en los titulares de la barra superior.
 const newsreader = Newsreader({
   subsets: ["latin"],
-  weight: ["500", "600"],
+  weight: ["400", "500", "600"],
   variable: "--font-newsreader",
   display: "swap",
 });
