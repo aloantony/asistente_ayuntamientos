@@ -387,7 +387,7 @@ export default function AppLayout({
       : "app-content app-content-wide";
 
   // La barra superior municipal sólo acompaña a las pantallas institucionales
-  // (ADR-034); el resto del producto se navega desde el menú lateral.
+  // (ADR-048); el resto del producto se navega desde el menú lateral.
   const showTopNav = shouldShowTopNav(pathname);
   const activeTopNavSectionId = activeTopNavSectionFor(pathname);
 

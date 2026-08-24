@@ -48,7 +48,7 @@ export function canCompareOrdinances(user: User) {
   );
 }
 
-// Corporación municipal y plantilla (ADR-035). Gobierno sólo distingue consulta
+// Corporación municipal y plantilla (ADR-049). Gobierno sólo distingue consulta
 // y gestión; personal añade un nivel intermedio de edición diaria.
 export const GOVERNMENT_PERMISSIONS = [
   "government.view",

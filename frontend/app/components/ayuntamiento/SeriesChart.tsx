@@ -3,7 +3,7 @@
 import { useId } from "react";
 import styles from "./SeriesChart.module.css";
 
-// Gráficas SVG propias, sin librería nueva (ADR-034 sobre no ampliar el peso
+// Gráficas SVG propias, sin librería nueva (ADR-048 sobre no ampliar el peso
 // del bundle sin motivo). Son series de pocos puntos —un valor por año o por
 // mes—, así que una línea y unas barras cubren todo lo que la pantalla pide.
 

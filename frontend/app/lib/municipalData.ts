@@ -5,7 +5,7 @@ import type {
 } from "../components/types";
 import { adminRequestWithTotal } from "./api";
 
-// Series del municipio (ADR-037). Se piden con el año más reciente primero,
+// Series del municipio (ADR-051). Se piden con el año más reciente primero,
 // que es como las devuelve el backend.
 
 export function fetchPadronSeries(organizationId: number, signal?: AbortSignal) {

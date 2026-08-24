@@ -27,7 +27,7 @@ La distinción central del dominio:
 - `MaintenanceOrder` representa trabajo humano programado sobre un activo municipal y `MaintenanceOrderEvent` conserva su historial inmutable. Organización y municipio se derivan del activo y quedan protegidos por claves compuestas; este dominio no reutiliza las tareas ejecutables de `agent_office`.
 - `Ordinance` es global, pertenece a un municipio y puede enlazar a un documento de un tenant; ese enlace exige que quien lo crea tenga acceso al documento.
 
-- `MunicipalProfile` y `MunicipalBlock` son el cromo editable del Ayuntamiento de cada organización: perfil (nombre mostrado, escudo, temperatura) y un árbol genérico de bloques con padre, posición y carga libre en JSON. Cuelgan de la organización, no del municipio, porque cada inquilino edita el suyo; hoy solo almacenan la navegación configurable y están preparados para absorber los epígrafes de contenido sin migración (ADR-034).
+- `MunicipalProfile` y `MunicipalBlock` son el cromo editable del Ayuntamiento de cada organización: perfil (nombre mostrado, escudo, temperatura) y un árbol genérico de bloques con padre, posición y carga libre en JSON. Cuelgan de la organización, no del municipio, porque cada inquilino edita el suyo; hoy solo almacenan la navegación configurable y están preparados para absorber los epígrafes de contenido sin migración (ADR-034). Los apartados que así se crean se pintan detrás de las seis áreas fijas de la pantalla, que siguen declaradas en código (ADR-052).
 
 ## Control de acceso
 
@@ -111,17 +111,11 @@ registra autenticación, cambios de privilegio y acceso a documentos.
 ## Carencias conocidas (deuda aceptada conscientemente)
 
 - Sin refresh tokens; la revocación server-side cubre solo el cambio/reset de contraseña (ADR-015): el logout no invalida el JWT, que expira a los 60 min.
-<<<<<<< HEAD
-- Los rate limiters (login, cambio de contraseña) son por proceso; al pasar a varios workers deben moverse a Redis (y valorar entonces un límite secundario por cuenta frente a password spraying, ADR-015).
-- El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar.
-- Los contenedores corren sin privilegios y un despliegue con valores de desarrollo se niega a arrancar (ADR-047), pero siguen con **un único worker** porque los limitadores por proceso lo exigen, y **no traen TLS**: la terminación es responsabilidad del proxy inverso, descrita en `docs/despliegue.md`.
-- Sin copias de seguridad automatizadas de `postgres_data` ni `document_storage`.
-=======
 - Los rate limiters siguen siendo **por proceso**; el despliegue mantiene un solo worker de uvicorn por esa razón. Pasar a varios workers exige moverlos a Redis antes (ADR-010, ADR-015, ADR-036).
 - El guard de sesión del frontend es client-side; añadir `middleware.ts` si se quiere bloquear rutas antes de hidratar. Ese mismo `middleware.ts` es lo que falta para apretar la CSP a nonce y quitar `'unsafe-inline'` de `script-src` (ADR-036).
 - La CSP del frontend admite `script-src 'unsafe-inline'` porque Next.js App Router inyecta scripts inline para hidratar y el script de tema también lo es (ADR-036).
+- Los contenedores corren sin privilegios y un despliegue con valores de desarrollo se niega a arrancar (ADR-047), pero **no traen TLS**: la terminación es responsabilidad del proxy inverso, descrita en `docs/despliegue.md`.
 - Retención de conversaciones, documentos y órdenes **no automatizada**: solo la traza de seguridad se purga sola (`docs/proteccion-datos.md`).
 - Sin cifrado en reposo a nivel de columna o base de datos; la postura es cifrado de disco del VPS (`docs/proteccion-datos.md`).
 - Las copias de seguridad viven en el mismo servidor: un compromiso o borrado del servidor se las lleva. Los snapshots del proveedor son la única red externa (ADR-037).
 - El planificador horario de las rutinas de la oficina de agentes sigue pendiente; se disparan a mano (`docs/oficina-agentes.md`).
->>>>>>> origin/servidor-main-backup

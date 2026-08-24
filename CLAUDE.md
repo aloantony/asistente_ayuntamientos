@@ -10,11 +10,7 @@ Asistente Ayuntamientos: FastAPI + Next.js platform for municipal management (do
 
 - `backend/`: FastAPI, SQLAlchemy 2, Alembic, PostgreSQL 17 (psycopg 3), JWT auth + RBAC. Deps pinned exactly in `backend/requirements.txt`.
 - `frontend/`: Next.js 15 App Router, React 19, TypeScript strict. Multi-route app (ADR-014): `(auth)/login` plus an `(app)` route group whose sidebar shell (`app/(app)/layout.tsx`) gates nav items with the same permission predicates as the routes — `/asistente`, `/requisitos`, `/proyectos`, `/cuenta`, `/admin/*`. Session state and the 401 funnel live in `SessionProvider` (`app/lib/session.tsx`, mounted in the root layout); the route guard is client-side. Each route mounts only its own controller — admin is split into per-domain hooks under `app/lib/admin/`, cross-domain lists go through `app/lib/fetchers.ts` — and selection/filters/page state live in the URL (deep links and back button must keep working). API access goes through helpers in `app/lib/api.ts` (native fetch, `credentials: "include"`), except login (`app/(auth)/login/page.tsx`), logout (`app/lib/session.tsx`) and the document download (`app/lib/useProjectsController.ts`), which call fetch directly. Browser auth is an httpOnly SameSite=Lax cookie: frontend and backend must share the same host — localhost in dev (ADR-010).
-<<<<<<< HEAD
-- Orchestration: Docker Compose — backend on 127.0.0.1:8000, frontend on 127.0.0.1:3000, postgres and redis internal. Redis backs job scheduling (`app/core/jobs.py`) and read-through caches (`app/weather/service.py`, `app/reference_layers/wms_cache.py`), each degrading gracefully when it is unavailable. The backend intentionally runs a single uvicorn worker: the login rate limiter (`app/core/rate_limit.py`) is still in-memory per-process and must move to Redis before going multi-worker (ADR-010).
-=======
-- Orchestration: Docker Compose — backend on 127.0.0.1:8000, frontend on 127.0.0.1:3000, postgres and redis internal. Redis backs a real RQ queue (`app/core/jobs.py`): ordinance imports and agent-office tasks enqueue jobs and the `worker` service consumes them. The backend intentionally runs a single uvicorn worker: the login rate limiter (`app/core/rate_limit.py`) is in-memory per-process and must move to Redis before going multi-worker (ADR-010).
->>>>>>> origin/servidor-main-backup
+- Orchestration: Docker Compose — backend on 127.0.0.1:8000, frontend on 127.0.0.1:3000, postgres and redis internal. Redis backs a real RQ queue (`app/core/jobs.py`): ordinance imports and agent-office tasks enqueue jobs and the `worker` service consumes them. It also backs read-through caches (`app/weather/service.py`, `app/reference_layers/wms_cache.py`), each degrading gracefully when it is unavailable. The backend intentionally runs a single uvicorn worker: the login rate limiter (`app/core/rate_limit.py`) is still in-memory per-process and must move to Redis before going multi-worker (ADR-010).
 
 ## Commands
 
@@ -48,10 +44,7 @@ docker compose exec backend alembic current
 git diff --check
 ```
 
-<<<<<<< HEAD
-CI runs on every pull request (`.github/workflows/ci.yml`): a Backend job, a Frontend job and a `CI gate` that the `main` ruleset requires before merging, with branches kept up to date. The frontend has a linter (`npm --prefix frontend run lint`) and a type checker (`npm --prefix frontend run typecheck`); the backend has neither. Pre-handoff validation remains useful locally, but CI is the gate. Match the existing code style and do not introduce new tooling without recording an ADR.
-=======
-CI runs on GitHub Actions (`.github/workflows/ci.yml`: whitespace gate, backend migrations + pytest, frontend typecheck/lint/build), but no linter, formatter or type checker is configured for the backend; pre-handoff validation — always including the test suite — is the substitute. Match the existing code style and do not introduce new tooling without recording an ADR.
+CI runs on every pull request (`.github/workflows/ci.yml`): Repository checks (whitespace gate and the Codex session helper), Backend (compile, migrations and pytest), GeoWebCache deployment contract, Frontend (typecheck/lint/build) and a `CI gate` that the `main` ruleset requires before merging, with branches kept up to date. The frontend has a linter (`npm --prefix frontend run lint`) and a type checker (`npm --prefix frontend run typecheck`); the backend has neither, so pre-handoff validation — always including the test suite — stays the local substitute, but CI is the gate. Match the existing code style and do not introduce new tooling without recording an ADR.
 
 ## Production deployment
 
@@ -81,7 +74,6 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 - Rate limiters are still in-memory per process, so production stays on a single
   uvicorn worker (ADR-010/015). Moving to several workers requires Redis first.
 - Never commit `.env` or `.env.production`.
->>>>>>> origin/servidor-main-backup
 
 ## Hard rules
 

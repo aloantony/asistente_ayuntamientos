@@ -1695,7 +1695,7 @@ export function userHasPermission(user: User, permissionCode: string) {
   );
 }
 
-// Corporación municipal y plantilla (ADR-035). Los cargos electos y el personal
+// Corporación municipal y plantilla (ADR-049). Los cargos electos y el personal
 // laboral son dominios distintos en el backend y se tipan por separado.
 
 export type GovernmentLevel =
@@ -1914,7 +1914,7 @@ export type MunicipalWeather = {
   provider: string;
 };
 
-// Series municipales (ADR-037). Los decimales viajan como cadena.
+// Series municipales (ADR-051). Los decimales viajan como cadena.
 
 export type MunicipalDataSource = "municipal" | "ine" | "aemet" | "other";
 
@@ -2307,6 +2307,8 @@ export type ArchiveItem = {
   notes: string | null;
   created_at: string;
   updated_at: string;
+};
+
 // Ayuntamiento: perfil del municipio y navegación configurable de su barra.
 // Los apartados y elementos son bloques del mismo árbol genérico (ver
 // ADR-034), por eso comparten forma.

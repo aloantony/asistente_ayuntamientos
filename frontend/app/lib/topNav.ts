@@ -1,4 +1,4 @@
-// Modelo de la barra superior municipal (ADR-034).
+// Modelo de la barra superior municipal (ADR-048).
 //
 // La navegación institucional es FIJA: no se puede renombrar, reordenar ni
 // ampliar desde la interfaz. El diseño de referencia incluía un editor de menú,
