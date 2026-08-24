@@ -15,6 +15,9 @@ PRODUCTION_BASE = {
     "environment": "production",
     "secret_key": "x" * 48,
     "cors_allowed_origins": "https://anacleto.example",
+    # ADR-047 rechaza la contraseña de desarrollo en producción, y el valor
+    # por defecto de `database_url` la lleva.
+    "database_url": "postgresql+psycopg://app:s3cret@db:5432/app",
     "allowed_hosts": "anacleto.example",
     "assistant_runtime": "anthropic",
 }

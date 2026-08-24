@@ -700,7 +700,7 @@ leerla.
 reinicios, descubriendo un fallo por vuelta, es la forma más rápida de que
 alguien se rinda a medias y deje dos valores sin cambiar.
 
-**CORS vacío es legítimo.** ADR-010 pone frontend y backend bajo el mismo host,
+**CORS vacío es legítimo.** *(Superado por ADR-036 al integrar la línea del servidor: allí la lista explícita es obligatoria en producción, y su `.env.production.example` ya la trae. Lo que sigue describe el razonamiento original.)*  ADR-010 pone frontend y backend bajo el mismo host,
 donde no hay petición cross-origin que permitir. Exigir una entrada sería pedir
 ruido. Lo que sí se rechaza es un origen de loopback o en texto plano: la cookie
 de sesión se emite `Secure` fuera de desarrollo, así que un origen `http://` no

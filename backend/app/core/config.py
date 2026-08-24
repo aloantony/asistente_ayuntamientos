@@ -958,6 +958,74 @@ class Settings(BaseSettings):
         return normalized
 
     @model_validator(mode="after")
+    def reject_development_defaults_outside_development(self):
+        """Refuse to start with values that only make sense on a laptop.
+
+        Every one of these has a documented placeholder in `.env.example`, and
+        a placeholder that survives to production is not a degraded mode: the
+        signing key alone lets anyone who can read this repository mint an
+        administrator token. Failing at import time is the only moment where
+        the mistake is still cheap.
+        """
+        if self.is_development_like:
+            return self
+
+        problems: list[str] = []
+
+        if self.secret_key in PLACEHOLDER_SECRET_KEYS:
+            problems.append(
+                "SECRET_KEY is still the documented development placeholder; "
+                "it signs JWTs, tool authorizations and catalog signatures"
+            )
+        elif len(self.secret_key) < MINIMUM_SECRET_KEY_LENGTH:
+            problems.append(
+                f"SECRET_KEY must be at least {MINIMUM_SECRET_KEY_LENGTH} "
+                f"characters, got {len(self.secret_key)}"
+            )
+
+        if self.bootstrap_admin_token in PLACEHOLDER_BOOTSTRAP_TOKENS:
+            problems.append(
+                "BOOTSTRAP_ADMIN_TOKEN is still the development placeholder; "
+                "it creates the first superuser. Leave it unset unless a "
+                "bootstrap is actually in progress"
+            )
+
+        database_password = urlsplit(self.database_url).password
+        if database_password in PLACEHOLDER_DATABASE_PASSWORDS:
+            problems.append(
+                "DATABASE_URL still carries the development database password"
+            )
+
+        # An empty list is legitimate: ADR-010 puts frontend and backend on the
+        # same host, where no cross-origin request happens at all.
+        for origin in self.cors_origins:
+            parsed = urlsplit(origin)
+            if parsed.hostname in LOOPBACK_HOSTNAMES:
+                problems.append(
+                    f"CORS_ALLOWED_ORIGINS points at the loopback host {origin!r}"
+                )
+            elif parsed.scheme != "https":
+                # The session cookie is issued Secure outside development, so a
+                # plain-HTTP origin cannot hold a session even if it is allowed.
+                problems.append(
+                    f"CORS_ALLOWED_ORIGINS entry {origin!r} is not https, and "
+                    "the session cookie is Secure outside development"
+                )
+
+        if problems:
+            raise ValueError(
+                f"environment={self.environment!r} rejects development "
+                "defaults:\n- " + "\n- ".join(problems)
+            )
+
+        return self
+
+    # ADR-047 va antes que ADR-036 a propósito: pydantic ejecuta los
+    # validadores en orden de definición, y el de ADR-047 junta todos los
+    # problemas en un solo mensaje. Si el de ADR-036 corriese primero
+    # cortaría en el primero, y arreglar un despliegue a base de reinicios
+    # es justo lo que ADR-047 quiere evitar.
+    @model_validator(mode="after")
     def require_hardened_production_configuration(self):
         """Se niega a arrancar en producción con configuración de desarrollo.
 
@@ -1032,69 +1100,6 @@ class Settings(BaseSettings):
     @property
     def is_development_like(self) -> bool:
         return self.environment in DEVELOPMENT_LIKE_ENVIRONMENTS
-
-    @model_validator(mode="after")
-    def reject_development_defaults_outside_development(self):
-        """Refuse to start with values that only make sense on a laptop.
-
-        Every one of these has a documented placeholder in `.env.example`, and
-        a placeholder that survives to production is not a degraded mode: the
-        signing key alone lets anyone who can read this repository mint an
-        administrator token. Failing at import time is the only moment where
-        the mistake is still cheap.
-        """
-        if self.is_development_like:
-            return self
-
-        problems: list[str] = []
-
-        if self.secret_key in PLACEHOLDER_SECRET_KEYS:
-            problems.append(
-                "SECRET_KEY is still the documented development placeholder; "
-                "it signs JWTs, tool authorizations and catalog signatures"
-            )
-        elif len(self.secret_key) < MINIMUM_SECRET_KEY_LENGTH:
-            problems.append(
-                f"SECRET_KEY must be at least {MINIMUM_SECRET_KEY_LENGTH} "
-                f"characters, got {len(self.secret_key)}"
-            )
-
-        if self.bootstrap_admin_token in PLACEHOLDER_BOOTSTRAP_TOKENS:
-            problems.append(
-                "BOOTSTRAP_ADMIN_TOKEN is still the development placeholder; "
-                "it creates the first superuser. Leave it unset unless a "
-                "bootstrap is actually in progress"
-            )
-
-        database_password = urlsplit(self.database_url).password
-        if database_password in PLACEHOLDER_DATABASE_PASSWORDS:
-            problems.append(
-                "DATABASE_URL still carries the development database password"
-            )
-
-        # An empty list is legitimate: ADR-010 puts frontend and backend on the
-        # same host, where no cross-origin request happens at all.
-        for origin in self.cors_origins:
-            parsed = urlsplit(origin)
-            if parsed.hostname in LOOPBACK_HOSTNAMES:
-                problems.append(
-                    f"CORS_ALLOWED_ORIGINS points at the loopback host {origin!r}"
-                )
-            elif parsed.scheme != "https":
-                # The session cookie is issued Secure outside development, so a
-                # plain-HTTP origin cannot hold a session even if it is allowed.
-                problems.append(
-                    f"CORS_ALLOWED_ORIGINS entry {origin!r} is not https, and "
-                    "the session cookie is Secure outside development"
-                )
-
-        if problems:
-            raise ValueError(
-                f"environment={self.environment!r} rejects development "
-                "defaults:\n- " + "\n- ".join(problems)
-            )
-
-        return self
 
 
 @lru_cache
