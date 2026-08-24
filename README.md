@@ -40,7 +40,7 @@ All AI egress continues through the internal gateway. Contractually approved ext
 
 ## 5. Implemented modules
 
-- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, per-IP login rate limiting, `/auth/me` session restoration and first-admin bootstrap.
+- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, distributed per-client+account login rate limiting backed by Redis (ADR-048), `/auth/me` session restoration and first-admin bootstrap.
 - Users and groups: administrative management. Deletion is physical (hard delete) but guarded: the last active superuser and your own account cannot be deleted, and association rows are cleaned up explicitly.
 - Roles and permissions: RBAC model for administrative and functional capabilities. The permission catalog is seeded automatically and idempotently on backend startup.
 - Organizations: tenant foundation for client entities using the application.

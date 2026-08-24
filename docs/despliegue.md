@@ -127,9 +127,12 @@ de la imagen.
 
 Honestamente, para que nadie lo descubra en producción:
 
-- **Los limitadores de peticiones son por proceso** (login y cambio de
-  contraseña, ADR-015). Por eso el despliegue mantiene un único worker de
-  uvicorn. Escalar a varios exige moverlos a Redis primero.
+- **Los limitadores de credenciales ya son distribuidos** (login y cambio de
+  contraseña, ADR-048): viven en Redis y `ENVIRONMENT=production` exige
+  `RATE_LIMIT_BACKEND=redis`. Escalar a varios workers ya no los desactiva,
+  pero la clave sigue siendo cliente+cuenta, así que el password spraying
+  desde muchas IP contra una sola cuenta sigue sin tope (ADR-015). Los topes
+  del proxy WMS sí son por proceso y con varios workers contarían por worker.
 - **El logout no invalida el JWT**, que caduca a los 60 minutos (ADR-015). La
   revocación en servidor solo cubre el cambio y el reinicio de contraseña.
 - **El guard de sesión del frontend es de cliente.** Las rutas se protegen en
